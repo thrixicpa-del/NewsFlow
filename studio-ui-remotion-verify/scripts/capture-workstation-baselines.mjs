@@ -12,7 +12,9 @@ if (process.env.NEWSFLOW_TEST_MODE !== "1") {
 const root = process.cwd();
 const artifactRoot = path.join(root, ".artifacts", "workstation-visual-baselines");
 const testUserData = path.join(tmpdir(), "NewsFlow-workstation-visual-test-user-data");
-const baselineRoot = path.join(artifactRoot, "approved");
+// Approved references are versioned test fixtures so a clean checkout can run
+// the same comparison. Current captures and manifests remain disposable.
+const baselineRoot = path.join(root, "tests", "visual-baselines", "approved");
 const currentRoot = path.join(artifactRoot, "current");
 const sourceUrl = process.env.NEWSFLOW_VISUAL_BASELINE_URL || "http://127.0.0.1:5174/";
 const updateBaselines = process.env.NEWSFLOW_UPDATE_VISUAL_BASELINES === "1";

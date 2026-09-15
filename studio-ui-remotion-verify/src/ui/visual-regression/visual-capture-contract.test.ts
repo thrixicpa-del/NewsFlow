@@ -114,4 +114,15 @@ describe("workstation visual capture contract", () => {
 
     for (const caseId of requiredCases) expect(captureScript).toContain(`id: "${caseId}"`);
   });
+
+  it("loads approved baselines from versioned test assets while keeping captures disposable", () => {
+    const captureScript = readFileSync(
+      resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
+      "utf8",
+    );
+
+    expect(captureScript).toContain('"tests", "visual-baselines", "approved"');
+    expect(captureScript).toContain('".artifacts", "workstation-visual-baselines"');
+  });
+
 });
