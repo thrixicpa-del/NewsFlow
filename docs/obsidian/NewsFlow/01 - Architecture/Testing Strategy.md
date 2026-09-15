@@ -77,6 +77,20 @@ made by this performance suite.
 python tests/run_isolated.py tests.test_performance_baselines tests.test_performance_paths tests.test_montage_benchmark
 ```
 
+## Resource checks
+
+`tests.test_resource_soak` supplies a quick disposable resource check for
+repeated bounded jobs, generated fixture media, temporary-directory cleanup,
+and FFmpeg child-process termination. It is marked `slow` and remains
+provider-free. The longer 40×100-job run is deliberately opt-in so ordinary
+feedback is not stretched into a pseudo-soak test:
+
+```powershell
+python tests/run_isolated.py tests.test_resource_soak
+$env:NEWSFLOW_RUN_SOAK = '1'
+python tests/run_isolated.py tests.test_resource_soak
+```
+
 ## Core contract boundary
 
 Passing source tests does not prove a release. The frozen core test invokes the actual `NewsFlowCore.exe` selected by the package configuration. The release freshness guard remains authoritative: any source module that changes packaged behavior must cause a core-bin rebuild before a package can pass release validation.

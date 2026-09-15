@@ -28,6 +28,7 @@ _PACKAGED = {
 }
 _SLOW = {
     "tests/test_montage_benchmark.py",
+    "tests/test_resource_soak.py",
     "scriptor/test_montage_render.py",
 }
 
