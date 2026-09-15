@@ -88,3 +88,64 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             page.screenshot(path=str(artifact))
             self.assertTrue(artifact.is_file())
             browser.close()
+
+    def test_accessibility_and_ux_guards(self):
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        axe_source = APP_ROOT / "node_modules" / "axe-core" / "axe.min.js"
+        self.assertTrue(axe_source.is_file(), "install the pinned axe-core test dependency")
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            page.add_script_tag(path=str(axe_source))
+            report = page.evaluate("""async () => (await axe.run(document, {
+                runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] },
+            })).violations.map(({ id, impact, nodes }) => ({
+                id,
+                impact,
+                targets: nodes.map(({ target, html }) => ({ target, html })),
+            }))""")
+            self.assertEqual([], report, f"axe violations: {report}")
+
+            page.get_by_role("button", name="ОБЛОЖКИ И ГЕНЕРАЦИИ").click()
+            page.get_by_role("button", name="Обложки YouTube").click()
+            page.get_by_role("button", name="Настроить студию").click()
+            dialog = page.get_by_role("dialog", name="Настройки Visual Production Studio")
+            dialog.wait_for(timeout=10_000)
+            page.keyboard.press("Tab")
+            focus_is_trapped = dialog.evaluate("node => node.contains(document.activeElement)")
+            self.assertTrue(focus_is_trapped, "Sheet focus escaped its modal dialog")
+
+            geometry = dialog.evaluate("""node => {
+                const rect = node.getBoundingClientRect();
+                return {
+                    clientWidth: node.clientWidth,
+                    scrollWidth: node.scrollWidth,
+                    left: rect.left,
+                    right: rect.right,
+                    top: rect.top,
+                    bottom: rect.bottom,
+                    viewportWidth: window.innerWidth,
+                    viewportHeight: window.innerHeight,
+                    documentClientWidth: document.documentElement.clientWidth,
+                    documentScrollWidth: document.documentElement.scrollWidth,
+                };
+            }""")
+            self.assertLessEqual(
+                geometry["documentScrollWidth"],
+                geometry["documentClientWidth"],
+                f"Page has horizontal overflow: {geometry}",
+            )
+            self.assertLessEqual(geometry["scrollWidth"], geometry["clientWidth"], "Sheet content overflows horizontally")
+            self.assertGreaterEqual(geometry["left"], 0, "Sheet starts outside the viewport")
+            # Electron on Windows reports the usable document width without the
+            # native scrollbar gutter, while a fixed Sheet can legitimately
+            # occupy that visible gutter. A larger excursion is off-screen.
+            self.assertLessEqual(geometry["right"], geometry["viewportWidth"] + 20, "Sheet extends past the viewport")
+            self.assertGreaterEqual(geometry["top"], 0, "Sheet starts above the viewport")
+            self.assertLessEqual(geometry["bottom"], geometry["viewportHeight"], "Sheet extends below the viewport")
+            browser.close()

@@ -30,3 +30,23 @@ python tests/run_isolated.py tests.test_electron_e2e
 The test connects only through Electron's explicitly supplied `--remote-debugging-port`; it never falls back to source Electron. A packaged launch that does not expose CDP is a packaged-E2E failure, not a source-test pass. The current pre-infrastructure r10 portable artifact did not expose CDP within the test deadline, so it is not accepted as packaged-E2E evidence. The next immutable RC must pass this lane or provide an equally real, auditable packaged automation adapter.
 
 Failure artifacts live solely under `<NEWSFLOW_TEST_ROOT>/artifacts`; production user-data remains outside the test process.
+
+## Accessibility and UX lane
+
+The source-Electron accessibility test is also opt-in and uses the pinned local
+`axe-core` asset; it does not call a hosted service or any provider. In addition
+to WCAG 2 A/AA violations, it verifies modal keyboard focus, a readable input
+name, and that the opened Sheet and document have no meaningful horizontal or
+off-screen overflow.
+
+```powershell
+pnpm --dir studio-ui-remotion-verify build:web
+pnpm --dir studio-ui-remotion-verify build:desktop
+$env:NEWSFLOW_RUN_ELECTRON_E2E = '1'
+$env:NEWSFLOW_E2E_TARGET = 'source'
+python tests/run_isolated.py tests.test_electron_e2e.ElectronE2ESmokeTests.test_accessibility_and_ux_guards
+```
+
+The 20px Sheet edge allowance is only the native Windows scrollbar gutter,
+which Electron excludes from `window.innerWidth`; any document-level horizontal
+overflow remains a failure.
