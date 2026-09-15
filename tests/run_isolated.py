@@ -13,7 +13,6 @@ import tempfile
 from hashlib import sha256
 from pathlib import Path
 
-
 _CRITICAL_PRODUCTION_FILES = (
     "settings.json",
     "covers-library.json",
@@ -35,6 +34,10 @@ def main(arguments: list[str]) -> int:
     production_local_appdata = os.environ.get("LOCALAPPDATA", "")
     if not production_local_appdata:
         raise RuntimeError("LOCALAPPDATA is required to establish the production integrity boundary.")
+    runner = "unittest"
+    if arguments[:1] == ["--pytest"]:
+        runner = "pytest"
+        arguments = arguments[1:]
     before = _critical_storage_hashes(production_local_appdata)
     with tempfile.TemporaryDirectory(prefix="newsflow-test-") as temporary:
         root = Path(temporary)
@@ -47,7 +50,10 @@ def main(arguments: list[str]) -> int:
             "TEMP": str(root),
             "TMP": str(root),
         })
-        command = [sys.executable, "-m", "unittest", *(arguments or ["discover", "-s", "tests", "-q"])]
+        if runner == "pytest":
+            command = [sys.executable, "-m", "pytest", *(arguments or ["-q"])]
+        else:
+            command = [sys.executable, "-m", "unittest", *(arguments or ["discover", "-s", "tests", "-q"])]
         result = subprocess.run(command, env=environment, check=False).returncode
     after = _critical_storage_hashes(production_local_appdata)
     if after != before:
