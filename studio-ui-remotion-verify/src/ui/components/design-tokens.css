@@ -1,0 +1,33 @@
+:root {
+  --nf-color-canvas: #07101d;
+  --nf-color-surface: #0a192b;
+  --nf-color-surface-raised: #0d243b;
+  --nf-color-surface-overlay: #102d49;
+  --nf-color-border: #294b6b;
+  --nf-color-border-strong: #315b82;
+  --nf-color-text: #f1f8ff;
+  --nf-color-text-muted: #91b0ca;
+  --nf-color-accent: #318df5;
+  --nf-color-success: #6de0aa;
+  --nf-color-warning: #f3c85f;
+  --nf-color-danger: #ffabb9;
+
+  --nf-font-sans: Manrope, "Segoe UI", sans-serif;
+  --nf-text-xs: 10px;
+  --nf-text-sm: 12px;
+  --nf-text-md: 13px;
+  --nf-text-lg: 17px;
+  --nf-text-xl: 27px;
+
+  --nf-space-1: 4px;
+  --nf-space-2: 8px;
+  --nf-space-3: 12px;
+  --nf-space-4: 16px;
+  --nf-space-5: 20px;
+  --nf-space-6: 24px;
+  --nf-radius-sm: 8px;
+  --nf-radius-md: 10px;
+  --nf-radius-lg: 14px;
+  --nf-control-sm: 30px;
+  --nf-control-md: 38px;
+}

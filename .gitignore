@@ -46,6 +46,7 @@ studio-ui-remotion-verify/node_modules/
 studio-ui-remotion-verify/dist/
 studio-ui-remotion-verify/dist-electron/
 studio-ui-remotion-verify/remotion-bundle/
+studio-ui-remotion-verify/storybook-static/
 studio-ui-remotion-verify/core-bin/
 studio-ui-remotion-verify/release-*/
 oauth-site/worker/node_modules/
