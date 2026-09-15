@@ -33,6 +33,7 @@ venv/
 .core-packaging-deps/
 .packaging-tools/
 .cache/
+.worktrees/
 
 # NewsFlow generated core and historical build work
 .build-core-*/
