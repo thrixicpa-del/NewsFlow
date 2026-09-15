@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "idea_results": ["Current topic"],
+  "cover_queue": [
+    {
+      "production_item_id": "current-cover-1",
+      "title": "Current cover"
+    }
+  ],
+  "cover_queue_tombstones": ["legacy-cover:historical"],
+  "unknown_user_value": {"preserve": true}
+}
