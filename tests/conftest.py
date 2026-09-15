@@ -19,6 +19,7 @@ _INTEGRATION_PREFIXES = (
     "tests/test_voicer.py",
     "tests/test_montage_queue.py",
     "tests/test_publication_v2.py",
+    "tests/test_electron_e2e.py",
 )
 _PACKAGED = {
     "tests/test_core_runtime_guard.py",

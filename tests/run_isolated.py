@@ -39,7 +39,10 @@ def main(arguments: list[str]) -> int:
         runner = "pytest"
         arguments = arguments[1:]
     before = _critical_storage_hashes(production_local_appdata)
-    with tempfile.TemporaryDirectory(prefix="newsflow-test-") as temporary:
+    # Electron/Chromium can release an isolated cache handle a moment after its
+    # process exits on Windows. The directory is test-owned OS temp state, so a
+    # delayed OS cleanup is safe; a lock must not mask a passed test result.
+    with tempfile.TemporaryDirectory(prefix="newsflow-test-", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         environment = os.environ.copy()
         environment.update({
