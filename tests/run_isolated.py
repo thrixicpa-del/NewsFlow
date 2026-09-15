@@ -10,11 +10,32 @@ import os
 import subprocess
 import sys
 import tempfile
+from hashlib import sha256
 from pathlib import Path
+
+
+_CRITICAL_PRODUCTION_FILES = (
+    "settings.json",
+    "covers-library.json",
+    "footage-index-status.json",
+)
+
+
+def _critical_storage_hashes(production_local_appdata: str) -> dict[str, str | None]:
+    """Read-only inventory used to detect any accidental test write to production."""
+    root = Path(production_local_appdata).expanduser() / "NewsFlow"
+    hashes: dict[str, str | None] = {}
+    for name in _CRITICAL_PRODUCTION_FILES:
+        path = root / name
+        hashes[name] = sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    return hashes
 
 
 def main(arguments: list[str]) -> int:
     production_local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if not production_local_appdata:
+        raise RuntimeError("LOCALAPPDATA is required to establish the production integrity boundary.")
+    before = _critical_storage_hashes(production_local_appdata)
     with tempfile.TemporaryDirectory(prefix="newsflow-test-") as temporary:
         root = Path(temporary)
         environment = os.environ.copy()
@@ -27,7 +48,14 @@ def main(arguments: list[str]) -> int:
             "TMP": str(root),
         })
         command = [sys.executable, "-m", "unittest", *(arguments or ["discover", "-s", "tests", "-q"])]
-        return subprocess.run(command, env=environment, check=False).returncode
+        result = subprocess.run(command, env=environment, check=False).returncode
+    after = _critical_storage_hashes(production_local_appdata)
+    if after != before:
+        changed = ", ".join(name for name in _CRITICAL_PRODUCTION_FILES if before[name] != after[name])
+        print(f"PRODUCTION_WRITE_GUARD=FAIL changed={changed}", file=sys.stderr)
+        return 91
+    print("PRODUCTION_WRITE_GUARD=PASS")
+    return result
 
 
 if __name__ == "__main__":
