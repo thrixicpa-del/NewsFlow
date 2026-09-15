@@ -38,6 +38,25 @@ python -m pip install --require-hashes -r requirements-test.lock
 
 Ruff is initially run on files changed by an infrastructure phase. Expanding lint scope is a separate cleanup task; a new quality gate must not conceal pre-existing lint debt.
 
+## Golden dataset
+
+`tests.golden_dataset.materialize_golden_dataset()` is the compact, synthetic
+cross-pipeline fixture used by every local or CI regression build. It is
+versioned as `newsflow-golden-v1` and materializes under an explicit
+`NEWSFLOW_TEST_ROOT` only. The fixed manifest contains one Topic, Script,
+MP3 voice asset, PNG face reference, PNG cover image, MP4 footage item,
+expected Topic/Script/Production mappings, a timeline, and a publication job.
+
+The PNG, MP3, and MP4 assets are generated from a fixed recipe into a temporary
+test root instead of being copied from the user's media library. Therefore no
+production content, credentials, channel auth, business state, or large media
+file is committed to Git. Its contract is run through the normal isolation
+boundary:
+
+```powershell
+python tests/run_isolated.py tests.test_golden_dataset
+```
+
 ## Core contract boundary
 
 Passing source tests does not prove a release. The frozen core test invokes the actual `NewsFlowCore.exe` selected by the package configuration. The release freshness guard remains authoritative: any source module that changes packaged behavior must cause a core-bin rebuild before a package can pass release validation.
