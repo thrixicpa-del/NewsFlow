@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "metrics": {
+    "app-startup": {"knownGoodSeconds": 2.8, "warningSeconds": 12.0, "hardSeconds": 30.0},
+    "idea-local-processing": {"knownGoodSeconds": 0.0003, "warningSeconds": 0.5, "hardSeconds": 3.0},
+    "script-validation": {"knownGoodSeconds": 0.0001, "warningSeconds": 0.5, "hardSeconds": 3.0},
+    "voice-queue-scheduling": {"knownGoodSeconds": 0.0706, "warningSeconds": 1.0, "hardSeconds": 5.0},
+    "footage-search-selection": {"knownGoodSeconds": 0.0004, "warningSeconds": 1.0, "hardSeconds": 5.0},
+    "montage-planning": {"knownGoodSeconds": 0.0001, "warningSeconds": 1.0, "hardSeconds": 5.0},
+    "ffmpeg-fast-news-render": {"knownGoodSeconds": 4.1, "warningSeconds": 12.0, "hardSeconds": 20.0},
+    "cover-local-processing": {"knownGoodSeconds": 0.0005, "warningSeconds": 0.5, "hardSeconds": 3.0},
+    "publication-preparation": {"knownGoodSeconds": 0.0001, "warningSeconds": 0.5, "hardSeconds": 3.0}
+  }
+}

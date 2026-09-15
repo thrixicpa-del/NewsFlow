@@ -57,6 +57,26 @@ boundary:
 python tests/run_isolated.py tests.test_golden_dataset
 ```
 
+## Performance regression policy
+
+`tests/performance-baselines.json` records the versioned local budgets. A
+metric at or below its warning threshold passes; exceeding that threshold
+reports a warning for review; only the deliberately generous hard threshold
+fails a regression run. This avoids treating ordinary Windows scheduling or
+disk variation as a failure while still stopping a real route change.
+
+`tests.test_performance_paths` measures deterministic local idea/script work,
+voice queue scheduling, footage ranking, FastGen prompt assembly, montage
+planning and publication-draft preparation. The existing
+`tests.test_montage_benchmark` remains the real synthetic FFmpeg render lane.
+Electron startup remains exercised by the source Electron E2E lane, rather
+than being misrepresented by a Python-only timer. Provider calls are never
+made by this performance suite.
+
+```powershell
+python tests/run_isolated.py tests.test_performance_baselines tests.test_performance_paths tests.test_montage_benchmark
+```
+
 ## Core contract boundary
 
 Passing source tests does not prove a release. The frozen core test invokes the actual `NewsFlowCore.exe` selected by the package configuration. The release freshness guard remains authoritative: any source module that changes packaged behavior must cause a core-bin rebuild before a package can pass release validation.
