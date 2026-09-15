@@ -42,3 +42,20 @@ On 2026-09-15 GitHub returned HTTP 403 for private-repository branch protection 
 4. Require the relevant local/CI gates and a recorded rollback commit or tag.
 
 When GitHub plan support is available, configure PR-required merging, no force-push, no deletion, linear history and real CI checks only.
+
+## Linked worktree workflow
+
+One task uses one branch and one linked worktree. Never run two Codex sessions against the same physical checkout.
+
+```powershell
+# Create a new isolated task checkout from main.
+.\scripts\worktree-new.ps1 -Kind fix -TaskName cover-retry
+
+# List registered checkouts and their branches.
+.\scripts\worktree-list.ps1
+
+# Safe removal refuses arbitrary paths and dirty worktrees by default.
+.\scripts\worktree-remove.ps1 -WorktreeName fix-cover-retry
+```
+
+The helper only permits the branch categories in this document and places worktrees in the Git-ignored `.worktrees` directory. `-Force` is explicit and must not be used for a worktree containing uncommitted work.
