@@ -91,6 +91,16 @@ $env:NEWSFLOW_RUN_SOAK = '1'
 python tests/run_isolated.py tests.test_resource_soak
 ```
 
+## Controlled failure matrix
+
+`tests/failure-matrix.json` binds each required simulated failure class to a
+real, isolated regression test: provider quota/timeout, FastGen transport,
+voice retry/idempotency, YouTube downstream failure, invalid audio and footage,
+FFmpeg retry classification, interrupted restart, missing output, and partial
+provider results. `tests.test_failure_matrix` parses the referenced source
+tests, so deleting or renaming a mapped case breaks the infrastructure gate.
+No scenario contacts an external service or invokes system-level chaos.
+
 ## Core contract boundary
 
 Passing source tests does not prove a release. The frozen core test invokes the actual `NewsFlowCore.exe` selected by the package configuration. The release freshness guard remains authoritative: any source module that changes packaged behavior must cause a core-bin rebuild before a package can pass release validation.

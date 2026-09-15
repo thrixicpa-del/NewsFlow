@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "scenarios": [
+    {"id": "openai-timeout-or-quota", "source": "tests/test_openai_client.py", "test": "test_uses_next_active_chatgpt_key_when_first_key_is_limited"},
+    {"id": "fastgen-429-or-timeout", "source": "tests/test_covers.py", "test": "test_transient_fastgen_failure_retries_and_finishes"},
+    {"id": "voice-provider-timeout", "source": "tests/test_tts_ranges.py", "test": "test_retryable_provider_limit_retries_same_snapshot_with_backoff"},
+    {"id": "youtube-downstream-failure", "source": "tests/test_publication_v2.py", "test": "test_downstream_retryable_failure_is_classified_without_resetting_video_upload"},
+    {"id": "invalid-audio", "source": "tests/test_voicer.py", "test": "test_generated_voice_marks_invalid_audio_as_error_not_ready"},
+    {"id": "invalid-footage", "source": "tests/test_montage_queue.py", "test": "test_missing_clip_recovery_never_uses_an_invalid_or_too_short_replacement"},
+    {"id": "ffmpeg-failure", "source": "tests/test_montage_queue.py", "test": "test_only_transient_render_failures_are_retried"},
+    {"id": "restart-during-job", "source": "tests/test_montage_queue.py", "test": "test_interrupted_queue_is_recovered_without_deleting_its_source_data"},
+    {"id": "missing-output", "source": "tests/test_publication_v2.py", "test": "test_migration_keeps_missing_artifact_as_recoverable_state_instead_of_deleting_it"},
+    {"id": "partial-provider-response", "source": "tests/test_covers.py", "test": "test_retries_only_the_missing_results_when_fastgen_returns_a_short_batch"}
+  ]
+}
