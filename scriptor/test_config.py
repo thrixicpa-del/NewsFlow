@@ -46,6 +46,23 @@ class TestStorageIsolationTests(unittest.TestCase):
             self.assertFalse((isolated_root / "NewsFlow" / "settings.json").exists())
             self.assertFalse((production_parent / "NewsFlow" / "settings.json").exists())
 
+    def test_explicit_test_root_rejects_the_canonical_production_newsflow_folder(self):
+        """A nested test root must not make the canonical production folder writable."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            production_parent = root / "production-local-appdata"
+            production_storage = production_parent / "NewsFlow"
+            with patch.dict(os.environ, {
+                "NEWSFLOW_TEST_MODE": "1",
+                "NEWSFLOW_TEST_ROOT": str(production_storage),
+                "LOCALAPPDATA": str(production_storage),
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(production_parent),
+            }, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "production"):
+                    app_data_root()
+
+            self.assertFalse((production_storage / "settings.json").exists())
+
     def test_test_root_is_used_when_localappdata_is_isolated(self):
         with tempfile.TemporaryDirectory() as directory:
             isolated_root = Path(directory) / "isolated-test-storage"

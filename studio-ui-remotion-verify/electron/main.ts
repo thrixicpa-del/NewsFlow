@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureTclRuntime } from './core-runtime.js';
-import { isolatedElectronUserDataRoot } from './test-user-data.js';
+import { environmentWindowTitle, isolatedElectronUserDataRoot } from './test-user-data.js';
 
 const isolatedUserDataRoot = isolatedElectronUserDataRoot(process.env);
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
@@ -176,7 +176,7 @@ async function resumeFastGenAtHourlyReset() {
 function createWindow() {
   const window = new BrowserWindow({
     width: 1440, height: 900, minWidth: 720, minHeight: 720,
-    backgroundColor: '#07101d', title: 'NewsFlow Studio',
+    backgroundColor: '#07101d', title: environmentWindowTitle(process.env),
     webPreferences: { preload: path.join(dirname, 'preload.mjs'), contextIsolation: true, nodeIntegration: false, sandbox: false },
   });
   window.setMenuBarVisibility(false);
