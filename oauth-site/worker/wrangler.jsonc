@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "newsflow-youtube-oauth",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-06",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "OAUTH_SESSIONS",
+      "database_name": "newsflow-oauth-sessions",
+      "database_id": "bad07428-8b60-4055-82b7-d403ffdda8d7",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": { "crons": ["*/5 * * * *"] }
+}

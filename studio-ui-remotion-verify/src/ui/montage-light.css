@@ -1,0 +1,11 @@
+.nf-montage{display:grid;gap:14px}
+.nf-montage>.panel{margin:0}
+.nf-montage .montage-short-mode,.nf-montage .renderer-choice-panel{border-color:#285779;background:linear-gradient(145deg,#0d2944,#091b2e)}
+.nf-montage .montage-queue,.nf-montage .montage-task-list{border-color:#244f70}
+.nf-montage .montage-task{border-color:#244b6b;background:#0a2035}
+.nf-montage .montage-provenance{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0;padding:12px;border:1px solid #244f70;border-radius:10px;background:#091827}.nf-montage .montage-provenance>div{min-width:0}.nf-montage .montage-provenance dt{color:#7e9bb8;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.nf-montage .montage-provenance dd{overflow-wrap:anywhere;margin:3px 0 0;color:#d5e9f8;font-size:12px;line-height:1.4}.nf-montage .montage-provenance>div:last-child{grid-column:1/-1}
+.nf-montage .timeline-list{border-color:#244b6b;background:#0a2035}
+.nf-fast-editing-workspace{position:relative;isolation:isolate}
+.nf-fast-editing-workspace::before{content:"FAST EDITING / RENDER WORKSPACE";position:absolute;z-index:-1;top:-18px;right:8px;color:#4f82aa2b;font-size:10px;font-weight:900;letter-spacing:.16em}
+.nf-montage .montage-control-deck{margin:0;border-color:#244f70;background:linear-gradient(120deg,#0b2237,#091827)}.nf-montage .montage-control-deck .panel-title{margin:0}.nf-montage-configuration{display:grid;gap:14px}.nf-montage-configuration>.panel{margin:0}
+.nf-outputs{display:grid;gap:14px}.nf-outputs .nf-table{min-width:760px}

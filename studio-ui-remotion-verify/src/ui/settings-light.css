@@ -1,0 +1,7 @@
+.nf-settings{display:grid;gap:14px}
+.nf-settings>.panel,.nf-settings .panel{border-color:#244b6b;background:linear-gradient(145deg,#0d2841,#091a2c)}
+.nf-settings>.toolbar{margin:0;padding:12px;border:1px solid #244b6b;border-radius:12px;background:#0a2035}
+.nf-settings .key-list>div,.nf-settings .session-list>div{border-color:#244b6b;background:#0a2035}
+.nf-settings .knowledge-form,.nf-settings .key-add-fields{border-color:#244b6b}
+.nf-structured-settings{position:relative;isolation:isolate}
+.nf-structured-settings::before{content:"CONFIGURATION / ACCESS";position:absolute;z-index:-1;top:-18px;right:8px;color:#4f82aa2b;font-size:10px;font-weight:900;letter-spacing:.16em}

@@ -1,0 +1,10 @@
+.nf-scenarios,.nf-scripts{display:grid;gap:14px}
+.nf-scenarios>.nf-toolbar,.nf-scripts>.nf-toolbar{margin:0;padding:12px;border:1px solid #244b6b;border-radius:12px;background:linear-gradient(145deg,#0d2841,#091a2c);box-shadow:0 12px 30px #010b1533}
+.nf-scenarios>.nf-toolbar>.nf-field{min-width:238px;flex:1;max-width:330px}
+.nf-scenarios .scenario-add .form-row>.nf-field{flex:1;min-width:260px}
+.nf-scenarios .scenario-add .form-row>.nf-field>textarea{width:100%;min-height:92px}
+.nf-scenarios .manual-import>.nf-field{display:block;margin:0 20px 20px}
+.nf-scenarios .manual-import>.nf-field>textarea{width:100%}
+.nf-scripts .script-editor>.nf-field{display:block;margin-bottom:12px}
+.nf-scripts .script-editor>.nf-field>textarea{width:100%;min-height:170px}
+@media(max-width:1250px){.nf-scenarios>.nf-toolbar>.nf-field{min-width:210px}}

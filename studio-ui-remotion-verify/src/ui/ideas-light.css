@@ -1,0 +1,24 @@
+.nf-ideas{display:grid;gap:14px}
+.nf-editorial-workspace{grid-template-columns:minmax(0,1fr);align-content:start}.nf-editorial-workspace>.publication-target-widget{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;margin:0;border-color:#2b5373;background:linear-gradient(100deg,#0c263e,#091a2c)}.nf-editorial-workspace>.publication-target-widget small{max-width:660px}.nf-editorial-workspace>.nf-toolbar{position:sticky;top:10px;z-index:8}.nf-editorial-workspace .topics,.nf-editorial-workspace .idea-results{border-color:#284c6d}.nf-editorial-workspace .topic-grid{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}.nf-editorial-workspace .topic-grid button{min-height:78px}.nf-editorial-workspace .release-plan{border-left:3px solid #3d93e8}@media(max-width:900px){.nf-editorial-workspace>.publication-target-widget{grid-template-columns:1fr}.nf-editorial-workspace>.nf-toolbar{position:static}}
+.nf-ideas>.nf-toolbar{margin:0;padding:12px;border:1px solid #244b6b;border-radius:12px;background:linear-gradient(145deg,#0d2841,#091a2c);box-shadow:0 12px 30px #010b1533}
+.nf-ideas .custom-topic-entry{display:flex;align-items:end;gap:8px;min-width:min(100%,480px);flex:1}
+.nf-ideas .custom-topic-entry .nf-field{flex:1;min-width:260px}
+.nf-ideas .youtube-research-controls{align-items:end}
+.nf-ideas .youtube-research-controls .nf-field{flex:1;min-width:180px}
+.nf-ideas .reference-controls .nf-field:first-child{flex:0 1 132px;min-width:120px}
+.nf-ideas .youtube-research-options,.nf-ideas .youtube-vector-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.nf-ideas .release-plan>.nf-field{margin-bottom:8px}
+.nf-ideas .form-row>.nf-field{flex:1;min-width:230px}
+.nf-ideas .ai-route>.nf-field{display:block;margin:0 20px 20px}
+.nf-ideas .ai-route>.nf-field>textarea{width:100%}
+.nf-ideas .preset-name>.nf-field{flex:1}
+.nf-ideas .preset-name{align-items:start}
+.nf-ideas .topics .nf-table td:first-child,.nf-ideas .topics .nf-table th:first-child{width:36px;padding-right:0;text-align:center}
+.nf-ideas .topics .nf-topic-selector{width:16px;height:16px;margin:0;accent-color:#3c9cff;cursor:pointer}
+/* The topic title is a semantic button, not a form control: neutralise the
+   browser's native button canvas that previously appeared as a white strip. */
+.nf-ideas .topics .nf-topic-title{display:block;width:100%;border:0;background:transparent;color:#d9e9f8;cursor:pointer;font:inherit;line-height:1.4;padding:6px 0;text-align:left}
+.nf-ideas .topics .nf-topic-title:hover{color:#f4f9ff;text-decoration:underline;text-decoration-color:#4aa5ff;text-underline-offset:3px}
+.nf-ideas .topics .nf-topic-title.selected{color:#7fc1ff;font-weight:800}
+.nf-ideas .topics .nf-topic-title:focus-visible{outline:2px solid #55a7ff;outline-offset:3px;border-radius:4px}
+@media(max-width:1250px){.nf-ideas .custom-topic-entry{width:100%;min-width:0}.nf-ideas .custom-topic-entry .nf-field{min-width:200px}}

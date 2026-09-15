@@ -1,0 +1,127 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fallback, FinishedScripts, Scenarios } from "../../App";
+
+describe("Scenarios and scripts Light views", () => {
+  it("uses the workstation scenario queue table without changing the selected-write command", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 0, title: "Ормуз", state: "Ожидает", result: "", error: "" }],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    expect(screen.getByRole("table", { name: "Очередь сценариев" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Ормуз" }));
+    fireEvent.click(screen.getByRole("button", { name: "Написать выбранные" }));
+    expect(command).toHaveBeenCalledWith("generate-scenarios", { indices: [0], provider: "agent" });
+  });
+
+  it("writes every unfinished scenario through the current batch command without resubmitting ready rows", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 0, title: "Готовый", state: "Готово", result: "Текст", error: "" },
+        { index: 1, title: "Нужно написать", state: "Ожидает", result: "", error: "" },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Написать все сценарии: 1" }));
+
+    expect(command).toHaveBeenCalledWith("generate-scenarios", { provider: "agent" });
+  });
+
+  it("keeps add, generate and finished-script navigation contracts", () => {
+    const command = vi.fn();
+    const go = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 0, title: "Ормуз", state: "Ожидает", result: "", error: "" }],
+    };
+    render(<Scenarios data={data} go={go} command={command} refresh={async () => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("Идеи для сценариев"), { target: { value: "Новая тема" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить сценарии" }));
+    fireEvent.click(screen.getByRole("button", { name: /Ормуз/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Написать выбранные" }));
+    fireEvent.click(screen.getByRole("button", { name: /Готовые сценарии/ }));
+
+    expect(command).toHaveBeenCalledWith("add-scenarios", { titles: "Новая тема" });
+    expect(command).toHaveBeenCalledWith("generate-scenarios", { indices: [0], provider: "agent" });
+    expect(go).toHaveBeenCalledWith("scripts");
+  });
+
+  it("keeps transfer of a ready script on the current command", () => {
+    const command = vi.fn();
+    const go = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 4, title: "Готовый материал", state: "Готово", result: "Полный текст", error: "" }],
+    };
+    render(<FinishedScripts data={data} go={go} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /В обложки/ }));
+    expect(command).toHaveBeenCalledWith("transfer-scenarios", { target: "covers", indices: [4], requireCompleted: true });
+  });
+
+  it("uses a ready-script workbench table before opening the current writing desk", () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 4, title: "Готовый материал", state: "Готово", result: "Полный текст", error: "" }],
+    };
+    render(<FinishedScripts data={data} go={vi.fn()} command={vi.fn()} />);
+
+    expect(screen.getByRole("table", { name: "Готовые сценарии" })).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Развернуть" }));
+    expect(screen.getByRole("dialog", { name: "Рабочий текст сценария" })).not.toBeNull();
+  });
+
+  it("protects an edited script before closing its writing desk", () => {
+    const command = vi.fn();
+    const go = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 4, title: "Готовый материал", state: "Готово", result: "Полный текст", error: "" }],
+    };
+    render(<FinishedScripts data={data} go={go} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Развернуть" }));
+    fireEvent.change(screen.getByLabelText("Текст сценария: Готовый материал"), {
+      target: { value: "Изменённый текст" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Свернуть" }));
+
+    expect(screen.getByRole("dialog", { name: "Несохранённые изменения" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить редактирование" }));
+    expect((screen.getByLabelText("Текст сценария: Готовый материал") as HTMLTextAreaElement).value).toBe("Изменённый текст");
+    expect(command).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Свернуть" }));
+    fireEvent.click(screen.getByRole("button", { name: "Не сохранять" }));
+    expect(screen.queryByLabelText("Текст сценария: Готовый материал")).toBeNull();
+    expect(command).not.toHaveBeenCalled();
+  });
+
+  it("saves the edited script through the current command from Ctrl+S", () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const go = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 4, title: "Готовый материал", state: "Готово", result: "Полный текст", error: "" }],
+    };
+    render(<FinishedScripts data={data} go={go} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Развернуть" }));
+    fireEvent.change(screen.getByLabelText("Текст сценария: Готовый материал"), {
+      target: { value: "Изменённый текст" },
+    });
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+
+    expect(command).toHaveBeenCalledWith("save-scenario-text", {
+      index: 4,
+      text: "Изменённый текст",
+    });
+  });
+});

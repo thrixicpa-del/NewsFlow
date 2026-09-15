@@ -1,0 +1,13002 @@
+"""Small JSON bridge used by the React/Electron shell.
+
+The bridge deliberately reuses NewsFlow's existing encrypted settings and
+session registry; the redesign must not create a second, incompatible project.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import asyncio
+import hashlib
+import difflib
+import re
+import random
+import math
+import time
+import shutil
+import os
+import ntpath
+import subprocess
+import uuid
+import threading
+import zipfile
+import sqlite3
+from functools import lru_cache
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from pathlib import Path
+
+from .config import (ChromeSession, FastGenKey, OpenAIKey, SecretVoicerKey, LumeanKey, VoiceGenKey, WProjectKey, Settings,
+                     allow_empty_release_state, app_data_root, load_settings, save_settings)
+from .covers import FastGenPool
+from .cover_library import CoverLibrary
+from .openai_client import HybridTextPool, OpenAIAPIError
+from .voicer import (ChromeSecretVoicer, LumeanClient, SecretVoicerClient, VoiceGenClient, WProjectClient,
+                     VoiceProfile, open_voice_login, safe_audio_name)
+from .cutter import cut_single_clip, cut_sources
+from .footage import (FootageItem, download_footage, download_youtube_segment, search_all_available_videos,
+                      search_wikimedia_videos, search_youtube_videos)
+from .mixer import make_mix_plans, render_mixes
+from .claude import chrome_path, open_login_window
+from .ai_index import ClipIndex, SearchHit
+from .footage import rank_items, scan_folders
+from .timeline import (TimelineClip, TimelineProject, agent_plan_prompt, fallback_scene_plan,
+                       fit_scene_plan_to_voice_duration, title_only_scene_plan, parse_agent_scene_plan,
+                       align_timeline_to_audio, probe_media_duration, probe_video_duration,
+                       remotion_payload, render_project, export_fcpxml, validate_rendered_montage,
+                       required_video_duration)
+from .davinci import import_fcpxml, resolve_status
+from .core import PromptRange, ScenarioRequest, build_requests, parse_titles, safe_filename
+from . import idea_engine
+from .runner import Job, ParallelRunner, RunState, scenario_length_status
+from .session import load_session, remove_scenarios, rename_scenario, save_session
+from .youtube_publisher import (PublicationJob, apply_rewritten_title, build_linked_community_post, can_upload,
+                                create_publication_job_from_package, plan_jobs_on_publication_grid,
+                                publication_job_record, suggest_youtube_title)
+from .youtube_allocation import allocate_ready_jobs, build_allocation_summary
+from .youtube_engagement import build_engagement_plan, new_engagement_state, transition_engagement_step
+from .publication_v2 import (apply_bulk_schedule_range, build_distribution_preview, cancel_publication_execution, confirm_publication_snapshots,
+                              begin_upload_attempt, claim_execution, classify_publication_error, complete_upload_attempt,
+                              complete_publication_stage, fail_publication_stage, migrate_legacy_publication_data, publication_queue_projection,
+                              persist_publication_receipt, reconcile_publication_executions, reconcile_publication_items,
+                              reconcile_youtube_video_state, release_execution, retry_publication_stage,
+                              validate_publication_snapshot)
+from .youtube_studio import StudioAutomationError, execute_studio_task
+from .seo_prefixes import normalize_prefix_ranges, prepend_description_prefix
+from .cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
+from .thumbnail_prompt_v2 import (append_universal_thumbnail_core_v2,
+                                  build_final_provider_prompt,
+                                  prompt_sources_debug,
+                                  strip_legacy_thumbnail_phrases,
+                                  universal_thumbnail_core_v2)
+from .tts_ranges import (RangeValidationError, ensure_production_item_ids, freeze_batch,
+                         migrate_voice_range_settings, resolve_assignments, snapshot_tts_job,
+                         validate_ranges)
+from .channel_research import channel_research_state, new_task, parse_txt_sources
+from .command_contract import COMMAND_CONTRACT, validate_command_request, validate_command_result
+from .youtube_oauth import (CloudflareOAuthSession, authorize_desktop_channel,
+                            cancel_cloudflare_authorization, open_channel_authorization,
+                            start_cloudflare_channel_authorization,
+                            validate_desktop_client_file, wait_for_cloudflare_credentials,
+                            _oauth_service_url)
+from .youtube_api import (build_private_video_insert_body, fetch_current_channel, fetch_google_account_email,
+                          fetch_youtube_analytics, fetch_youtube_video_state, set_youtube_thumbnail, upload_private_video)
+
+
+_COVER_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".jfif", ".tif", ".tiff"}
+_FASTGEN_REFERENCE_SAFE_BYTES = int(4.7 * 1024 * 1024)
+_EXTERNAL_FOOTAGE_CACHE_LOCK = threading.RLock()
+_EXTERNAL_FOOTAGE_CACHE: dict[str, FootageItem] = {}
+_EXTERNAL_FOOTAGE_SOURCE_LOCKS: dict[str, threading.Lock] = {}
+_COVER_FACE_IGNORE_TOKENS = {
+    "face", "head", "portrait", "person", "photo", "image", "img", "avatar", "reference",
+    "лицо", "голова", "портрет", "человек", "фото", "картинка", "референс", "вырезанные",
+}
+
+
+def _cover_library_path() -> Path:
+    """One writable thumbnail registry shared by every installed release."""
+    return app_data_root() / "covers-library.json"
+
+
+def _assign_cover_production_ids(settings: Settings) -> None:
+    """Leave cover identities untouched; only ProductionItem IDs authorise active rows.
+
+    A historical title can be reused in a new session.  Promoting a
+    ``legacy-cover:*`` row merely because its title matches would let stale
+    text, statuses and queued work resurrect into that new ProductionItem.
+    Current rows are created by ``_sync_current_scenario_covers`` with their
+    durable ID already attached; legacy registry entries remain history.
+    """
+    del settings
+
+
+def _cover_face_config(settings: Settings) -> dict[str, object]:
+    """Cover-only settings that must survive a release-level settings reset."""
+    return {
+        "enabled": bool(settings.cover_face_library_enabled),
+        "folder": str(settings.cover_face_library_folder or ""),
+        "preparedFolder": str(settings.cover_face_prepared_folder or ""),
+        "removeBackground": bool(settings.cover_face_remove_background),
+    }
+
+
+def _restore_cover_face_config(settings: Settings, value: dict[str, object]) -> None:
+    """Apply an explicit durable face config; an empty registry means no override."""
+    if not value:
+        return
+    settings.cover_face_library_enabled = bool(value.get("enabled", False))
+    settings.cover_face_library_folder = str(value.get("folder", "") or "")
+    settings.cover_face_prepared_folder = str(value.get("preparedFolder", "") or "")
+    settings.cover_face_remove_background = bool(value.get("removeBackground", False))
+
+
+def _active_cover_production_ids(settings: Settings) -> set[str]:
+    """Return only identities owned by the current durable scenario session."""
+    titles, _jobs = load_session()
+    ids_by_title = {
+        str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
+        for item in getattr(settings, "idea_production_items", [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    ids_by_title.update({
+        str(title).casefold(): str(item.get("id", "")).strip()
+        for title, item in getattr(settings, "idea_scenario_context", {}).items()
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    })
+    return {
+        identity for title in titles
+        if (identity := ids_by_title.get(str(title).casefold(), ""))
+    }
+
+
+def _select_current_cover_generation_rows(
+    settings: Settings,
+    payload: dict,
+    should_generate,
+) -> list[tuple[int, dict]]:
+    """Return only the still-current rows authorised for one cover worker.
+
+    Indices are a view concern: reconciliation can compact the cover queue
+    between a click and a background bridge process.  A queued action must
+    therefore carry the durable ProductionItem ID it observed.  Bulk actions
+    are resolved here against the current session, never against a persisted
+    historical registry.
+    """
+    active_ids = _active_cover_production_ids(settings)
+    if not active_ids:
+        # A cover created directly by an operator can precede the scenario
+        # workflow. Give that in-memory row a current durable identity before
+        # it reaches any provider; never derive it from a title or reuse a
+        # legacy registry key.
+        for item in settings.cover_queue:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("production_item_id", "")).strip():
+                continue
+            if str(item.get("title", "")).strip():
+                item["production_item_id"] = f"production:manual:{uuid.uuid4().hex}"
+    tombstoned_ids = {
+        str(value).strip()
+        for value in [
+            *getattr(settings, "idea_deleted_production_ids", []),
+            *getattr(settings, "deleted_scenario_production_ids", []),
+        ]
+        if str(value).strip()
+    }
+    tombstoned_titles = {
+        " ".join(str(value).split()).casefold()
+        for value in getattr(settings, "deleted_scenario_titles", [])
+        if str(value).strip()
+    }
+    # A direct manual operation can be issued before a scenario session exists
+    # (for example while composing one imported current cover).  Its durable
+    # ProductionItem ID is sufficient authority.  A legacy registry identity
+    # is never sufficient: it remains history until an explicit migration.
+    direct_current_ids = {
+        str(item.get("production_item_id", "")).strip()
+        for item in settings.cover_queue
+        if isinstance(item, dict)
+        and str(item.get("production_item_id", "")).strip()
+        and not str(item.get("production_item_id", "")).strip().startswith("legacy-cover:")
+    }
+    current_ids = (active_ids or direct_current_ids) - tombstoned_ids
+    requested = {int(index) for index in payload.get("indices", [])}
+    expected_values = payload.get("productionItemIds", payload.get("production_item_ids", []))
+    if expected_values is None:
+        expected_values = []
+    if not isinstance(expected_values, list):
+        raise ValueError("productionItemIds должен быть списком durable ProductionItem ID")
+    expected_ids = {str(value).strip() for value in expected_values if str(value).strip()}
+    if requested and not expected_ids:
+        # Current session actions must carry the identity seen by the UI.  The
+        # only safe compatibility path is a freshly created manual row with
+        # no session at all: it has just received a new current ID above and
+        # cannot resolve to a historical registry record.
+        direct_selection = {
+            str(settings.cover_queue[index].get("production_item_id", "")).strip()
+            for index in requested
+            if 0 <= index < len(settings.cover_queue) and isinstance(settings.cover_queue[index], dict)
+        }
+        if active_ids or not direct_selection or not direct_selection.issubset(current_ids):
+            raise ValueError("Выбранная задача обложки устарела: отсутствует ProductionItem ID")
+        expected_ids = direct_selection
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    return [
+        (index, item)
+        for index, item in enumerate(settings.cover_queue)
+        if index in requested
+        and isinstance(item, dict)
+        and (identity := str(item.get("production_item_id", "")).strip()) in current_ids
+        and " ".join(str(item.get("title", "")).split()).casefold() not in tombstoned_titles
+        and (not expected_ids or identity in expected_ids)
+        and should_generate(item)
+    ]
+
+
+def _hydrate_cover_library(settings: Settings) -> bool:
+    """Restore current cover state, never a prior release's unrelated rows."""
+    _assign_cover_production_ids(settings)
+    before = list(settings.cover_queue)
+    library = CoverLibrary(_cover_library_path())
+    active_ids = _active_cover_production_ids(settings)
+    if active_ids:
+        queue, capabilities, usage = library.hydrate(
+            settings.cover_queue, settings.fastgen_capabilities_cache, settings.fastgen_usage_cache,
+            active_production_ids=active_ids,
+        )
+    else:
+        # No current scenario session exists to authorise a library row.  Keep
+        # an explicitly supplied in-memory queue (manual/direct action), but
+        # never let the persistent gallery repopulate an intentionally empty
+        # release or a just-cleared session.
+        queue = list(settings.cover_queue)
+        capabilities = settings.fastgen_capabilities_cache
+        usage = settings.fastgen_usage_cache
+    settings.cover_queue = queue
+    settings.fastgen_capabilities_cache = capabilities
+    settings.fastgen_usage_cache = usage
+    _restore_cover_face_config(settings, library.face_config())
+    changed = _sync_current_scenario_covers(settings)
+    return changed or settings.cover_queue != before
+
+
+def _save_cover_state(settings: Settings) -> None:
+    """Persist cover-specific state before the mutable global settings snapshot."""
+    _assign_cover_production_ids(settings)
+    CoverLibrary(_cover_library_path()).persist(
+        settings.cover_queue, settings.fastgen_capabilities_cache, settings.fastgen_usage_cache,
+        face_config=_cover_face_config(settings),
+    )
+    save_settings(settings)
+
+
+def cover_file_state(path_value: str, *, verify: bool = True) -> dict[str, str]:
+    """Describe a persisted gallery path without changing it or its source file."""
+    raw_path = str(path_value or "").strip()
+    result = {"path": raw_path, "state": "missing", "message": "Файл обложки не найден на диске."}
+    if not raw_path:
+        result["message"] = "Для варианта не сохранён путь к файлу."
+        return result
+    path = Path(raw_path)
+    if not path.is_file():
+        return result
+    # Gallery snapshots are rendered frequently.  Opening and decoding every
+    # cover before first paint makes an existing library look empty.  A later
+    # reconciliation keeps the full corruption check, while the fast path can
+    # truthfully expose an already-present file immediately.
+    if not verify:
+        return {"path": raw_path, "state": "ready", "message": "Файл обложки доступен."}
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            image.verify()
+    except (ImportError, OSError, ValueError, SyntaxError):
+        return {"path": raw_path, "state": "invalid", "message": "Файл обложки повреждён или не является изображением."}
+    return {"path": raw_path, "state": "ready", "message": "Файл обложки доступен."}
+
+
+def cover_gallery_paths(item: dict) -> list[dict[str, str]]:
+    """Keep every persisted gallery variant visible, including unavailable files."""
+    paths = item.get("paths") or []
+    if not paths and str(item.get("selected_path", "")).strip():
+        paths = [item["selected_path"]]
+    return [cover_file_state(str(path), verify=False) for path in paths if str(path).strip()]
+
+
+def _cover_has_valid_image(item: dict) -> bool:
+    return any(record["state"] == "ready" for record in cover_gallery_paths(item))
+
+
+def cover_queue_counts(rows: list[dict]) -> dict[str, int]:
+    """Classify every cover topic once for all UI counters.
+
+    A physically available image wins over a stale worker status.  This keeps
+    the queue and gallery truthful after an interrupted FastGen worker wrote
+    its error after the file had already reached the persistent library.
+    """
+    counts = {"total": len(rows), "ready": 0, "missing": 0, "failed": 0, "generating": 0, "queued": 0}
+    for item in rows:
+        states = item.get("galleryPaths") if isinstance(item.get("galleryPaths"), list) else cover_gallery_paths(item)
+        if any(isinstance(record, dict) and record.get("state") == "ready" for record in states):
+            counts["ready"] += 1
+            continue
+        # This is the exact missing-only generation set: a topic lacks a
+        # physically available image even if its last attempt is also marked
+        # failed, generating, or queued.  Those are explanatory sub-states.
+        counts["missing"] += 1
+        status = str(item.get("status", "") or "").casefold()
+        if "ошиб" in status or "error" in status or "исчерпан" in status or "поврежд" in status:
+            counts["failed"] += 1
+        elif "генерир" in status or "подготовка запрос" in status or "повторная попытка" in status:
+            counts["generating"] += 1
+        elif ("ожида" in status or "приостанов" in status or "лимит" in status
+              or "промпт" in status):
+            counts["queued"] += 1
+    return counts
+
+
+def _recover_legacy_cover_face_blocks(settings: Settings) -> int:
+    """Make the old local-portrait-only failure safely resumable once."""
+    recovered = 0
+    for item in settings.cover_queue:
+        if not isinstance(item, dict) or str(item.get("status", "")) != "Нет подходящего лица":
+            continue
+        item.update(
+            status="Ожидает",
+            error="Локальный портрет не был найден старой версией. Обложку можно перезапустить: лицо будет сгенерировано по теме.",
+        )
+        recovered += 1
+    return recovered
+
+
+def reconcile_cover_gallery(payload: dict | None = None) -> dict:
+    """Restore valid on-disk cover links without regenerating or deleting files."""
+    del payload
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    _recover_legacy_cover_face_blocks(settings)
+    output = Path(settings.cover_output_folder)
+    physical = {
+        str(path): path for path in output.rglob("*")
+        if path.is_file() and path.suffix.casefold() in _COVER_IMAGE_SUFFIXES
+    } if output.is_dir() else {}
+    referenced: set[str] = set()
+    repaired = missing = invalid = 0
+    for index, source in enumerate(settings.cover_queue):
+        item = dict(source)
+        candidates = [
+            *(item.get("paths") or []), *(item.get("raw_paths") or []),
+            *(item.get("face_composite_paths") or []), item.get("selected_path", ""),
+            item.get("selected_base_path", ""), item.get("path", ""), item.get("text_overlay_path", ""),
+        ]
+        # Old projects often kept no path at all even though the canonical
+        # image still exists. The numbered title prefix is deterministic and
+        # safe; ambiguous matches are intentionally left untouched.
+        title_prefix = f"{index + 1:03d} — {safe_filename(str(item.get('title', '')))}"
+        discovered = [str(path) for path in physical.values() if path.name.startswith(title_prefix)]
+        candidates = list(dict.fromkeys(str(path) for path in [*candidates, *discovered] if str(path).strip()))
+        valid = [record["path"] for record in (cover_file_state(path) for path in candidates)
+                 if record["state"] == "ready"]
+        if valid:
+            old_selected = str(item.get("selected_path", ""))
+            selected = old_selected if old_selected in valid else valid[0]
+            old_status = str(item.get("status", ""))
+            item.update(paths=valid, raw_paths=item.get("raw_paths") or valid,
+                        path=selected, selected_path=selected, selected_base_path=selected,
+                        status="Готово", error="")
+            referenced.update(valid)
+            if old_status != "Готово" or old_selected != selected:
+                repaired += 1
+        else:
+            states = [cover_file_state(path)["state"] for path in candidates]
+            if "invalid" in states:
+                invalid += 1
+                item.update(status="Повреждённая обложка", error="Файл обложки повреждён или не читается.")
+            else:
+                missing += 1
+                # A stale in-progress status from a closed executable must be
+                # resumable; it cannot truthfully remain "генерируется".
+                if str(item.get("status", "")) in {"FastGen генерирует", "Подготовка запросов"}:
+                    item.update(status="Ожидает", error="")
+                # Older builds incorrectly treated an optional local portrait
+                # as a hard prerequisite.  Keep the row and make it retryable:
+                # the current renderer asks FastGen for a topic-relevant face.
+                elif str(item.get("status", "")) == "Нет подходящего лица":
+                    item.update(
+                        status="Ожидает",
+                        error="Локальный портрет не был найден старой версией. Обложку можно перезапустить: лицо будет сгенерировано по теме.",
+                    )
+        settings.cover_queue[index] = item
+    all_paths = set(physical)
+    orphan = len(all_paths - referenced)
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-reconcile", "count": repaired,
+        "message": (f"Проверены обложки: тем {len(settings.cover_queue)} · файлов {len(physical)} · "
+                    f"исправлено ссылок {repaired} · отсутствует {missing} · повреждено {invalid} · orphan {orphan}."),
+        "health": {"topics": len(settings.cover_queue), "files": len(physical), "repaired": repaired,
+                   "missing": missing, "invalid": invalid, "orphan": orphan},
+    }}
+
+
+def _api_key_id(kind: str, index: int = 0) -> str:
+    return f"{kind}:{index}"
+
+
+def _api_key_fingerprint(secret: str) -> str:
+    """A stable identifier that cannot be used as an API credential."""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:10] if secret else "—"
+# A small alias bridge makes a library named in English still useful with
+# Russian news topics.  Exact folder/file name matches remain the priority.
+_COVER_FACE_ALIASES = (
+    {"трамп", "trump"}, {"зеленский", "zelensky", "zelenskyy"}, {"путин", "putin"},
+    {"алиев", "aliyev"}, {"пашинян", "pashinyan"}, {"нетаньяху", "netanyahu"},
+    {"макрон", "macron"}, {"эрдоган", "erdogan"}, {"хаменеи", "khamenei"},
+)
+# Country and place names often occur in a headline without the leader's
+# surname.  These hints let a correctly named portrait folder still be used,
+# but only for the country/region it actually belongs to.  They deliberately
+# do *not* turn every news topic into a generic politician collage.
+_COVER_FACE_TOPIC_HINTS = (
+    # The user deliberately uses the Ormuz/US pressure angle.  Give this
+    # matching rule priority over the general Iran hint when both folders are
+    # available, while still falling back to an Iranian leader if Trump is not
+    # present in the local library.
+    ({"ормуз", "ормузский"}, {"трамп", "trump"}, 12),
+    ({"иран", "ирана", "ираном", "тегеран"}, {"хамене", "khamenei", "пезешки", "pezeshk"}, 5),
+    ({"россия", "россии", "россий", "кремль", "москва", "рф"}, {"путин", "putin"}, 6),
+    ({"украина", "украины", "украин", "киев"}, {"зеленск", "zelensk"}, 6),
+    ({"азербайджан", "азербайджана", "баку"}, {"алиев", "aliyev"}, 6),
+    ({"армения", "армении", "ереван"}, {"пашинян", "pashinyan"}, 6),
+    ({"израиль", "израиля", "тель", "авив"}, {"нетанья", "netanyahu"}, 6),
+    ({"сша", "вашингтон", "америк", "трамп"}, {"трамп", "trump"}, 6),
+    ({"турция", "турции", "анкара"}, {"эрдоган", "erdogan"}, 6),
+    ({"франция", "франции", "париж"}, {"макрон", "macron"}, 6),
+)
+
+
+def _cover_face_folder_value(value: object) -> str:
+    """Return a safe stored library path; a legacy '.' must never mean the app folder."""
+    raw = str(value or "").strip().strip('"')
+    return "" if raw in {".", ".\\", "./"} else raw
+
+
+def _cover_face_tokens(value: object) -> set[str]:
+    return {
+        token.casefold() for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9]{3,}", str(value or ""))
+        if token.casefold() not in _COVER_FACE_IGNORE_TOKENS
+    }
+
+
+def _cover_tokens_match(values: set[str], expected: set[str]) -> bool:
+    """Allow word forms such as ``хаменея`` and folder names like Hameneyi."""
+    return any(value == hint or value.startswith(hint) or hint.startswith(value)
+               for value in values for hint in expected if len(value) >= 4 and len(hint) >= 4)
+
+
+def _cover_face_files(folder_value: object, limit: int = 500) -> tuple[list[Path], bool]:
+    """Return only source portraits; prepared transparent copies are excluded."""
+    raw_folder = _cover_face_folder_value(folder_value)
+    if not raw_folder:
+        return [], False
+    folder = Path(raw_folder).expanduser()
+    if not folder.is_dir():
+        return [], False
+    result: list[Path] = []
+    truncated = False
+    try:
+        for path in folder.rglob("*"):
+            if "_вырезанные" in path.parts or not path.is_file() or path.suffix.casefold() not in _COVER_IMAGE_SUFFIXES:
+                continue
+            result.append(path)
+            if len(result) >= limit:
+                truncated = True
+                break
+    except OSError:
+        return [], False
+    return result, truncated
+
+
+def _cover_prepared_face_folder(settings: Settings, library_folder: Path) -> Path:
+    """Return the separate destination for transparent portraits.
+
+    Older projects used ``Лица\\_вырезанные``.  Retain that safe fallback,
+    while new projects can keep the source library completely clean by
+    choosing a different root folder.
+    """
+    configured = _cover_face_folder_value(getattr(settings, "cover_face_prepared_folder", ""))
+    return Path(configured).expanduser() if configured else library_folder / "_вырезанные"
+
+
+def _cover_processed_face_path(source: Path, library_folder: Path, prepared_folder: Path | None = None) -> Path:
+    try:
+        relative = source.resolve().relative_to(library_folder.resolve())
+    except ValueError:
+        relative = Path(source.name)
+    return (prepared_folder or library_folder / "_вырезанные") / relative.with_suffix(".png")
+
+
+def _compress_prepared_face_for_fastgen(path: Path) -> bool:
+    """Resave only a generated transparent cut-out below FastGen's 5 MiB cap.
+
+    Source portraits are never changed.  The prepared PNG keeps transparency
+    and its .png extension, while being reduced only when it is too large for
+    FastGen to accept as a face reference.
+    """
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size <= _FASTGEN_REFERENCE_SAFE_BYTES:
+        return False
+    try:
+        from PIL import Image
+        with Image.open(path) as source:
+            source.load()
+            image = source.convert("RGBA")
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось сжать подготовленное лицо {path.name}") from exc
+    temporary = path.with_name(f"{path.stem}.compressing.png")
+    try:
+        for edge in (3840, 3072, 2560, 2048, 1600, 1280, 1024, 800, 640):
+            candidate = image.copy()
+            candidate.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+            candidate.save(temporary, format="PNG", optimize=True, compress_level=9)
+            if temporary.stat().st_size <= _FASTGEN_REFERENCE_SAFE_BYTES:
+                temporary.replace(path)
+                return True
+        raise RuntimeError(f"Не удалось сжать {path.name} до лимита FastGen 5 МБ")
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _cover_face_library_summary(settings: Settings) -> dict:
+    raw_folder = _cover_face_folder_value(settings.cover_face_library_folder)
+    folder = Path(raw_folder).expanduser() if raw_folder else Path()
+    files, truncated = _cover_face_files(folder)
+    prepared_folder = _cover_prepared_face_folder(settings, folder) if raw_folder and folder.is_dir() else Path()
+    prepared_paths: list[str] = []
+    if raw_folder and folder.is_dir():
+        for source in files:
+            prepared = _cover_processed_face_path(source, folder, prepared_folder)
+            if prepared.is_file():
+                prepared_paths.append(str(prepared))
+    return {
+        "folder": str(folder) if raw_folder else "",
+        "exists": bool(raw_folder and folder.is_dir()),
+        "count": len(files),
+        "truncated": truncated,
+        "preparedCount": len(prepared_paths),
+        "preparedFolder": str(prepared_folder) if raw_folder and folder.is_dir() else "",
+        # A small preview list lets the interface show that the background
+        # removal really completed without loading a large portrait library.
+        "preparedPaths": prepared_paths[:12],
+        "sampleNames": [path.parent.name if path.parent != folder else path.stem for path in files[:6]],
+    }
+
+
+def _cover_face_catalog(settings: Settings) -> list[dict]:
+    """Return selectable people, preferring their prepared cut-outs.
+
+    The user works with ``Лица/<person>`` and ``Лица/_вырезанные/<person>``.
+    A gallery never needs to scan the full source library on every card, so a
+    compact grouped catalogue is produced once per snapshot instead.
+    """
+    raw_folder = _cover_face_folder_value(settings.cover_face_library_folder)
+    if not raw_folder:
+        return []
+    library = Path(raw_folder).expanduser()
+    if not library.is_dir():
+        return []
+    prepared = _cover_prepared_face_folder(settings, library)
+    groups: dict[str, list[str]] = {}
+
+    def collect(root: Path, *, only_missing: bool) -> None:
+        if not root.is_dir():
+            return
+        try:
+            files = sorted(path for path in root.rglob("*")
+                           if path.is_file() and path.suffix.casefold() in _COVER_IMAGE_SUFFIXES)
+        except OSError:
+            return
+        for path in files[:500]:
+            if root == library and prepared.is_dir():
+                try:
+                    path.relative_to(prepared)
+                    continue
+                except ValueError:
+                    pass
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            name = relative.parts[0] if len(relative.parts) > 1 else path.stem
+            key = name.casefold()
+            if only_missing and key in groups:
+                continue
+            groups.setdefault(key, []).append(str(path))
+
+    # Cut-outs are fit for local compositing. Sources are only a fallback for
+    # a person that has not yet been prepared.
+    collect(prepared, only_missing=False)
+    collect(library, only_missing=True)
+    return [{"name": key,
+             "paths": paths[:60], "prepared": bool(prepared.is_dir() and Path(paths[0]).is_relative_to(prepared))}
+            for key, paths in sorted(groups.items()) if paths]
+
+
+def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False) -> tuple[str, str, str]:
+    """Find a portrait only where the identity is explicitly present in the topic."""
+    if item.get("face_reference_disabled"):
+        return "", "", ""
+    # A manually picked reference must remain fixed.  An automatically picked
+    # portrait is intentionally *not* reused here: a new render can take a
+    # different photo of the same person from the library.
+    manual = Path(str(item.get("face_reference_path", "") or "")).expanduser()
+    if item.get("face_reference_source") == "manual" and manual.is_file() and manual.suffix.casefold() in _COVER_IMAGE_SUFFIXES:
+        return str(manual), manual.stem, "manual"
+    if not settings.cover_face_library_enabled and not force:
+        return "", "", ""
+    folder = Path(settings.cover_face_library_folder).expanduser()
+    files, _ = _cover_face_files(folder)
+    title_tokens = _cover_face_tokens(str(item.get("title", "")))
+    topic_tokens = set(title_tokens)
+    topic_tokens |= _cover_face_tokens(" ".join(str(item.get("script", "")).split())[:1200])
+    best_score = 0
+    candidates: list[Path] = []
+    for source in files:
+        try:
+            relative = source.relative_to(folder)
+        except ValueError:
+            relative = Path(source.name)
+        candidate_tokens = _cover_face_tokens(" ".join(relative.parts))
+        score = len(topic_tokens & candidate_tokens) * 5
+        for aliases in _COVER_FACE_ALIASES:
+            if _cover_tokens_match(topic_tokens, aliases) and _cover_tokens_match(candidate_tokens, aliases):
+                score += 6
+        # A named leader always wins.  Place-to-leader matching is deliberately
+        # weaker, so a headline that explicitly mentions another person cannot
+        # accidentally get an unrelated regional leader.
+        for topic_markers, identities, bonus in _COVER_FACE_TOPIC_HINTS:
+            if _cover_tokens_match(title_tokens, topic_markers) and _cover_tokens_match(candidate_tokens, identities):
+                score += bonus
+        if score > best_score:
+            best_score = score
+            candidates = [source]
+        elif score and score == best_score:
+            candidates.append(source)
+    if not candidates:
+        return "", "", ""
+    # Different portraits of the same person are equally relevant.  Randomly
+    # choose one to avoid four thumbnails using the identical Putin/Trump/etc.
+    # photo; the rendered layout itself remains remembered per selected photo.
+    source = random.choice(candidates)
+    prepared = _cover_processed_face_path(source, folder, _cover_prepared_face_folder(settings, folder))
+    chosen = prepared if settings.cover_face_remove_background and prepared.is_file() else source
+    label = source.parent.name if source.parent != folder else source.stem
+    return str(chosen), label, "auto"
+
+
+def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
+                               face_mode: str = "auto", position: int = 0) -> tuple[list[str], str]:
+    """Keep references within FastGen's common ten-file limit and show match state."""
+    manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
+    if face_mode == "without" or item.get("face_reference_disabled"):
+        face_path, face_label, face_source = "", "", ""
+    elif item.get("face_reference_source") == "manual" and manual_path.is_file():
+        # A deliberately selected portrait is never replaced by the automatic
+        # matcher when the render starts.
+        face_path = str(manual_path)
+        face_label = str(item.get("face_reference_label") or manual_path.stem)
+        face_source = "manual"
+    else:
+        face_path, face_label, face_source = _match_cover_face_reference(
+            item, settings, force=face_mode == "with"
+        )
+    # Scene/style references can arrive from four places: a manually uploaded
+    # image, an existing gallery cover, a FastGen pack and an AI-reference
+    # pack.  They all need the same transport preparation before FastGen sees
+    # them.  In particular, a portrait-orientation PNG must not be sent raw
+    # and become a stretched or rejected reference just because it came from
+    # a different panel in the UI.
+    scene_references: list[str] = []
+    visual_path = Path(str(item.get("visual_reference_path", "") or "")).expanduser()
+    if visual_path.is_file() and item.get("visual_reference_to_fastgen"):
+        scene_references.append(str(visual_path))
+    if refine:
+        scene_path = Path(str(item.get("selected_path") or item.get("path") or ""))
+        if not scene_path.is_file():
+            raise ValueError("Сначала выберите уже сгенерированную картинку для перерисовки с лицом")
+        scene_references.append(str(scene_path))
+    scene_references.extend(_cover_reference_paths_for_item(item, position, settings))
+    scene_references.extend(_cover_ai_reference_paths_for_fastgen(item, position, settings))
+    references = [_prepare_cover_visual_reference(Path(reference)) for reference in scene_references]
+    references = [str(reference) for reference in references]
+    if face_path:
+        references.append(face_path)
+        item.update(face_reference_path=face_path, face_reference_label=face_label, face_reference_source=face_source)
+    else:
+        item.pop("face_reference_path", None)
+        item.pop("face_reference_label", None)
+        item.pop("face_reference_source", None)
+    unique: list[str] = []
+    for reference in references:
+        if reference not in unique:
+            unique.append(reference)
+    return unique[:10], face_label
+
+
+def _cover_face_layout(item: dict, settings: Settings, face_path: str, face_label: str) -> str:
+    """Choose a reusable composition profile; FastGen receives its exact framing brief."""
+    if not face_path:
+        return ""
+    key = str(Path(face_path).expanduser()).casefold()
+    saved = settings.cover_face_layout_memory.get(key)
+    if isinstance(saved, dict) and saved.get("instruction"):
+        instruction = str(saved["instruction"])
+    else:
+        title_tokens = _cover_face_tokens(item.get("title", ""))
+        identity_tokens = _cover_face_tokens(face_label)
+        if title_tokens & identity_tokens:
+            instruction = (
+                "Frame the supplied identity as a large, immediately recognisable head-and-shoulders hero anchored from the BOTTOM edge, "
+                "occupying roughly 56–68% of image height on the RIGHT. Keep the eyes, full head and outer silhouette clear; "
+                "the portrait may extend slightly beyond the lower edge, but must never float in the centre like a sticker. "
+                "Keep the panoramic event context visible behind and beside them."
+            )
+            mode = "крупный план героя"
+        else:
+            instruction = (
+                "Frame the supplied identity as a strong lower-right head-and-shoulders portrait occupying roughly 42–54% of image height; "
+                "anchor it from the bottom edge, keep the full head visible and let the panoramic event context remain the dominant explanation."
+            )
+            mode = "средний план + панорама"
+        settings.cover_face_layout_memory[key] = {
+            "mode": mode, "instruction": instruction, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    # FastGen renders the lettering itself. It therefore needs an explicit
+    # protected lower-left zone before it composes the portrait.
+    text_safe_zone = bool(str(item.get("cover_headline", "")).strip()) or (
+        settings.cover_auto_overlay_text and settings.cover_text_mode == "overlay"
+    )
+    if text_safe_zone:
+        instruction += (
+            " Position the portrait on the RIGHT side, anchored flush to the LOWER edge of the frame, and keep the lower-left "
+            "52% of the image clean, dark enough and free of faces, hands, important objects "
+            "or detail: this is a protected headline area."
+        )
+    mode = str(settings.cover_face_layout_memory.get(key, {}).get("mode", "сохранённый профиль"))
+    item["face_layout"] = f"{mode} · справа, зона текста свободна" if text_safe_zone else mode
+    return instruction
+
+
+def _cover_local_face_composite(source_path: Path, face_path: Path, destination: Path) -> None:
+    """Place a selected portrait locally, so FastGen references are not the only face mechanism.
+
+    A prepared PNG keeps its transparent cutout.  A regular JPG is given a soft
+    oval alpha mask instead of an obvious hard rectangular sticker.  The right
+    side is deliberately used: the lower-left half is reserved for the local
+    headline compositor.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFilter, ImageOps
+    except ImportError as exc:
+        raise RuntimeError("Не найдена библиотека Pillow для наложения лица") from exc
+    base = Image.open(source_path).convert("RGBA")
+    portrait = Image.open(face_path).convert("RGBA")
+    width, height = base.size
+    # A head-and-shoulders crop provides a consistent thumbnail layout even
+    # when a source library contains both vertical and horizontal portraits.
+    # News covers need a recognisable face at phone size.  A large lower-edge
+    # portrait also frees a clean opposite corner for the headline.
+    target_height = int(height * .96)
+    target_width = min(int(width * .49), max(int(target_height * .76), int(width * .31)))
+    portrait = ImageOps.fit(portrait, (target_width, target_height), method=Image.Resampling.LANCZOS,
+                            centering=(.5, .27))
+    alpha = portrait.getchannel("A")
+    # JPEG source portraits are fully opaque.  Soften their outline locally;
+    # prepared cutouts retain their own alpha untouched.
+    if alpha.getextrema() == (255, 255):
+        mask = Image.new("L", portrait.size, 0)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse((-int(target_width * .14), -int(target_height * .08),
+                      int(target_width * 1.14), int(target_height * 1.16)), fill=255)
+        alpha = mask.filter(ImageFilter.GaussianBlur(max(5, int(min(target_width, target_height) * .035))))
+        portrait.putalpha(alpha)
+    x = width - target_width - int(width * .025)
+    y = max(-int(height * .035), height - target_height)
+    # Small shadow grounds the portrait in the scene and removes the "cut and
+    # pasted" look without hiding any part of the supplied face.
+    shadow = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(max(8, int(width * .014))))
+    shadow_layer = Image.new("RGBA", portrait.size, (0, 0, 0, 150))
+    shadow_layer.putalpha(shadow_alpha.point(lambda value: int(value * .62)))
+    shadow.alpha_composite(shadow_layer, (x - int(width * .016), y + int(height * .020)))
+    base = Image.alpha_composite(base, shadow)
+    base.alpha_composite(portrait, (x, y))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    base.convert("RGB").save(destination, quality=96)
+
+
+def _cover_face_cutout(face_path: Path, library_folder: Path, prepared_folder: Path | None = None) -> Path:
+    """Return a reusable transparent portrait, preparing it on demand.
+
+    This is deliberately invoked from the render flow as well as from the
+    explicit library-preparation button.  A user should never need to discover
+    why the first cover retained the rectangular JPG background.
+    """
+    if "_вырезанные" in face_path.parts or face_path.suffix.casefold() == ".png":
+        _compress_prepared_face_for_fastgen(face_path)
+        return face_path
+    target = _cover_processed_face_path(face_path, library_folder, prepared_folder)
+    if target.is_file() and target.stat().st_mtime >= face_path.stat().st_mtime:
+        return target
+    try:
+        # Keep the model and every generated artifact out of the source-photo
+        # library.  The user can archive or replace originals without service
+        # folders mixed into them.
+        model_root = prepared_folder or library_folder / "_вырезанные"
+        os.environ["U2NET_HOME"] = str(model_root / "_модели_вырезания_фона")
+        from rembg import new_session, remove  # type: ignore[import-not-found]
+        session = new_session("silueta")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(remove(face_path.read_bytes(), session=session))
+        _compress_prepared_face_for_fastgen(target)
+        return target
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось автоматически вырезать фон у портрета: {exc}") from exc
+
+
+def compose_cover_faces(payload: dict) -> dict:
+    """Make a real local face layer for generated cover variants.
+
+    FastGen still receives the portrait as a reference for a coherent scene,
+    but the final image is guaranteed to contain the chosen face by this step.
+    """
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    output = Path(settings.cover_output_folder) / "С лицами"
+    written = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        face = Path(str(item.get("face_reference_path", "") or "")).expanduser()
+        sources = [Path(str(path)) for path in (item.get("raw_paths") or item.get("paths") or [])]
+        sources = [path for path in sources if path.is_file()]
+        if not face.is_file() or not sources:
+            continue
+        composed: list[str] = []
+        try:
+            _cover_step(item, "Наложение лица", 86, str(item.get("face_reference_label", "портрет")))
+            if settings.cover_face_remove_background:
+                library = Path(settings.cover_face_library_folder).expanduser()
+                if library.is_dir():
+                    face = _cover_face_cutout(face, library, _cover_prepared_face_folder(settings, library))
+                    item["face_reference_path"] = str(face)
+            for variant, source in enumerate(sources, 1):
+                destination = output / (
+                    f"{index + 1:03d} — {safe_filename(str(item.get('title', 'Обложка')))} — лицо {variant:02d}.png"
+                )
+                _cover_local_face_composite(source, face, destination)
+                composed.append(str(destination))
+            if composed:
+                previous_selected = str(item.get("selected_base_path") or item.get("selected_path") or "")
+                try:
+                    selected_index = [str(path) for path in sources].index(previous_selected)
+                except ValueError:
+                    selected_index = 0
+                selected = composed[min(selected_index, len(composed) - 1)]
+                item.update(face_composite_paths=composed, paths=composed,
+                            path=selected, selected_path=selected, selected_base_path=selected,
+                            status="Лицо наложено", error="")
+                written += len(composed)
+        except Exception as exc:
+            _cover_step(item, "Ошибка наложения лица", 100, str(exc))
+            item.update(error=f"Не удалось наложить лицо: {exc}")
+        _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-face-compose", "count": written, "folder": str(output),
+        "message": f"Лица локально наложены на {written} вариантов.",
+    }}
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
+
+
+def _footage_index_status_path() -> Path:
+    return app_data_root() / "footage-index-status.json"
+
+
+def _read_footage_index_status() -> dict:
+    path = _footage_index_status_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_footage_index_status(payload: dict) -> None:
+    """Persist lightweight progress without rewriting the user's settings."""
+    path = _footage_index_status_path()
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _footage_index_lock_path() -> Path:
+    return app_data_root() / "footage-index-run.lock"
+
+
+def _index_process_is_running(pid: object) -> bool:
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, value)
+        if not handle:
+            return False
+        try:
+            # OpenProcess may still return a handle for a terminated/reused PID.
+            # Verify that it is specifically the NewsFlow worker, not merely any
+            # process which happened to receive the same PID.
+            capacity = 32768
+            buffer = ctypes.create_unicode_buffer(capacity)
+            length = wintypes.DWORD(capacity)
+            query = ctypes.windll.kernel32.QueryFullProcessImageNameW
+            query.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+            query.restype = wintypes.BOOL
+            if not query(handle, 0, buffer, ctypes.byref(length)):
+                return False
+            return Path(buffer.value).name.casefold() == "newsflowcore.exe"
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(value, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _claim_footage_index_lock() -> Path:
+    lock_path = _footage_index_lock_path()
+    if lock_path.exists():
+        try:
+            current = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            current = {}
+        if _index_process_is_running(current.get("pid")):
+            raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
+        try:
+            lock_path.unlink()
+        except OSError:
+            raise RuntimeError("Не удалось снять старую блокировку ИИ-индексации")
+    try:
+        with lock_path.open("x", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "startedAt": datetime.now().isoformat(timespec="seconds")}, stream)
+    except FileExistsError:
+        raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
+    return lock_path
+
+
+def _publication_allocation_profiles(settings: Settings) -> list[dict]:
+    """Merge saved per-channel allocation choices with actual channel state."""
+
+    saved = {str(item.get("channelId", "")).strip(): dict(item)
+             for item in settings.youtube_publication_allocation_profiles if str(item.get("channelId", "")).strip()}
+    profiles: list[dict] = []
+    for channel in settings.analytics_channels:
+        channel_id = str(channel.get("profile_id", "")).strip()
+        if not channel_id:
+            continue
+        value = saved.get(channel_id, {})
+        points = [item for item in settings.youtube_analytics_metric_points
+                  if str(item.get("channelId", "")) == channel_id]
+        points.sort(key=lambda item: str(item.get("at", "")))
+        growth = False
+        if len(points) >= 2:
+            previous, current = points[-2], points[-1]
+            growth = (int(current.get("views", 0) or 0) > int(previous.get("views", 0) or 0)
+                      and int(current.get("subscribers", 0) or 0) > 0)
+        profiles.append({
+            "channelId": channel_id,
+            "monetized": bool(channel.get("monetary_access", False)),
+            "growthSignal": growth,
+            "quota": value.get("quota"), "quotaLocked": bool(value.get("quotaLocked", False)),
+            "minDurationSeconds": value.get("minDurationSeconds", 0),
+            "maxDurationSeconds": value.get("maxDurationSeconds", 0),
+        })
+    return profiles
+
+
+def _publication_allocation_assigned_jobs(settings: Settings, channel_id: str) -> list[dict]:
+    """Give the allocation UI compact, readable details for one channel's jobs."""
+
+    return [
+        {
+            "id": str(job.get("id", "")),
+            "title": str(job.get("seoTitle") or job.get("title") or "Без названия"),
+            "durationSeconds": int(job.get("durationSeconds", 0) or 0),
+        }
+        for job in settings.youtube_publication_jobs
+        if str(job.get("channelId", "")) == channel_id
+    ]
+
+
+def _save_publication_allocation_profiles(settings: Settings, profiles: list[dict]) -> None:
+    settings.youtube_publication_allocation_profiles = [
+        {key: value for key, value in profile.items()
+         if key in {"channelId", "quota", "quotaLocked", "minDurationSeconds", "maxDurationSeconds"}}
+        for profile in profiles
+    ]
+
+
+def _youtube_engagement_policy(settings: Settings, channel_id: str) -> dict:
+    """Return the per-channel Studio policy, enabled by default for uploads.
+
+    The default follows the operator's requested workflow: a newly connected
+    channel gets a queued linked post, cards and an end screen.  A saved policy
+    can switch off the whole automation or any individual step later.
+    """
+
+    selected = next((dict(item) for item in settings.youtube_engagement_policies
+                     if str(item.get("channelId", "")).strip() == channel_id), {})
+    return {
+        "enabled": bool(selected.get("enabled", True)),
+        "postsEnabled": bool(selected.get("postsEnabled", True)),
+        "cardsEnabled": bool(selected.get("cardsEnabled", True)),
+        "endScreensEnabled": bool(selected.get("endScreensEnabled", True)),
+    }
+
+
+def reconcile_youtube_engagement_task(task: dict) -> dict:
+    """Record deterministic plan omissions as terminal Studio states.
+
+    This makes the task history explain why a card or an end screen was not
+    attempted, instead of leaving a permanently pending row with no action.
+    """
+
+    result = dict(task)
+    plan = dict(result.get("plan") or {})
+    cards = dict(result.get("cards") or {})
+    if str(cards.get("status", "pending")) == "pending" and not list(plan.get("cards") or []):
+        result = transition_engagement_step(
+            result, "cards", "skipped",
+            reason="Нет другого доступного публичного ролика для подсказки",
+        )
+    end_screen = dict(result.get("endScreen") or {})
+    end_screen_plan = dict(plan.get("endScreen") or {})
+    if str(end_screen.get("status", "pending")) == "pending" and str(end_screen_plan.get("status", "")) == "skipped":
+        result = transition_engagement_step(
+            result, "endScreen", "skipped",
+            reason=str(end_screen_plan.get("reason") or "Конечная заставка недоступна для этого ролика"),
+        )
+    return result
+
+
+def reconcile_youtube_engagement_tasks(payload: dict) -> dict:
+    """Persist currently knowable Studio omissions for selected uploads."""
+
+    requested = {str(item).strip() for item in payload.get("jobIds", []) if str(item).strip()}
+    if not requested:
+        raise ValueError("Выберите хотя бы одно задание Studio для проверки.")
+    settings = load_settings()
+    changed = 0
+    tasks: list[dict] = []
+    for source in settings.youtube_engagement_tasks:
+        task = dict(source)
+        if str(task.get("jobId", "")).strip() in requested:
+            reconciled = reconcile_youtube_engagement_task(task)
+            if reconciled != task:
+                task = reconciled
+                changed += 1
+        tasks.append(task)
+    settings.youtube_engagement_tasks = tasks
+    now = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_activity.append({
+        "at": now, "kind": "youtube-engagement-reconciled",
+        "detail": f"Проверены Studio-элементы: {len(requested)}; зафиксированы причины: {changed}.",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "youtube-engagement-reconciled", "count": changed,
+        "message": f"Studio-задачи проверены: {len(requested)}.",
+    }}
+
+
+def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft: dict) -> dict | None:
+    """Create exactly one resumable Studio task for a successfully uploaded job."""
+
+    job_id = str(record.get("id", "")).strip()
+    channel_id = str(record.get("channelId", "")).strip()
+    if not job_id or not channel_id:
+        return None
+    existing = next((item for item in settings.youtube_engagement_tasks
+                     if str(item.get("jobId", "")).strip() == job_id), None)
+    if existing is not None:
+        return existing
+    policy = _youtube_engagement_policy(settings, channel_id)
+    if not policy["enabled"]:
+        return None
+    catalog = [
+        {
+            "videoId": item.get("videoId", ""), "channelId": item.get("channelId", ""),
+            "privacyStatus": item.get("youtubePrivacyStatus", ""),
+            "publishedAt": item.get("publishAt", ""), "score": item.get("engagementScore", 0),
+        }
+        for item in settings.youtube_publication_jobs
+    ]
+    plan = build_engagement_plan(record, catalog, [])
+    state = new_engagement_state(job_id, channel_id)
+    state.update({
+        "videoId": str(record.get("videoId", "")).strip(),
+        "videoUrl": str(record.get("videoUrl", "")).strip(),
+        "publishAt": str(record.get("publishAt", "")).strip(),
+        "postDraft": dict(post_draft),
+        "plan": plan,
+        "policy": policy,
+    })
+    if policy["cardsEnabled"]:
+        state = reconcile_youtube_engagement_task(state)
+    if not policy["postsEnabled"]:
+        state["post"] = {"status": "skipped", "reason": "Посты выключены в правилах канала"}
+    if not policy["cardsEnabled"]:
+        state["cards"] = {"status": "skipped", "reason": "Карточки выключены в правилах канала"}
+    if not policy["endScreensEnabled"]:
+        state["endScreen"] = {"status": "skipped", "reason": "Конечные заставки выключены в правилах канала"}
+    settings.youtube_engagement_tasks.append(state)
+    return state
+
+
+def reconcile_runtime_state(payload: dict | None = None) -> dict:
+    """Explicitly persist bounded recovery/migration work.
+
+    A snapshot is a UI read operation.  Recovery that changes durable state is
+    intentionally available only through this named command, so opening the
+    application cannot silently migrate or rewrite user data.
+    """
+    del payload
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    cover_changed = bool(_recover_legacy_cover_face_blocks(settings))
+    publication_recovery = reconcile_publication_executions(settings)
+    changed = bool(publication_recovery["interrupted"] or publication_recovery["partial"])
+    current_titles, _current_jobs = load_session()
+    changed = ensure_idea_production_items(settings, active_titles=current_titles) or changed
+    changed = _recover_interrupted_montage_tasks(settings) or changed
+    cover_changed = _migrate_legacy_cover_texts(settings) or cover_changed
+    cover_changed = _migrate_legacy_cover_photo_prompts(settings) or cover_changed
+    if cover_changed:
+        CoverLibrary(_cover_library_path()).persist(
+            settings.cover_queue, settings.fastgen_capabilities_cache, settings.fastgen_usage_cache,
+            face_config=_cover_face_config(settings),
+        )
+    if changed or cover_changed:
+        save_settings(settings)
+    return snapshot()
+
+
+def snapshot() -> dict:
+    """Project the current durable state without initiating persistence writes."""
+    settings = load_settings()
+    titles, jobs = load_session()
+    ensure_idea_production_items(settings, active_titles=titles)
+    _hydrate_cover_library(settings)
+    # The queue screen is driven by the frozen production batch, not by a
+    # sortable React list.  Persist the first batch the moment it is shown so
+    # a restart cannot shift range 1–10 onto different scenarios.
+    try:
+        voice_range_preview = prepare_voice_range_preview(settings, titles)
+    except RangeValidationError as error:
+        voice_range_preview = {"batch": None, "items": [], "error": str(error)}
+    voice_assignment_by_index = {
+        int(item["scenario_index"]): item for item in voice_range_preview.get("items", [])
+        if isinstance(item, dict) and isinstance(item.get("scenario_index"), int)
+    }
+    allocation_profiles = _publication_allocation_profiles(settings)
+    allocation = build_allocation_summary(allocation_profiles, settings.youtube_publication_jobs)
+    publication_v2 = publication_queue_projection(settings)
+    allocation_channels = {str(item.get("channelId", "")): item for item in allocation["channels"]}
+    for source in settings.analytics_channels:
+        channel_id = str(source.get("profile_id", "")).strip()
+        target = allocation_channels.get(channel_id)
+        if target is not None:
+            target.update({
+                "name": str(source.get("name", "Канал")), "thumbnailUrl": str(source.get("thumbnail_url", "")),
+                "subscribers": str(source.get("subscribers", "—")),
+                "assignedJobs": _publication_allocation_assigned_jobs(settings, channel_id),
+            })
+    voice_count = sum(Path(path).is_file() for path in settings.voice_scenario_outputs.values())
+    montage_count = montage_ready_count(settings)
+    job_by_index = {job.request.index: job for job in jobs}
+    scenarios = []
+    for index, title in enumerate(titles):
+        job = job_by_index.get(index)
+        request = job.request if job else None
+        computed_length_status, computed_actual_chars = (
+            scenario_length_status(request, job.result) if request else ("", 0)
+        )
+        scenarios.append({
+            "index": index,
+            "title": title,
+            "state": job.state.value if job else RunState.WAITING.value,
+            "result": job.result if job else "",
+            "error": job.error if job else "",
+            "targetChars": request.target_chars if request else 0,
+            "allowedMin": request.allowed_min if request else 0,
+            "allowedMax": request.allowed_max if request else 0,
+            "actualChars": (job.actual_chars or computed_actual_chars) if job else 0,
+            "lengthStatus": (job.length_status or computed_length_status) if job else "",
+            "lengthRepairAttempts": job.length_repair_attempts if job else 0,
+        })
+    cover_rows = [
+        {**item, "galleryPaths": cover_gallery_paths(item)}
+        for item in settings.cover_queue
+    ]
+    cover_counts = cover_queue_counts(cover_rows)
+    project_folder = Path(settings.montage_project_folder)
+    # A .newsflow file is the editable timeline plan, not a playable video by
+    # itself.  Expose its clips together with the optional rendered MP4 so the
+    # desktop UI can show a real project preview and timeline instead of only
+    # a list of opaque JSON files.
+    montage_projects = []
+    for path in sorted(project_folder.glob("*.newsflow")) if project_folder.is_dir() else []:
+        item = {"title": path.stem, "path": str(path), "clips": [], "duration": 0.0,
+                "voicePath": "", "outputPath": "", "remotionPath": "", "fcpxmlPath": ""}
+        try:
+            project = TimelineProject.load(path)
+            output_path = Path(project.output_path) if project.output_path else (
+                Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+            )
+            remotion_path = output_path.with_suffix(".remotion.json")
+            fcpxml_path = Path(project.davinci_xml_path) if project.davinci_xml_path else path.with_suffix(".fcpxml")
+            item.update({
+                "title": project.title or path.stem,
+                "duration": round(project.duration, 2),
+                "voicePath": project.voiceover_path,
+                "transitionStyle": project.transition_style,
+                "transitionFrames": project.transition_frames,
+                "outputPath": str(output_path) if output_path.is_file() else "",
+                "remotionPath": str(remotion_path) if remotion_path.is_file() else "",
+                "fcpxmlPath": str(fcpxml_path) if fcpxml_path.is_file() else "",
+                "clips": [{
+                    "path": clip.path,
+                    "duration": round(float(clip.duration), 2),
+                    "narration": clip.narration,
+                    "query": clip.visual_query_en,
+                    "source": clip.source,
+                } for clip in project.clips],
+            })
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            item["error"] = f"Не удалось прочитать план: {error}"
+        montage_projects.append(item)
+    footage_db_path = app_data_root() / "footage-index.sqlite3"
+    # The footage database can be temporarily locked by an indexing worker or
+    # unavailable on a removable/profile drive.  The desktop must still load:
+    # surface the state in the Footage screen instead of dropping the whole
+    # Electron window into safe mode.
+    footage_index: ClipIndex | None = None
+    footage_index_error = ""
+    try:
+        footage_index = ClipIndex(footage_db_path)
+    except (OSError, sqlite3.Error) as error:
+        footage_index_error = f"База ИИ-индекса временно недоступна: {error}"
+    footage_status = _read_footage_index_status()
+    # A portable NewsFlow window may be closed while its worker is indexing.
+    # Do not leave the next launch stuck forever on a stale "active" flag.
+    if footage_status.get("active"):
+        try:
+            lock_payload = json.loads(_footage_index_lock_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            lock_payload = {}
+        if not _index_process_is_running(lock_payload.get("pid")):
+            footage_status.update({
+                "stage": "paused",
+                "active": False,
+                "message": "Индексация остановлена. Нажмите «Продолжить индексацию» — уже готовые клипы повторно не анализируются.",
+                "updatedAt": datetime.now().isoformat(timespec="seconds"),
+            })
+    footage_total = 0
+    footage_indexed = 0
+    footage_text_stats = {"blocked": 0, "safe": 0, "unchecked": 0}
+    if footage_index:
+        try:
+            footage_total = footage_index.count()
+            footage_indexed = footage_index.count(True)
+            footage_text_stats = footage_index.screen_text_stats()
+        except (OSError, sqlite3.Error) as error:
+            # SQLite can become busy *after* the schema check when an indexer
+            # has just begun a transaction. Keep the renderer usable and
+            # expose a precise temporary state in the Footage panel.
+            footage_index_error = f"База ИИ-индекса временно занята: {error}"
+    if str(footage_status.get("stage", "")) in {"scan", "embedding"}:
+        footage_total = max(footage_total, int(footage_status.get("total", 0) or 0))
+    return {
+        "pipelineTarget": settings.pipeline_target_count,
+        "autoMontageEnabled": settings.auto_montage_enabled,
+        "autoPipelineStages": settings.auto_pipeline_stages,
+        "ideaTopics": settings.idea_topics,
+        "ideaSuggestedTopics": settings.idea_suggested_topics,
+        "ideaReferenceChannels": settings.idea_reference_channels,
+        "ideaReferenceAnalysis": settings.idea_reference_analysis,
+        "ideaReferenceRules": settings.idea_reference_rules,
+        "ideaPlan": settings.idea_plan,
+        "youtubeSuggestedTopics": settings.youtube_suggested_topics,
+        "ideaResults": settings.idea_results,
+        "ideaResultSources": settings.idea_result_sources,
+        "ideaTitleMetadata": getattr(settings, "idea_title_metadata", {}),
+        "ideaProductionItems": getattr(settings, "idea_production_items", []),
+        "ideaPortfolioSummary": getattr(settings, "idea_portfolio_summary", {}),
+        "ideaRejectedItems": getattr(settings, "idea_rejected_items", []),
+        "ideaRoutePresets": settings.idea_route_presets,
+        "scenarios": scenarios,
+        "covers": cover_rows,
+        "coverCounts": cover_counts,
+        "seo": settings.seo_queue,
+        "voiceProfiles": settings.voice_profiles,
+        "voiceRanges": settings.voice_ranges,
+        "voiceRangePresets": settings.voice_range_presets,
+        "voiceDefaultProfileId": settings.voice_default_profile_id,
+        "voiceQueueConcurrency": settings.voice_queue_concurrency,
+        "voiceRangePreview": voice_range_preview,
+        "voiceKeyFailover": settings.voice_key_failover,
+        "voiceProvider": settings.voice_provider,
+        "lumeanVoices": settings.lumean_voice_cache,
+        "lumeanModels": settings.lumean_model_cache,
+        "voicegenVoices": settings.voicegen_voice_cache,
+        "voicegenPresets": settings.voicegen_preset_cache,
+        "voicegenEngines": settings.voicegen_engine_cache,
+        "voicegenProfile": settings.voicegen_profile_cache,
+        "wprojectVoices": settings.wproject_voice_cache,
+        "wprojectProfile": settings.wproject_profile_cache,
+        "wprojectUsage": settings.wproject_usage_cache,
+        "voiceApiFallback": settings.voice_api_fallback,
+        "voiceUseChromeSelectedVoice": settings.voice_use_chrome_selected_voice,
+        "voiceQueuePaused": settings.voice_queue_paused,
+        "voiceOutputFolder": settings.voicer_output_folder,
+        "voiceImport": settings.voice_import_summary,
+        "voiceItems": [{
+            "index": scenario["index"], "title": scenario["title"], "state": scenario["state"],
+            "path": settings.voice_scenario_outputs.get(str(scenario["index"] + 1), ""),
+            "productionItemId": str(voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")),
+            "rangeId": str(voice_assignment_by_index.get(scenario["index"], {}).get("range_id", "")),
+            "voiceName": str(voice_assignment_by_index.get(scenario["index"], {}).get("profile", {}).get("name", "")),
+            "voiceProvider": str(voice_assignment_by_index.get(scenario["index"], {}).get("profile", {}).get("provider", "")),
+            "jobSnapshotId": str(settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "jobSnapshotId", settings.voice_tts_jobs.get(str(voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")), {}).get("id", "")
+            )),
+            "jobState": str(settings.voice_tts_jobs.get(str(voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")), {}).get("state", "")),
+            "voiceStatus": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "label", "Готово" if settings.voice_scenario_outputs.get(str(scenario["index"] + 1), "") else "Ожидает озвучки"
+            ),
+            "voiceProgress": int(settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "progress", 100 if settings.voice_scenario_outputs.get(str(scenario["index"] + 1), "") else 0
+            )),
+            "voiceUpdatedAt": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("updatedAt", ""),
+            "voiceError": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("error", ""),
+        } for scenario in scenarios],
+        "footageFolders": settings.footage_folders,
+        "footageIndex": {
+            "total": footage_total,
+            "indexed": footage_indexed,
+            "englishBlocked": footage_text_stats["blocked"],
+            "englishSafe": footage_text_stats["safe"],
+            "englishUnchecked": footage_text_stats["unchecked"],
+            "databasePath": str(footage_db_path),
+            "error": footage_index_error,
+            "status": footage_status,
+        },
+        "cutterSources": settings.cutter_sources,
+        "cutterSettings": {"outputFolder": settings.cutter_output_folder, "downloadFolder": settings.footage_download_folder,
+                           "mixerOutputFolder": settings.mixer_output_folder},
+        "montageSettings": {"projectFolder": settings.montage_project_folder, "outputFolder": settings.montage_output_folder,
+                            "aspectRatio": settings.montage_aspect_ratio, "introEnabled": settings.montage_intro_enabled,
+                            "renderer": settings.montage_renderer, "remotionFrameConcurrency": settings.montage_remotion_frame_concurrency,
+                            "exportDaVinciXml": settings.montage_export_davinci_xml,
+                            "davinciAutoImport": settings.montage_davinci_auto_import,
+                            "davinciStatus": resolve_status(),
+                            "transitionStyle": settings.montage_transition_style, "transitionFrames": settings.montage_transition_frames,
+                            "introFolder": settings.montage_intro_folder, "introDuration": settings.montage_intro_duration, "overlayEnabled": settings.montage_overlay_enabled,
+                            "overlayFolder": settings.montage_overlay_folder,
+                            "autoWeb": settings.montage_auto_web, "autoYoutube": settings.montage_auto_youtube,
+                            "externalOnly": settings.montage_external_only,
+                            "useScriptText": settings.montage_use_script_text,
+                            "excludeEnglishText": settings.montage_exclude_english_text,
+                            "scenePlanner": settings.montage_scene_planner,
+                            "matchThreshold": settings.montage_match_threshold,
+                            "fastReuseEnabled": settings.montage_fast_reuse_enabled,
+                            "uniqueFootagePercent": settings.montage_unique_footage_percent,
+                            "fastReuseRanges": _clean_fast_reuse_ranges(settings.montage_fast_reuse_ranges),
+                            "planningWorkers": settings.montage_planning_workers,
+                            "downloadWorkers": settings.montage_download_workers,
+                            "renderWorkers": settings.montage_render_workers,
+                            "queuePaused": settings.montage_queue_paused},
+        "montageTasks": [dict(value, index=int(key)) for key, value in sorted(
+            settings.montage_task_statuses.items(), key=lambda pair: int(pair[0]) if str(pair[0]).isdigit() else 10 ** 9
+        )],
+        "montageProjects": montage_projects,
+        "outputs": [{"video": video, "folder": folder} for video, folder in settings.video_result_packages.items()
+                    if Path(video).is_file() and Path(folder).is_dir()],
+        "publication": {
+            "jobs": settings.youtube_publication_jobs,
+            "presets": settings.youtube_publication_presets,
+            "activity": settings.youtube_publication_activity[-200:],
+            "engagementPolicies": settings.youtube_engagement_policies,
+            "engagementTasks": settings.youtube_engagement_tasks[-1000:],
+            "uploadConcurrency": settings.youtube_publication_upload_concurrency,
+            "v2": publication_v2,
+            "allocation": {**allocation, "presets": settings.youtube_publication_allocation_presets,
+                           "updatedAt": settings.youtube_publication_allocation_updated_at},
+            "readyOutputs": [
+                {"video": video, "folder": folder}
+                for video, folder in settings.video_result_packages.items()
+                if Path(video).is_file() and Path(folder).is_dir()
+                and str(folder) not in {str(item.get("packageFolder", "")) for item in settings.youtube_publication_jobs}
+            ],
+        },
+        "analytics": {
+            "metricPoints": settings.youtube_analytics_metric_points[-20000:],
+            "videoMetrics": settings.youtube_analytics_video_metrics[-10000:],
+            "updatedAt": settings.youtube_analytics_updated_at,
+        },
+        "mediaResults": [str(path) for path in sorted(Path(settings.media_output_folder).rglob("*"), reverse=True)
+                         if path.is_file() and path.suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"}][:100],
+        "templateSettings": {
+            "template": settings.template,
+            "ranges": settings.prompt_ranges,
+            "scenarioProvider": settings.scenario_provider,
+            "presets": [
+                {"name": str(item.get("name", "Шаблон")), "template": str(item.get("template", "")),
+                 "ranges": item.get("ranges", [])}
+                for item in settings.scenario_templates
+                if item.get("topic") == "__newsflow_desktop__"
+            ],
+            "rangePresets": [
+                {"name": str(item.get("name", "Набор диапазонов")), "ranges": item.get("ranges", [])}
+                for item in settings.range_templates
+                if item.get("topic") == "__newsflow_desktop__"
+            ],
+        },
+        "coverSettings": {
+            "outputFolder": settings.cover_output_folder,
+            "operation": settings.cover_operation,
+            "aspectRatio": settings.cover_aspect_ratio,
+            "variantCount": settings.cover_variant_count,
+            "promptTemplate": settings.cover_prompt_template,
+            "provider": settings.cover_prompt_provider,
+            "useCustomPrompt": settings.cover_use_custom_prompt,
+            "useScriptContext": settings.cover_use_script_context,
+            "promptVariantCount": settings.cover_prompt_variant_count,
+            "headlineProvider": settings.cover_headline_provider,
+            "headlineTemplate": settings.cover_headline_template,
+            "subheadlineTemplate": settings.cover_subheadline_template,
+            "headlinePresets": settings.cover_headline_presets,
+            "useTextStructure": settings.cover_text_use_structure,
+            "avoidTextRepeats": settings.cover_text_avoid_repeats,
+            "headlinePaused": settings.cover_headlines_paused,
+            "subheadlinePaused": settings.cover_subheadlines_paused,
+            "textMode": settings.cover_text_mode,
+            "buildMode": settings.cover_build_mode,
+            "ranges": settings.cover_prompt_ranges,
+            "presets": settings.cover_prompt_presets,
+            "referenceMode": settings.cover_reference_mode,
+            "referencePaths": settings.cover_reference_paths,
+            "referenceRanges": settings.cover_reference_ranges,
+            "aiReferenceMode": settings.cover_ai_reference_mode,
+            "aiReferencePaths": settings.cover_ai_reference_paths,
+            "aiReferenceRanges": settings.cover_ai_reference_ranges,
+            "aiReferenceToFastgen": settings.cover_ai_reference_to_fastgen,
+            "faceLibraryFolder": _cover_face_folder_value(settings.cover_face_library_folder),
+            "facePreparedFolder": _cover_face_folder_value(settings.cover_face_prepared_folder),
+            "faceLibraryEnabled": settings.cover_face_library_enabled,
+            "faceRemoveBackground": settings.cover_face_remove_background,
+            "faceLibrary": _cover_face_library_summary(settings),
+            "faceCatalog": _cover_face_catalog(settings),
+            "autoOverlayText": settings.cover_auto_overlay_text,
+            "autoTextColor": settings.cover_auto_text_color,
+            "generationPaused": settings.cover_generation_paused,
+            "rateLimitPerHour": settings.cover_rate_limit_per_hour,
+            "rateAutoResume": settings.cover_rate_auto_resume,
+            "rateUsed": sum(max(0, int(item.get("count", 0) or 0)) for item in settings.cover_rate_usage_events),
+            "seed": settings.cover_seed,
+            "upscale": settings.cover_upscale,
+            "quality": settings.cover_quality,
+            "resolution": settings.cover_resolution,
+            "activeKeys": sum(item.active for item in settings.cover_api_keys),
+            "selectedKeyLabels": settings.cover_selected_key_labels,
+        },
+        "fastgenCapabilities": settings.fastgen_capabilities_cache,
+        "fastgenUsage": settings.fastgen_usage_cache,
+        "seoSettings": {"promptTemplate": settings.seo_prompt_template, "tagsPromptTemplate": settings.tags_prompt_template,
+                        "provider": settings.seo_provider, "tagsProvider": settings.tags_provider,
+                        "hashtagBatchSize": settings.hashtag_batch_size, "tagCharLimit": settings.tag_char_limit,
+                        "useScriptContext": settings.seo_use_script_context, "callToAction": settings.seo_call_to_action,
+                        "fixedDescriptionPrefix": settings.seo_description_prefix,
+                        "descriptionPrefixRanges": settings.seo_description_prefix_ranges,
+                        "descriptionPrefixPresets": settings.seo_description_prefix_presets},
+        "chromeSessions": [{"id": item.profile_id, "label": item.label, "active": item.active, "limitStatus": item.limit_status,
+                           "usage": item.usage}
+                           for item in settings.chrome_sessions],
+        "keyStatus": {"fastgen": [{"label": item.label, "active": item.active,
+                                      "fingerprint": _api_key_fingerprint(item.secret),
+                                      "note": settings.api_key_notes.get(_api_key_id("fastgen", index), "")}
+                                     for index, item in enumerate(settings.cover_api_keys)],
+                      "openai": [{"label": item.label, "active": item.active, "streams": 2,
+                                  "fingerprint": _api_key_fingerprint(item.secret),
+                                  "note": settings.api_key_notes.get(_api_key_id("openai", index), "")}
+                                 for index, item in enumerate(settings.openai_api_keys)],
+                      "voicer": [{"label": item.label, "active": item.active, "streams": item.streams,
+                                  "balance": item.balance, "balanceStatus": item.balance_status,
+                                  "fingerprint": _api_key_fingerprint(item.secret),
+                                  "note": settings.api_key_notes.get(_api_key_id("voicer", index), "")}
+                                 for index, item in enumerate(settings.secret_voicer_keys)],
+                      "lumean": [{"label": item.label, "active": item.active, "streams": item.streams,
+                                  "balance": item.balance, "balanceStatus": item.balance_status,
+                                  "fingerprint": _api_key_fingerprint(item.secret),
+                                  "note": settings.api_key_notes.get(_api_key_id("lumean", index), "")}
+                                 for index, item in enumerate(settings.lumean_api_keys)],
+                      "voicegen": [{"label": item.label, "active": item.active, "streams": item.streams,
+                                    "balance": item.balance, "balanceStatus": item.balance_status,
+                                    "fingerprint": _api_key_fingerprint(item.secret),
+                                    "note": settings.api_key_notes.get(_api_key_id("voicegen", index), "")}
+                                   for index, item in enumerate(settings.voicegen_api_keys)],
+                      "wproject": [{"label": item.label, "active": item.active, "streams": item.streams,
+                                    "balance": item.balance, "balanceStatus": item.balance_status,
+                                    "fingerprint": _api_key_fingerprint(item.secret),
+                                    "note": settings.api_key_notes.get(_api_key_id("wproject", index), "")}
+                                   for index, item in enumerate(settings.wproject_api_keys)],
+                      "youtube": ([{"label": "YouTube Data API", "active": settings.youtube_api_enabled,
+                                    "fingerprint": _api_key_fingerprint(settings.youtube_api_key),
+                                    "note": settings.api_key_notes.get(_api_key_id("youtube"), "")}]
+                                  if settings.youtube_api_key else [])},
+        "analyticsOAuth": {"configured": bool(settings.youtube_oauth_service_url) or bool(settings.google_oauth_client_file and Path(settings.google_oauth_client_file).is_file()),
+                           "mode": "cloudflare" if settings.youtube_oauth_service_url else "loopback",
+                           "serviceUrl": settings.youtube_oauth_service_url,
+                           "fileName": Path(settings.google_oauth_client_file).name if settings.google_oauth_client_file else ""},
+        "obsidian": {"vaultPath": settings.obsidian_vault_path,
+                     "mcpUrl": settings.obsidian_mcp_url,
+                     "mcpConfigured": bool(settings.obsidian_mcp_url),
+                     "syncEnabled": settings.obsidian_sync_enabled},
+        "research": {"channels": [{
+            "channelId": str(item.get("profile_id", "")), "name": str(item.get("name", "Канал")),
+            "profileReady": bool(item.get("profile_id", "")),
+            "status": {key: channel_research_state(settings, str(item.get("profile_id", ""))).get("status", {}).get(key, 0 if key in {"processed", "skipped"} else "")
+                       for key in ("state", "processed", "skipped", "message", "updatedAt")},
+            "config": {key: list(channel_research_state(settings, str(item.get("profile_id", ""))).get("config", {}).get(key, []))
+                       for key in ("queries", "languages", "regions", "manualUrls")},
+            "tasks": [{key: value for key, value in task.items() if key != "channelId"}
+                      for task in channel_research_state(settings, str(item.get("profile_id", ""))).get("tasks", []) if isinstance(task, dict)],
+            "results": [dict(result) for result in channel_research_state(settings, str(item.get("profile_id", ""))).get("results", []) if isinstance(result, dict)],
+        } for item in settings.analytics_channels]},
+        "channels": [{"id": item.get("profile_id", ""), "channelId": item.get("channel_id", ""), "name": item.get("name", "Канал"), "channel": item.get("channel", ""), "thumbnailUrl": item.get("thumbnail_url", ""), "operatorTag": item.get("operator_tag", ""), "operatorNotes": item.get("operator_notes", ""),
+                      "subscribers": item.get("subscribers", "—"), "viewsHour": item.get("views_hour", "—"),
+                      "views48h": item.get("views_48h", "—"), "income": item.get("income", "—"),
+                      "monetaryAccess": bool(item.get("monetary_access", False)),
+                      "oauthConnected": bool(settings.youtube_oauth_tokens.get(str(item.get("profile_id", "")))),
+                      "oauthAccountEmail": item.get("oauth_account_email", ""),
+                      "status": item.get("status", "Не обновлён")}
+                     for item in settings.analytics_channels],
+        "counts": {
+            "ideas": len(titles),
+            "scripts": sum(job.state == RunState.DONE for job in jobs),
+            "voice": voice_count,
+            "montage": montage_count,
+        },
+    }
+
+
+def save_settings_patch(patch: dict) -> dict:
+    settings = load_settings()
+    if "pipelineTarget" in patch:
+        settings.pipeline_target_count = max(1, int(patch["pipelineTarget"]))
+        if settings.idea_target_follows_pipeline:
+            settings.idea_target_count = settings.pipeline_target_count
+    if "autoMontageEnabled" in patch:
+        settings.auto_montage_enabled = bool(patch["autoMontageEnabled"])
+    if isinstance(patch.get("autoPipelineStages"), dict):
+        defaults = settings.auto_pipeline_stages
+        settings.auto_pipeline_stages = {
+            name: bool(patch["autoPipelineStages"].get(name, enabled))
+            for name, enabled in defaults.items()
+        }
+    save_settings(settings)
+    return snapshot()
+
+
+def save_obsidian_settings(payload: dict) -> dict:
+    """Store a local Obsidian vault and optional local Vault MCP endpoint.
+
+    No vault contents are accessed merely by saving this screen.  Writes happen
+    only through the separate export command, and MCP URLs are constrained to
+    localhost so production notes cannot silently leave the computer.
+    """
+    settings = load_settings()
+    vault = str(payload.get("vaultPath", settings.obsidian_vault_path)).strip()
+    if vault and not Path(vault).is_dir():
+        raise ValueError("Выберите существующую папку vault Obsidian")
+    endpoint = str(payload.get("mcpUrl", settings.obsidian_mcp_url)).strip().rstrip("/")
+    if endpoint:
+        parsed = urllib.parse.urlparse(endpoint)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Для безопасности разрешён только локальный адрес Vault MCP (localhost)")
+    token = str(payload.get("mcpToken", "")).strip()
+    settings.obsidian_vault_path = vault
+    settings.obsidian_mcp_url = endpoint
+    if token:
+        settings.obsidian_mcp_token = token
+    if "syncEnabled" in payload:
+        settings.obsidian_sync_enabled = bool(payload.get("syncEnabled"))
+    save_settings(settings)
+    return snapshot()
+
+
+def test_obsidian_mcp() -> dict:
+    """Verify that the explicitly configured local endpoint answers HTTP.
+
+    Vault MCP implementations differ between SSE and Streamable HTTP.  An
+    OPTIONS request is intentionally transport-neutral and does not read or
+    write a single note.
+    """
+    settings = load_settings()
+    if not settings.obsidian_mcp_url:
+        raise ValueError("Укажите локальный адрес Vault MCP из настроек Obsidian")
+    headers = {"User-Agent": "NewsFlow/2", "Accept": "application/json, text/event-stream"}
+    if settings.obsidian_mcp_token:
+        headers["Authorization"] = f"Bearer {settings.obsidian_mcp_token}"
+    request = urllib.request.Request(settings.obsidian_mcp_url, headers=headers, method="OPTIONS")
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        # 405 is common for a live SSE endpoint which permits GET only.
+        if exc.code not in {200, 204, 405}:
+            raise ValueError(f"Vault MCP ответил HTTP {exc.code}") from exc
+        status = exc.code
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Не удалось подключиться к Vault MCP: {exc.reason}") from exc
+    return {**snapshot(), "obsidianStatus": f"Локальный Vault MCP доступен (HTTP {status})"}
+
+
+def export_obsidian_notes(payload: dict) -> dict:
+    """Export approved NewsFlow entities as readable Markdown notes.
+
+    This is local filesystem output compatible with every Obsidian vault.  It
+    provides immediate value even before the optional MCP server is enabled.
+    """
+    settings = load_settings()
+    if not settings.obsidian_vault_path:
+        raise ValueError("Сначала укажите папку vault Obsidian")
+    vault = Path(settings.obsidian_vault_path)
+    if not vault.is_dir():
+        raise ValueError("Папка vault Obsidian больше не существует")
+    root = vault / "NewsFlow" / "Производство"
+    root.mkdir(parents=True, exist_ok=True)
+    titles, jobs = load_session()
+    job_by_title = {job.request.title: job for job in jobs if job.state == RunState.DONE}
+    seo_by_title = {str(item.get("source_title", "")): item for item in settings.seo_queue
+                    if item.get("status") == "Готово"}
+    created = 0
+    compressed = 0
+    for title in titles:
+        job = job_by_title.get(title)
+        if not job:
+            continue
+        seo = seo_by_title.get(title, {})
+        tags = seo.get("tags", []) if isinstance(seo.get("tags"), list) else []
+        note = root / f"{safe_filename(title)}.md"
+        frontmatter = ["---", f'title: "{title.replace(chr(34), chr(39))}"', "source: NewsFlow", "---", ""]
+        body = ["# Сценарий", job.result.strip(), "", "# SEO", f"## Заголовок\n{seo.get('title') or title}",
+                f"\n## Описание\n{seo.get('description') or ''}", f"\n## Теги\n{', '.join(tags)}"]
+        note.write_text("\n".join(frontmatter + body).strip() + "\n", encoding="utf-8")
+        created += 1
+    inbox = vault / "NewsFlow" / "Идеи.md"
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    inbox.write_text("# Идеи NewsFlow\n\n" + "\n".join(f"- {item}" for item in settings.idea_results) + "\n", encoding="utf-8")
+    return {**snapshot(), "operationResult": {"kind": "obsidian", "count": created, "folder": str(root)}}
+
+
+def add_topic(payload: dict) -> dict:
+    topic = str(payload.get("topic", "")).strip()
+    if not topic:
+        raise ValueError("Введите название направления")
+    settings = load_settings()
+    if topic.casefold() not in {item.casefold() for item in settings.idea_topics}:
+        settings.idea_topics.append(topic)
+        save_settings(settings)
+    return snapshot()
+
+
+def delete_topics(payload: dict) -> dict:
+    """Delete only explicitly selected permanent favourite directions."""
+    settings = load_settings()
+    requested = {" ".join(str(item).split()).casefold() for item in payload.get("topics", []) if str(item).strip()}
+    if not requested:
+        raise ValueError("Отметьте направления в избранном, которые нужно удалить")
+    before = len(settings.idea_topics)
+    settings.idea_topics = [topic for topic in settings.idea_topics if topic.casefold() not in requested]
+    removed = before - len(settings.idea_topics)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "idea-favorites-delete", "count": removed,
+        "message": f"Удалено из избранных направлений: {removed}.",
+    }}
+
+
+def suggest_topics(payload: dict) -> dict:
+    """Ask the configured text route for reusable *directions*, not news facts.
+
+    Suggestions are a review-only staging set.  They never enter either the
+    release plan or the permanent favourites library until the operator uses
+    the explicit approval actions for those stages.
+    """
+    settings = load_settings()
+    count = max(1, min(30, int(payload.get("count", 6))))
+    provider = str(payload.get("provider", "agent")).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Неизвестный провайдер направлений")
+    prompt = (
+        f"Предложи ровно {count} самостоятельных новостных направлений для коротких роликов.\n"
+        "Это должны быть устойчивые тематические векторы (страна/регион + конфликт, экономика, дипломатия или общественная тема), "
+        "а не выдуманные сегодняшние события, даты, цитаты и цифры.\n"
+        "Формат: одно направление на строке, без нумерации и пояснений. Язык: русский."
+    )
+    pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
+    suggested = _parse_ideas(asyncio.run(pool.generate(prompt)))[:count]
+    settings.idea_suggested_topics = list(dict.fromkeys(suggested))
+    save_settings(settings)
+    return {**snapshot(), "suggestedTopics": suggested, "addedTopics": []}
+
+
+def add_suggested_topics_to_favorites(payload: dict) -> dict:
+    """Persist only the agent ideas the operator explicitly approves."""
+    settings = load_settings()
+    requested = [" ".join(str(item).split()) for item in payload.get("topics", []) if str(item).strip()]
+    if not requested:
+        raise ValueError("Отметьте предложенные направления для избранного")
+    existing = {item.casefold() for item in settings.idea_topics}
+    added = []
+    for topic in requested:
+        if topic.casefold() not in existing:
+            settings.idea_topics.append(topic)
+            existing.add(topic.casefold())
+            added.append(topic)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "idea-favorites", "count": len(added),
+        "message": f"Добавлено в избранные направления: {len(added)}.",
+    }}
+
+
+def clear_suggested_topics() -> dict:
+    settings = load_settings()
+    settings.idea_suggested_topics = []
+    save_settings(settings)
+    return snapshot()
+
+
+def reject_suggested_topics(payload: dict) -> dict:
+    """Remove only explicitly rejected proposals from the current review set.
+
+    The list is persisted in the existing ``idea_suggested_topics`` field, so
+    a restart cannot resurrect rejected entries.  Missing entries are ignored
+    deliberately: retrying a click after a slow renderer response is safe.
+    """
+    requested = {
+        " ".join(str(item).split()).casefold()
+        for item in payload.get("topics", [])
+        if str(item).strip()
+    }
+    if not requested:
+        raise ValueError("Отметьте предложения, которые нужно отклонить")
+    source = str(payload.get("source", "idea")).strip().casefold()
+    if source not in {"idea", "youtube"}:
+        raise ValueError("Неизвестный источник предложений")
+    settings = load_settings()
+    field = "youtube_suggested_topics" if source == "youtube" else "idea_suggested_topics"
+    proposals = list(getattr(settings, field, []))
+    before = len(proposals)
+    setattr(settings, field, [
+        topic for topic in proposals
+        if " ".join(str(topic).split()).casefold() not in requested
+    ])
+    removed = before - len(getattr(settings, field))
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "idea-suggestions-reject", "count": removed,
+        "message": f"Отклонено предложений: {removed}.",
+    }}
+
+
+def add_idea_reference_channel(payload: dict) -> dict:
+    """Store a public YouTube channel as an editorial reference only."""
+    url = " ".join(str(payload.get("url", "")).split())
+    label = " ".join(str(payload.get("label", "")).split()) or url
+    if not url or not ("youtube.com" in url.casefold() or "youtu.be" in url.casefold()):
+        raise ValueError("Вставьте публичную ссылку на канал YouTube")
+    settings = load_settings()
+    known = {str(item.get("url", "")).casefold() for item in settings.idea_reference_channels}
+    if url.casefold() not in known:
+        settings.idea_reference_channels.append({"url": url, "label": label})
+        save_settings(settings)
+    return snapshot()
+
+
+def remove_idea_reference_channel(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.idea_reference_channels):
+        raise ValueError("Канал-референс не найден")
+    del settings.idea_reference_channels[index]
+    save_settings(settings)
+    return snapshot()
+
+
+def save_idea_reference_rules(payload: dict) -> dict:
+    rules = " ".join(str(payload.get("rules", "")).split())
+    if len(rules) < 20:
+        raise ValueError("Правила заголовков должны содержать хотя бы 20 символов")
+    settings = load_settings()
+    settings.idea_reference_rules = rules[:6000]
+    save_settings(settings)
+    return snapshot()
+
+
+def _reference_video_score(item: dict) -> tuple[float, float]:
+    """Prefer recent clips that outperform normally-viewed uploads.
+
+    `views/hour` is visible in the UI and avoids treating a video with a few
+    views after an hour as a successful reference merely because it is recent.
+    """
+    views = max(0, int(item.get("view_count") or item.get("views") or 0))
+    timestamp = item.get("timestamp") or item.get("release_timestamp") or item.get("upload_timestamp")
+    if not timestamp and str(item.get("upload_date") or "").isdigit():
+        try:
+            timestamp = datetime.strptime(str(item["upload_date"]), "%Y%m%d").timestamp()
+        except ValueError:
+            timestamp = None
+    age_hours = max(1.0, (time.time() - float(timestamp)) / 3600) if timestamp else 24.0
+    return views / age_hours, age_hours
+
+
+def _read_reference_channel(channel: dict, limit: int) -> list[dict]:
+    """Read a small recent sample and keep only its strongest fresh uploads."""
+    from yt_dlp import YoutubeDL
+
+    url = str(channel.get("url", "")).strip()
+    flat_options = {"quiet": True, "no_warnings": True, "skip_download": True,
+                    "extract_flat": "discard_in_playlist", "playlistend": max(8, min(20, limit * 3))}
+    with YoutubeDL(flat_options) as ydl:
+        listing = ydl.extract_info(url, download=False) or {}
+    entries = [item for item in (listing.get("entries") or []) if isinstance(item, dict)]
+    detailed: list[dict] = []
+    detail_options = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with YoutubeDL(detail_options) as ydl:
+        for item in entries[:max(8, min(16, limit * 3))]:
+            video_url = str(item.get("webpage_url") or item.get("url") or "")
+            if not video_url:
+                video_id = str(item.get("id") or "")
+                video_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
+            if not video_url:
+                continue
+            try:
+                detail = ydl.extract_info(video_url, download=False) or item
+            except Exception:
+                continue
+            title = str(detail.get("title") or "").strip()
+            views_hour, age_hours = _reference_video_score(detail)
+            if title and views_hour > 0:
+                detailed.append({"title": title, "url": str(detail.get("webpage_url") or video_url),
+                                 "channel": str(detail.get("channel") or detail.get("uploader") or channel.get("label") or ""),
+                                 "views": int(detail.get("view_count") or 0),
+                                 "ageHours": round(age_hours, 1), "viewsHour": round(views_hour, 1)})
+    detailed.sort(key=lambda row: (row["viewsHour"], row["views"]), reverse=True)
+    # A channel can have an unusually quiet day. Still select only its best
+    # upload(s), never arbitrary recent low-performing entries.
+    if not detailed:
+        return []
+    strongest = detailed[0]["viewsHour"]
+    return [row for row in detailed if row["viewsHour"] >= strongest * .15][:limit]
+
+
+def analyze_idea_reference_channels(payload: dict) -> dict:
+    settings = load_settings()
+    if not settings.idea_reference_channels:
+        raise ValueError("Добавьте хотя бы один канал-референс")
+    count = max(1, min(30, int(payload.get("count", 8))))
+    sample: list[dict] = []
+    errors: list[str] = []
+    for channel in settings.idea_reference_channels:
+        try:
+            sample.extend(_read_reference_channel(channel, max(3, min(8, count))))
+        except Exception as exc:
+            errors.append(f"{channel.get('label') or channel.get('url')}: {str(exc)[:120]}")
+    sample.sort(key=lambda row: (row.get("viewsHour", 0), row.get("views", 0)), reverse=True)
+    sample = sample[:max(3, min(24, count * 2))]
+    if not sample:
+        raise ValueError("Не удалось найти свежие ролики с просмотрами. Проверьте публичность ссылок и попробуйте позже.")
+    ingest_idea_signals(settings, "reference", sample)
+    evidence = "\n".join(
+        f"- {row['title']} | {row['channel']} | {row['views']} просмотров | {row['viewsHour']} просмотров/ч | возраст {row['ageHours']} ч"
+        for row in sample
+    )
+    prompt = (
+        f"На основе успешных свежих заголовков ниже создай ровно {count} новых русскоязычных тем для новостных роликов. "
+        "Не копируй и не перефразируй исходные заголовки буквально. Нужны самостоятельные темы, пригодные для дальнейшей проверки фактов.\n"
+        f"Редакционные правила: {settings.idea_reference_rules}\n"
+        "Формат: одна тема на строке, без нумерации и пояснений.\n\n"
+        f"Отобранные ролики по просмотрам в час:\n{evidence}"
+    )
+    keys = [key for key in settings.openai_api_keys if key.active and key.secret.strip()]
+    try:
+        suggested = _parse_ideas(asyncio.run(HybridTextPool([], keys, "", settings.openai_model).generate(prompt)))[:count] if keys else []
+    except OpenAIAPIError:
+        suggested = []
+    if not suggested:
+        suggested = _parse_ideas("\n".join(row["title"] for row in sample))[:count]
+    settings.idea_reference_analysis = sample
+    settings.idea_suggested_topics = list(dict.fromkeys(suggested))
+    save_settings(settings)
+    suffix = f" Ошибки каналов: {'; '.join(errors)}" if errors else ""
+    return {**snapshot(), "operationResult": {
+        "kind": "reference-channel-analysis", "count": len(settings.idea_suggested_topics),
+        "message": f"Разобрано успешных свежих роликов: {len(sample)}. Новые темы ждут отбора в предложениях.{suffix}",
+    }}
+
+
+def _youtube_research(query: str, limit: int) -> list[dict]:
+    """Return a transparent, ranked *search sample* from YouTube.
+
+    Search results are not a platform-wide popularity ranking.  We enrich a
+    bounded sample with the public counters yt-dlp can read, then score it by
+    reach and available engagement.  Downloading is deliberately not part of
+    this operation.
+    """
+    from yt_dlp import YoutubeDL
+
+    candidates = search_youtube_videos(query, limit=max(12, min(30, limit * 3)))
+    details_options = {"quiet": True, "no_warnings": True, "skip_download": True}
+    researched: list[dict] = []
+    # Per-video extraction is intentionally capped: it keeps the button fast
+    # and avoids turning a topic search into a mass scraper.
+    for item in candidates[:18]:
+        detail: dict = {}
+        try:
+            with YoutubeDL(details_options) as client:
+                detail = client.extract_info(str(item.get("source_url", "")), download=False) or {}
+        except Exception:
+            # A search result still helps the editor even when its public
+            # counters are hidden or YouTube temporarily rejects a request.
+            detail = {}
+        views = max(0, int(detail.get("view_count") or 0))
+        likes = max(0, int(detail.get("like_count") or 0))
+        comments = max(0, int(detail.get("comment_count") or 0))
+        engagement = (likes + comments * 3) / max(views, 1)
+        score = round(math.log10(views + 1) * 10 + engagement * 100, 2)
+        researched.append({
+            "title": str(detail.get("title") or item.get("title") or "Без названия"),
+            "url": str(item.get("source_url") or ""),
+            "channel": str(detail.get("channel") or detail.get("uploader") or item.get("artist") or ""),
+            "views": views,
+            "likes": likes,
+            "comments": comments,
+            "score": score,
+        })
+    researched.sort(key=lambda row: (row["score"], row["views"], row["likes"]), reverse=True)
+    return researched[:max(1, min(30, limit * 2))]
+
+
+def _youtube_api_research(query: str, limit: int, api_key: str) -> list[dict]:
+    """Search and batch-read public counters through the official API."""
+    def request_json(path: str, params: dict[str, str]) -> dict:
+        url = f"https://www.googleapis.com/youtube/v3/{path}?{urllib.parse.urlencode(params)}"
+        try:
+            with urllib.request.urlopen(url, timeout=18) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                message = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "")
+            except Exception:
+                message = ""
+            raise ValueError(f"YouTube Data API: {message or f'HTTP {exc.code}'}") from exc
+        except urllib.error.URLError as exc:
+            raise ValueError(f"YouTube Data API недоступен: {exc.reason}") from exc
+
+    count = max(12, min(30, limit * 3))
+    found = request_json("search", {"part": "snippet", "type": "video", "maxResults": str(count), "q": query, "key": api_key})
+    ids = [str(item.get("id", {}).get("videoId", "")) for item in found.get("items", []) if item.get("id", {}).get("videoId")]
+    if not ids:
+        return []
+    detail = request_json("videos", {"part": "snippet,statistics", "id": ",".join(ids), "key": api_key})
+    rows: list[dict] = []
+    for item in detail.get("items", []):
+        snippet = item.get("snippet") or {}
+        stats = item.get("statistics") or {}
+        views = max(0, int(stats.get("viewCount") or 0))
+        likes = max(0, int(stats.get("likeCount") or 0))
+        comments = max(0, int(stats.get("commentCount") or 0))
+        engagement = (likes + comments * 3) / max(views, 1)
+        rows.append({
+            "title": str(snippet.get("title") or "Без названия"),
+            "url": f"https://www.youtube.com/watch?v={item.get('id', '')}",
+            "channel": str(snippet.get("channelTitle") or ""),
+            "views": views, "likes": likes, "comments": comments,
+            "score": round(math.log10(views + 1) * 10 + engagement * 100, 2),
+        })
+    rows.sort(key=lambda row: (row["score"], row["views"], row["likes"]), reverse=True)
+    return rows[:max(1, min(30, limit * 2))]
+
+
+# Countries and broad news words are useful to formulate a query, but cannot
+# by themselves prove that a video is about the requested direction.
+_YOUTUBE_GENERIC_WORDS = {
+    "россия", "россии", "россию", "россий", "украина", "украины", "украине", "украину",
+    "иран", "ирана", "ираном", "рф", "сша", "ес", "нато", "новости", "news", "сегодня",
+    "современный", "современная", "современной", "вокруг", "между", "последние", "новое",
+}
+
+
+def _youtube_terms(query: str) -> set[str]:
+    """Extract specific searchable concepts, using a small common stem."""
+    values = set()
+    for value in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", query.casefold()):
+        if value not in _YOUTUBE_GENERIC_WORDS:
+            values.add(value[:5])
+    return values
+
+
+def _youtube_is_relevant(item: dict, query: str) -> bool:
+    terms = _youtube_terms(query)
+    if not terms:
+        # A numeric or overly broad request must never fall back to arbitrary
+        # high-view videos (kids, games, music). Ask the user for keywords.
+        return False
+    title = str(item.get("title", ""))
+    channel = str(item.get("channel", ""))
+    found = {value[:5] for value in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", f"{title} {channel}".casefold())}
+    return bool(terms & found)
+
+
+def _news_research(query: str, limit: int) -> list[dict]:
+    """Read a bounded public Google News RSS sample for the editor's query."""
+    params = urllib.parse.urlencode({"q": query, "hl": "ru", "gl": "RU", "ceid": "RU:ru"})
+    request = urllib.request.Request(
+        f"https://news.google.com/rss/search?{params}",
+        headers={"User-Agent": "NewsFlow/2.1 (+local editorial research)"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            root = ET.fromstring(response.read())
+    except (urllib.error.URLError, ET.ParseError) as exc:
+        raise ValueError(f"Не удалось получить новостную выборку: {exc}") from exc
+    namespace = {"source": "http://search.yahoo.com/mrss/"}
+    rows: list[dict] = []
+    for item in root.findall("./channel/item")[:max(1, min(30, limit * 3))]:
+        raw_title = (item.findtext("title") or "").strip()
+        title = raw_title.rsplit(" - ", 1)[0].strip() if " - " in raw_title else raw_title
+        source = (item.findtext("source") or "Новостной источник").strip()
+        row = {"title": title, "source": source, "url": (item.findtext("link") or "").strip(),
+               "published": (item.findtext("pubDate") or "").strip()}
+        if title and _youtube_is_relevant({"title": title, "channel": source}, query):
+            rows.append(row)
+    return rows[:max(1, min(30, limit * 2))]
+
+
+def research_youtube_topics(payload: dict) -> dict:
+    """Use YouTube search evidence to create reusable topic cards.
+
+    The optional ChatGPT pass is editorial only: it turns titles from the
+    search sample into broad directions and must not invent news claims.
+    """
+    settings = load_settings()
+    count = max(1, min(30, int(payload.get("count", 6))))
+    selected = [str(item).strip() for item in payload.get("topics", []) if str(item).strip()]
+    query = " ".join(str(payload.get("query", "")).split())
+    if not query:
+        query = " ".join(selected)
+    if not query:
+        raise ValueError("Введите запрос для YouTube или выберите направления из сетки")
+    # When the editor picked several directions, one broad combined query lets
+    # YouTube match a single country name and return unrelated videos. Search
+    # every selected direction independently instead.
+    queries = [query] if str(payload.get("query", "")).strip() else selected
+    invalid_queries = [item for item in queries if not _youtube_terms(item)]
+    if invalid_queries:
+        raise ValueError("Введите смысловые ключевые слова (например «Ормуз нефть танкеры») или выберите направление с такими словами; цифры и общие слова не подходят")
+    sample: list[dict] = []
+    seen_urls: set[str] = set()
+    for search_query in queries:
+        found = (_youtube_api_research(search_query, count, settings.youtube_api_key)
+                 if settings.youtube_api_key and settings.youtube_api_enabled
+                 else _youtube_research(search_query, count))
+        for item in found:
+            url = str(item.get("url", ""))
+            if url and url not in seen_urls and _youtube_is_relevant(item, search_query):
+                sample.append(item)
+                seen_urls.add(url)
+    sample.sort(key=lambda row: (row.get("score", 0), row.get("views", 0), row.get("likes", 0)), reverse=True)
+    sample = sample[:max(1, min(30, count * 2))]
+    news_sample: list[dict] = []
+    seen_news: set[str] = set()
+    for search_query in queries:
+        try:
+            news_rows = _news_research(search_query, count)
+        except ValueError:
+            # News search enriches the research but must not break a useful
+            # YouTube result just because an RSS mirror is temporarily down.
+            news_rows = []
+        for item in news_rows:
+            key = str(item.get("url") or item.get("title"))
+            if key and key not in seen_news:
+                news_sample.append(item)
+                seen_news.add(key)
+    if not sample and not news_sample:
+        raise ValueError("По ключевым словам не найдено релевантных роликов или новостей. Уточните запрос: объект, место, действие.")
+    ingest_idea_signals(settings, "youtube", sample)
+    ingest_idea_signals(settings, "news", news_sample)
+    youtube_evidence = "\n".join(
+        f"- {row['title']} | канал: {row['channel'] or 'не указан'} | "
+        f"просмотры: {row['views']}; лайки: {row['likes']}; комментарии: {row['comments']}"
+        for row in sample[:12]
+    )
+    news_evidence = "\n".join(
+        f"- {row['title']} | издание: {row['source']} | опубликовано: {row['published']}"
+        for row in news_sample[:12]
+    )
+    prompt = (
+        f"На основе выборки роликов YouTube ниже предложи ровно {count} самостоятельных русскоязычных "
+        "направлений для новостных видео. Также используй новостную выборку. Ищи повторяющиеся, привлекательные для аудитории векторы, "
+        "но не утверждай непроверенные события и не копируй кричащие заголовки. Это не рейтинг всего YouTube, "
+        "а выборка поиска. Формат: одно направление на строке, без нумерации, пояснений и фактов.\n\n"
+        f"Запрос: {query}\nВыборка YouTube:\n{youtube_evidence or 'нет'}\n\nНовостная выборка:\n{news_evidence or 'нет'}"
+    )
+    keys = [key for key in settings.openai_api_keys if key.active and key.secret.strip()]
+    try:
+        suggested = _parse_ideas(asyncio.run(HybridTextPool([], keys, "", settings.openai_model).generate(prompt)))[:count] if keys else []
+    except OpenAIAPIError:
+        suggested = []
+    # An API key is optional for research: public video titles still provide a
+    # useful starting set and make the screen usable during quota outages.
+    if not suggested:
+        bases = selected or [query]
+        suggested = [draft for base in bases for draft in _local_idea_drafts(base, count)][:count]
+    settings.youtube_suggested_topics = list(dict.fromkeys(suggested))
+    # Research results are proposed for approval in their own panel. Never
+    # inject them into the permanent favourites library behind the user's back.
+    added: list[str] = []
+    save_settings(settings)
+    result = {
+        **snapshot(), "youtubeResearch": sample, "newsResearch": news_sample, "suggestedTopics": suggested, "addedTopics": added,
+        "operationResult": {
+            "kind": "youtube-research", "count": len(suggested),
+            "message": f"Найдено направлений: {len(suggested)}. Отметьте нужные перед добавлением в план или избранное.",
+        },
+    }
+    if payload.get("generateTogether"):
+        requested = list(dict.fromkeys([*selected, *added]))
+        if not requested:
+            raise ValueError("Не удалось получить новые темы для общей генерации")
+        generated = generate_ideas({
+            "topics": requested,
+            "count": max(1, min(200, int(payload.get("vectors", 5)))),
+            "provider": str(payload.get("provider", "agent")),
+            "requirements": str(payload.get("requirements", "")),
+            "onlyRequested": True,
+        })
+        generated.update({"youtubeResearch": sample, "suggestedTopics": suggested, "addedTopics": added})
+        generated["operationResult"] = {
+            "kind": "youtube-and-ideas", "count": len(generated.get("ideaResults", [])),
+            "message": "Темы из YouTube и выбранные вами направления сгенерированы вместе.",
+        }
+        return generated
+    return result
+
+
+def clear_youtube_suggested_topics() -> dict:
+    """Clear only the pending YouTube research batch, not the main topic grid."""
+    settings = load_settings()
+    settings.youtube_suggested_topics = []
+    save_settings(settings)
+    return {**snapshot(), "youtubeResearch": [], "operationResult": {
+        "kind": "youtube-research", "count": 0, "message": "Предложенные YouTube‑темы очищены.",
+    }}
+
+
+def add_session(payload: dict) -> dict:
+    label = str(payload.get("label", "")).strip() or "Chrome-сессия"
+    settings = load_settings()
+    session = ChromeSession(label=label)
+    session.profile_dir.mkdir(parents=True, exist_ok=True)
+    settings.chrome_sessions.append(session)
+    save_settings(settings)
+    return snapshot()
+
+
+def add_topics_to_plan(payload: dict) -> dict:
+    topics = [str(item).strip() for item in payload.get("topics", []) if str(item).strip()]
+    count = max(1, int(payload.get("count", 5)))
+    if not topics:
+        raise ValueError("Выберите хотя бы одно направление")
+    settings = load_settings()
+    provider = str(payload.get("provider", "agent")).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Неизвестный провайдер идей")
+    requirements = str(payload.get("requirements", "")).strip()
+    route = {"provider": provider}
+    if requirements:
+        route["requirements"] = requirements
+    known = {str(item.get("topic", "")).casefold() for item in settings.idea_plan}
+    for topic in topics:
+        if topic.casefold() not in known:
+            settings.idea_plan.append({"topic": topic, "count": count, **route})
+    save_settings(settings)
+    return snapshot()
+
+
+def set_idea_route(payload: dict) -> dict:
+    settings = load_settings()
+    topics = {str(item).strip().casefold() for item in payload.get("topics", []) if str(item).strip()}
+    if not topics:
+        raise ValueError("Выберите направления, для которых сохраняется маршрут")
+    provider = str(payload.get("provider", "agent")).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Неизвестный провайдер идей")
+    requirements = str(payload.get("requirements", "")).strip()
+    route = {"provider": provider}
+    if requirements:
+        route["requirements"] = requirements
+    for item in settings.idea_plan:
+        if str(item.get("topic", "")).casefold() in topics:
+            item.update(route)
+    save_settings(settings)
+    return snapshot()
+
+
+def save_idea_route_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        raise ValueError("Введите название пресета")
+    provider = str(payload.get("provider", "agent")).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Неизвестный провайдер идей")
+    # A preset keeps the complete editorial instruction, not merely the model
+    # choice. This makes pasted prompt libraries reusable between batches.
+    preset = {"name": name, "provider": provider, "role": "news-ideas",
+              "requirements": str(payload.get("requirements", "")).strip()}
+    settings.idea_route_presets = [item for item in settings.idea_route_presets
+                                   if str(item.get("name", "")).casefold() != name.casefold()]
+    settings.idea_route_presets.append(preset)
+    save_settings(settings)
+    return snapshot()
+
+
+def update_idea_plan(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.idea_plan):
+        raise ValueError("Направление в плане не найдено")
+    if payload.get("remove"):
+        del settings.idea_plan[index]
+    elif "count" in payload:
+        settings.idea_plan[index]["count"] = max(1, min(500, int(payload["count"])))
+    save_settings(settings)
+    return snapshot()
+
+
+def _parse_ideas(text: str) -> list[str]:
+    values = []
+    for raw in text.splitlines():
+        value = re.sub(r"^\s*(?:[-•*]|\d+[.)]|идея\s*\d+[:.)-]?)\s*", "", raw, flags=re.IGNORECASE).strip()
+        value = value.strip('"“”«»')
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def ensure_idea_production_items(settings, *, active_titles: list[str] | None = None) -> bool:
+    """Project legacy title rows into compatible production items in memory.
+
+    No legacy result is removed merely because it would fail the newer quality
+    gate.  Such a row remains usable and is explicitly marked `legacy` so new
+    generation never treats it as a validated contemporary item.
+    """
+    changed = ensure_production_item_ids(getattr(settings, "idea_production_items", []))
+    existing = {str(item.get("title", "")).casefold() for item in getattr(settings, "idea_production_items", [])
+                if isinstance(item, dict)}
+    for raw_title in getattr(settings, "idea_results", []):
+        title = str(raw_title).strip()
+        if not title or title.casefold() in existing:
+            continue
+        direction = str(getattr(settings, "idea_result_sources", {}).get(title, "")).strip() or "Старое направление"
+        item = idea_engine.build_production_item(
+            {"direction": direction, "topic": direction, "angle": "legacy"}, title, [])
+        if item is None:
+            normalised = idea_engine.normalise_title(title)
+            item = {
+                "direction": direction, "topic": direction, "angle": "legacy", "title": normalised,
+                "event_ids": [], "supporting_context": ["Унаследованный title-only проект"],
+                "core_event": direction, "core_claim": normalised, "conflict": "",
+                "promised_question": "Уточнить содержание перед сценарием",
+                "script_requirements": ["уточнить фактический контекст перед написанием сценария"],
+                "click_score": 0, "novelty_score": 0, "scriptability_score": 0,
+                "char_count": len(normalised), "hook_family": "legacy", "macro_event_id": "",
+                "primary_entity": "", "geography": [], "topic_family": "legacy", "angle_family": "legacy",
+                "manual": True, "framing_type": "EDITORIAL", "factual_risk_score": "UNKNOWN",
+                "cis_audience_relevance_score": 0, "why_cis_audience_cares": "Не оценивалось в legacy-проекте.",
+                "emotional_stakes_score": 0, "creative_amplification_score": 0, "direction_fit_score": 0,
+                "information_payload": {}, "main_consequence": "", "status": "LEGACY",
+            }
+        item["legacy"] = True
+        ensure_production_item_ids([item])
+        settings.idea_production_items.append(item)
+        existing.add(title.casefold())
+        changed = True
+    if active_titles is None:
+        return changed
+    deleted_ids = {
+        str(value).strip()
+        for value in [
+            *getattr(settings, "idea_deleted_production_ids", []),
+            *getattr(settings, "deleted_scenario_production_ids", []),
+        ]
+        if str(value).strip()
+    }
+    contexts_by_title = {
+        str(title).casefold(): dict(item)
+        for title, item in getattr(settings, "idea_scenario_context", {}).items()
+        if isinstance(item, dict)
+    }
+    existing_ids = {
+        str(item.get("id", "")).strip()
+        for item in settings.idea_production_items
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    for raw_title in active_titles:
+        title = str(raw_title).strip()
+        title_key = title.casefold()
+        if not title:
+            continue
+        context_item = contexts_by_title.get(title_key)
+        context_id = str(context_item.get("id", "")).strip() if context_item else ""
+        if context_id and context_id not in deleted_ids:
+            if context_id not in existing_ids:
+                # A current session context already carries the authoritative
+                # ProductionItem identity.  Project that identity back into
+                # the active set instead of searching historical rows by title.
+                settings.idea_production_items.append(dict(context_item))
+                existing.add(title_key)
+                existing_ids.add(context_id)
+                changed = True
+            continue
+        # A matching title in history is never authority for this session.  A
+        # current manual scenario needs a fresh canonical ProductionItem ID,
+        # rather than reusing or reviving a legacy title-only record.
+        item = next((candidate for candidate in settings.idea_production_items
+                     if isinstance(candidate, dict)
+                     and str(candidate.get("title", "")).casefold() == title_key
+                     and not bool(candidate.get("legacy"))
+                     and str(candidate.get("status", "")).upper() != "LEGACY"
+                     and str(candidate.get("id", "")).strip()), None)
+        if item is None:
+            item = {"title": title, "manual": True}
+            ensure_production_item_ids([item])
+            item_id = str(item.get("id", "")).strip()
+            if not item_id or item_id in deleted_ids or item_id in existing_ids:
+                continue
+            settings.idea_production_items.append(item)
+            existing.add(title_key)
+            existing_ids.add(item_id)
+            changed = True
+        item_id = str(item.get("id", "")).strip()
+        if not item_id or item_id in deleted_ids:
+            continue
+        if context_item != item:
+            settings.idea_scenario_context[title] = dict(item)
+            changed = True
+    return changed
+
+
+def ingest_idea_signals(settings, source: str, rows: list[dict]) -> list[dict]:
+    """Persist evidence before any source proposes directions or titles."""
+    known = {str(item.get("signal_id", "")) for item in getattr(settings, "idea_raw_signals", [])
+             if isinstance(item, dict)}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        signal = idea_engine.normalise_signal(source, row)
+        if signal["signal_id"] not in known and signal.get("event_core"):
+            settings.idea_raw_signals.append(signal)
+            known.add(signal["signal_id"])
+    settings.idea_events = idea_engine.cluster_events(settings.idea_raw_signals)
+    return settings.idea_events
+
+
+_IDEA_TITLE_MAX_CHARS = 100
+_IDEA_TITLE_TARGET_MIN_CHARS = 55
+_IDEA_TITLE_TARGET_MAX_CHARS = 95
+_IDEA_TITLE_MEMORY_LIMIT = 500
+_IDEA_TITLE_RECENT_WINDOW = 100
+_GENERIC_IDEA_TITLE_WORDS = {
+    "глобальный", "глобальная", "глобальные", "политический", "политическая", "политические",
+    "кризис", "кризиса", "кризисе", "экономический", "экономическая", "экономические",
+    "неопределенность", "неопределённость", "международный", "международная", "международные",
+    "ситуация", "ситуации", "обстановка", "происходит", "события", "новости",
+}
+
+
+def _clean_idea_title(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().strip('"“”«»')).strip()
+
+
+def _title_opening_words(value: str, limit: int = 3) -> str:
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", value.casefold())
+    return " ".join(words[:limit])
+
+
+def _title_similarity(first: str, second: str) -> float:
+    first_words = _idea_words(first)
+    second_words = _idea_words(second)
+    if not first_words or not second_words:
+        return 0.0
+    return len(first_words & second_words) / len(first_words | second_words)
+
+
+def _title_is_all_caps(value: str) -> bool:
+    letters = "".join(re.findall(r"[A-Za-zА-Яа-яЁё]", value))
+    return len(letters) >= 12 and letters.isupper()
+
+
+def valid_idea_title(value: object) -> dict:
+    """Validate the non-negotiable publication constraints for an idea title.
+
+    The preferred 55–95 range is recorded as metadata, not a rejection rule:
+    a short concrete headline can still be better than a padded one.  The hard
+    upper bound is deliberately deterministic so both the agent and direct
+    ChatGPT route obey the same policy.
+    """
+    title = _clean_idea_title(value)
+    reasons: list[str] = []
+    if len(title) < 8:
+        reasons.append("too_short")
+    if len(title) > _IDEA_TITLE_MAX_CHARS:
+        reasons.append("too_long")
+    if _has_unresolved_headline_template(title):
+        reasons.append("unfinished_template")
+    if _title_is_all_caps(title):
+        reasons.append("all_caps")
+    if re.search(r"([!?.,:;])\1+", title):
+        reasons.append("repeated_punctuation")
+    title_words = set(re.findall(r"[a-zа-яё]{4,}", title.casefold()))
+    if title_words and title_words.issubset(_GENERIC_IDEA_TITLE_WORDS):
+        reasons.append("generic_topic")
+    return {
+        "title": title,
+        "valid": not reasons,
+        "reasons": reasons,
+        "char_count": len(title),
+        "valid_length": _IDEA_TITLE_TARGET_MIN_CHARS <= len(title) <= _IDEA_TITLE_TARGET_MAX_CHARS,
+    }
+
+
+def _idea_title_structure(title: str) -> str:
+    lowered = title.casefold()
+    if "?" in title:
+        return "вопрос"
+    if ":" in title:
+        return "тезис и пояснение"
+    if lowered.startswith(("почему ", "как ", "что ", "кто ", "зачем ")):
+        return "вопросительное объяснение"
+    if "—" in title or "-" in title:
+        return "контраст или следствие"
+    return "прямая новостная подача"
+
+
+def _idea_hook_type(title: str) -> str:
+    lowered = title.casefold()
+    if lowered.startswith(("почему ", "как ", "что ", "кто ", "зачем ")):
+        return "вопрос"
+    if lowered.startswith(("вот ", "это ", "главное ")):
+        return "интрига"
+    if any(word in lowered for word in ("после", "на фоне", "вслед за")):
+        return "последствие"
+    if any(word in lowered for word in ("решение", "заявление", "переговоры", "санкции")):
+        return "событие"
+    return "контекст"
+
+
+def _normalised_title(value: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", " ", value.casefold()).strip()
+
+
+def _duplicate_details(title: str, memory: list[dict]) -> tuple[bool, float, str]:
+    title_key = _normalised_title(title)
+    opening = _title_opening_words(title)
+    best_score = 0.0
+    for item in memory[-_IDEA_TITLE_RECENT_WINDOW:]:
+        previous = _clean_idea_title(item.get("title", "") if isinstance(item, dict) else item)
+        if not previous:
+            continue
+        if title_key == _normalised_title(previous):
+            return True, 1.0, "exact"
+        score = _title_similarity(title, previous)
+        best_score = max(best_score, score)
+        previous_opening = _title_opening_words(previous)
+        if opening and opening == previous_opening:
+            return True, max(score, 0.9), "opening"
+        if score >= 0.72:
+            return True, score, "similar"
+    return False, round(best_score, 3), ""
+
+
+def _metadata_for_idea_title(title: str, topic: str, candidate: dict | None = None,
+                             duplicate_score: float = 0.0) -> dict:
+    validation = valid_idea_title(title)
+    supplied = candidate or {}
+    resolved_topic = str(supplied.get("topic") or topic).strip() or topic
+    resolved_angle = str(supplied.get("angle") or supplied.get("angle_family")
+                         or _idea_hook_type(validation["title"])).strip()
+    framing_type = str(supplied.get("framing_type", "EDITORIAL")).strip().upper()
+    if framing_type not in {"FACTUAL", "EDITORIAL", "HYPOTHETICAL"}:
+        framing_type = "EDITORIAL"
+    information_payload = supplied.get("information_payload", {})
+    return {
+        "title": validation["title"],
+        "topic": resolved_topic,
+        "char_count": validation["char_count"],
+        "valid_length": validation["valid_length"],
+        "opening_words": _title_opening_words(validation["title"]),
+        "hook_type": str(supplied.get("hook_type") or _idea_hook_type(validation["title"])),
+        "angle": resolved_angle,
+        "title_structure": str(supplied.get("title_structure") or supplied.get("structure")
+                               or _idea_title_structure(validation["title"])),
+        "subjects": supplied.get("subjects") if isinstance(supplied.get("subjects"), list) else [],
+        "duplicate_score": duplicate_score,
+        "framing_type": framing_type,
+        "main_consequence": str(supplied.get("main_consequence") or supplied.get("consequence") or "").strip(),
+        "information_payload": dict(information_payload) if isinstance(information_payload, dict) else {},
+        "script_requirements": [str(value).strip() for value in supplied.get("script_requirements", [])
+                                if str(value).strip()] if isinstance(supplied.get("script_requirements"), list) else [],
+    }
+
+
+def _parse_idea_candidates(text: str) -> list[dict]:
+    """Accept JSON candidates from the model, but remain compatible with old lines."""
+    raw = str(text or "").strip()
+    fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE)
+    try:
+        decoded = json.loads(fenced)
+    except (json.JSONDecodeError, TypeError):
+        decoded = None
+    if isinstance(decoded, dict):
+        decoded = decoded.get("candidates", decoded.get("titles", []))
+    if isinstance(decoded, list):
+        candidates = []
+        for value in decoded:
+            if isinstance(value, dict):
+                title = _clean_idea_title(value.get("title", ""))
+                if title:
+                    candidates.append({**value, "title": title})
+            else:
+                title = _clean_idea_title(value)
+                if title:
+                    candidates.append({"title": title})
+        if candidates:
+            return candidates
+    return [{"title": title} for title in _parse_ideas(raw)]
+
+
+def select_idea_title_candidates(topic: str, candidates: list[object], memory: list[dict], count: int) -> list[dict]:
+    """Select diverse valid candidates with deterministic anti-duplicate checks."""
+    selected: list[dict] = []
+    comparison_memory = list(memory)
+    for raw in candidates:
+        candidate = raw if isinstance(raw, dict) else {"title": raw}
+        validation = valid_idea_title(candidate.get("title", ""))
+        if not validation["valid"]:
+            continue
+        duplicate, score, _reason = _duplicate_details(validation["title"], comparison_memory)
+        if duplicate:
+            continue
+        metadata = _metadata_for_idea_title(validation["title"], topic, candidate, score)
+        selected.append(metadata)
+        comparison_memory.append(metadata)
+        if len(selected) >= count:
+            break
+    return selected
+
+
+def _local_idea_drafts(topic: str, count: int) -> list[str]:
+    """Useful, non-factual fallback drafts when the optional LLM quota is unavailable.
+
+    The wording intentionally asks a question or frames an angle rather than
+    asserting a new event, date, quote, or figure as fact.
+    """
+    templates = (
+        "Что меняется вокруг темы «{topic}» и что ещё требует проверки",
+        "Почему «{topic}» снова оказалось в центре внимания",
+        "Какие последствия темы «{topic}» могут затронуть участников ситуации",
+        "Какие версии вокруг «{topic}» обсуждаются и что уже подтверждено",
+        "Главный вопрос темы «{topic}»: что происходит прямо сейчас",
+        "Что остаётся без ответа в истории «{topic}»",
+        "Как на «{topic}» могут отреагировать ключевые стороны",
+        "Риски вокруг «{topic}»: что важно учитывать",
+        "Почему спор о «{topic}» не заканчивается",
+        "Что важно проверить перед новым поворотом в теме «{topic}»",
+    )
+    return [templates[index % len(templates)].format(topic=topic) for index in range(max(count, len(templates)))]
+
+
+def _has_unresolved_headline_template(value: str) -> bool:
+    """A bracketed label is an instruction, never a publishable headline."""
+    return bool(re.search(r"[\[\]{}]", value))
+
+
+def _idea_words(value: str) -> set[str]:
+    return {word.casefold() for word in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", value)}
+
+
+def _infer_idea_topic(idea: str, plan: list[dict]) -> str:
+    """Migration fallback for results made before source metadata existed."""
+    words = _idea_words(idea)
+    scored = [(len(words & _idea_words(str(item.get("topic", "")))), str(item.get("topic", ""))) for item in plan]
+    return max(scored, default=(0, ""))[1]
+
+
+def _events_for_idea_direction(events: list[dict], direction: str, limit: int = 8) -> list[dict]:
+    """Pick a bounded, relevant evidence bundle before asking the model.
+
+    This prevents Direction → Title guessing: the model receives events first
+    and may only propose angles that can be attached to that evidence.
+    """
+    direction_words = _idea_words(direction)
+    ranked = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_words = _idea_words(f"{event.get('event_core', '')} {event.get('object', '')}")
+        entity_words = {str(entity).casefold() for entity in event.get("primary_entities", [])}
+        score = len(direction_words & event_words) + len(direction_words & entity_words) * 2
+        if score:
+            ranked.append((score, event))
+    ranked.sort(key=lambda pair: (pair[0], pair[1].get("confidence", 0),
+                                  pair[1].get("demand_inputs", {}).get("views_hour", 0)), reverse=True)
+    return [event for _score, event in ranked[:max(1, limit)]]
+
+
+def _title_generation_prompt(topic: str, requirements: str, candidate_count: int,
+                             memory: list[dict], events: list[dict] | None = None) -> str:
+    recent_openings = [str(item.get("opening_words", "")) for item in memory[-12:]
+                       if isinstance(item, dict) and item.get("opening_words")]
+    banned_openings = ", ".join(dict.fromkeys(recent_openings)) or "нет"
+    evidence = []
+    for event in (events or [])[:8]:
+        core = str(event.get("event_core", "")).strip()
+        if not core:
+            continue
+        entities = ", ".join(str(value) for value in event.get("primary_entities", []) if str(value).strip())
+        evidence.append(f"- {core}" + (f" | участники: {entities}" if entities else ""))
+    evidence_text = "\n".join(evidence) or "Нет подтверждённого события: не создавай готовые заголовки с утверждением фактов."
+    return (
+        f"Ты редактор новостного YouTube-канала. Подготовь {candidate_count} кандидатов заголовка "
+        "для последующего автоматического отбора.\n"
+        f"Направление: {topic}.\nЯзык: русский.\nДополнительные редакционные требования: "
+        f"{requirements or 'нет'}.\n\nДоказательная выборка (не добавляй неподтверждённые факты):\n{evidence_text}\n\n"
+        "Внутренне рассмотри минимум 10 разных углов: PERSONAL_CONFLICT, PRESSURE, ULTIMATUM, REVERSAL, "
+        "RESPONSE, ESCALATION, LOSS, WIN, POLITICAL_PRICE, DEAL_TRAP, HIDDEN_RISK, POWER_SHIFT, "
+        "BREAKING_EVENT, ECONOMIC_PAIN, INTERNATIONAL_REACTION, BORDER_CONFLICT, CONSEQUENCE или WHAT_IF. "
+        "Смешивай типы подачи и не начинай "
+        "варианты одинаковыми словами. Старая формула из трёх фраз и восклицательных знаков не обязательна: "
+        "используй её только если она действительно делает заголовок лучше.\n"
+        "Строгие правила: до 100 символов; цель 55–95; без полного CAPS (допустимы 1–3 акцентных слова), "
+        "без бессмысленных !! или ???; конкретно и эмоционально, но без травли. Не предлагай сухие газетные "
+        "заголовки «Почему снова обсуждают», «Что дальше», «Что происходит вокруг» без самостоятельной "
+        "конфликтной ставки. Не выдумывай факты, даты, "
+        "цифры, цитаты, обвинения и последствия. Неподтверждённое формулируй как вопрос, анализ или "
+        "необходимость проверки, а не как установленный факт.\n"
+        f"Недавние начала, которые нельзя повторять: {banned_openings}.\n"
+        "Для каждого кандидата сначала выдели самостоятельную Topic (один отдельный ролик), затем Angle "
+        "(редакционный угол), и только затем Title. Не выдавай две Topic, требующие одного сценария. "
+        "Для каждого кандидата обязательно укажи framing_type: FACTUAL только для прямо подтверждённой "
+        "подачи, EDITORIAL для творческой трактовки реального события (это режим по умолчанию), "
+        "HYPOTHETICAL только для явно помеченного сценария/прогноза. HYPOTHETICAL Title обязан содержать "
+        "маркер неопределённости вроде «Что будет, если», «Может ли» или «может». Для HYPOTHETICAL придумай "
+        "новый возможный конфликт, ультиматум, ответ, эскалацию, смену позиции или последствия, а не только "
+        "осторожную переформулировку исходного события. Укажи information_payload "
+        "как короткое ядро будущего сценария и script_requirements как список проверок для автора. "
+        "Верни только JSON без Markdown: {\"candidates\":[{\"topic\":\"...\",\"angle\":\"...\","
+        "\"title\":\"...\",\"hook_type\":\"...\",\"title_structure\":\"...\",\"subjects\":[\"...\"],"
+        "\"framing_type\":\"EDITORIAL\",\"information_payload\":{\"core\":\"...\"},"
+        "\"script_requirements\":[\"...\"]}]}"
+    )
+
+
+def _merge_idea_title_memory(memory: list[dict], additions: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    known: dict[str, int] = {}
+    for item in [*memory, *additions]:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_idea_title(item.get("title", ""))
+        key = _normalised_title(title)
+        if not key:
+            continue
+        value = {**item, "title": title}
+        if key in known:
+            merged[known[key]] = value
+        else:
+            known[key] = len(merged)
+            merged.append(value)
+    return merged[-_IDEA_TITLE_MEMORY_LIMIT:]
+
+
+def build_generated_production_items(settings, titles: list[str], sources: dict[str, str],
+                                     metadata: dict[str, dict]) -> tuple[list[dict], dict]:
+    """Convert generated title candidates into the durable Ideas Engine output."""
+    candidates = []
+    for title in titles:
+        detail = metadata.get(title, {})
+        direction = str(sources.get(title, "")).strip() or str(detail.get("topic", "")).strip()
+        candidates.append({
+            "direction": direction or "Ручное направление",
+            "topic": str(detail.get("topic", "")).strip() or direction or title,
+            "angle": str(detail.get("angle", "")).strip() or "контекст",
+            "angle_family": str(detail.get("angle", "")).strip() or "контекст",
+            "topic_family": str(detail.get("topic", "")).strip() or direction,
+            "title": title,
+            "framing_type": str(detail.get("framing_type", "EDITORIAL")),
+            "main_consequence": str(detail.get("main_consequence", "")),
+            "information_payload": detail.get("information_payload", {}),
+            "script_requirements": detail.get("script_requirements", []),
+        })
+    return idea_engine.select_production_portfolio(candidates, settings.idea_events, len(candidates))
+
+
+def _generate_for_vectors(settings, plan: list[dict], requirements: str) -> tuple[list[str], dict[str, str], dict[str, dict], list[str], dict]:
+    results: list[str] = []
+    sources: dict[str, str] = {}
+    metadata: dict[str, dict] = {}
+    local_fallback_topics: list[str] = []
+    provider_request_topics: list[str] = []
+    provider_response_topics: list[str] = []
+    recent_memory = list(getattr(settings, "idea_title_memory", []))
+    for item in plan:
+        topic = str(item.get("topic", "")).strip()
+        if not topic:
+            continue
+        count = max(1, min(200, int(item.get("count", 5))))
+        item_requirements = str(item.get("requirements", "")).strip() or requirements
+        candidate_count = max(10, count * 3)
+        evidence = _events_for_idea_direction(getattr(settings, "idea_events", []), topic)
+        prompt = _title_generation_prompt(topic, item_requirements, candidate_count, recent_memory, evidence)
+        provider = str(item.get("provider", "agent")).casefold()
+        keys = [entry for entry in settings.openai_api_keys if entry.active and entry.secret.strip()
+                and (not item.get("key_label") or entry.label == item.get("key_label"))]
+        if not keys:
+            if provider != "agent":
+                raise ValueError(f"Активный ключ ChatGPT для «{topic}» не найден")
+            generated = [{"title": title} for title in _local_idea_drafts(topic, candidate_count)]
+            local_fallback_topics.append(topic)
+        else:
+            pool = HybridTextPool([], keys, "", settings.openai_model)
+            try:
+                provider_request_topics.append(topic)
+                generated = _parse_idea_candidates(asyncio.run(pool.generate(prompt)))
+                provider_response_topics.append(topic)
+            except OpenAIAPIError as exc:
+                if provider != "agent" or not exc.key_unavailable:
+                    raise
+                generated = [{"title": title} for title in _local_idea_drafts(topic, candidate_count)]
+                local_fallback_topics.append(topic)
+        approved = select_idea_title_candidates(topic, generated, recent_memory, count)
+        if len(approved) < count:
+            fallback = [{"title": title} for title in _local_idea_drafts(topic, candidate_count)]
+            approved.extend(select_idea_title_candidates(topic, fallback, [*recent_memory, *approved], count - len(approved)))
+            if topic not in local_fallback_topics:
+                local_fallback_topics.append(topic)
+        for title_metadata in approved[:count]:
+            idea = title_metadata["title"]
+            if idea and idea not in sources:
+                results.append(idea)
+                sources[idea] = topic
+                metadata[idea] = title_metadata
+                recent_memory.append(title_metadata)
+    return results, sources, metadata, local_fallback_topics, {
+        "providerRequested": bool(provider_request_topics),
+        "providerResponseReceived": bool(provider_response_topics),
+        "providerRequestDirections": len(provider_request_topics),
+        "providerResponseDirections": len(provider_response_topics),
+    }
+
+
+def generate_ideas(payload: dict) -> dict:
+    settings = load_settings()
+    plan = list(settings.idea_plan)
+    # "Generate" is the one primary action in the desktop UI.  Selected topic
+    # cards are accepted here as well, so users do not have to remember a
+    # separate hidden prerequisite of first adding the same cards to the plan.
+    requested_topics = [str(item).strip() for item in payload.get("topics", []) if str(item).strip()]
+    requirements = str(payload.get("requirements", "")).strip()
+    if requested_topics:
+        provider = str(payload.get("provider", "agent")).strip().casefold()
+        if provider not in {"agent", "openai"}:
+            raise ValueError("Неизвестный провайдер идей")
+        count = max(1, min(200, int(payload.get("count", 5))))
+        selected_plan: list[dict] = []
+        for topic in requested_topics:
+            existing = next((item for item in plan
+                             if str(item.get("topic", "")).casefold() == topic.casefold()), None)
+            # A checked favourite is valid generation input, but generation is
+            # not an implicit approval to rewrite the release plan.  Use an
+            # ephemeral route for a favourite that has not been added manually.
+            selected_plan.append({
+                **(existing or {"topic": topic}),
+                "topic": topic,
+                "provider": provider,
+                "count": count,
+                **({"requirements": requirements} if requirements else {}),
+            })
+        plan = selected_plan
+    elif requirements:
+        # Existing plan rows created before per-topic prompts were introduced
+        # inherit the visible editor prompt once.  Explicit saved prompts are
+        # never overwritten by a later batch run.
+        changed = False
+        for item in plan:
+            if not str(item.get("requirements", "")).strip():
+                item["requirements"] = requirements
+                changed = True
+        if changed:
+            save_settings(settings)
+    if not plan:
+        raise ValueError("Добавьте направления в план выпуска")
+    generated, generated_sources, generated_metadata, local_fallback_topics, provider_trace = _generate_for_vectors(
+        settings, plan, requirements)
+    # Generation is an editorial ideation step, not a production acceptance
+    # gate.  Evidence changes the review status only; it may never hide a
+    # generated headline or silently write it into the release plan.
+    known_suggestions = {str(item).casefold() for item in settings.idea_suggested_topics}
+    suggestions = []
+    needs_research = 0
+    ready = 0
+    for title in generated:
+        if title.casefold() in known_suggestions:
+            continue
+        topic = generated_sources.get(title, "")
+        status = "READY" if _events_for_idea_direction(settings.idea_events, topic) else "NEEDS_RESEARCH"
+        detail = {**generated_metadata.get(title, {}), "review_status": status}
+        generated_metadata[title] = detail
+        suggestions.append(title)
+        known_suggestions.add(title.casefold())
+        if status == "NEEDS_RESEARCH":
+            needs_research += 1
+        else:
+            ready += 1
+    settings.idea_suggested_topics = [*settings.idea_suggested_topics, *suggestions]
+    settings.idea_title_metadata = {**getattr(settings, "idea_title_metadata", {}), **generated_metadata}
+    settings.idea_rejected_items = []
+    settings.idea_portfolio_summary = {
+        "requested": sum(max(1, int(item.get("count", 1))) for item in plan),
+        "generated": len(generated),
+        "suggested": len(suggestions),
+        "accepted": ready,
+        "needs_research": needs_research,
+        "rejected": 0,
+        "deficit": max(0, sum(max(1, int(item.get("count", 1))) for item in plan) - len(generated)),
+        **provider_trace,
+    }
+    settings.idea_title_memory = _merge_idea_title_memory(
+        getattr(settings, "idea_title_memory", []), list(generated_metadata.values()))
+    save_settings(settings)
+    provider_label = "черновики без API" if local_fallback_topics else "ChatGPT"
+    summary = settings.idea_portfolio_summary
+    message = (f"Сгенерировано: {summary['generated']}. Предложений: {summary['suggested']}. "
+               f"Готово: {summary['accepted']}. На research: {summary['needs_research']}. "
+               f"Отклонено: 0. Источник: {provider_label}.")
+    return {**snapshot(), "operationResult": {
+        "kind": "ideas", "count": len(suggestions), "message": message,
+        "generation": {
+            "requested": summary["requested"], "generated": summary["generated"],
+            "suggested": summary["suggested"], "accepted": summary["accepted"],
+            "needsResearch": summary["needs_research"], "rejected": summary["rejected"],
+            "providerRequested": summary["providerRequested"],
+            "providerResponseReceived": summary["providerResponseReceived"],
+        },
+    }}
+
+
+def delete_idea_results(payload: dict) -> dict:
+    settings = load_settings()
+    selected = {str(item).strip() for item in payload.get("ideas", []) if str(item).strip()}
+    if payload.get("all"):
+        settings.idea_results = []
+        settings.idea_result_sources = {}
+        settings.idea_title_metadata = {}
+        settings.idea_production_items = []
+        settings.idea_rejected_items = []
+        settings.idea_portfolio_summary = {}
+    elif selected:
+        removed_ids = {
+            str(item.get("id", "")).strip() for item in settings.idea_production_items
+            if isinstance(item, dict) and str(item.get("title", "")) in selected and str(item.get("id", "")).strip()
+        }
+        settings.idea_deleted_production_ids = sorted({
+            *(str(value).strip() for value in settings.idea_deleted_production_ids if str(value).strip()),
+            *removed_ids,
+        })[-10000:]
+        settings.idea_results = [item for item in settings.idea_results if item not in selected]
+        settings.idea_result_sources = {item: topic for item, topic in settings.idea_result_sources.items()
+                                        if item in settings.idea_results}
+        settings.idea_title_metadata = {item: meta for item, meta in settings.idea_title_metadata.items()
+                                        if item in settings.idea_results}
+        settings.idea_production_items = [item for item in settings.idea_production_items
+                                          if str(item.get("title", "")) in settings.idea_results]
+        settings.idea_scenario_context = {title: item for title, item in settings.idea_scenario_context.items()
+                                          if title in settings.idea_results}
+    else:
+        raise ValueError("Выберите идеи для удаления")
+    save_settings(settings)
+    return snapshot()
+
+
+def regenerate_idea_results(payload: dict) -> dict:
+    settings = load_settings()
+    selected = [str(item).strip() for item in payload.get("ideas", []) if str(item).strip()]
+    if not selected:
+        raise ValueError("Выберите идеи для перегенерации")
+    groups: dict[str, int] = {}
+    for idea in selected:
+        topic = settings.idea_result_sources.get(idea) or _infer_idea_topic(idea, settings.idea_plan)
+        if not topic:
+            raise ValueError(f"Не удалось определить направление для «{idea}»")
+        groups[topic] = groups.get(topic, 0) + 1
+    source_rows = {str(item.get("topic", "")): item for item in settings.idea_plan}
+    vectors = []
+    for topic, count in groups.items():
+        source = source_rows.get(topic)
+        if not source:
+            raise ValueError(f"Направление «{topic}» удалено из плана")
+        vectors.append({**source, "count": count})
+    generated, sources, generated_metadata, local_fallback_topics, _provider_trace = _generate_for_vectors(
+        settings, vectors, str(payload.get("requirements", "")).strip())
+    production_items, portfolio = build_generated_production_items(settings, generated, sources, generated_metadata)
+    generated = [item["title"] for item in production_items]
+    selected_set = set(selected)
+    remaining = [idea for idea in settings.idea_results if idea not in selected_set]
+    settings.idea_results = list(dict.fromkeys([*remaining, *generated]))
+    old_sources = {idea: topic for idea, topic in settings.idea_result_sources.items() if idea in remaining}
+    settings.idea_result_sources = {**old_sources, **sources}
+    old_metadata = {idea: meta for idea, meta in settings.idea_title_metadata.items() if idea in remaining}
+    item_by_title = {item["title"]: item for item in production_items}
+    settings.idea_title_metadata = {**old_metadata, **{
+        idea: {**generated_metadata.get(idea, {}), **item_by_title.get(idea, {})} for idea in generated
+    }}
+    settings.idea_production_items = [item for item in settings.idea_production_items
+                                      if str(item.get("title", "")) in remaining] + production_items
+    settings.idea_rejected_items = portfolio["rejected"]
+    settings.idea_portfolio_summary = portfolio
+    settings.idea_title_memory = _merge_idea_title_memory(
+        getattr(settings, "idea_title_memory", []), list(generated_metadata.values()))
+    save_settings(settings)
+    message = ("Выбранные идеи заменены черновиками агента без API."
+               if local_fallback_topics else "Выбранные идеи перегенерированы по их исходным направлениям.")
+    return {**snapshot(), "operationResult": {"kind": "ideas", "count": len(generated), "message": message}}
+
+
+def add_ideas_to_scenarios(payload: dict) -> dict:
+    settings = load_settings()
+    ensure_idea_production_items(settings)
+    requested = [str(value).strip() for value in payload.get("ideas", []) if str(value).strip()]
+    if not requested:
+        raise ValueError("Выберите хотя бы одну идею для передачи в Новости")
+    titles, jobs = load_session()
+    known = {title.casefold() for title in titles}
+    added = [value for value in requested if value.casefold() not in known]
+    titles.extend(added)
+    save_session(titles, jobs)
+    by_title = {str(item.get("title", "")).casefold(): item
+                for item in settings.idea_production_items if isinstance(item, dict)}
+    for title in requested:
+        item = by_title.get(title.casefold())
+        if item:
+            settings.idea_scenario_context[title] = dict(item)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "ideas-to-scenarios",
+        "count": len(added),
+        "message": (f"{len(added)} идей перенесено в Новости для написания сценариев."
+                    if added else "Все выбранные идеи уже находятся в очереди сценариев.")
+    }}
+
+
+def transfer_ideas(payload: dict) -> dict:
+    """Create title records for ideas and route them to a chosen next stage.
+
+    Covers and SEO can use a title immediately.  Voice is deliberately queued
+    too, but becomes renderable after the scenario text has been written.
+    """
+    requested = [str(value).strip() for value in payload.get("ideas", []) if str(value).strip()]
+    # A transfer button with no checked rows deliberately means "all ideas".
+    # This makes batch hand-off possible without Ctrl-clicking every item.
+    if not requested:
+        settings = load_settings()
+        requested = [str(value).strip() for value in settings.idea_results if str(value).strip()]
+    if not requested:
+        raise ValueError("Нет идей для передачи")
+    target = str(payload.get("target", "scenarios")).strip()
+    if target not in {"scenarios", "covers", "seo", "voice"}:
+        raise ValueError("Неизвестный этап передачи идей")
+    if target == "scenarios":
+        # Keep the same ProductionItem→Script contract whichever Ideas button
+        # the operator uses to hand titles off to the scenario queue.
+        return add_ideas_to_scenarios({"ideas": requested})
+    titles, jobs = load_session()
+    indexes = {title.casefold(): index for index, title in enumerate(titles)}
+    created = 0
+    selected_indices: list[int] = []
+    for idea in requested:
+        key = idea.casefold()
+        if key not in indexes:
+            indexes[key] = len(titles)
+            titles.append(idea)
+            created += 1
+        selected_indices.append(indexes[key])
+    save_session(titles, jobs)
+    result = transfer_scenarios({"target": target, "indices": selected_indices})
+    label = {"scenarios": "написания сценариев", "covers": "обложек", "seo": "SEO-пакетов", "voice": "озвучки"}[target]
+    return {**result, "operationResult": {
+        "kind": "ideas-transfer", "count": created,
+        "message": f"Идеи переданы в очередь {label}."
+    }}
+
+
+def export_ideas() -> dict:
+    """Download all currently generated ideas as one UTF-8 TXT file."""
+    settings = load_settings()
+    ideas = [str(value).strip() for value in settings.idea_results if str(value).strip()]
+    if not ideas:
+        raise ValueError("Нет идей для выгрузки")
+    folder = Path(settings.output_folder) / "Выгрузки этапов"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "Идеи NewsFlow.txt"
+    target.write_text("\n".join(f"{index}. {idea}" for index, idea in enumerate(ideas, 1)) + "\n", encoding="utf-8-sig")
+    return {**snapshot(), "operationResult": {
+        "kind": "idea-export", "count": len(ideas), "folder": str(folder),
+        "message": "Идеи сохранены в TXT."
+    }, "exportedPath": str(target)}
+
+
+def _ensure_current_manual_scenario_identity(settings: Settings, title: str, active_titles: list[str]) -> str:
+    """Return the durable current identity for an operator-created scenario.
+
+    Manual scenarios are current production work, not a compatibility view of
+    a title-matched cover record.  The established ProductionItem projection
+    owns their identity; persisting that exact item and scenario context keeps
+    every downstream worker on the same current runtime path after restart.
+    """
+    ensure_idea_production_items(settings, active_titles=active_titles)
+    item = next(
+        (
+            candidate for candidate in settings.idea_production_items
+            if isinstance(candidate, dict)
+            and str(candidate.get("title", "")).casefold() == title.casefold()
+            and str(candidate.get("id", "")).strip()
+        ),
+        None,
+    )
+    if item is None:
+        raise ValueError("Не удалось создать current ProductionItem для ручного сценария")
+    production_item_id = str(item["id"]).strip()
+    settings.idea_scenario_context[title] = dict(item)
+    return production_item_id
+
+
+def import_manual_scenario(payload: dict) -> dict:
+    """Put a finished user-written scenario into the same durable queue.
+
+    It is marked DONE immediately, so the user can jump straight to voice,
+    footage, montage or SEO without generating a replacement text.
+    """
+    title = " ".join(str(payload.get("title", "")).split())
+    text = str(payload.get("text", "")).strip()
+    if not title:
+        raise ValueError("Укажите название сценария")
+    if not text:
+        raise ValueError("Вставьте текст готового сценария")
+    titles, jobs = load_session()
+    existing = next((index for index, value in enumerate(titles) if value.casefold() == title.casefold()), None)
+    if existing is None:
+        index = len(titles)
+        titles.append(title)
+    else:
+        index = existing
+        titles[index] = title
+    settings = load_settings()
+    production_item_id = _ensure_current_manual_scenario_identity(settings, title, titles)
+    jobs = [job for job in jobs if job.request.index != index]
+    jobs.append(Job(ScenarioRequest(index, title, "", production_item_id), RunState.DONE, text, ""))
+    save_settings(settings)
+    save_session(titles, jobs)
+    return snapshot()
+
+
+def import_manual_scenarios(payload: dict) -> dict:
+    """Import one or more user TXT files into the durable narration queue.
+
+    File names become scenario titles in the UI. The text is stored as a
+    completed scenario, so the voice worker reads precisely this text rather
+    than trying to regenerate it from an older title.
+    """
+    entries = payload.get("items", [])
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Выберите хотя бы один TXT-файл со сценарием")
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
+    imported = 0
+    imported_indices: set[int] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        title = " ".join(str(entry.get("title", "")).split())
+        text = str(entry.get("text", "")).strip()
+        if not title or not text:
+            continue
+        existing = next((index for index, value in enumerate(titles) if value.casefold() == title.casefold()), None)
+        if existing is None:
+            index = len(titles)
+            titles.append(title)
+        else:
+            index = existing
+            titles[index] = title
+        jobs_by_index[index] = Job(ScenarioRequest(index, title, ""), RunState.DONE, text, "")
+        imported_indices.add(index)
+        imported += 1
+    if not imported:
+        raise ValueError("В выбранных TXT не найден текст сценария")
+    settings = load_settings()
+    production_item_ids = {
+        index: _ensure_current_manual_scenario_identity(settings, titles[index], titles)
+        for index in imported_indices
+    }
+    for index, production_item_id in production_item_ids.items():
+        job = jobs_by_index[index]
+        jobs_by_index[index] = replace(
+            job,
+            request=replace(job.request, production_item_id=production_item_id),
+        )
+    for index in imported_indices:
+        settings.voice_scenario_outputs.setdefault(str(index + 1), "")
+        settings.voice_task_statuses[str(index + 1)] = {"label": "Ожидает озвучки", "progress": 0, "updatedAt": ""}
+    save_settings(settings)
+    save_session(titles, list(jobs_by_index.values()))
+    return {**snapshot(), "operationResult": {
+        "kind": "voice-text-import", "count": imported,
+        "message": f"В очередь добавлено TXT-сценариев: {imported}. Выделите их и запустите озвучку.",
+    }}
+
+
+SUPPORTED_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".wma"}
+
+
+def validate_voiceover_artifact(path: Path) -> float:
+    """Return a usable narration duration or refuse a false READY state."""
+    artifact = Path(path)
+    if not artifact.is_file():
+        raise ValueError("Файл озвучки не был сохранён")
+    duration = probe_media_duration(artifact)
+    if duration <= 0.05:
+        raise ValueError("Файл озвучки имеет нулевую длительность")
+    return duration
+
+
+def _voice_candidate_folder(output_folder: str) -> Path:
+    """Keep a newly generated MP3 out of the active output path until validated."""
+    return Path(output_folder) / ".newsflow-voice-staging"
+
+
+def _save_voice_candidate(output_folder: str, index: int, title: str, content: bytes) -> Path:
+    """Persist a provider response where it cannot overwrite a prior ready MP3."""
+    return SecretVoicerClient("browser-session").save_audio(
+        _voice_candidate_folder(output_folder), f"{index + 1:03d} — {title}", content,
+    )
+
+
+def _promote_validated_voice_candidate(output_folder: str, candidate: str | Path) -> tuple[str, float]:
+    """Validate first, then atomically replace the canonical output on the same volume."""
+    staged = Path(candidate)
+    duration = validate_voiceover_artifact(staged)
+    target_folder = Path(output_folder)
+    target_folder.mkdir(parents=True, exist_ok=True)
+    target = target_folder / safe_audio_name(staged.stem)
+    staged.replace(target)
+    return str(target), duration
+
+
+def audio_title_key(value: str) -> str:
+    """Normalise a narration file name so numbered exports match scenario titles."""
+    stem = Path(str(value)).stem.casefold()
+    stem = re.sub(r"^\s*\d+\s*[-_.—–]+\s*", "", stem)
+    return re.sub(r"[^\wа-яё]+", "", stem, flags=re.IGNORECASE)
+
+
+def _audio_title_tokens(value: str) -> set[str]:
+    stem = Path(str(value)).stem.casefold()
+    stem = re.sub(r"^\s*\d+\s*[-_.—–]+\s*", "", stem)
+    return set(re.findall(r"[\wа-яё]+", stem, flags=re.IGNORECASE)) - {"narration", "audio", "voice", "озвучка"}
+
+
+def _voiceover_match_score(folder_name: str, title: str) -> float:
+    folder_key = audio_title_key(folder_name)
+    title_key = audio_title_key(title)
+    if folder_key and folder_key == title_key:
+        return 1.0
+    folder_tokens = _audio_title_tokens(folder_name)
+    title_tokens = _audio_title_tokens(title)
+    if len(folder_tokens) >= 2 and folder_tokens.issubset(title_tokens):
+        return 0.90
+    overlap = len(folder_tokens & title_tokens)
+    if not overlap:
+        return 0.0
+    precision = overlap / max(1, len(folder_tokens))
+    recall = overlap / max(1, len(title_tokens))
+    sequence = difflib.SequenceMatcher(None, folder_key, title_key).ratio()
+    return round((precision * .52) + (recall * .20) + (sequence * .28), 3)
+
+
+def scan_voiceover_folder(root: Path, titles: list[str]) -> dict:
+    """Read a nested finished-audio folder and classify safe title matches."""
+    root = Path(root)
+    result = {"root": str(root), "foldersFound": 0, "audioFound": 0, "matched": [],
+              "requiresChoice": [], "unmatched": [], "errors": []}
+    if not root.is_dir():
+        result["errors"].append("Выбранная папка с озвучками недоступна.")
+        return result
+    try:
+        files = sorted(path for path in root.rglob("*")
+                       if path.is_file() and path.suffix.casefold() in SUPPORTED_AUDIO_SUFFIXES)
+    except OSError as error:
+        result["errors"].append(f"Не удалось прочитать папку: {error}")
+        return result
+    result["audioFound"] = len(files)
+    result["foldersFound"] = len({path.parent for path in files})
+    for source in files:
+        folder_name = source.parent.name
+        ranked = sorted(((_voiceover_match_score(folder_name, title), index, title)
+                         for index, title in enumerate(titles)), reverse=True)
+        record = {"path": str(source), "folder": folder_name, "file": source.name}
+        if not ranked or ranked[0][0] < .78:
+            result["unmatched"].append(record)
+            continue
+        best_score, best_index, best_title = ranked[0]
+        close = [entry for entry in ranked if entry[0] >= .78 and best_score - entry[0] <= .04]
+        if len(close) != 1:
+            record.update({"candidates": [{"scenarioIndex": index, "title": title, "score": score}
+                                             for score, index, title in close[:5]]})
+            result["requiresChoice"].append(record)
+            continue
+        record.update({"scenarioIndex": best_index, "title": best_title, "score": best_score})
+        result["matched"].append(record)
+    return result
+
+
+def _same_audio_file(left: Path, right: Path) -> bool:
+    """Compare a possible duplicate without ever replacing the older copy."""
+    try:
+        if left.stat().st_size != right.stat().st_size:
+            return False
+        digest_left = hashlib.sha256()
+        digest_right = hashlib.sha256()
+        with left.open("rb") as source, right.open("rb") as target:
+            while True:
+                source_chunk = source.read(1024 * 1024)
+                target_chunk = target.read(1024 * 1024)
+                if source_chunk != target_chunk:
+                    return False
+                if not source_chunk:
+                    return True
+                digest_left.update(source_chunk)
+                digest_right.update(target_chunk)
+        return digest_left.digest() == digest_right.digest()
+    except OSError:
+        return False
+
+
+def _preserving_audio_import_target(target_folder: Path, name: str, source: Path) -> Path:
+    """Choose a managed target while retaining any non-identical older file."""
+    target = target_folder / name
+    if not target.exists() or _same_audio_file(source, target):
+        return target
+    recovered_folder = target_folder / "Восстановлено"
+    recovered_folder.mkdir(parents=True, exist_ok=True)
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    candidate = recovered_folder / name
+    serial = 2
+    while candidate.exists() and not _same_audio_file(source, candidate):
+        candidate = recovered_folder / f"{stem}__{serial}{suffix}"
+        serial += 1
+    return candidate
+
+
+def import_voiceover_folder(payload: dict) -> dict:
+    """Copy only unambiguous nested finished audio into the managed output folder."""
+    root = Path(str(payload.get("root", "") or "").strip())
+    if not str(root):
+        raise ValueError("Выберите корневую папку с готовыми озвучками")
+    settings = load_settings()
+    titles, _ = load_session()
+    scanned = scan_voiceover_folder(root, titles)
+    matched_records = list(scanned["matched"])
+    by_scenario: dict[int, list[dict]] = {}
+    for record in matched_records:
+        by_scenario.setdefault(int(record["scenarioIndex"]), []).append(record)
+    attachable = []
+    review = list(scanned["requiresChoice"])
+    for scenario_index, records in by_scenario.items():
+        if len(records) == 1:
+            attachable.append(records[0])
+        else:
+            review.extend({
+                "path": record["path"], "folder": record["folder"], "file": record["file"],
+                "candidates": [{"scenarioIndex": scenario_index, "title": titles[scenario_index], "score": record["score"]}],
+                "reason": "Для одного сценария найдено несколько аудиофайлов.",
+            } for record in records)
+    target_folder = Path(settings.voicer_output_folder) / "Импортированные"
+    target_folder.mkdir(parents=True, exist_ok=True)
+    attached = 0
+    errors = list(scanned["errors"])
+    for record in attachable:
+        index = int(record["scenarioIndex"])
+        source = Path(record["path"])
+        try:
+            duration = validate_voiceover_artifact(source)
+        except (OSError, ValueError) as error:
+            errors.append(f"{source.name}: {error}")
+            continue
+        target = _preserving_audio_import_target(
+            target_folder,
+            f"{index + 1:04d}_{safe_filename(titles[index])}{source.suffix.casefold()}",
+            source,
+        )
+        try:
+            if not target.exists():
+                shutil.copy2(source, target)
+            duration = validate_voiceover_artifact(target)
+        except (OSError, ValueError) as error:
+            errors.append(f"{source.name}: {error}")
+            continue
+        settings.voice_scenario_outputs[str(index + 1)] = str(target)
+        settings.voice_task_statuses[str(index + 1)] = {
+            "label": "Готово: импорт из папки", "progress": 100,
+            "updatedAt": time.strftime("%H:%M:%S"), "durationSeconds": duration,
+            "artifactPath": str(target),
+        }
+        attached += 1
+    settings.voice_import_summary = {
+        "root": str(root), "foldersFound": scanned["foldersFound"], "audioFound": scanned["audioFound"],
+        "matched": attached, "requiresChoice": len(review), "unmatched": len(scanned["unmatched"]),
+        "errors": len(errors), "review": review[:200], "unmatchedItems": scanned["unmatched"][:200],
+    }
+    save_settings(settings)
+    message = (f"Папок: {scanned['foldersFound']}; аудио: {scanned['audioFound']}; "
+               f"сопоставлено: {attached}; требуют выбора: {len(review)}; "
+               f"не сопоставлено: {len(scanned['unmatched'])}; ошибок: {len(errors)}.")
+    return {**snapshot(), "operationResult": {
+        "kind": "voice-folder-import", "count": scanned["audioFound"], "matched": attached,
+        "review": len(review), "unmatched": len(scanned["unmatched"]), "errors": len(errors), "message": message,
+    }}
+
+
+def import_voiceover_files(payload: dict) -> dict:
+    """Import audio files or ZIP members and attach only unambiguous title matches."""
+    raw_paths = [Path(str(value).strip()) for value in payload.get("paths", []) if str(value).strip()]
+    if not raw_paths:
+        raise ValueError("Выберите готовые аудиофайлы или ZIP-архив")
+    settings = load_settings()
+    target_folder = Path(settings.voicer_output_folder) / "Импортированные"
+    target_folder.mkdir(parents=True, exist_ok=True)
+    extracted: list[Path] = []
+    for source in raw_paths:
+        if not source.is_file():
+            continue
+        if source.suffix.casefold() == ".zip":
+            with zipfile.ZipFile(source) as archive:
+                for member in archive.infolist():
+                    member_path = Path(member.filename)
+                    if member.is_dir() or member_path.is_absolute() or ".." in member_path.parts:
+                        continue
+                    if member_path.suffix.casefold() not in SUPPORTED_AUDIO_SUFFIXES:
+                        continue
+                    target = target_folder / safe_filename(member_path.stem)
+                    target = target.with_suffix(member_path.suffix.casefold())
+                    with archive.open(member) as stream, target.open("wb") as output:
+                        shutil.copyfileobj(stream, output)
+                    extracted.append(target)
+        elif source.suffix.casefold() in SUPPORTED_AUDIO_SUFFIXES:
+            target = target_folder / source.name
+            if source.resolve() != target.resolve():
+                shutil.copy2(source, target)
+            extracted.append(target)
+    if not extracted:
+        raise ValueError("В файлах не найдено MP3, WAV, M4A, AAC, OGG или FLAC")
+    titles, _ = load_session()
+    matches: dict[str, list[int]] = {}
+    for index, title in enumerate(titles):
+        matches.setdefault(audio_title_key(title), []).append(index)
+    attached = 0
+    review: list[str] = []
+    for source in extracted:
+        candidates = matches.get(audio_title_key(source.name), [])
+        if len(candidates) != 1:
+            review.append(source.name)
+            continue
+        try:
+            duration = validate_voiceover_artifact(source)
+        except (OSError, ValueError):
+            review.append(source.name)
+            continue
+        index = candidates[0]
+        final = target_folder / f"{index + 1:04d}_{safe_filename(titles[index])}{source.suffix.casefold()}"
+        if source.resolve() != final.resolve():
+            if final.exists():
+                final.unlink()
+            source.replace(final)
+        duration = validate_voiceover_artifact(final)
+        settings.voice_scenario_outputs[str(index + 1)] = str(final)
+        settings.voice_task_statuses[str(index + 1)] = {"label": "Готово: импорт", "progress": 100,
+                                                        "updatedAt": time.strftime("%H:%M:%S"),
+                                                        "durationSeconds": duration, "artifactPath": str(final)}
+        attached += 1
+    save_settings(settings)
+    message = f"Импортировано и сопоставлено: {attached}."
+    if review:
+        message += f" Требуют ручного назначения: {len(review)}."
+    return {**snapshot(), "operationResult": {"kind": "voice-import", "count": len(extracted),
+            "matched": attached, "review": len(review), "reviewFiles": review, "message": message}}
+
+
+def import_voiceover(payload: dict) -> dict:
+    """Attach an existing user-made narration to a selected scenario."""
+    index = int(payload.get("scenarioIndex", -1))
+    source = Path(str(payload.get("path", "")).strip())
+    titles, _jobs = load_session()
+    if not 0 <= index < len(titles):
+        raise ValueError("Выберите сценарий для своей озвучки")
+    if not source.is_file() or source.suffix.casefold() not in SUPPORTED_AUDIO_SUFFIXES:
+        raise ValueError("Выберите готовый аудиофайл MP3, WAV, M4A, AAC, OGG или FLAC")
+    settings = load_settings()
+    duration = validate_voiceover_artifact(source)
+    target_folder = Path(settings.voicer_output_folder) / "Импортированные"
+    target_folder.mkdir(parents=True, exist_ok=True)
+    target = target_folder / f"{index + 1:04d}_{safe_filename(titles[index])}{source.suffix.casefold()}"
+    if source.resolve() != target.resolve():
+        shutil.copy2(source, target)
+    duration = validate_voiceover_artifact(target)
+    settings.voice_scenario_outputs[str(index + 1)] = str(target)
+    settings.voice_task_statuses[str(index + 1)] = {
+        "label": "Готово: свой аудиофайл", "progress": 100, "updatedAt": time.strftime("%H:%M:%S"),
+        "durationSeconds": duration, "artifactPath": str(target),
+    }
+    save_settings(settings)
+    return snapshot()
+
+
+def remove_voiceovers(payload: dict) -> dict:
+    """Delete selected generated/imported audio files and detach them safely."""
+    indices = {int(value) for value in payload.get("indices", [])}
+    if not indices:
+        raise ValueError("Выберите одну или несколько готовых озвучек")
+    settings = load_settings()
+    root = Path(settings.voicer_output_folder).resolve()
+    removed = 0
+    for index in indices:
+        key = str(index + 1)
+        source_text = settings.voice_scenario_outputs.get(key, "")
+        source = Path(source_text) if source_text else None
+        if source and source.is_file():
+            try:
+                # Only managed copies inside the configured result folder can
+                # be physically removed. A manually linked external file is
+                # merely detached from NewsFlow.
+                if source.resolve().is_relative_to(root):
+                    source.unlink()
+                removed += 1
+            except OSError as exc:
+                raise ValueError(f"Не удалось удалить MP3: {source.name}") from exc
+        settings.voice_scenario_outputs.pop(key, None)
+        settings.voice_task_statuses.pop(key, None)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "voice-remove", "count": removed,
+        "message": f"Удалено озвучек: {removed}.",
+    }}
+
+
+def export_stage(payload: dict) -> dict:
+    """Create explicit files for manual hand-off from any production step."""
+    settings = load_settings()
+    stage = str(payload.get("stage", "")).strip().casefold()
+    index = int(payload.get("scenarioIndex", -1))
+    titles, jobs = load_session()
+    if not 0 <= index < len(titles):
+        raise ValueError("Выберите сценарий для выгрузки")
+    folder = Path(settings.output_folder) / "Выгрузки этапов" / safe_filename(titles[index])
+    folder.mkdir(parents=True, exist_ok=True)
+    if stage == "scenario":
+        job = next((item for item in jobs if item.request.index == index and item.state == RunState.DONE), None)
+        if not job:
+            raise ValueError("Готовый сценарий не найден")
+        path = folder / "Сценарий.txt"
+        path.write_text(job.result.strip() + "\n", encoding="utf-8-sig")
+    elif stage == "voice":
+        source = Path(settings.voice_scenario_outputs.get(str(index + 1), ""))
+        if not source.is_file():
+            raise ValueError("Готовая озвучка не найдена")
+        chosen = str(payload.get("path", "")).strip()
+        path = Path(chosen) if chosen else folder / f"Озвучка{source.suffix.casefold()}"
+        if path.suffix.casefold() != source.suffix.casefold():
+            path = path.with_suffix(source.suffix.casefold())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if source.resolve() != path.resolve():
+            shutil.copy2(source, path)
+    else:
+        raise ValueError("Неизвестный этап выгрузки")
+    return {**snapshot(), "operationResult": {"kind": "export", "count": 1, "folder": str(folder)},
+            "exportedPath": str(path)}
+
+
+def export_scenario_titles() -> dict:
+    """Export the whole scenario-title queue as one UTF-8 text file."""
+    settings = load_settings()
+    titles, _jobs = load_session()
+    if not titles:
+        raise ValueError("Нет названий сценариев для выгрузки")
+    folder = Path(settings.output_folder) / "Выгрузки этапов"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "Названия сценариев.txt"
+    target.write_text("\n".join(f"{index}. {title}" for index, title in enumerate(titles, 1)) + "\n", encoding="utf-8-sig")
+    return {**snapshot(), "operationResult": {"kind": "scenario-titles", "count": len(titles), "folder": str(folder)},
+            "exportedPath": str(target)}
+
+
+def export_scenarios(payload: dict) -> dict:
+    """Export selected finished scripts, or all finished scripts, into one TXT."""
+    settings = load_settings()
+    requested = {int(index) for index in payload.get("indices", [])}
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
+    available = [
+        index for index in range(len(titles))
+        if (job := jobs_by_index.get(index)) and job.state == RunState.DONE and job.result.strip()
+    ]
+    selected = [index for index in available if not requested or index in requested]
+    if not selected:
+        raise ValueError("Нет готовых сценариев для выгрузки")
+    requested_path = Path(str(payload.get("path", "")).strip()) if str(payload.get("path", "")).strip() else None
+    folder = requested_path.parent if requested_path else Path(settings.output_folder) / "Выгрузки этапов" / "Сценарии"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = requested_path or folder / ("Выбранные сценарии.txt" if requested else "Все готовые сценарии.txt")
+    if target.suffix.casefold() != ".txt":
+        target = target.with_suffix(".txt")
+    blocks = []
+    for index in selected:
+        job = jobs_by_index[index]
+        blocks.append(f"{index + 1}. {titles[index]}\n\n{job.result.strip()}")
+    target.write_text("\n\n".join(blocks) + "\n", encoding="utf-8-sig")
+    label = "Выбранные сценарии" if requested else "Все готовые сценарии"
+    return {**snapshot(), "operationResult": {
+        "kind": "scenarios-export", "count": len(selected), "folder": str(folder),
+        "message": f"{label} выгружены в TXT.",
+    }, "exportedPath": str(target)}
+
+
+def export_scenarios_separate_txt(payload: dict) -> dict:
+    """Export each ready scenario into a separately named UTF-8 text file in ZIP."""
+    settings = load_settings()
+    requested = {int(index) for index in payload.get("indices", [])}
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
+    selected = [index for index in range(len(titles))
+                if (job := jobs_by_index.get(index)) and job.state == RunState.DONE and job.result.strip()
+                and (not requested or index in requested)]
+    if not selected:
+        raise ValueError("Нет готовых сценариев для выгрузки")
+    folder = Path(settings.output_folder) / "Выгрузки этапов"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "Готовые сценарии — отдельные TXT.zip"
+    used: set[str] = set()
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index in selected:
+            stem = safe_filename(titles[index]) or f"Сценарий {index + 1}"
+            name = f"{stem}.txt"
+            ordinal = 2
+            while name.casefold() in used:
+                name = f"{stem} ({ordinal}).txt"
+                ordinal += 1
+            used.add(name.casefold())
+            archive.writestr(name, jobs_by_index[index].result.strip() + "\n")
+    return {**snapshot(), "operationResult": {"kind": "scenarios-export-separate", "count": len(selected),
+            "folder": str(folder), "message": "Сценарии выгружены отдельными TXT в ZIP."}, "exportedPath": str(target)}
+
+
+def set_session_active(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.chrome_sessions):
+        raise ValueError("Сессия не найдена")
+    settings.chrome_sessions[index].active = bool(payload.get("active", True))
+    save_settings(settings)
+    return snapshot()
+
+
+def set_session_usage(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    stage = str(payload.get("stage", "")).strip()
+    if not 0 <= index < len(settings.chrome_sessions):
+        raise ValueError("Сессия не найдена")
+    if stage not in {"ideas", "scenarios", "covers", "seo"}:
+        raise ValueError("Неизвестный этап сессии")
+    settings.chrome_sessions[index].usage[stage] = bool(payload.get("enabled", True))
+    save_settings(settings)
+    return snapshot()
+
+
+def save_voice_settings(payload: dict) -> dict:
+    settings = load_settings()
+    profiles = payload.get("profiles")
+    if isinstance(profiles, list):
+        cleaned = []
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            cleaned.append({
+                "id": str(item.get("id") or uuid.uuid4().hex).strip(),
+                "name": name,
+                "provider": str(item.get("provider", "chrome")).strip() if str(item.get("provider", "chrome")).strip() in {"chrome", "api", "lumean", "voicegen", "wproject"} else "chrome",
+                "voice_id": str(item.get("voice_id", "")).strip(),
+                "voice_name": str(item.get("voice_name", "")).strip(),
+                "model_id": str(item.get("model_id", "")).strip()[:160],
+                # Templates belong to a voice+model+settings signature.  We
+                # retain them only until one of those values changes.
+                "template_id": str(item.get("template_id", "")).strip()[:200],
+                "template_signature": str(item.get("template_signature", "")).strip()[:80],
+                "settings_preset": str(item.get("settings_preset", "standard")).strip()[:80] or "standard",
+                "chunk_size": max(200, min(10000, int(item.get("chunk_size", 1200) or 1200))),
+                "delay_between_chunks": max(0.0, min(30.0, float(item.get("delay_between_chunks", .5) or 0))),
+                "task_threads": max(1, min(100, int(item.get("task_threads", 5) or 5))),
+                "secret_mode": str(item.get("secret_mode", "emotional")) if str(item.get("secret_mode", "emotional")) in {"standard", "emotional"} else "emotional",
+                "wproject_split": str(item.get("wproject_split", "single")) if str(item.get("wproject_split", "single")) in {"paragraphs", "lines", "sentences", "single"} else "single",
+                "wproject_join": bool(item.get("wproject_join", True)),
+                "wproject_join_pause": max(0.0, min(5.0, float(item.get("wproject_join_pause", .3) or 0))),
+                "wproject_autotag": str(item.get("wproject_autotag", "off")) if str(item.get("wproject_autotag", "off")) in {"off", "light", "medium", "heavy"} else "off",
+                "wproject_prosody_speed": max(.5, min(2.0, float(item.get("wproject_prosody_speed", 1) or 1))),
+                "wproject_prosody_volume": max(-20.0, min(20.0, float(item.get("wproject_prosody_volume", 0) or 0))),
+                "wproject_latency": str(item.get("wproject_latency", "normal")) if str(item.get("wproject_latency", "normal")) in {"normal", "balanced"} else "normal",
+                "wproject_normalize": bool(item.get("wproject_normalize", True)),
+                "wproject_normalize_loudness": bool(item.get("wproject_normalize_loudness", True)),
+                "wproject_tag_compat": bool(item.get("wproject_tag_compat", True)),
+                "stability": max(0.0, min(1.0, float(item.get("stability", .30)))),
+                "style": max(0.0, min(1.0, float(item.get("style", .50)))),
+                "favorite": bool(item.get("favorite", False)),
+                "fallback": bool(item.get("fallback", False)),
+            })
+        if not cleaned:
+            raise ValueError("Добавьте хотя бы один профиль голоса")
+        settings.voice_profiles = cleaned
+    ranges = payload.get("ranges")
+    if isinstance(ranges, list):
+        incoming_ranges = []
+        for item in ranges:
+            if isinstance(item, dict):
+                row = dict(item)
+                if "profileId" in row and "profile_id" not in row:
+                    row["profile_id"] = row["profileId"]
+                incoming_ranges.append(row)
+        profiles, cleaned_ranges, default_profile_id, _changed = migrate_voice_range_settings(
+            settings.voice_profiles, incoming_ranges, settings.voice_default_profile_id,
+        )
+        # Reject invalid and overlapping active ranges before replacing the
+        # stored rule set; a UI save can never introduce ambiguous voice work.
+        validate_ranges(cleaned_ranges)
+        settings.voice_profiles = profiles
+        settings.voice_ranges = cleaned_ranges
+        settings.voice_default_profile_id = default_profile_id
+    if "defaultProfileId" in payload:
+        selected_default = str(payload.get("defaultProfileId") or "").strip()
+        known_profiles = {str(item.get("id") or "") for item in settings.voice_profiles if isinstance(item, dict)}
+        if selected_default not in known_profiles:
+            raise ValueError("Выберите существующий голос по умолчанию")
+        settings.voice_default_profile_id = selected_default
+    if "provider" in payload:
+        provider = str(payload.get("provider", "chrome"))
+        if provider not in {"chrome", "api", "lumean", "voicegen", "wproject"}:
+            raise ValueError("Неизвестный провайдер озвучки")
+        settings.voice_provider = provider
+    if "apiFallback" in payload:
+        settings.voice_api_fallback = bool(payload.get("apiFallback"))
+    if "keyFailover" in payload:
+        settings.voice_key_failover = bool(payload.get("keyFailover"))
+    if "queueConcurrency" in payload:
+        try:
+            settings.voice_queue_concurrency = max(1, min(100, int(payload.get("queueConcurrency") or 1)))
+        except (TypeError, ValueError) as error:
+            raise ValueError("Укажите число одновременных задач озвучки") from error
+    if "useChromeSelectedVoice" in payload:
+        settings.voice_use_chrome_selected_voice = bool(payload.get("useChromeSelectedVoice"))
+    if "outputFolder" in payload:
+        folder_text = str(payload.get("outputFolder", "")).strip()
+        if not folder_text:
+            raise ValueError("Выберите папку для готовых озвучек")
+        folder = Path(folder_text).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        settings.voicer_output_folder = str(folder)
+    save_settings(settings)
+    return snapshot()
+
+
+def save_voice_range_preset(payload: dict) -> dict:
+    """Store a complete voice/range allocation locally for one-click reuse."""
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())[:100]
+    if not name:
+        raise ValueError("Укажите название пресета озвучки")
+    profiles = payload.get("profiles", settings.voice_profiles)
+    ranges = payload.get("ranges", settings.voice_ranges)
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError("В пресете нужен хотя бы один профиль")
+    if not isinstance(ranges, list):
+        raise ValueError("Диапазоны пресета переданы неверно")
+    value = {"name": name, "profiles": profiles, "ranges": ranges,
+             "defaultProfileId": str(payload.get("defaultProfileId", settings.voice_default_profile_id) or ""),
+             "queueConcurrency": max(1, min(100, int(payload.get("queueConcurrency", settings.voice_queue_concurrency) or 1))),
+             "keyFailover": bool(payload.get("keyFailover", settings.voice_key_failover))}
+    existing = next((item for item in settings.voice_range_presets
+                     if str(item.get("name", "")).casefold() == name.casefold()), None)
+    if existing is None:
+        settings.voice_range_presets.append(value)
+    else:
+        existing.update(value)
+    save_settings(settings)
+    return snapshot()
+
+
+def apply_voice_range_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = str(payload.get("name", "")).strip()
+    preset = next((item for item in settings.voice_range_presets
+                   if str(item.get("name", "")).casefold() == name.casefold()), None)
+    if preset is None:
+        raise ValueError("Пресет озвучки не найден")
+    # Reuse the normal validation and persistence path instead of accepting
+    # stale manually edited JSON straight into active settings.
+    return save_voice_settings({"profiles": preset.get("profiles", []), "ranges": preset.get("ranges", []),
+                                "defaultProfileId": preset.get("defaultProfileId", settings.voice_default_profile_id),
+                                "queueConcurrency": preset.get("queueConcurrency", settings.voice_queue_concurrency),
+                                "keyFailover": bool(preset.get("keyFailover", True))})
+
+
+def delete_voice_range_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = str(payload.get("name", "")).strip()
+    before = len(settings.voice_range_presets)
+    settings.voice_range_presets = [item for item in settings.voice_range_presets
+                                    if str(item.get("name", "")).casefold() != name.casefold()]
+    if len(settings.voice_range_presets) == before:
+        raise ValueError("Пресет озвучки не найден")
+    save_settings(settings)
+    return snapshot()
+
+
+def add_channel(payload: dict) -> dict:
+    name = str(payload.get("name", "")).strip() or "Новый YouTube-канал"
+    channel = str(payload.get("channel", "")).strip()
+    settings = load_settings()
+    # A new channel always enters through the same audited OAuth handoff.  The
+    # endpoint receives the Google callback; the resulting channel token is
+    # then stored locally under this row's individual profile ID.
+    if not settings.youtube_oauth_service_url:
+        settings.youtube_oauth_service_url = "https://a.tinkbro.online"
+    profile_id = uuid.uuid4().hex
+    settings.analytics_channels.append({
+        "profile_id": profile_id, "name": name, "channel": channel, "subscribers": "—",
+        "views_hour": "—", "views_48h": "—", "income": "—", "operator_tag": "", "operator_notes": "",
+        "status": "Ожидает входа Google",
+    })
+    channel_research_state(settings, profile_id)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "analytics-channel-added", "count": 1,
+        "message": f"Канал «{name}» добавлен. Нажмите OAuth, чтобы подтянуть название, аватар и подписчиков.",
+    }}
+
+
+def _research_channel(settings: Settings, index: int) -> tuple[dict, str]:
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    channel = settings.analytics_channels[index]
+    profile_id = str(channel.get("profile_id", "")).strip()
+    if not profile_id:
+        raise ValueError("У канала нет отдельного Chrome-профиля")
+    return channel, profile_id
+
+
+def import_channel_research_txt(payload: dict) -> dict:
+    """Queue public URLs for exactly one selected channel profile."""
+
+    settings = load_settings()
+    _, profile_id = _research_channel(settings, int(payload.get("index", -1)))
+    sources, errors = parse_txt_sources(str(payload.get("text", "")))
+    state = channel_research_state(settings, profile_id)
+    known = {str(item.get("url", "")) for item in state.get("tasks", []) if isinstance(item, dict)}
+    added = 0
+    for source in sources:
+        if source in known:
+            continue
+        state["tasks"].append(new_task(profile_id, source, "txt"))
+        known.add(source)
+        added += 1
+    state["status"].update({"state": "idle", "message": f"Добавлено источников: {added}", "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds")})
+    state["updatedAt"] = state["status"]["updatedAt"]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "channel-research-import", "count": added,
+        "message": f"Добавлено {added}; строк с ошибками: {len(errors)}.", "lineErrors": errors,
+    }}
+
+
+def update_analytics_channel_metadata(payload: dict) -> dict:
+    """Save operator-owned metadata without changing the connected YouTube identity."""
+
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    tag = " ".join(str(payload.get("tag", "")).split())[:120]
+    notes = str(payload.get("notes", "")).strip()[:4000]
+    settings.analytics_channels[index]["operator_tag"] = tag
+    settings.analytics_channels[index]["operator_notes"] = notes
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "analytics-channel-metadata", "count": 1,
+        "message": "Метка и заметки канала сохранены.",
+    }}
+
+
+def _youtube_channel_profile_dir(profile_id: str) -> Path:
+    """Return one verified NewsFlow-owned Chrome profile directory.
+
+    ``profile_id`` is persisted local metadata, but never trust it as a path:
+    it must identify exactly one direct child of the dedicated profile root.
+    """
+
+    identifier = str(profile_id or "").strip()
+    if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
+        raise ValueError("Некорректный идентификатор профиля YouTube")
+    root = (app_data_root() / "YouTubeChannelProfiles").resolve()
+    candidate = (root / identifier).resolve()
+    if candidate.parent != root:
+        raise ValueError("Профиль YouTube должен находиться в папке NewsFlow")
+    return candidate
+
+
+def _youtube_oauth_browser_command(profile_dir: Path) -> str:
+    """Return the browser template for the optional local OAuth fallback."""
+
+    chrome = str(chrome_path())
+    return (
+        f'"{chrome}" --user-data-dir="{profile_dir}" '
+        "--no-first-run --no-default-browser-check --new-window %s"
+    )
+
+
+def open_analytics_channel(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    channel = settings.analytics_channels[index]
+    profile_id = str(channel.get("profile_id", "")).strip() or uuid.uuid4().hex
+    channel["profile_id"] = profile_id
+    profile_dir = _youtube_channel_profile_dir(profile_id)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    channel_id = str(channel.get("channel_id", "")).strip()
+    url = f"https://studio.youtube.com/channel/{channel_id}" if channel_id else "https://studio.youtube.com/"
+    subprocess.Popen([str(chrome_path()), f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check", url])
+    channel["status"] = "Открыт вход Google — сессия сохранится"
+    save_settings(settings)
+    return snapshot()
+
+
+def reset_youtube_channel_account(payload: dict) -> dict:
+    """Forget one channel's OAuth access and archive only its Chrome profile.
+
+    Moving the profile below the same NewsFlow root is recoverable and avoids
+    the dangerous pattern of recursively deleting a computed user path.
+    """
+
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    channel = settings.analytics_channels[index]
+    profile_id = str(channel.get("profile_id", "")).strip()
+    profile_dir = _youtube_channel_profile_dir(profile_id)
+    if profile_dir.exists():
+        retired_root = profile_dir.parent / ".retired"
+        retired_root.mkdir(parents=True, exist_ok=True)
+        archived = retired_root / f"{profile_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        shutil.move(str(profile_dir), str(archived))
+    settings.youtube_oauth_tokens.pop(profile_id, None)
+    channel.update({
+        "channel_id": "",
+        "thumbnail_url": "",
+        "subscribers": "",
+        "views_total": 0,
+        "views_hour": "",
+        "views_48h": "",
+        "monetary_access": False,
+        "status": "Ожидает нового входа Google",
+    })
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "youtube-account-reset", "count": 1,
+        "message": "Вход выбранного канала очищен. Следующий OAuth откроется в новом отдельном профиле Chrome.",
+    }}
+
+
+def remove_analytics_channel(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    # Removing a row never destroys the Chrome profile or its login data.
+    del settings.analytics_channels[index]
+    save_settings(settings)
+    return snapshot()
+
+
+def save_google_oauth(payload: dict) -> dict:
+    path = Path(str(payload.get("path", "")).strip())
+    validate_desktop_client_file(path)
+    settings = load_settings()
+    settings.google_oauth_client_file = str(path)
+    save_settings(settings)
+    return snapshot()
+
+
+def save_youtube_oauth_service(payload: dict) -> dict:
+    """Save only the public Cloudflare endpoint; secrets stay on the Worker."""
+
+    settings = load_settings()
+    settings.youtube_oauth_service_url = _oauth_service_url(str(payload.get("serviceUrl", "")))
+    save_settings(settings)
+    return snapshot()
+
+
+def _handoff_session_from_payload(payload: dict) -> CloudflareOAuthSession:
+    value = payload.get("session")
+    if not isinstance(value, dict):
+        raise ValueError("Сессия входа не найдена")
+    try:
+        return CloudflareOAuthSession(
+            session_id=str(value["sessionId"]),
+            poll_capability=str(value["pollCapability"]),
+            authorization_url=str(value["authorizationUrl"]),
+            expires_at=datetime.fromisoformat(str(value["expiresAt"]).replace("Z", "+00:00")),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Сессия входа повреждена") from exc
+
+
+def start_youtube_channel_handoff(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    if not settings.youtube_oauth_service_url:
+        raise ValueError("Сначала настройте HTTPS-сервис входа Cloudflare")
+    channel = settings.analytics_channels[index]
+    profile_id = str(channel.get("profile_id", "")).strip() or uuid.uuid4().hex
+    channel["profile_id"] = profile_id
+    profile_dir = _youtube_channel_profile_dir(profile_id)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    session = start_cloudflare_channel_authorization(
+        settings.youtube_oauth_service_url, profile_id, include_monetary=bool(payload.get("includeMonetary", False)),
+    )
+    settings.youtube_oauth_pending_handoffs[profile_id] = {
+        "sessionId": session.session_id,
+        "pollCapability": session.poll_capability,
+        "authorizationUrl": session.authorization_url,
+        "expiresAt": session.expires_at.isoformat(),
+    }
+    open_channel_authorization(str(chrome_path()), profile_dir, session.authorization_url)
+    channel["status"] = "Ожидает подтверждение в Google"
+    save_settings(settings)
+    return {"session": {
+        "sessionId": session.session_id, "pollCapability": session.poll_capability,
+        "authorizationUrl": session.authorization_url, "expiresAt": session.expires_at.isoformat(),
+    }}
+
+
+def finish_youtube_channel_handoff(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    if not settings.youtube_oauth_service_url:
+        raise ValueError("HTTPS-сервис входа не настроен")
+    channel = settings.analytics_channels[index]
+    session = _handoff_session_from_payload(payload)
+    credentials = wait_for_cloudflare_credentials(settings.youtube_oauth_service_url, session)
+    profile_id = str(channel.get("profile_id", "")).strip()
+    if not profile_id:
+        raise ValueError("Профиль канала не найден")
+    # A handoff payload can only be consumed once. Save it before asking the
+    # YouTube Data API for channel metadata so a brand-account mismatch never
+    # discards a valid OAuth grant.
+    settings.youtube_oauth_tokens[profile_id] = json.dumps(credentials, ensure_ascii=False)
+    settings.youtube_oauth_pending_handoffs.pop(profile_id, None)
+    try:
+        channel["oauth_account_email"] = fetch_google_account_email(credentials)
+    except (RuntimeError, ValueError):
+        channel["oauth_account_email"] = ""
+    channel["status"] = "OAuth-токен получен — проверяем доступный YouTube-канал"
+    save_settings(settings)
+    profile, refreshed_credentials = fetch_current_channel(credentials)
+    channel.update({
+        "channel_id": profile["channelId"], "name": profile["name"],
+        "thumbnail_url": profile.get("thumbnailUrl", ""), "subscribers": str(profile["subscribers"]),
+        "views_total": profile["viewsTotal"], "status": "OAuth подключён — ожидает первое обновление YouTube",
+    })
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "oauth-connected", "channelId": profile_id,
+        "title": str(channel.get("name", "Канал")), "detail": "Подключён OAuth YouTube через Cloudflare",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return snapshot()
+
+
+def recover_pending_youtube_handoffs(settings: Settings) -> int:
+    """Collect OAuth callbacks that completed while the desktop was closed."""
+
+    if not settings.youtube_oauth_service_url:
+        return 0
+    recovered = 0
+    for channel in settings.analytics_channels:
+        profile_id = str(channel.get("profile_id", "")).strip()
+        pending = settings.youtube_oauth_pending_handoffs.get(profile_id)
+        if not profile_id or not isinstance(pending, dict):
+            continue
+        try:
+            session = _handoff_session_from_payload({"session": pending})
+            credentials = wait_for_cloudflare_credentials(
+                settings.youtube_oauth_service_url, session, timeout_seconds=0.1, poll_seconds=0.1,
+            )
+        except RuntimeError:
+            continue
+        settings.youtube_oauth_tokens[profile_id] = json.dumps(credentials, ensure_ascii=False)
+        settings.youtube_oauth_pending_handoffs.pop(profile_id, None)
+        try:
+            channel["oauth_account_email"] = fetch_google_account_email(credentials)
+        except (RuntimeError, ValueError):
+            channel["oauth_account_email"] = ""
+        channel["status"] = "OAuth-токен получен — проверяем доступный YouTube-канал"
+        settings.youtube_publication_activity.append({
+            "at": datetime.now().astimezone().isoformat(), "kind": "oauth-recovered", "channelId": profile_id,
+            "title": str(channel.get("name", "Канал")), "detail": "Получен OAuth-токен YouTube после callback",
+        })
+        recovered += 1
+    if recovered:
+        settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    return recovered
+
+
+def cancel_youtube_channel_handoff(payload: dict) -> dict:
+    settings = load_settings()
+    if settings.youtube_oauth_service_url:
+        cancel_cloudflare_authorization(settings.youtube_oauth_service_url, _handoff_session_from_payload(payload))
+    return {"operationResult": {"kind": "youtube-oauth-cancelled", "count": 1, "message": "Вход в Google отменён."}}
+
+
+def connect_youtube_channel(payload: dict) -> dict:
+    """Run an explicit browser OAuth flow and bind its encrypted token to one row."""
+
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.analytics_channels):
+        raise ValueError("Канал не найден")
+    client_file = Path(settings.google_oauth_client_file)
+    if not client_file.is_file():
+        raise ValueError("Сначала добавьте Google OAuth Desktop Client JSON")
+    channel = settings.analytics_channels[index]
+    profile_id = str(channel.get("profile_id", "")).strip() or uuid.uuid4().hex
+    channel["profile_id"] = profile_id
+    profile_dir = _youtube_channel_profile_dir(profile_id)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    include_monetary = bool(payload.get("includeMonetary", False))
+    credentials = authorize_desktop_channel(
+        client_file,
+        include_monetary=include_monetary,
+        browser_command=_youtube_oauth_browser_command(profile_dir),
+    )
+    profile, refreshed_credentials = fetch_current_channel(credentials)
+    settings.youtube_oauth_tokens[profile_id] = json.dumps(refreshed_credentials, ensure_ascii=False)
+    channel["channel_id"] = profile["channelId"]
+    channel["name"] = profile["name"]
+    channel["thumbnail_url"] = profile.get("thumbnailUrl", "")
+    channel["subscribers"] = str(profile["subscribers"])
+    channel["views_total"] = profile["viewsTotal"]
+    channel["monetary_access"] = include_monetary
+    channel["status"] = "OAuth подключён — ожидает первое обновление YouTube"
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "oauth-connected", "channelId": profile_id,
+        "title": str(channel.get("name", "Канал")),
+        "detail": "Подключён OAuth YouTube" + (" с финансовой аналитикой" if include_monetary else ""),
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "youtube-oauth", "count": 1, "message": f"Канал «{channel.get('name', 'Канал')}» подключён."}}
+
+
+def refresh_analytics(payload: dict) -> dict:
+    settings = load_settings()
+    recover_pending_youtube_handoffs(settings)
+    if not settings.youtube_oauth_tokens:
+        raise ValueError("Подключите хотя бы один канал через OAuth для закрытой аналитики")
+    now = datetime.now().astimezone()
+    refreshed = 0
+    failures = 0
+    for channel in settings.analytics_channels:
+        profile_id = str(channel.get("profile_id", "")).strip()
+        token_text = settings.youtube_oauth_tokens.get(profile_id, "")
+        if not profile_id or not token_text:
+            continue
+        try:
+            token = json.loads(token_text)
+            profile, refreshed_token = fetch_current_channel(token)
+            try:
+                report = fetch_youtube_analytics(
+                    refreshed_token,
+                    include_monetary=bool(channel.get("monetary_access", False)),
+                )
+            except Exception as analytics_error:
+                # Data v3 profile metadata remains useful when the optional
+                # Analytics API has not yet been enabled or has delayed data.
+                report = {"videos": [], "financialAvailable": False, "errors": [str(analytics_error)[:220]]}
+            try:
+                previous_views = int(channel.get("views_total", 0))
+            except (TypeError, ValueError):
+                previous_views = 0
+            try:
+                previous_subscribers = int(channel.get("subscribers", 0))
+            except (TypeError, ValueError):
+                previous_subscribers = 0
+            views_delta = max(0, int(profile["viewsTotal"]) - previous_views)
+            subscribers_delta = int(profile["subscribers"]) - previous_subscribers
+            point = {
+                "channelId": profile_id,
+                "at": now.isoformat(),
+                "views": views_delta,
+                "subscribers": subscribers_delta,
+                "publications": 0,
+                "estimatedRevenue": None,
+            }
+            settings.youtube_analytics_metric_points.append(point)
+            settings.youtube_analytics_video_metrics = [
+                item for item in settings.youtube_analytics_video_metrics
+                if str(item.get("channelId", "")) != profile_id
+            ]
+            for row in report.get("videos", []):
+                video_id = str(row.get("video", "")).strip()
+                if video_id:
+                    settings.youtube_analytics_video_metrics.append({
+                        "channelId": profile_id,
+                        "videoId": video_id,
+                        "at": now.isoformat(),
+                        "financialAvailable": bool(report.get("financialAvailable", False)),
+                        **row,
+                    })
+            recent_views = views_delta
+            window_start = now - timedelta(hours=48)
+            for metric in settings.youtube_analytics_metric_points[:-1]:
+                if str(metric.get("channelId", "")) != profile_id:
+                    continue
+                try:
+                    metric_at = datetime.fromisoformat(str(metric.get("at", "")))
+                except ValueError:
+                    continue
+                if window_start <= metric_at <= now:
+                    recent_views += int(metric.get("views", 0) or 0)
+            channel.update({
+                "channel_id": profile["channelId"], "name": profile["name"],
+                "thumbnail_url": profile.get("thumbnailUrl", ""),
+                "subscribers": str(profile["subscribers"]), "views_total": profile["viewsTotal"],
+                "views_hour": str(views_delta), "views_48h": str(recent_views),
+                "status": "Аналитика обновлена",
+            })
+            if report.get("errors"):
+                channel["analytics_note"] = "Часть метрик пока недоступна: " + str(report["errors"][0])
+            else:
+                channel["analytics_note"] = ""
+            settings.youtube_oauth_tokens[profile_id] = json.dumps(refreshed_token, ensure_ascii=False)
+            refreshed += 1
+        except Exception as exc:
+            channel["status"] = f"Ошибка аналитики: {str(exc)[:180]}"
+            failures += 1
+    settings.youtube_analytics_metric_points = settings.youtube_analytics_metric_points[-20000:]
+    settings.youtube_analytics_video_metrics = settings.youtube_analytics_video_metrics[-10000:]
+    settings.youtube_analytics_updated_at = now.isoformat()
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "analytics-refresh", "count": refreshed,
+        "message": f"Каналов обновлено: {refreshed}." + (f" Ошибок: {failures}." if failures else ""),
+    }}
+
+
+def add_scenarios(payload: dict) -> dict:
+    raw = payload.get("titles", "")
+    incoming = parse_titles(raw) if isinstance(raw, str) else [str(item).strip() for item in raw]
+    incoming = [item for item in incoming if item]
+    if not incoming:
+        raise ValueError("Добавьте хотя бы один заголовок сценария")
+    titles, jobs = load_session()
+    known = {title.casefold() for title in titles}
+    titles.extend(title for title in incoming if title.casefold() not in known)
+    save_session(titles, jobs)
+    return snapshot()
+
+
+def production_item_prompt(item: dict) -> str:
+    """Turn a validated production item into bounded context for the writer."""
+    if not isinstance(item, dict):
+        return ""
+    context = [str(value).strip() for value in item.get("supporting_context", []) if str(value).strip()]
+    requirements = [str(value).strip() for value in item.get("script_requirements", []) if str(value).strip()]
+    blocks = ["\n\nКОНТРАКТ ИДЕИ NEWSFLOW:"]
+    if item.get("core_event"):
+        blocks.append(f"Подтверждённый/редакционный контекст: {item['core_event']}")
+    if context:
+        blocks.append("Опорный контекст: " + " | ".join(context[:3]))
+    if item.get("promised_question"):
+        blocks.append(f"Что обязан раскрыть сценарий: {item['promised_question']}")
+    if requirements:
+        blocks.append("Обязательные пункты: " + "; ".join(requirements))
+    framing = str(item.get("framing_type", "EDITORIAL")).strip().upper()
+    if framing == "HYPOTHETICAL":
+        blocks.extend([
+            "Режим подачи: HYPOTHETICAL — это сценарий/прогноз, а не новостное сообщение.",
+            "Явно отдели реальное исходное положение от возможного развития.",
+            "Свободно разбери возможный конфликт, ультиматум, ответ, эскалацию или смену позиции.",
+            "Не выдавай прогноз за уже произошедшее событие.",
+        ])
+    elif framing == "EDITORIAL":
+        blocks.extend([
+            "Режим подачи: EDITORIAL — сначала отдели подтверждённый контекст от редакционной трактовки.",
+            "Подача может быть жёсткой и таблоидной: раскрой конфликт, давление, политическую цену, риск, ловушку, победителя или проигравшего.",
+            "Не маскируй редакционную интерпретацию под подтверждённый факт.",
+        ])
+    else:
+        blocks.append("Режим подачи: FACTUAL — все основные утверждения должны следовать из опорного контекста.")
+    blocks.append("Не добавляй как факт то, чего нет в опорном контексте.")
+    return "\n".join(blocks)
+
+
+def generate_scenarios(payload: dict) -> dict:
+    settings = load_settings()
+    titles, existing_jobs = load_session()
+    provider = str(payload.get("provider", settings.scenario_provider)).strip()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
+    settings.scenario_provider = provider
+    requested = {int(index) for index in payload.get("indices", [])}
+    force = bool(payload.get("force") or payload.get("restart"))
+    ranges = [PromptRange(
+        int(item.get("start", 1)), int(item.get("end", 1)), str(item.get("prompt", "")),
+        max(0, int(item.get("target_chars", 0) or 0)),
+        max(0, int(item.get("allowed_min", 0) or 0)),
+        max(0, int(item.get("allowed_max", 0) or 0)),
+    ) for item in settings.prompt_ranges]
+    production_id_by_title = {
+        str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
+        for item in settings.idea_production_items
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    all_requests = [ScenarioRequest(
+        request.index, request.title, request.prompt,
+        production_id_by_title.get(request.title.casefold(), ""),
+        request.target_chars, request.allowed_min, request.allowed_max,
+    ) for request in build_requests(titles, settings.template, ranges)]
+    completed = {
+        job.request.index for job in existing_jobs
+        if job.state == RunState.DONE and str(job.result or "").strip()
+    }
+    selected = [request for request in all_requests
+                if (not requested or request.index in requested)
+                and (force or request.index not in completed)]
+    if not selected:
+        return {**snapshot(), "operationResult": {
+            "kind": "scenarios-skip-ready", "count": 0,
+            "message": "Все выбранные сценарии уже готовы. Обычный запуск их не перезаписывает.",
+        }}
+    narration_only = (
+        "\n\nФОРМАТ ОТВЕТА ОБЯЗАТЕЛЕН: верни только готовый цельный текст для озвучки. "
+        "Не добавляй рабочую концепцию, ядро новости, лейтмотив, план, структуру, подзаголовки, "
+        "Markdown, списки, технические комментарии или фразы вроде «если план согласован». "
+        "Допускаются только обычные связные абзацы самого сценария."
+    )
+    selected = [ScenarioRequest(
+        request.index, request.title,
+        request.prompt + production_item_prompt(settings.idea_scenario_context.get(request.title, {})) + narration_only,
+        request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max,
+    ) for request in selected]
+    if provider == "agent":
+        selected = [ScenarioRequest(request.index, request.title,
+                                    "Ты редактор новостных сценариев NewsFlow. Напиши цельный, понятный текст "
+                                    "по заданию; отделяй проверяемые факты от оценок, не выдумывай даты, цитаты "
+                                    "и цифры. Верни только готовый сценарий.\n\n" + request.prompt,
+                                    request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max)
+                    for request in selected]
+    api_keys = [item for item in settings.openai_api_keys if item.active and item.secret.strip()]
+    pool = HybridTextPool([], api_keys, "", settings.openai_model)
+    current = {job.request.index: job for job in existing_jobs}
+
+    # Persist the planned batch before the first API request. Snapshot calls
+    # run in a separate process, so the UI can now display each queue item.
+    for request in selected:
+        current[request.index] = Job(request)
+    save_session(titles, list(current.values()))
+
+    def save_job(job):
+        current[job.request.index] = job
+        save_session(titles, list(current.values()))
+
+    workers = pool.concurrency
+    finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected))
+    current.update({job.request.index: job for job in finished})
+    save_session(titles, list(current.values()))
+    save_settings(settings)
+    return snapshot()
+
+
+def rename_scenario_command(payload: dict) -> dict:
+    index = int(payload.get("index", -1))
+    title = str(payload.get("title", ""))
+    titles, jobs = load_session()
+    if not 0 <= index < len(titles):
+        raise ValueError("Сценарий не найден")
+    titles, jobs = rename_scenario(titles, jobs, index, title)
+    save_session(titles, jobs)
+    return snapshot()
+
+
+def remove_scenarios_command(payload: dict) -> dict:
+    requested = payload.get("indices", [])
+    indices = {int(index) for index in requested}
+    titles, jobs = load_session()
+    valid = {index for index in indices if 0 <= index < len(titles)}
+    if valid:
+        settings = load_settings()
+        removed_keys = {" ".join(titles[index].split()).casefold() for index in valid}
+        removed_production_ids = {
+            str(job.request.production_item_id).strip() for job in jobs
+            if job.request.index in valid and str(job.request.production_item_id).strip()
+        }
+        settings.deleted_scenario_titles = sorted({
+            *(str(value).strip().casefold() for value in settings.deleted_scenario_titles if str(value).strip()),
+            *removed_keys,
+        })[-10000:]
+        settings.deleted_scenario_production_ids = sorted({
+            *(str(value).strip() for value in settings.deleted_scenario_production_ids if str(value).strip()),
+            *removed_production_ids,
+        })[-10000:]
+        root = Path(settings.voicer_output_folder).resolve()
+        # Scenario indexes are compacted after deletion. Carry each retained
+        # audio mapping to its new index; otherwise the next row can inherit a
+        # different scenario's MP3.
+        kept = [old for old in range(len(titles)) if old not in valid]
+        remapped: dict[str, str] = {}
+        remapped_statuses: dict[str, dict] = {}
+        for new_index, old_index in enumerate(kept):
+            path = settings.voice_scenario_outputs.get(str(old_index + 1), "")
+            if path:
+                remapped[str(new_index + 1)] = path
+            status = settings.voice_task_statuses.get(str(old_index + 1))
+            if isinstance(status, dict):
+                remapped_statuses[str(new_index + 1)] = status
+        for old_index in valid:
+            source_text = settings.voice_scenario_outputs.get(str(old_index + 1), "")
+            source = Path(source_text) if source_text else None
+            if source and source.is_file() and source.resolve().is_relative_to(root):
+                try:
+                    source.unlink()
+                except OSError:
+                    pass
+        settings.voice_scenario_outputs = remapped
+        settings.voice_task_statuses = remapped_statuses
+        save_settings(settings)
+        titles, jobs = remove_scenarios(titles, jobs, valid)
+        save_session(titles, jobs)
+    return snapshot()
+
+
+def save_scenario_text(payload: dict) -> dict:
+    """Save a user-edited finished scenario in the durable queue."""
+    index = int(payload.get("index", -1))
+    text = str(payload.get("text", "")).strip()
+    titles, jobs = load_session()
+    if not 0 <= index < len(titles):
+        raise ValueError("Сценарий не найден")
+    if not text:
+        raise ValueError("Текст сценария не может быть пустым")
+    current = {job.request.index: job for job in jobs}
+    previous = current.get(index)
+    request = previous.request if previous else ScenarioRequest(index, titles[index], "")
+    current[index] = Job(request, RunState.DONE, text, "")
+    save_session(titles, list(current.values()))
+    return snapshot()
+
+
+def _scenario_preferences(job: Job | None) -> str:
+    """Keep the per-scenario requirements authored in the prompt ranges for later stages."""
+    if job is None:
+        return ""
+    prompt = str(job.request.prompt or "")
+    marker = "Дополнительные требования:"
+    if marker not in prompt:
+        return ""
+    return prompt.split(marker, 1)[1].strip()[:1800]
+
+
+_MONTAGE_RUNNING_STATUSES = {
+    "В очереди", "Планирование", "Планирование сцен", "Подбор футажей", "Внешний поиск",
+    "Нарезка внешнего футажа", "Ожидает рендер", "Рендер", "Склейка", "Пауза",
+}
+
+
+def _sync_montage_handoff(settings: Settings, index: int, title: str, voice_path: str = "",
+                          transferred: bool = False) -> bool:
+    """Make the scenario/audio hand-off visible without starting a render."""
+    key = str(index)
+    current = dict(settings.montage_task_statuses.get(key) or {})
+    status = str(current.get("status", ""))
+    # 2.1.129 and older could overwrite a just-failed render with "Новый
+    # MP3" during a later snapshot.  Recover that precise error from the
+    # durable timeline before deciding whether this is a genuinely new audio.
+    if status in {"Новый MP3", "Добавлено в монтаж"}:
+        prior_error = next((event for event in reversed(list(current.get("timeline") or []))
+                            if str(event.get("label", "")).startswith("Ошибка")), None)
+        if isinstance(prior_error, dict):
+            error_phase = str(prior_error.get("label") or "Ошибка рендера")
+            error_detail = str(prior_error.get("detail") or "Предыдущий рендер не завершился")
+            current.update({
+                "title": title, "scenarioIndex": index, "status": "Ошибка",
+                "phase": error_phase, "progress": 100, "detail": error_detail,
+                "error": error_detail, "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            settings.montage_task_statuses[key] = current
+            return True
+    # A fresh scan of the same MP3 must never hide an actionable render error.
+    # It already has a saved project and belongs in «Продолжить монтаж», not
+    # back in the inbox as if it had never been planned.
+    if status in _MONTAGE_RUNNING_STATUSES or status in {"Готово", "Ошибка"}:
+        return False
+    has_voice = bool(voice_path and Path(voice_path).is_file())
+    if has_voice:
+        next_status = "Готов к монтажу" if transferred else "Новый MP3"
+        next_phase = "Передано в монтаж" if transferred else "Новая озвучка"
+        next_detail = ("Сценарий и MP3 готовы к запуску"
+                       if transferred else "Новая MP3 — перенесите её в монтаж")
+    else:
+        next_status = "Ожидает MP3"
+        next_phase = "Ожидает озвучку"
+        next_detail = "Сценарий готов; добавьте MP3 для запуска монтажа"
+    if status == "Готов к монтажу" and not transferred:
+        return False
+    updated = {
+        **current, "title": title, "scenarioIndex": index, "status": next_status,
+        "phase": next_phase, "progress": 0, "detail": next_detail,
+        "voicePath": voice_path if has_voice else "", "error": "",
+        "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    timeline = list(current.get("timeline") or [])
+    if not timeline or timeline[-1].get("label") != next_phase or timeline[-1].get("detail") != next_detail:
+        timeline.append({"at": time.strftime("%H:%M:%S"), "label": next_phase,
+                         "progress": 0, "detail": next_detail})
+    updated["timeline"] = timeline[-30:]
+    if current == updated:
+        return False
+    settings.montage_task_statuses[key] = updated
+    return True
+
+
+def _mark_montage_audio_incoming(settings: Settings, index: int, title: str, voice_path: str) -> bool:
+    """Move an existing MP3 to the montage inbox without rendering it."""
+    if not voice_path or not Path(voice_path).is_file():
+        return False
+    key = str(index)
+    current = dict(settings.montage_task_statuses.get(key) or {})
+    if str(current.get("status", "")) in _MONTAGE_RUNNING_STATUSES | {"Готово", "Ошибка"}:
+        return False
+    phase = "MP3 добавлена в монтаж"
+    detail = "Новая озвучка в монтажном входящем; добавьте её в очередь, когда будете готовы"
+    updated = {**current, "title": title, "scenarioIndex": index, "status": "Добавлено в монтаж",
+               "phase": phase, "progress": 0, "detail": detail, "voicePath": voice_path, "error": "",
+               "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S")}
+    timeline = list(current.get("timeline") or [])
+    if not timeline or timeline[-1].get("label") != phase:
+        timeline.append({"at": time.strftime("%H:%M:%S"), "label": phase, "progress": 0, "detail": detail})
+    updated["timeline"] = timeline[-30:]
+    if current == updated:
+        return False
+    settings.montage_task_statuses[key] = updated
+    return True
+
+
+def enqueue_montage_audio(payload: dict) -> dict:
+    """Accept new/incoming MP3s into the selectable montage queue, never render."""
+    settings = load_settings()
+    titles, _jobs = load_session()
+    requested = {int(value) for value in payload.get("indices", [])}
+    if not requested:
+        requested = {int(key) for key, task in settings.montage_task_statuses.items()
+                     if str(task.get("status", "")) in {"Новый MP3", "Добавлено в монтаж"} and str(key).isdigit()}
+    accepted = []
+    for index in sorted(requested):
+        if not 0 <= index < len(titles):
+            continue
+        key = str(index)
+        current = dict(settings.montage_task_statuses.get(key) or {})
+        if str(current.get("status", "")) not in {"Новый MP3", "Добавлено в монтаж"}:
+            continue
+        voice_path = str(settings.voice_scenario_outputs.get(str(index + 1), current.get("voicePath", "")))
+        if not voice_path or not Path(voice_path).is_file():
+            continue
+        _sync_montage_handoff(settings, index, titles[index], voice_path, transferred=True)
+        accepted.append(index)
+    if not accepted:
+        raise ValueError("Нет новых готовых MP3 для добавления в очередь монтажа")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "montage-audio-enqueue", "count": len(accepted),
+        "message": f"Добавлено новых MP3 в очередь монтажа: {len(accepted)}. Рендер ещё не запускался.",
+    }}
+
+
+def _sync_finished_scenarios_to_montage(settings: Settings, scenarios: list[dict]) -> bool:
+    """Register every scenario once; fresh MP3 files become visible too."""
+    changed = False
+    for scenario in scenarios:
+        index = int(scenario["index"])
+        title = str(scenario["title"])
+        if scenario.get("state") != RunState.DONE.value or not str(scenario.get("result", "")).strip():
+            key = str(index)
+            if key not in settings.montage_task_statuses:
+                settings.montage_task_statuses[key] = {
+                    "title": title, "scenarioIndex": index, "status": "Ожидает сценарий",
+                    "phase": "Ожидает текст сценария", "progress": 0,
+                    "detail": "Тема автоматически передана в монтаж; нужен готовый сценарий",
+                    "voicePath": "", "outputPath": "", "error": "",
+                    "timeline": [{"at": time.strftime("%H:%M:%S"), "label": "Ожидает текст сценария",
+                                  "progress": 0, "detail": "Тема автоматически передана в монтаж"}],
+                    "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                changed = True
+            continue
+        voice_path = str(settings.voice_scenario_outputs.get(str(index + 1), ""))
+        changed = _sync_montage_handoff(settings, index, title, voice_path) or changed
+    return changed
+
+
+def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bool:
+    """Keep one SEO/tags row per scenario title and refresh its finished text."""
+    existing = next((item for item in settings.seo_queue
+                     if str(item.get("source_title", "")).casefold() == title.casefold()), None)
+    script = job.result if job else ""
+    requirements = _scenario_preferences(job)
+    if existing is None:
+        settings.seo_queue.append({"source_title": title, "script": script, "requirements": requirements,
+                                   "status": "Ожидает", "title": "", "description": "", "hashtags": [], "tags": [],
+                                   "tags_status": "Ожидают", "tags_error": "", "error": ""})
+        return True
+    changed = (existing.get("source_title") != title or existing.get("script", "") != script
+               or existing.get("requirements", "") != requirements)
+    if changed:
+        existing.update({"source_title": title, "script": script, "requirements": requirements})
+    return changed
+
+
+def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
+    """Keep a single automatic cover entry for every scenario topic."""
+    script = job.result if job and job.state == RunState.DONE else ""
+    production_item = dict(getattr(settings, "idea_scenario_context", {}).get(title, {}) or {})
+    production_item_id = str(production_item.get("id", "")).strip()
+    existing = next((item for item in settings.cover_queue
+                     if (production_item_id and str(item.get("production_item_id", "")).strip() == production_item_id)
+                     or (not production_item_id and str(item.get("title", "")).casefold() == title.casefold())), None)
+    context_keys = (
+        "direction", "topic", "angle", "event_ids", "event_context", "supporting_context",
+        "primary_entities", "primary_entity", "entities", "geography", "conflict",
+        "main_consequence", "consequence", "framing", "framing_type",
+    )
+    context = {key: production_item[key] for key in context_keys if production_item.get(key) not in (None, "", [], {})}
+    if existing is None:
+        settings.cover_queue.append({"title": title, "script": script, "scenario_index": index + 1,
+                                     "status": "Ожидает", "path": "", "error": "",
+                                     "headline_status": "Ожидает генерации", "headline_error": "",
+                                     "subheadline_status": "Ожидает генерации", "subheadline_error": "",
+                                     "production_item_id": production_item_id, **context})
+        return True
+    changed = (existing.get("script", "") != script or existing.get("scenario_index") != index + 1
+               or existing.get("production_item_id", "") != production_item_id
+               or any(existing.get(key) != value for key, value in context.items()))
+    if changed:
+        existing.update({"title": title, "script": script, "scenario_index": index + 1,
+                         "production_item_id": production_item_id, **context})
+    return changed
+
+
+def _sync_current_scenario_covers(settings: Settings) -> bool:
+    """Project exactly one cover row for each current scenario identity."""
+    titles, jobs = load_session()
+    active_ids = _active_cover_production_ids(settings)
+    # Direct cover-reference/compositor actions can deliberately operate on a
+    # manually supplied in-memory row before a production session exists.
+    # There is no current session identity to reconcile in that case, so do
+    # not erase the operator's row.  Hydration itself still refuses to restore
+    # an old persistent gallery when the current session is empty.
+    if not active_ids:
+        return False
+    before = list(settings.cover_queue)
+    settings.cover_queue = [
+        item for item in settings.cover_queue
+        if isinstance(item, dict) and str(item.get("production_item_id", "")).strip() in active_ids
+    ]
+    jobs_by_index = {job.request.index: job for job in jobs}
+    changed = settings.cover_queue != before
+    for index, title in enumerate(titles):
+        changed = _sync_scenario_to_covers(settings, index, str(title), jobs_by_index.get(index)) or changed
+    _assign_cover_production_ids(settings)
+    return changed
+
+
+def transfer_scenarios(payload: dict) -> dict:
+    target = str(payload.get("target", "")).strip()
+    requested = {int(index) for index in payload.get("indices", [])}
+    titles, jobs = load_session()
+    by_index = {job.request.index: job for job in jobs}
+    # The command is also available to the auto-pipeline and future external
+    # controls.  An omitted selection means "all", exactly as the UI says.
+    if not requested:
+        requested = set(range(len(titles)))
+    valid = [index for index in sorted(requested) if 0 <= index < len(titles)]
+    if bool(payload.get("requireCompleted", False)):
+        valid = [index for index in valid if (job := by_index.get(index)) and job.state == RunState.DONE and job.result.strip()]
+    if not valid:
+        raise ValueError("Выберите хотя бы один готовый сценарий для передачи")
+    settings = load_settings()
+    if target == "covers":
+        for index in valid:
+            title = titles[index]
+            _sync_scenario_to_covers(settings, index, title, by_index.get(index))
+    elif target == "seo":
+        for index in valid:
+            title = titles[index]
+            job = by_index.get(index)
+            _sync_scenario_to_seo(settings, title, job)
+    elif target == "voice":
+        for index in valid:
+            # A blank output marks a manually queued task; actual audio will
+            # replace it when the selected provider finishes.
+            key = str(index + 1)
+            settings.voice_scenario_outputs.setdefault(key, "")
+            settings.voice_task_statuses.setdefault(key, {"label": "Ожидает озвучки", "progress": 0, "updatedAt": ""})
+    elif target == "montage":
+        for index in valid:
+            voice_path = str(settings.voice_scenario_outputs.get(str(index + 1), ""))
+            if payload.get("handoffOnly"):
+                _mark_montage_audio_incoming(settings, index, titles[index], voice_path)
+            else:
+                _sync_montage_handoff(settings, index, titles[index], voice_path, transferred=True)
+    else:
+        raise ValueError("Неизвестный этап передачи")
+    save_settings(settings)
+    result = snapshot()
+    labels = {"covers": "обложки", "seo": "SEO и теги", "voice": "озвучку", "montage": "монтаж"}
+    result["operationResult"] = {
+        "kind": "scenario-transfer",
+        "count": len(valid),
+        "message": f"Сценариев передано в этап «{labels[target]}»: {len(valid)}.",
+    }
+    return result
+
+
+def save_cover_settings(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    if "operation" in payload:
+        settings.cover_operation = str(payload["operation"]).strip() or settings.cover_operation
+    if "aspectRatio" in payload:
+        ratio = str(payload["aspectRatio"])
+        if ratio in {"16:9", "9:16", "1:1"}:
+            settings.cover_aspect_ratio = ratio
+    if "variantCount" in payload:
+        settings.cover_variant_count = max(1, min(10, int(payload["variantCount"])))
+    if "promptTemplate" in payload:
+        settings.cover_prompt_template = str(payload["promptTemplate"]).strip()
+    provider = str(payload.get("provider", settings.cover_prompt_provider)).strip().casefold()
+    if provider in {"agent", "openai"}:
+        settings.cover_prompt_provider = provider
+    if isinstance(payload.get("useCustomPrompt"), bool):
+        settings.cover_use_custom_prompt = bool(payload["useCustomPrompt"])
+    if isinstance(payload.get("useScriptContext"), bool):
+        settings.cover_use_script_context = bool(payload["useScriptContext"])
+    if "promptVariantCount" in payload:
+        settings.cover_prompt_variant_count = max(1, min(10, int(payload["promptVariantCount"])))
+    headline_provider = str(payload.get("headlineProvider", settings.cover_headline_provider)).strip().casefold()
+    if headline_provider in {"agent", "openai"}:
+        settings.cover_headline_provider = headline_provider
+    if str(payload.get("textMode", settings.cover_text_mode)) in {"overlay", "fastgen"}:
+        settings.cover_text_mode = str(payload.get("textMode"))
+    build_mode = str(payload.get("buildMode", settings.cover_build_mode))
+    if build_mode in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
+        settings.cover_build_mode = build_mode
+    if "headlineTemplate" in payload:
+        settings.cover_headline_template = str(payload["headlineTemplate"]).strip() or settings.cover_headline_template
+    if "subheadlineTemplate" in payload:
+        settings.cover_subheadline_template = (str(payload["subheadlineTemplate"]).strip()
+                                              or settings.cover_subheadline_template)
+    if isinstance(payload.get("useTextStructure"), bool):
+        settings.cover_text_use_structure = bool(payload["useTextStructure"])
+    if isinstance(payload.get("avoidTextRepeats"), bool):
+        settings.cover_text_avoid_repeats = bool(payload["avoidTextRepeats"])
+    if isinstance(payload.get("ranges"), list):
+        settings.cover_prompt_ranges = _clean_cover_ranges(payload["ranges"])
+    reference_mode = str(payload.get("referenceMode", settings.cover_reference_mode)).casefold()
+    if reference_mode in {"all", "ranges", "off"}:
+        settings.cover_reference_mode = reference_mode
+    if isinstance(payload.get("referencePaths"), list):
+        settings.cover_reference_paths = [str(path) for path in payload["referencePaths"]
+                                          if Path(str(path)).is_file()][:10]
+    if isinstance(payload.get("referenceRanges"), list):
+        settings.cover_reference_ranges = _clean_cover_reference_ranges(payload["referenceRanges"])
+    ai_reference_mode = str(payload.get("aiReferenceMode", settings.cover_ai_reference_mode)).casefold()
+    if ai_reference_mode in {"all", "ranges", "off"}:
+        settings.cover_ai_reference_mode = ai_reference_mode
+    if isinstance(payload.get("aiReferencePaths"), list):
+        settings.cover_ai_reference_paths = [str(path) for path in payload["aiReferencePaths"]
+                                             if Path(str(path)).is_file()][:10]
+    if isinstance(payload.get("aiReferenceRanges"), list):
+        settings.cover_ai_reference_ranges = _clean_cover_reference_ranges(payload["aiReferenceRanges"])
+    if isinstance(payload.get("aiReferenceToFastgen"), bool):
+        settings.cover_ai_reference_to_fastgen = bool(payload["aiReferenceToFastgen"])
+    if "faceLibraryFolder" in payload:
+        raw_folder = str(payload.get("faceLibraryFolder", "") or "").strip().strip('"')
+        if raw_folder in {".", ".\\", "./"}:
+            raise ValueError("Укажите главную папку «Лица», а не точку (.): внутри неё должны быть подпапки с портретами.")
+        folder = Path(raw_folder).expanduser()
+        if raw_folder and not folder.is_absolute():
+            raise ValueError("Укажите полный путь к главной папке «Лица» через кнопку «Выбрать папку».")
+        folder = folder.resolve() if raw_folder else folder
+        if raw_folder and not folder.is_dir():
+            raise ValueError("Папка лиц не найдена. Выберите существующую папку с портретами.")
+        settings.cover_face_library_folder = str(folder) if raw_folder else ""
+        # Selecting a portrait library should make it usable immediately.
+        # The switches remain available to disable faces later, but the user
+        # no longer has to discover a second setting before politicians appear.
+        if raw_folder:
+            settings.cover_face_library_enabled = True
+            settings.cover_face_remove_background = True
+    if "facePreparedFolder" in payload:
+        raw_prepared = str(payload.get("facePreparedFolder", "") or "").strip().strip('"')
+        prepared = Path(raw_prepared).expanduser()
+        if raw_prepared and not prepared.is_absolute():
+            raise ValueError("Укажите полный путь к отдельной папке готовых PNG через кнопку «Папка PNG».")
+        if raw_prepared and settings.cover_face_library_folder:
+            source_folder = Path(settings.cover_face_library_folder).expanduser().resolve()
+            if prepared.resolve() == source_folder:
+                raise ValueError("Папка готовых PNG должна отличаться от папки исходников.")
+        settings.cover_face_prepared_folder = str(prepared.resolve()) if raw_prepared else ""
+    if isinstance(payload.get("faceLibraryEnabled"), bool):
+        settings.cover_face_library_enabled = bool(payload["faceLibraryEnabled"])
+    if isinstance(payload.get("faceRemoveBackground"), bool):
+        settings.cover_face_remove_background = bool(payload["faceRemoveBackground"])
+    if isinstance(payload.get("autoOverlayText"), bool):
+        settings.cover_auto_overlay_text = bool(payload["autoOverlayText"])
+    if isinstance(payload.get("autoTextColor"), bool):
+        settings.cover_auto_text_color = bool(payload["autoTextColor"])
+    if "seed" in payload:
+        settings.cover_seed = str(payload.get("seed", "")).strip()[:40]
+    if isinstance(payload.get("upscale"), bool):
+        settings.cover_upscale = bool(payload["upscale"])
+    if "quality" in payload:
+        settings.cover_quality = str(payload.get("quality", "")).strip()[:80]
+    if "resolution" in payload:
+        settings.cover_resolution = str(payload.get("resolution", "")).strip()[:80]
+    if "rateLimitPerHour" in payload:
+        settings.cover_rate_limit_per_hour = max(0, min(100000, int(payload.get("rateLimitPerHour", 0) or 0)))
+    if isinstance(payload.get("rateAutoResume"), bool):
+        settings.cover_rate_auto_resume = bool(payload["rateAutoResume"])
+    if isinstance(payload.get("fastgenKeyLabels"), list):
+        known = {item.label for item in settings.cover_api_keys}
+        settings.cover_selected_key_labels = [str(value).strip() for value in payload["fastgenKeyLabels"]
+                                              if str(value).strip() in known]
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def set_cover_generation_paused(paused: bool) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    settings.cover_generation_paused = paused
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-generation-pause", "count": 0,
+        "message": "Генерация обложек поставлена на паузу после текущего запроса." if paused
+        else "Генерация обложек продолжена для приостановленных тем.",
+    }}
+
+
+def prepare_cover_face_library(payload: dict) -> dict:
+    """Create reusable transparent portrait PNGs once, never on every render."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    folder = Path(settings.cover_face_library_folder).expanduser()
+    if not folder.is_dir():
+        raise ValueError("Сначала выберите папку «Лица»")
+    prepared_folder = _cover_prepared_face_folder(settings, folder)
+    sources, truncated = _cover_face_files(folder)
+    if not sources:
+        raise ValueError("В папке «Лица» нет JPG, PNG или WEBP-портретов")
+    created = 0
+    reused = 0
+    compressed = 0
+    errors: list[str] = []
+    session = None
+    remove = None
+    for source in sources:
+        target = _cover_processed_face_path(source, folder, prepared_folder)
+        try:
+            if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
+                if _compress_prepared_face_for_fastgen(target):
+                    compressed += 1
+                reused += 1
+                continue
+            if session is None:
+                try:
+                    # Never put a large model on C: or into the untouched source-photo
+                    # library.  The reusable model lives next to the generated PNGs.
+                    os.environ["U2NET_HOME"] = str(prepared_folder / "_модели_вырезания_фона")
+                    from rembg import new_session, remove as rembg_remove  # type: ignore[import-not-found]
+                    # silueta is deliberately used instead of rembg's heavyweight default
+                    # BRIA model. It is sufficient for portrait cut-outs.
+                    session = new_session("silueta")
+                    remove = rembg_remove
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "Для вырезания фона нужен модуль rembg. Он добавлен в зависимости NewsFlow; "
+                        "после следующей сборки установщика функция будет доступна."
+                    ) from exc
+                except Exception as exc:
+                    raise RuntimeError(f"Не удалось подготовить лёгкую модель вырезания фона: {exc}") from exc
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(remove(source.read_bytes(), session=session))
+            if _compress_prepared_face_for_fastgen(target):
+                compressed += 1
+            created += 1
+        except Exception as exc:  # individual damaged images must not stop the library
+            errors.append(f"{source.name}: {exc}")
+    _save_cover_state(settings)
+    detail = f"Подготовлено PNG без фона: {created}; уже были готовы: {reused}; сжато для FastGen ≤5 МБ: {compressed}."
+    if truncated:
+        detail += " За один запуск обработаны первые 500 файлов."
+    if errors:
+        detail += f" Ошибок: {len(errors)} ({errors[0]})."
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-face-prepare", "count": created, "folder": str(prepared_folder), "message": detail,
+    }}
+
+
+def select_cover_face(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    face_path = Path(str(payload.get("path", "") or "")).expanduser()
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Тема обложки не найдена")
+    if not face_path.is_file() or face_path.suffix.casefold() not in _COVER_IMAGE_SUFFIXES:
+        raise ValueError("Выберите файл портрета JPG, PNG или WEBP")
+    label = " ".join(str(payload.get("label", "") or "").split()) or face_path.stem
+    settings.cover_queue[index].update(
+        face_reference_path=str(face_path), face_reference_label=label, face_reference_source="manual",
+        face_reference_disabled=False,
+    )
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def select_cover_face_person(payload: dict) -> dict:
+    """Pick a prepared portrait from the selected person's folder, not a file dialog."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    person = " ".join(str(payload.get("person", "") or "").split())
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Тема обложки не найдена")
+    if not person:
+        raise ValueError("Выберите персону из списка лиц")
+    catalog = _cover_face_catalog(settings)
+    selected = next((item for item in catalog if str(item.get("name", "")).casefold() == person.casefold()), None)
+    if not selected or not selected.get("paths"):
+        raise ValueError(f"В папке «{person}» нет готовых портретов")
+    current = str(settings.cover_queue[index].get("face_reference_path", ""))
+    choices = [path for path in selected["paths"] if path != current] or list(selected["paths"])
+    face_path = Path(random.choice(choices))
+    settings.cover_queue[index].update(
+        face_reference_path=str(face_path), face_reference_label=str(selected["name"]), face_reference_source="manual",
+        face_reference_disabled=False,
+    )
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-face-selected", "count": 1,
+        "message": f"Выбрано лицо: {selected['name']}. Для повторной генерации промпт будет адаптирован под него.",
+    }}
+
+
+def clear_cover_face(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Тема обложки не найдена")
+    item = settings.cover_queue[index]
+    for key in ("face_reference_path", "face_reference_label", "face_reference_source"):
+        item.pop(key, None)
+    item["face_reference_disabled"] = True
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def _prepare_cover_visual_reference(path: Path) -> Path:
+    """Copy an arbitrary user reference into a stable 16:9 FastGen-safe asset.
+
+    The original remains untouched. Scene references use a centre ``cover``
+    crop: the canvas is always filled without letterboxing or stretching a
+    person's face out of proportion. Portraits are handled by the separate
+    local face compositor and therefore never pass through this crop route.
+    """
+    directory = app_data_root() / "CoverReferenceCache"
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ValueError("Нужна Pillow, чтобы подготовить референс обложки") from exc
+    try:
+        with Image.open(path) as source:
+            source.load()
+            image = source.convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"Не удалось прочитать изображение «{path.name}». Выберите исправный JPG, PNG или WEBP.") from exc
+    try:
+        if path.resolve().is_relative_to(directory.resolve()) and image.size == (1920, 1080) \
+                and 0 < path.stat().st_size <= _FASTGEN_REFERENCE_SAFE_BYTES:
+            return path
+    except (OSError, ValueError):
+        pass
+    width, height = image.size
+    if width < 2 or height < 2:
+        raise ValueError(f"Изображение «{path.name}» слишком маленькое для референса обложки")
+    target_size = (1920, 1080)
+    scale = max(target_size[0] / width, target_size[1] / height)
+    scaled = (max(target_size[0], round(width * scale)), max(target_size[1], round(height * scale)))
+    image = image.resize(scaled, Image.Resampling.LANCZOS)
+    left = max(0, (scaled[0] - target_size[0]) // 2)
+    top = max(0, (scaled[1] - target_size[1]) // 2)
+    image = image.crop((left, top, left + target_size[0], top + target_size[1]))
+    fingerprint = hashlib.sha256(
+        f"{path.resolve()}:{path.stat().st_size}:{path.stat().st_mtime_ns}:1920x1080".encode("utf-8", errors="replace")
+    ).hexdigest()
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"{fingerprint}.webp"
+    if destination.is_file():
+        try:
+            with Image.open(destination) as cached:
+                if cached.size == target_size and 0 < destination.stat().st_size <= _FASTGEN_REFERENCE_SAFE_BYTES:
+                    return destination
+        except Exception:
+            destination.unlink(missing_ok=True)
+    for quality in (90, 84, 78, 72):
+        image.save(destination, format="WEBP", quality=quality, method=6)
+        if destination.stat().st_size <= _FASTGEN_REFERENCE_SAFE_BYTES:
+            return destination
+    destination.unlink(missing_ok=True)
+    raise ValueError(f"Не удалось подготовить «{path.name}» для FastGen: файл не сжимается до 5 МБ")
+
+
+def select_cover_visual_reference(payload: dict) -> dict:
+    """Attach a normalized user image for prompt analysis and optionally FastGen."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    path = Path(str(payload.get("path", "") or "")).expanduser()
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Тема обложки не найдена")
+    if not path.is_file() or path.suffix.casefold() not in _COVER_IMAGE_SUFFIXES:
+        raise ValueError("Выберите файл обложки JPG, PNG или WEBP")
+    prepared = _prepare_cover_visual_reference(path)
+    item = settings.cover_queue[index]
+    item["visual_reference_path"] = str(prepared)
+    item["visual_reference_to_fastgen"] = bool(payload.get("sendToFastgen", False))
+    destination = "ИИ и FastGen" if item["visual_reference_to_fastgen"] else "только ИИ-промптов"
+    _cover_step(item, "Референс загружен", 0, f"Референс подготовлен для {destination}; следующий запуск промптов создаст похожую новую композицию")
+    item["error"] = ""
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-visual-reference", "count": 1,
+        "message": f"Референс обложки подготовлен для {destination}. Запускаю анализ промпта для похожей новой композиции.",
+    }}
+
+
+def set_cover_visual_reference_target(payload: dict) -> dict:
+    """Choose whether an already uploaded visual reference is also sent to FastGen."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Тема обложки не найдена")
+    item = settings.cover_queue[index]
+    path = Path(str(item.get("visual_reference_path", "") or ""))
+    if not path.is_file():
+        raise ValueError("Сначала загрузите свою картинку для этой темы")
+    item["visual_reference_to_fastgen"] = bool(payload.get("sendToFastgen", False))
+    _save_cover_state(settings)
+    destination = "ИИ и FastGen" if item["visual_reference_to_fastgen"] else "только ИИ-промптов"
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-visual-reference-target", "count": 1,
+        "message": f"Референс будет использоваться для {destination}.",
+    }}
+
+
+def _selected_fastgen_keys(settings: Settings) -> list:
+    """Return explicitly chosen active keys, or every active key by default."""
+    labels = {str(value).strip() for value in settings.cover_selected_key_labels if str(value).strip()}
+    active = [item for item in settings.cover_api_keys if item.active and item.secret.strip()]
+    if not labels:
+        return active
+    selected = [item for item in active if item.label in labels]
+    if not selected:
+        raise ValueError("Включите хотя бы один выбранный ключ FastGen")
+    return selected
+
+
+def refresh_fastgen(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    pool = FastGenPool(_selected_fastgen_keys(settings))
+    capabilities = pool.capabilities_all()
+    models = pool.validate_all()
+    settings.fastgen_capabilities_cache = {
+        kind: _decorate_fastgen_models(capabilities.get(kind), models.get(kind))
+        for kind in ("image", "video")
+    }
+    settings.fastgen_usage_cache = _decorate_fastgen_usage(pool.usage_all())
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def _fastgen_items(value: object) -> list[dict]:
+    """FastGen has used both a plain list and {data/models: []} responses."""
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        for key in ("data", "models", "capabilities", "items"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+    return []
+
+
+def _decorate_fastgen_models(capabilities: object, models: object) -> list[dict]:
+    """Expose a stable visual health state without inventing unavailable models."""
+    capability_items = _fastgen_items(capabilities)
+    model_items = _fastgen_items(models)
+    model_by_operation: dict[str, dict] = {}
+    for model in model_items:
+        ids = [model.get("id"), model.get("operation"), *(model.get("operations") or [])]
+        for model_id in ids:
+            if model_id:
+                model_by_operation[str(model_id)] = model
+    result: list[dict] = []
+    for capability in capability_items:
+        item = dict(capability)
+        ident = str(item.get("id") or item.get("operation") or "")
+        model = model_by_operation.get(ident, {})
+        item.setdefault("provider", model.get("provider"))
+        item.setdefault("display_name", model.get("display_name") or model.get("name"))
+        item["deprecated"] = bool(item.get("deprecated") or model.get("deprecated"))
+        raw_status = str(item.get("status") or model.get("status") or "").casefold()
+        available_flag = item.get("available", model.get("available", item.get("is_available", model.get("is_available", True))))
+        found_in_active_models = bool(model)
+        item["api_checked"] = True
+        item["api_available"] = found_in_active_models and available_flag is not False
+        if item["deprecated"] or not found_in_active_models or available_flag is False or raw_status in {"unavailable", "disabled", "failed", "offline"}:
+            item.update(health="unavailable", health_label="Недоступна по API")
+        elif raw_status in {"degraded", "busy", "limited"} or item.get("experimental") or model.get("experimental"):
+            item.update(health="degraded", health_label="Ограничение API" if raw_status else "Beta по API")
+        else:
+            item.update(health="healthy", health_label="Доступна по API")
+        result.append(item)
+    return result
+
+
+def _as_number(value: object) -> int:
+    try:
+        return max(0, int(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _decorate_fastgen_usage(entries: list[dict]) -> dict:
+    """Keep only the documented usage data needed by the UI; never cache keys."""
+    result = {"updatedAt": time.strftime("%d.%m.%Y %H:%M:%S"), "keys": []}
+    for key_number, entry in enumerate(entries, start=1):
+        raw = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
+        limits = raw.get("account_limits") if isinstance(raw.get("account_limits"), dict) else {}
+        current = raw.get("current_usage") if isinstance(raw.get("current_usage"), dict) else {}
+        hourly = current.get("hourly_usage") if isinstance(current.get("hourly_usage"), dict) else {}
+        threads = current.get("active_threads") if isinstance(current.get("active_threads"), dict) else {}
+        image_used = hourly.get("image_generation")
+        video_used = hourly.get("video_generation")
+        prompt_used = hourly.get("prompt_generation")
+        raw_label = str(entry.get("label", "FastGen")).strip()
+        safe_label = raw_label if raw_label and "?" not in raw_label else f"FastGen · ключ {key_number}"
+        result["keys"].append({
+            "label": safe_label,
+            "error": str(entry.get("error", "")),
+            "window": str(raw.get("usage_window", "per_hour")),
+            "image": {"used": _as_number(image_used), "knownUsed": image_used is not None,
+                      "limit": _as_number(limits.get("img_gen_per_hour_limit")),
+                      "threads": _as_number(threads.get("image_threads")),
+                      "threadLimit": _as_number(limits.get("img_generation_threads_allowed"))},
+            "video": {"used": _as_number(video_used), "knownUsed": video_used is not None,
+                      "limit": _as_number(limits.get("video_gen_per_hour_limit")),
+                      "threads": _as_number(threads.get("video_threads")),
+                      "threadLimit": _as_number(limits.get("video_generation_threads_allowed"))},
+            "prompts": {"used": _as_number(prompt_used), "knownUsed": prompt_used is not None,
+                        "limit": _as_number(limits.get("prompt_tokens_per_hour_limit"))},
+            "expiresAt": _as_number(raw.get("expiration_date")),
+        })
+    return result
+
+
+def _clean_cover_ranges(value: list) -> list[dict]:
+    result: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        start = max(1, int(item.get("start", 1) or 1))
+        end = max(start, int(item.get("end", start) or start))
+        prompt = str(item.get("prompt", "")).strip()
+        if prompt:
+            result.append({"start": start, "end": end, "prompt": prompt})
+    return result
+
+
+def _clean_cover_reference_ranges(value: list) -> list[dict]:
+    """Validate channel style packs. First matching range intentionally wins."""
+    result: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        start = max(1, int(item.get("start", 1) or 1))
+        end = max(start, int(item.get("end", start) or start))
+        paths = []
+        for raw in item.get("paths", []):
+            path = str(raw).strip()
+            if path and Path(path).is_file() and path not in paths:
+                paths.append(path)
+        if paths:
+            result.append({"start": start, "end": end, "paths": paths[:10],
+                           "sendToFastgen": bool(item.get("sendToFastgen", False))})
+    return result
+
+
+def _cover_reference_paths_for_item(item: dict, position: int, settings: Settings) -> list[str]:
+    """Resolve references before both the vision prompt and FastGen render."""
+    mode = str(settings.cover_reference_mode or "all").casefold()
+    if mode == "off":
+        return []
+    if mode == "all":
+        candidates = settings.cover_reference_paths
+    else:
+        scenario_index = int(item.get("scenario_index") or position + 1)
+        candidates = []
+        for group in settings.cover_reference_ranges:
+            if int(group.get("start", 1)) <= scenario_index <= int(group.get("end", 0)):
+                candidates = group.get("paths", [])
+                break
+    unique: list[str] = []
+    for raw in candidates:
+        path = str(raw).strip()
+        if path and Path(path).is_file() and path not in unique:
+            unique.append(path)
+    return unique[:10]
+
+
+def _cover_ai_reference_paths_for_item(item: dict, position: int, settings: Settings) -> list[str]:
+    """Resolve references sent only to the prompt-writing agent/ChatGPT."""
+    mode = str(settings.cover_ai_reference_mode or "off").casefold()
+    if mode == "off":
+        candidates: list[str] = []
+    elif mode == "all":
+        candidates = settings.cover_ai_reference_paths
+    else:
+        scenario_index = int(item.get("scenario_index") or position + 1)
+        candidates = []
+        for group in settings.cover_ai_reference_ranges:
+            if int(group.get("start", 1)) <= scenario_index <= int(group.get("end", 0)):
+                candidates = group.get("paths", [])
+                break
+    unique: list[str] = []
+    for raw in candidates:
+        path = str(raw).strip()
+        if path and Path(path).is_file() and path not in unique:
+            unique.append(path)
+    visual = str(item.get("visual_reference_path", "")).strip()
+    if visual and Path(visual).is_file() and visual not in unique:
+        unique.insert(0, visual)
+    return unique[:10]
+
+
+def _cover_ai_reference_paths_for_fastgen(item: dict, position: int, settings: Settings) -> list[str]:
+    """Return only AI reference packs that the user explicitly opted into FastGen."""
+    mode = str(settings.cover_ai_reference_mode or "off").casefold()
+    if mode == "off":
+        candidates: list[str] = []
+    elif mode == "all":
+        candidates = settings.cover_ai_reference_paths if settings.cover_ai_reference_to_fastgen else []
+    else:
+        scenario_index = int(item.get("scenario_index") or position + 1)
+        candidates = []
+        for group in settings.cover_ai_reference_ranges:
+            if int(group.get("start", 1)) <= scenario_index <= int(group.get("end", 0)):
+                candidates = group.get("paths", []) if group.get("sendToFastgen") else []
+                break
+    unique: list[str] = []
+    for raw in candidates:
+        path = str(raw).strip()
+        if path and Path(path).is_file() and path not in unique:
+            unique.append(path)
+    return unique[:10]
+
+
+def _cover_reference_instruction(item: dict, position: int, settings: Settings) -> str:
+    paths = _cover_reference_paths_for_item(item, position, settings)
+    if not paths:
+        return ""
+    return (
+        f"\nРЕФЕРЕНСЫ КАНАЛА: перед тобой {len(paths)} изображений, отобранных для этой темы. "
+        "Внимательно учти их только как визуальную планку: композицию, распределение крупного героя, "
+        "контраст, палитру, плотность сцены и безопасную зону текста. Не копируй конкретную обложку, "
+        "лицо, логотип, чужой текст или водяной знак. Придумай новую самостоятельную сцену строго по текущей теме."
+    )
+
+
+def _cover_ai_reference_instruction(item: dict, position: int, settings: Settings) -> str:
+    paths = _cover_ai_reference_paths_for_item(item, position, settings)
+    if not paths:
+        return ""
+    return (
+        f"\nРЕФЕРЕНСЫ ДЛЯ ИИ-ПРОМПТА: используй {len(paths)} изображений только для анализа "
+        "композиции, палитры, контраста, масштаба героя и зоны текста. Не копируй людей, логотипы, "
+        "надписи или конкретное событие; придумай новый реалистичный визуальный план по текущей теме."
+    )
+
+
+def _cover_range_prompt(item: dict, position: int, settings) -> str:
+    scenario_index = int(item.get("scenario_index") or position + 1)
+    for value in settings.cover_prompt_ranges:
+        if int(value.get("start", 1)) <= scenario_index <= int(value.get("end", 0)):
+            return str(value.get("prompt", "")).strip()
+    return ""
+
+
+def _cover_step(item: dict, label: str, progress: int, detail: str = "") -> None:
+    events = list(item.get("timeline") or [])
+    events.append({"at": time.strftime("%H:%M:%S"), "label": label, "progress": max(0, min(100, int(progress))), "detail": detail})
+    item.update(
+        status=label,
+        progress=max(0, min(100, int(progress))),
+        timeline=events[-12:],
+        # Used by Settings' per-row merge when montage and FastGen work at
+        # the same time. Microseconds prevent equal-second progress updates
+        # from being mistaken for an older bridge snapshot.
+        updatedAt=datetime.now().isoformat(timespec="microseconds"),
+    )
+
+
+def _cover_context_values(value: object) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(" ".join(str(item).split()) for item in value if str(item).strip())
+    return " ".join(str(value or "").split())
+
+
+def _cover_structured_context(item: dict) -> str:
+    """Expose production-item facts to prompt generation without inventing a scene."""
+    fields = (
+        ("НАПРАВЛЕНИЕ", item.get("direction")),
+        ("ТОПИК", item.get("topic")),
+        ("УГОЛ", item.get("angle")),
+        ("КОНТЕКСТ СОБЫТИЯ", item.get("event_context") or item.get("supporting_context")),
+        ("ОСНОВНЫЕ УЧАСТНИКИ", item.get("primary_entities") or item.get("primary_entity") or item.get("entities")),
+        ("ГЕОГРАФИЯ", item.get("geography")),
+        ("КОНФЛИКТ", item.get("conflict")),
+        ("ПОСЛЕДСТВИЕ", item.get("main_consequence") or item.get("consequence")),
+        ("ФРЕЙМИНГ", item.get("framing") or item.get("framing_type")),
+    )
+    lines = [f"{label}: {text}" for label, value in fields if (text := _cover_context_values(value))]
+    evidence = " ".join(lines).casefold()
+    military_markers = ("ракет", "удар", "атак", "взрыв", "пво", "дрон", "беспилот", "войн", "военн", "пожар", "разруш")
+    if any(marker in evidence for marker in military_markers):
+        lines.append(
+            "ДРАМАТИЧЕСКАЯ ВОЕННАЯ ВИЗУАЛИЗАЦИЯ: только если это следует из контекста, покажи "
+            "конкретные последствия удара — дым, огонь, повреждённую инфраструктуру, спасателей, ПВО, дроны, "
+            "ракеты или технику — без заявления, что это точный документальный кадр события."
+        )
+    else:
+        lines.append(
+            "НЕВОЕННОЕ ОГРАНИЧЕНИЕ: не добавляй взрывы, огонь, ракеты, дроны или военную технику, если они не "
+            "следуют из указанного контекста; для экономики, миграции и переговоров показывай только релевантную среду."
+        )
+    return "\n".join(lines)
+
+
+def _cover_topic_visual_plan(item: dict) -> str:
+    """Give the prompt writer a concrete scene grammar for recurring news topics.
+
+    General words such as “war” or “tension” otherwise produce a generic
+    soldier/map thumbnail.  The plan remains an editorial visualisation, not
+    a claim that a photographed incident really occurred.
+    """
+    factual_context = " ".join(_cover_context_values(item.get(key)) for key in (
+        "direction", "topic", "angle", "event_context", "supporting_context", "primary_entities",
+        "primary_entity", "entities", "geography", "conflict", "main_consequence", "consequence",
+    ))
+    text = " ".join((str(item.get("title", "")), str(item.get("script", "")), factual_context)).casefold()
+    has = lambda *terms: any(term in text for term in terms)
+    if has("ормуз", "ormuz", "hormuz"):
+        return (
+            "ОРМУЗСКИЙ ВИЗУАЛЬНЫЙ ПЛАН: широкий реальный вид Ормузского пролива — танкер на переднем плане, "
+            "портовые краны/терминал и другие суда на глубине, тревожные моряки, спасатели или береговая охрана. "
+            "Для атмосферы угрозы допустимы дым, аварийные огни или горящий танкер ТОЛЬКО как редакционная визуализация, "
+            "не как заявление о конкретном подтверждённом взрыве. Оставь правую треть под локально наложенный портрет Трампа "
+            "если он найден в библиотеке, левую нижнюю часть — под крупный заголовок. Не ставь случайного военного у карты."
+        )
+    if has("нато") and has("росси", "кремл", "рф"):
+        return (
+            "ПЛАН НАТО—РОССИЯ: фотореалистичный телевизионный репортаж о конкретной политической или военной теме, а не выдуманная кино-сцена. "
+            "Основой кадра сделай реальный саммит НАТО, официальный вход штаба, пресс-зону или зал консультаций; обязательно покажи официальные флаги НАТО и ЕС "
+            "как узнаваемые тканевые флаги без читаемых надписей. Добавь журналистов с камерами, вспышки, охрану и только тех официальных лиц или объекты, "
+            "которые прямо связаны с заголовком. В каждом варианте обязателен один видимый и строго тематический маркер эскалации: ракетный пуск, удар, "
+            "работа ПВО или последствия атаки у названного в теме объекта; в кадре должны быть люди, пресса и реакция на конфликт. На втором плане покажи "
+            "фактический предмет риска из темы: карту региона, военную технику, аэродром, корабли, границу, санкционные документы или экстренные службы — "
+            "но только если это логично для текста. Дым, пожарные, спасатели и эвакуация должны быть частью новостной визуализации конкретного конфликта. "
+            "Не рисуй выдуманного седого генерала, безымянного героя, фантазийный бункер, одинокого солдата у декоративной карты или странный секретный штаб. "
+            "Не показывай бункер и не смешивай случайных лидеров, страны или флаги, которых нет в теме."
+        )
+    if has("кремл", "переговор", "ультиматум", "торг"):
+        return (
+            "ПЛАН ПЕРЕГОВОРОВ: широкая фотореалистичная сцена политического саммита — длинный стол, несколько лидеров и "
+            "дипломатов, журналисты, телекамеры, папки и флаги, напряжённые лица и вспышки камер. Если найден Путин, "
+            "локально помести его крупным портретом справа; фон должен оставаться панорамой переговоров, не одинокий политик у карты."
+        )
+    if has("удар", "взрыв", "пожар", "атак"):
+        return (
+            "ПЛАН ИНЦИДЕНТА: правдоподобная широкая сцена последствий — спасатели, пожарные, очевидцы на безопасной дистанции, "
+            "дым и аварийный свет, техника или объект строго по теме. Не создавай несуществующие доказательства конкретного удара; "
+            "это атмосферная редакционная визуализация события."
+        )
+    if has("военн", "армия", "фронт", "наступлен"):
+        return (
+            "ПЛАН ВОЕННОЙ ТЕМЫ: военнослужащие заняты понятным действием (патруль, эвакуация, логистика, штаб или техника), "
+            "реальная среда и люди на разных планах. Никакой одинокой фигуры с декоративной картой без связи с темой."
+        )
+    return (
+        "ПЛАН ПО УМОЛЧАНИЮ: не придумывай отдельное событие, аварию, удар или разрушение. Используй только конкретные объекты, "
+        "имена, места и действия, названные в теме или сценарии; покажи их в реалистичной редакционной среде с естественными людьми "
+        "(журналисты, участники, специалисты или очевидцы) только если они логично следуют из текста. Если физический объект не назван, "
+        "используй правдоподобную пресс-сцену или сдержанную инфографику с пустой зоной для заголовка. Никаких фантазийных происшествий, "
+        "гигантских объектов, случайных флагов, оружия, знаменитостей, разрушений и несовместимых стран."
+    )
+
+
+def _cover_news_conflict_requirement(item: dict) -> str:
+    """Return the non-negotiable news-conflict brief for prompt and render paths."""
+    text = " ".join((str(item.get("title", "")), str(item.get("script", "")))).casefold()
+    military_markers = (
+        "ракет", "удар", "атак", "взрыв", "пво", "дрон", "беспилот", "нато", "войн", "фронт",
+        "наступлен", "армия", "военн", "эскалац", "обстрел", "бомб",
+    )
+    if any(marker in text for marker in military_markers):
+        return (
+            "ОБЯЗАТЕЛЬНЫЙ НОВОСТНОЙ КОНФЛИКТ: в каждом промпте прямо укажи ракеты, пуск, удар или последствия атаки, "
+            "строго связанные с темой и названным объектом/местом. Покажи реакцию людей, прессу и камеры в правдоподобной "
+            "широкой новостной сцене; это не декоративный фон и не случайная атака из другой страны. "
+        )
+    return (
+        "ОБЯЗАТЕЛЬНЫЙ НОВОСТНОЙ КОНФЛИКТ: в каждом промпте прямо укажи конкретное противостояние или последствие, "
+        "которое следует из темы, и покажи людей, прессу и камеры в правдоподобной широкой новостной сцене. "
+    )
+
+
+def _cover_instruction(item: dict, position: int, settings) -> str:
+    title = str(item.get("title", "")).strip()
+    excerpt = " ".join(str(item.get("script", "")).split())[:2000] if settings.cover_use_script_context else ""
+    range_prompt = _cover_range_prompt(item, position, settings)
+    # A saved legacy template is not an implicit provider instruction.  It is
+    # only additive after the user deliberately enables their custom brief.
+    base = range_prompt or (settings.cover_prompt_template if settings.cover_use_custom_prompt else "")
+    request = (
+        "Ты планировщик сцены для новостной YouTube-обложки. Верни только краткое, естественное английское "
+        "описание фактов сцены: кто/что в кадре, видимое действие, материальные доказательства и среда. "
+        "Не добавляй style prompt, photorealism, typography, headline/subheadline instructions, negative rules, "
+        "устаревший шаблон, формат кадра или технические требования: их единожды добавит Final Prompt Builder. "
+        "Верни JSON строго формата "
+        '{"prompts":["..."],"recommended":1} без Markdown и пояснений. '
+        f"Создай ровно {settings.cover_prompt_variant_count} разных semantic scene descriptions. "
+        "Каждый вариант обязан передавать конкретное действие, визуальное доказательство и тему.\n\n"
+        f"ТЕМА: {title}\n{_cover_structured_context(item)}\n{_cover_topic_visual_plan(item)}"
+    )
+    if base:
+        request += f"\nДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ ПОЛЬЗОВАТЕЛЯ: {base}"
+    request += _cover_ai_reference_instruction(item, position, settings)
+    manual_face = Path(str(item.get("face_reference_path", "") or "")).expanduser()
+    face_label = " ".join(str(item.get("face_reference_label", "") or "").split())
+    if item.get("face_reference_source") == "manual" and manual_face.is_file() and face_label:
+        request += (
+            f"\nВЫБРАННОЕ ЛИЦО: «{face_label}». Это обязательный герой для новой обложки: "
+            "подстрой сцену, свет и конфликт под эту персону; крупный портрет закрепи от нижнего края справа. "
+            "Левая нижняя половина остаётся полностью свободной для слов. Не заменяй выбранного человека и не добавляй другого политика."
+        )
+    headline = " ".join(str(item.get("cover_headline", "")).split())
+    subheadline = " ".join(str(item.get("cover_subheadline", "")).split())
+    if headline:
+        request += (
+            f"\nВЫБРАННЫЕ СЛОВА ДЛЯ ОБЛОЖКИ: «{headline}». "
+            "Построй визуальную композицию так, чтобы эта фраза была главным смысловым акцентом, "
+            "и оставь под неё чистое контрастное место. Не рисуй буквы сам: текст будет наложен NewsFlow."
+        )
+    if subheadline:
+        request += (
+            f"\nВЫБРАННЫЙ ПОДЗАГОЛОВОК: «{subheadline}». "
+            "Он уточняет главный текст: оставь рядом с заголовком место под строку меньшего размера. "
+            "Не рисуй буквы сам: текст будет наложен NewsFlow."
+        )
+    if excerpt:
+        request += f"\nКРАТКИЙ КОНТЕКСТ СЦЕНАРИЯ: {excerpt}"
+    return request
+
+
+def _normalize_cover_photo_prompt(value: str, item: dict | None = None) -> str:
+    """Build the immutable provider payload from a possibly legacy scene draft."""
+    return append_universal_thumbnail_core_v2(strip_legacy_thumbnail_phrases(value), item)
+
+
+def _migrate_legacy_cover_photo_prompts(settings: Settings) -> bool:
+    """Keep approved legacy rows intact; V2 applies on explicit prompt generation.
+
+    The render adapter still supplies V2 for an old scene, but a launch/snapshot
+    must never rewrite a user's 84 persisted prompt choices in the background.
+    """
+    return False
+
+
+def _cover_prompt_should_generate(item: dict, *, force: bool = False) -> bool:
+    """Keep approved visual briefs unless the user explicitly asks for a rewrite."""
+    if not str(item.get("title", "")).strip():
+        return False
+    if force:
+        return True
+    options = item.get("image_prompt_options")
+    if isinstance(options, list) and any(str(value).strip() for value in options):
+        return False
+    return not str(item.get("image_prompt", "")).strip()
+
+
+def _clean_cover_prompts(value: str, count: int) -> tuple[list[str], int]:
+    text = str(value or "").strip()
+    prompts: list[object] = []
+    recommended = 1
+    if "{" in text:
+        try:
+            parsed = json.loads(text[text.index("{"):text.rindex("}") + 1])
+            if isinstance(parsed, dict):
+                prompts = parsed.get("prompts") or [parsed.get("prompt", "")]
+                recommended = int(parsed.get("recommended", 1) or 1)
+        except (ValueError, TypeError, IndexError):
+            pass
+    if not prompts:
+        prompts = [text]
+    cleaned = []
+    for raw in prompts:
+        prompt = re.sub(r"^(?:prompt|промпт)\s*[:—-]\s*", "", str(raw), flags=re.I).strip()
+        prompt = " ".join(prompt.split())[:6000]
+        if len(prompt) >= 35 and prompt not in cleaned:
+            cleaned.append(prompt)
+    if not cleaned:
+        return [], 0
+    return cleaned[:count], max(0, min(len(cleaned) - 1, recommended - 1))
+
+
+def _cover_prompt_safety_blocked(error: object) -> bool:
+    """Recognise provider content filters without hiding ordinary API failures."""
+    text = str(error or "").casefold()
+    return any(marker in text for marker in (
+        "safety", "content filter", "policy", "request blocked", "blocked by provider", "unsafe",
+    ))
+
+
+def _fallback_cover_prompt(item: dict, variant: int = 0) -> str:
+    """Create a deterministic, neutral visual prompt when an LLM filter blocks rewriting.
+
+    This is deliberately a visual brief, not a claim that an incident happened. It lets
+    the separate «Новые промпты» action finish and leaves image rendering to its own button.
+    """
+    title = " ".join(str(item.get("title", "")).split()) or "current news topic"
+    context = " ".join(str(item.get("script", "")).split())[:500]
+    shot = (
+        "wide establishing television-news shot with foreground subject and visible press activity"
+        if variant % 2 == 0 else
+        "closer human-centered television-news shot with a clear object of attention and layered background"
+    )
+    return (
+        f"Photorealistic editorial YouTube thumbnail about {title}. {shot}. "
+        "Show only people, places and objects explicitly implied by the title or script, in one coherent real-world scene. "
+        "Use natural documentary lighting, realistic scale, restrained newsroom urgency, and an uncluttered lower-left zone for later text overlay. "
+        "No invented incident, no fantasy, no surreal or cinematic poster treatment, no random flags, weapons, celebrities, damage, logos or words. "
+        + (f"Relevant context: {context}." if context else "")
+    )
+
+
+def generate_cover_prompts(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    provider = str(payload.get("provider", settings.cover_prompt_provider)).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
+    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual") or payload.get("rewrite"))
+    selected = _select_current_cover_generation_rows(
+        settings, payload, lambda item: _cover_prompt_should_generate(item, force=force),
+    )
+    if not selected:
+        raise ValueError("Выберите хотя бы один сценарий для промптов обложек")
+    # Prompt rewriting should remain usable even when a text provider rejects a
+    # violent-sounding phrase or no key is temporarily available. The fallback
+    # is local and deterministic; it never starts image rendering.
+    pool = None
+    pool_error: Exception | None = None
+    try:
+        pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
+    except Exception as exc:
+        pool_error = exc
+    settings.cover_prompt_provider = provider
+    rewrite = bool(payload.get("rewrite"))
+    for _index, item in selected:
+        _cover_step(item, "ИИ готовит промпт", 5)
+        item.update(error="")
+
+    _save_cover_state(settings)
+
+    async def build_one(index: int, item: dict) -> None:
+        try:
+            prompt = _cover_instruction(item, index, settings)
+            if rewrite and item.get("image_prompt_options"):
+                previous = "\n".join(f"- {value}" for value in item.get("image_prompt_options", [])[:5])
+                prompt += ("\nПредыдущие варианты не подошли. Сделай новый визуальный ход, заметно отличный от них, "
+                           "но сохрани фактическую тему и выбранные слова.\nПРЕДЫДУЩИЕ ВАРИАНТЫ:\n" + previous)
+            if provider == "agent":
+                prompt = "Работай как специализированный агент NewsFlow. " + prompt
+            if pool_error is not None:
+                raise pool_error
+            reference_paths = _cover_ai_reference_paths_for_item(item, index, settings)
+            options, chosen = _clean_cover_prompts(
+                await pool.generate(prompt, image_paths=reference_paths[:6]), settings.cover_prompt_variant_count,
+            )
+            options = [_normalize_cover_photo_prompt(value, item) for value in options]
+            if not options:
+                raise ValueError("ИИ вернул слишком короткий промпт обложки")
+            requested_count = max(1, int(settings.cover_prompt_variant_count or 1))
+            if len(options) < requested_count:
+                # A short LLM response must not silently reduce the user's
+                # requested batch.  The local brief remains topic-specific
+                # and renderable, while the original answer stays first.
+                options.extend(
+                    _normalize_cover_photo_prompt(_fallback_cover_prompt(item, variant), item)
+                    for variant in range(len(options), requested_count)
+                )
+            options = options[:requested_count]
+            # An explicit terminal state lets the editor see that FastGen can
+            # start; it is not merely an intermediate LLM progress label.
+            _cover_step(item, "Промпты готовы", 100,
+                        f"Подготовлено вариантов: {len(options)}")
+            item.update(image_prompt_options=options, selected_prompt_index=chosen, image_prompt=options[chosen],
+                        prompt_provider=provider, error="")
+        except Exception as exc:
+            if _cover_prompt_safety_blocked(exc):
+                fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
+                options = [_normalize_cover_photo_prompt(_fallback_cover_prompt(item, variant), item) for variant in range(fallback_count)]
+                _cover_step(item, "Промпты готовы", 100,
+                            "Провайдер отклонил формулировку: создан безопасный локальный вариант")
+                item.update(image_prompt_options=options, selected_prompt_index=0,
+                            image_prompt=options[0], prompt_provider="local-fallback", error="")
+            else:
+                _cover_step(item, "Ошибка промпта", 100, str(exc))
+                item.update(error=str(exc))
+        _save_cover_state(settings)
+
+    async def run_batch() -> None:
+        # HybridTextPool owns two queue slots per active key.  Starting all
+        # pending jobs lets it distribute work fairly while the pool itself
+        # keeps the batch within that configured aggregate limit.
+        await asyncio.gather(*(build_one(index, item) for index, item in selected))
+
+    asyncio.run(run_batch())
+    return snapshot()
+
+
+# Word Engine V2 is independent from visual generation and portrait selection.
+_COVER_WORD_HEADLINE_STRUCTURES = (
+    ("H01", "SUBJECT_ACTION", ("subject", "action")),
+    ("H02", "OBJECT_ACTION", ("object", "action")),
+    ("H03", "CONSEQUENCE_FIRST", ("consequence",)),
+    ("H04", "LOCATION_EVENT", ("location", "action")),
+    ("H05", "PERSON_RESPONSE", ("subject", "response")),
+    ("H06", "RISK_THREAT", ("risk", "stake")),
+    ("H07", "PRESSURE_CONFRONTATION", ("subject", "conflict")),
+    ("H08", "QUESTION_CONSEQUENCE", ("consequence", "question")),
+    ("H09", "QUESTION_ACTION", ("action", "question")),
+    ("H10", "TURNING_POINT", ("surprise",)),
+    ("H11", "DECISION", ("decision",)),
+    ("H12", "BREAKDOWN_STOPPAGE", ("object", "breakdown")),
+    ("H13", "ESCALATION", ("conflict", "scale")),
+    ("H14", "REVERSAL", ("surprise", "consequence")),
+    ("H15", "SCALE", ("scale",)),
+    ("H16", "SECOND_SIDE", ("second_side", "action")),
+    ("H17", "OBJECT_AT_STAKE", ("object", "stake")),
+    ("H18", "PERSON_PLACE_CONSEQUENCE", ("subject", "location", "consequence")),
+)
+_COVER_WORD_SUBHEADLINE_ROLES = (
+    ("S01", "CAUSE", ("cause",)), ("S02", "CONSEQUENCE", ("consequence",)),
+    ("S03", "AFFECTED_ACTOR", ("affected_actor",)), ("S04", "LOCATION", ("location",)),
+    ("S05", "PHYSICAL_ACTION", ("action",)), ("S06", "OBJECT", ("object",)),
+    ("S07", "ECONOMIC_STAKE", ("stake", "economic")), ("S08", "SECURITY_STAKE", ("stake", "security")),
+    ("S09", "RESPONSE", ("response",)), ("S10", "SECOND_SIDE", ("second_side",)),
+    ("S11", "DECISION_DETAIL", ("decision",)), ("S12", "NEXT_STEP", ("next_step",)),
+    ("S13", "SCALE", ("scale",)), ("S14", "VERIFIED_NUMBER", ("number",)),
+    ("S15", "INFRASTRUCTURE", ("infrastructure",)), ("S16", "TIME_PRESSURE", ("time",)),
+    ("S17", "SURPRISE_DETAIL", ("surprise",)), ("S18", "PRICE_COST_STAKE", ("stake", "cost")),
+)
+_COVER_WORD_PAIRING = {
+    "H01": ("S02", "S04", "S10", "S06"), "H02": ("S02", "S01", "S03", "S15"),
+    "H03": ("S01", "S03", "S05", "S10"), "H04": ("S03", "S02", "S10", "S06"),
+    "H05": ("S01", "S10", "S02", "S07"), "H06": ("S01", "S03", "S08", "S18"),
+    "H07": ("S10", "S02", "S06", "S08"), "H08": ("S01", "S07", "S08", "S12"),
+    "H09": ("S02", "S01", "S10", "S06"), "H10": ("S01", "S02", "S17", "S12"),
+    "H11": ("S02", "S03", "S06", "S12"), "H12": ("S01", "S03", "S15", "S18"),
+    "H13": ("S01", "S08", "S10", "S13"), "H14": ("S01", "S02", "S17", "S10"),
+    "H15": ("S01", "S04", "S13", "S18"), "H16": ("S10", "S02", "S01", "S03"),
+    "H17": ("S02", "S07", "S08", "S15"), "H18": ("S02", "S04", "S03", "S10"),
+}
+_COVER_WORD_GENERIC_STEMS = {"важн", "главн", "новост", "сегодн", "ситуац", "событ", "проблем", "изменен", "вопрос", "сценар", "последств", "шок", "срочно"}
+_COVER_WORD_FOREIGN_ENTITIES = {"трамп", "путин", "зеленск", "макрон", "али", "эрдоган", "нетан", "китай", "росси", "украин", "европ", "нато", "сша", "иран", "израил"}
+_COVER_WORD_RISK_TERMS = ("может", "могут", "риск", "вероят", "возмож", "угроз")
+_COVER_WORD_ASSERTIVE_TERMS = ("взлетел", "рухнул", "обвалил", "закрыл", "остановил", "сорвал")
+_COVER_WORD_SEMANTIC_GROUPS = {
+    "collapse": ("рух", "обвал", "сократ", "паден", "провал"),
+    "closure": ("закро", "перекр", "останов", "замороз"),
+    "price-rise": ("взлет", "поднял", "дороже", "рост цен"),
+    "pressure": ("давл", "бь", "удар", "под угроз"),
+}
+
+
+def _cover_word_structure_pair(item: dict, variation_index: int = 0) -> dict[str, object]:
+    """Stable by item ID; explicit regenerate moves to the next compatible pair."""
+    identity = str(item.get("production_item_id") or item.get("id") or item.get("title") or "cover")
+    digest = int(hashlib.sha256(identity.casefold().encode("utf-8")).hexdigest()[:12], 16)
+    variation = max(0, int(variation_index))
+    h_id, h_role, h_slots = _COVER_WORD_HEADLINE_STRUCTURES[(digest + variation) % len(_COVER_WORD_HEADLINE_STRUCTURES)]
+    candidates = _COVER_WORD_PAIRING[h_id]
+    s_id = candidates[(digest // len(_COVER_WORD_HEADLINE_STRUCTURES) + variation) % len(candidates)]
+    _, s_role, s_slots = next(row for row in _COVER_WORD_SUBHEADLINE_ROLES if row[0] == s_id)
+    return {
+        "headline_structure_id": h_id, "headline_structure": h_role, "headline_semantic_slots": list(h_slots),
+        "subheadline_structure_id": s_id, "subheadline_structure": s_role, "subheadline_semantic_slots": list(s_slots),
+    }
+
+
+def _cover_word_should_generate(item: dict, kind: str, *, force: bool = False) -> bool:
+    prefix = "headline" if kind == "headline" else "subheadline"
+    value_key = "cover_headline" if prefix == "headline" else "cover_subheadline"
+    source = str(item.get(f"{prefix}_source", "")).upper()
+    status = str(item.get(f"{prefix}_status", "")).upper()
+    return bool(force or (source != "MANUAL" and status not in {"READY", "MANUAL"} and not str(item.get(value_key, "")).strip()))
+
+def _cover_word_source_text(item: dict) -> str:
+    fields = ("title", "topic", "angle", "event_context", "supporting_context", "script",
+              "primary_entities", "primary_entity", "entities", "geography", "conflict",
+              "main_consequence", "consequence", "framing")
+    return " ".join(_cover_context_values(item.get(field)) for field in fields if item.get(field))
+
+
+def _cover_word_semantic_plan(item: dict) -> dict[str, list[str]]:
+    """Fact-only slots used before the visual prompt and FastGen stage."""
+    source = _cover_word_source_text(item)
+    values = list(dict.fromkeys(
+        word.casefold() for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9%-]{3,}", source)
+        if word.casefold() not in _COVER_TOPIC_STOPWORDS
+    ))
+    slots = {name: [] for name in (
+        "subject", "action", "object", "location", "cause", "conflict", "consequence",
+        "stake", "second_side", "scale", "number", "surprise", "decision", "response",
+        "affected_actor", "infrastructure", "risk", "next_step", "time", "economic",
+        "security", "cost", "breakdown",
+    )}
+    lower = source.casefold()
+    for word in values:
+        if re.fullmatch(r"\d+(?:[.,]\d+)?%?", word):
+            slots["number"].append(word)
+        if word[:4] in _COVER_WORD_FOREIGN_ENTITIES:
+            slots["subject"].append(word)
+    markers = {
+        "action": ("заяв", "введ", "повыс", "закро", "перекр", "постав", "ответ", "переговор"),
+        "object": ("нефт", "газ", "тариф", "экспорт", "порт", "термин", "постав", "санкц"),
+        "location": ("ормуз", "европ", "росси", "украин", "сша", "кита", "иран", "израил"),
+        "cause": ("из-за", "потому", "после", "вследств"),
+        "conflict": ("конфликт", "давлен", "санкц", "против", "спор", "эскалац"),
+        "consequence": ("сократ", "рост", "паден", "риск", "потер", "дефиц"),
+        "stake": ("цен", "рын", "безопас", "постав", "экспорт"),
+        "infrastructure": ("порт", "термин", "труб", "завод", "систем", "инфраструкт"),
+        "risk": ("может", "риск", "угроз", "вероят", "возмож"),
+        "decision": ("решил", "решен", "введ", "одобр", "запрет"),
+        "response": ("ответ", "реакц", "ответил"),
+        "breakdown": ("сорва", "останов", "закро", "провал"),
+    }
+    for name, choices in markers.items():
+        if any(choice in lower for choice in choices):
+            slots[name] = values[:6]
+    slots["economic"] = slots["object"] if any(x in lower for x in ("нефт", "газ", "тариф", "рын")) else []
+    slots["security"] = slots["stake"] if any(x in lower for x in ("безопас", "военн", "атак", "угроз")) else []
+    slots["cost"] = slots["stake"] if any(x in lower for x in ("цен", "потер", "стоим")) else []
+    slots["second_side"] = slots["subject"][1:]
+    slots["affected_actor"] = slots["subject"][:]
+    slots["next_step"] = slots["action"][:]
+    slots["scale"] = slots["number"][:]
+    slots["surprise"] = slots["consequence"][:]
+    return slots
+
+def _cover_word_semantic_groups(value: str) -> set[str]:
+    normalized = " ".join(str(value).casefold().split())
+    return {name for name, markers in _COVER_WORD_SEMANTIC_GROUPS.items() if any(marker in normalized for marker in markers)}
+
+
+def _cover_word_pattern_signature(value: str) -> str:
+    """Stable semantic cooldown key, also recoverable from persisted text after restart."""
+    groups = _cover_word_semantic_groups(value)
+    if groups:
+        return " ".join(sorted(groups))
+    return " ".join(sorted(_cover_meaningful_word_stems(str(value)))[:2])
+
+
+def _cover_word_foreign_entities(value: str, item: dict) -> set[str]:
+    source_tokens = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", _cover_word_source_text(item).casefold())}
+    phrase_tokens = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", str(value).casefold())}
+    # Match standalone words/stems, not a substring: «али» inside
+    # «обвалиться» must never be treated as the unrelated leader Алиев.
+    return {entity for entity in _COVER_WORD_FOREIGN_ENTITIES
+            if entity[:4] in phrase_tokens and entity[:4] not in source_tokens}
+
+
+def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "",
+                         structure: dict | None = None, recent: list[dict] | None = None) -> dict[str, object]:
+    """Return explicit validation/reason codes; never silently truncate into READY."""
+    raw = str(value or "").strip()
+    result = {"valid": False, "value": raw, "reason_code": "", "reason_detail": "", "semantic_slots": []}
+    if not raw or raw.startswith(chr(96) * 3) or raw.startswith("{") or "\n" in raw:
+        result.update(reason_code="INVALID_JSON", reason_detail="Ожидалось одно значение из JSON-ответа")
+        return result
+    words = raw.split()
+    min_words, max_words, max_chars = (1, 3, 70) if kind == "headline" else (3, 10, 110)
+    if len(raw) > max_chars:
+        result.update(reason_code="TOO_LONG", reason_detail=f"Лимит: {max_chars} символов")
+        return result
+    if len(words) > max_words:
+        result.update(reason_code="TOO_MANY_WORDS", reason_detail=f"Лимит: {max_words} слов")
+        return result
+    if len(words) < min_words:
+        result.update(reason_code="TOO_SHORT", reason_detail=f"Нужно минимум {min_words} слов")
+        return result
+    if "!" in raw or (kind == "subheadline" and raw.isupper()):
+        result.update(reason_code="STYLE_VIOLATION", reason_detail="Стиль строки не допускает это оформление")
+        return result
+    stems = _cover_meaningful_word_stems(raw)
+    topic_stems = _cover_topic_terms(str(item.get("title", "")), _cover_word_source_text(item))
+    # Existing topic terms keep five letters whereas duplicate detection uses
+    # four-letter stems. Compare their shared stem instead of rejecting a
+    # grounded inflection such as «экспорт» / «экспорта».
+    if not any(word[:4] == topic[:4] for word in stems for topic in topic_stems):
+        result.update(reason_code="NOT_GROUNDED", reason_detail="Нет значимой связи с темой или контекстом")
+        return result
+    foreign = _cover_word_foreign_entities(raw, item)
+    if foreign:
+        result.update(reason_code="FOREIGN_ENTITY", reason_detail=f"Чужие сущности: {', '.join(sorted(foreign))}")
+        return result
+    if stems and all(any(stem.startswith(generic) for generic in _COVER_WORD_GENERIC_STEMS) for stem in stems):
+        result.update(reason_code="GENERIC_ONLY", reason_detail="Фраза состоит только из общего кликбейта")
+        return result
+    source = _cover_word_source_text(item).casefold()
+    if any(token in raw.casefold() for token in _COVER_WORD_ASSERTIVE_TERMS) and any(token in source for token in _COVER_WORD_RISK_TERMS):
+        if "?" not in raw and not any(token in raw.casefold() for token in ("может", "риск", "угроз")):
+            result.update(reason_code="CLAIM_STRENGTH_ERROR", reason_detail="Риск выдан за подтверждённый факт")
+            return result
+    if set(re.findall(r"\d+(?:[.,]\d+)?%?", raw)) - set(re.findall(r"\d+(?:[.,]\d+)?%?", source)):
+        result.update(reason_code="UNSUPPORTED_FACT", reason_detail="В строку добавлено отсутствующее в источнике число")
+        return result
+    if kind == "subheadline" and headline:
+        if _cover_lines_repeat_meaningful_words(headline, raw):
+            result.update(reason_code="DUPLICATE_WORD", reason_detail="Повторяются содержательные слова headline")
+            return result
+        if _cover_word_semantic_groups(headline) & _cover_word_semantic_groups(raw):
+            result.update(reason_code="DUPLICATE_MEANING", reason_detail="Вторая строка повторяет смысл headline")
+            return result
+    if recent:
+        signature = _cover_word_pattern_signature(raw)
+        recent_signatures = [
+            str(row.get("pattern_signature") or _cover_word_pattern_signature(
+                row.get("cover_headline") if kind == "headline" else row.get("cover_subheadline")
+            ))
+            for row in recent[-20:]
+        ]
+        if sum(1 for saved_signature in recent_signatures if saved_signature == signature) >= 3:
+            result.update(reason_code="RECENT_PATTERN_REPEAT", reason_detail="Недавний паттерн использован слишком часто")
+            return result
+    result.update(valid=True, semantic_slots=list((structure or {}).get("semantic_slots", [])))
+    return result
+
+def _clean_cover_headline(value: str, *, emergency_limit: bool = True) -> str:
+    text = str(value or "").strip()
+    if "{" in text:
+        try:
+            parsed = json.loads(text[text.index("{"):text.rindex("}") + 1])
+            if isinstance(parsed, dict):
+                text = str(parsed.get("headline") or parsed.get("text") or "")
+        except (ValueError, TypeError, IndexError):
+            pass
+    text = re.sub(r"^[\s\"'«»]+|[\s\"'«»]+$", "", text)
+    # The cover headline is a deliberately compact 1–3 word display field.
+    # Keep its hard rendering limit here as a final guard even if a provider
+    # ignored the prompt constraint.
+    words = text.split()
+    return " ".join(words[:3] if emergency_limit else words)
+
+
+def _clean_cover_subheadline(value: str) -> str:
+    text = str(value or "").strip()
+    if "{" in text:
+        try:
+            parsed = json.loads(text[text.index("{"):text.rindex("}") + 1])
+            if isinstance(parsed, dict):
+                text = str(parsed.get("subheadline") or parsed.get("subtitle") or parsed.get("text") or "")
+        except (ValueError, TypeError, IndexError):
+            pass
+    text = re.sub(r"^[\s\"'«»]+|[\s\"'«»]+$", "", text)
+    return " ".join(text.split())
+
+
+_COVER_TOPIC_STOPWORDS = {
+    "видео", "новости", "сегодня", "тема", "что", "когда", "почему", "который", "которое",
+    "после", "перед", "через", "будет", "могут", "может", "самый", "новый", "новая",
+    "главный", "снова", "теперь", "сила", "мир", "мировой", "мировая", "рынок", "рынки",
+    "угроза", "угрозы", "ситуация", "ситуации", "влияние", "последствия", "демонстрирует",
+}
+
+# Prepositions and deliberately generic clickbait language may occur in both
+# lines.  They do not make a thumbnail feel duplicated, unlike names, places,
+# objects and verbs such as «Ормуз» / «нефтяники».
+_COVER_LINE_STOPWORDS = _COVER_TOPIC_STOPWORDS | {
+    "это", "этот", "эта", "эти", "как", "из", "для", "без", "над", "под", "при",
+    "в", "во", "на", "за", "от", "до", "по", "у", "к", "с", "со", "и", "а", "но",
+    "или", "ли", "уже", "ещё", "там", "здесь", "весь", "всё", "все", "свой",
+}
+
+
+def _cover_meaningful_word_stems(value: str) -> set[str]:
+    """Use stems to catch obvious inflections: «нефть» / «нефтяников»."""
+    return {
+        word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", str(value).casefold())
+        if word not in _COVER_LINE_STOPWORDS
+    }
+
+
+def _cover_lines_repeat_meaningful_words(headline: str, subheadline: str) -> bool:
+    return bool(_cover_meaningful_word_stems(headline) & _cover_meaningful_word_stems(subheadline))
+
+
+# The two lines need distinct jobs.  We rotate structures deterministically by
+# topic, so a batch is not filled with the same «X В ОГНЕ / X ...» pattern.
+# These are writing constraints, not ready-made phrases, therefore examples
+# from a user's style prompt still cannot leak into an unrelated news item.
+_COVER_TEXT_STRUCTURES = (
+    ("субъект или объект + конкретное действие", "последствие этого действия"),
+    ("главная угроза или риск", "кто или что оказывается под давлением"),
+    ("неожиданный поворот или конфликт", "конкретная ставка или цена этого поворота"),
+    ("вопрос или интрига по факту темы", "короткий ответ-направление без повтора вопроса"),
+    ("срочность или масштаб события", "отдельная деталь, объясняющая причину тревоги"),
+    ("фигура или место из темы", "самостоятельное последствие для людей, рынков или безопасности"),
+)
+
+
+def _cover_text_structure(title: str) -> tuple[str, str]:
+    normalized = "".join(str(title).casefold().split())
+    return _COVER_TEXT_STRUCTURES[sum(map(ord, normalized)) % len(_COVER_TEXT_STRUCTURES)]
+
+
+def _cover_topic_terms(title: str, context: str = "") -> set[str]:
+    """Return distinctive topic stems that a cover phrase must reference.
+
+    The user's examples may name unrelated politicians.  Requiring one of the
+    actual scenario terms prevents such examples from becoming a result for a
+    different topic while still allowing short, punchy thumbnail text.
+    """
+    terms: set[str] = set()
+    # The title is deliberately weighted more strongly than the script: it is
+    # the one thing that is always available for a manually imported topic.
+    for word in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", f"{title} {title} {context}".casefold()):
+        if word not in _COVER_TOPIC_STOPWORDS:
+            terms.add(word[:5])
+    return terms
+
+
+def _cover_text_matches_topic(value: str, title: str, context: str = "", headline: str = "") -> bool:
+    topic_terms = _cover_topic_terms(title, context)
+    # A subheadline may also legitimately reference an already validated main
+    # line, but cannot become a free-standing phrase about some other story.
+    if headline:
+        topic_terms |= _cover_topic_terms(headline)
+    result_terms = {
+        word[:5] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", str(value).casefold())
+        if word not in _COVER_TOPIC_STOPWORDS
+    }
+    return bool(topic_terms & result_terms)
+
+
+def _migrate_legacy_cover_texts(settings: Settings) -> bool:
+    """Move valid pre-2.1.50 suggestions into the visible text field once.
+
+    Older builds wrote a generated phrase to ``*_suggestion`` and marked it as
+    proposed.  The redesigned screen deliberately has no suggestion column,
+    so leaving that hidden value in place made a completed generation look
+    empty.  Invalid legacy suggestions are discarded instead of being shown
+    under an unrelated scenario.
+    """
+    changed = False
+    for item in settings.cover_queue:
+        title = str(item.get("title", "")).strip()
+        context = _scenario_context(item.get("script", ""))[:1300]
+        legacy_headline = _clean_cover_headline(str(item.get("cover_headline_suggestion", "")))
+        if not str(item.get("cover_headline", "")).strip() and legacy_headline:
+            if _cover_text_matches_topic(legacy_headline, title, context):
+                item.update(cover_headline=legacy_headline, headline_status="Заголовок готов", headline_error="")
+            else:
+                item.update(headline_status="Фраза отклонена: не по теме",
+                            headline_error="Старая фраза ИИ не соответствовала сценарию и удалена")
+            changed = True
+        if item.pop("cover_headline_suggestion", None) is not None:
+            changed = True
+        legacy_subheadline = _clean_cover_subheadline(str(item.get("cover_subheadline_suggestion", "")))
+        current_headline = str(item.get("cover_headline", ""))
+        if not str(item.get("cover_subheadline", "")).strip() and legacy_subheadline:
+            if _cover_text_matches_topic(legacy_subheadline, title, context, current_headline):
+                item.update(cover_subheadline=legacy_subheadline, subheadline_status="Подзаголовок готов", subheadline_error="")
+            else:
+                item.update(subheadline_status="Подзаголовок отклонён: не по теме",
+                            subheadline_error="Старая фраза ИИ не соответствовала сценарию и удалена")
+            changed = True
+        if item.pop("cover_subheadline_suggestion", None) is not None:
+            changed = True
+        # A completed IPC command never legitimately leaves a preparation
+        # status.  Mark a crashed old request explicitly so it can be retried.
+        if (not str(item.get("cover_headline", "")).strip()
+                and str(item.get("headline_status", "")).startswith("Фраза:")):
+            item.update(headline_status="Ошибка фразы", headline_error="Старый запрос не сохранил результат; перегенерируйте заголовок")
+            changed = True
+    return changed
+
+
+def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure: dict[str, object],
+                                headline: str = "") -> str:
+    """Strict V2 provider prompt; visual generation remains outside this layer."""
+    title = str(item.get("title", "")).strip()
+    context = _cover_word_source_text(item)[:4000]
+    plan = _cover_word_semantic_plan(item)
+    source_template = template.replace("{title}", title).replace("{excerpt}", context)
+    prefix = "headline" if kind == "headline" else "subheadline"
+    role = structure[f"{prefix}_structure"]
+    slots = structure[f"{prefix}_semantic_slots"]
+    schema = '{"headline":"..."}' if kind == "headline" else '{"subheadline":"..."}'
+    target = "1–3 слова, максимум 3 слова и 70 символов" if kind == "headline" else "3–7 слов, максимум 10 слов и 110 символов"
+    task = (
+        "Ты создаёшь только одну строку для новостной YouTube-обложки. "
+        "Примеры пользовательского стиля не являются фактами и не могут переносить чужие имена, страны или события. "
+        f"ТЕМА: «{title}». КОНТЕКСТ: «{context}». ДОСТУПНЫЕ СЕМАНТИЧЕСКИЕ СЛОТЫ: {json.dumps(plan, ensure_ascii=False)}. "
+        f"ПОЛЬЗОВАТЕЛЬСКИЙ STYLE TEMPLATE: {source_template}. "
+        f"ЦЕЛЕВАЯ РОЛЬ: {role}. ПРЕДПОЧТИТЕЛЬНЫЕ СЛОТЫ: {', '.join(slots)}. "
+    )
+    if kind == "headline":
+        task += (
+            "Внутренне сравни минимум пять разных подходов и верни один лучший. "
+            "При равной фактической точности выбери наиболее кликабельный hook: конкретный конфликт, сильное действие, "
+            "угрозу, ставку или неожиданный поворот. Не выбирай скучную нейтральную формулировку, если её можно "
+            "точнее и сильнее выразить без изменения фактов. Не используй пустой общий кликбейт. "
+        )
+    else:
+        task += (
+            f"УЖЕ УТВЕРЖДЁННЫЙ HEADLINE: «{headline}». "
+            "Главная строка уже является hook. Добавь второй самостоятельный информационный слой: другую причину, "
+            "последствие, ставку, объект, место, действие или сторону. Не перефразируй headline и не повторяй его смысл. "
+        )
+    return (
+        task + f"Требование длины: {target}. Не придумывай числа и не усиливай риск до факта. "
+        "Не используй лишние кавычки, Markdown, комментарии или варианты. Верни строго только JSON: " + schema
+    )
+
+
+def _cover_word_repair_prompt(kind: str, value: str, validation: dict[str, object], item: dict,
+                              structure: dict[str, object], headline: str = "") -> str:
+    prefix = "headline" if kind == "headline" else "subheadline"
+    next_pair = _cover_word_structure_pair(item, int(item.get(f"{prefix}_variation_index", 0) or 0) + 1)
+    return (
+        f"Предыдущая строка «{value or 'пусто'}» отклонена. REASON: {validation['reason_code']}. "
+        f"DETAIL: {validation['reason_detail']}. Исправь только эту проблему, не выдумывай новых фактов и не копируй "
+        "предыдущую фразу. "
+        + _cover_word_provider_prompt(kind, "", item, next_pair, headline)
+    )
+
+
+async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, template: str,
+                                  structure: dict[str, object], *, headline: str = "",
+                                  pause_waiter=None, recent: list[dict] | None = None) -> tuple[str, dict[str, object], list[dict]]:
+    """Generate, validate and repair at most twice; callers persist state per item."""
+    prompt = _cover_word_provider_prompt(kind, template, item, structure, headline)
+    attempts: list[dict] = []
+    for repair_index in range(3):
+        raw = await pool.generate(prompt, before_request=pause_waiter)
+        value = (_clean_cover_headline(raw, emergency_limit=False)
+                 if kind == "headline" else _clean_cover_subheadline(raw))
+        validation = _validate_cover_word(
+            kind, value, item, headline=headline,
+            structure={"semantic_slots": structure[f"{kind}_semantic_slots"]},
+            recent=recent,
+        )
+        attempts.append({"attempt": repair_index, "value": value, "validation": validation})
+        if validation["valid"]:
+            return value, validation, attempts
+        if repair_index == 2:
+            break
+        prompt = _cover_word_repair_prompt(kind, value, validation, item, structure, headline)
+    raise ValueError(f"{validation['reason_code']}: {validation['reason_detail']}")
+
+
+def _cover_text_prompt(kind: str, template: str, title: str, context: str, headline: str = "",
+                       use_structure: bool = True, avoid_repeats: bool = True) -> str:
+    """Build a topic-locked prompt for either cover text line."""
+    style = template.replace("{title}", title).replace("{excerpt}", context)
+    response_schema = '{"headline":"1–3 слова"}' if kind == "headline" else '{"subheadline":"2–7 слов"}'
+    base = (
+        "Ты создаёшь только текст одной новостной YouTube-обложки.\n"
+        "НИЖЕ ПОЛЬЗОВАТЕЛЬСКИЕ ПРАВИЛА СТИЛЯ. Примеры в них — не факты, не готовые фразы и не имена, "
+        "их нельзя дословно переносить в ответ:\n"
+        f"---\n{style}\n---\n"
+        f"ЕДИНСТВЕННАЯ ТЕМА: «{title}».\n"
+        f"КОНТЕКСТ ЭТОЙ ТЕМЫ: «{context or 'не указан'}».\n"
+    )
+    if headline:
+        base += f"ГЛАВНАЯ СТРОКА ЭТОЙ ЖЕ ОБЛОЖКИ: «{headline}».\n"
+    base += (
+        "Ответ обязан прямо содержать хотя бы одно ключевое слово, имя, страну, место или объект из темы выше. "
+        "Нельзя подставлять Алиева, Зеленского, другого политика, другую страну или событие, если их нет в теме/контексте. "
+        "Нельзя выдавать домысел за подтверждённый факт. "
+    )
+    headline_structure, subheadline_structure = _cover_text_structure(title)
+    if kind == "headline" and use_structure:
+        base += (
+            f"СТРУКТУРА ГЛАВНОЙ СТРОКИ ДЛЯ ЭТОЙ ТЕМЫ: {headline_structure}. "
+            "Не пересказывай заголовок ролика дословно. "
+        )
+    if kind == "subheadline":
+        base += (
+            "Вторая строка должна дополнять главную. "
+        )
+        if avoid_repeats:
+            base += (
+                "Нельзя повторять ни одно содержательное слово или его форму из главной строки "
+                "(например, «ОРМУЗ» и «Ормуз», «нефть» и «нефтяников»). "
+                "Возьми другую сущность, действие или последствие строго из темы/контекста. "
+            )
+        if use_structure:
+            base += f"СТРУКТУРА ВТОРОЙ СТРОКИ ДЛЯ ЭТОЙ ТЕМЫ: {subheadline_structure}. "
+    base += f"Верни только JSON: {response_schema}. Без пояснений, Markdown и вариантов."
+    return base
+
+
+def _generate_topic_locked_cover_text(pool: HybridTextPool, prompt: str, cleaner, title: str,
+                                      context: str, headline: str = "", pause_waiter=None,
+                                      avoid_repeats: bool = True) -> str:
+    """Ask once more if the model ignored the scenario and copied an example."""
+    return asyncio.run(_generate_topic_locked_cover_text_async(pool, prompt, cleaner, title, context, headline, pause_waiter, avoid_repeats))
+
+
+async def _generate_topic_locked_cover_text_async(pool: HybridTextPool, prompt: str, cleaner, title: str,
+                                                  context: str, headline: str = "", pause_waiter=None,
+                                                  avoid_repeats: bool = True) -> str:
+    """Topic validation that can share one two-slots-per-key pool across a batch."""
+    result = cleaner(await pool.generate(prompt, before_request=pause_waiter))
+    topic_matches = _cover_text_matches_topic(result, title, context, headline)
+    repeats_headline = bool(avoid_repeats and headline and _cover_lines_repeat_meaningful_words(headline, result))
+    if topic_matches and not repeats_headline:
+        return result
+    reason = (
+        f"он повторяет значимые слова из главной строки «{headline}»"
+        if repeats_headline else f"он не связан с темой «{title}»"
+    )
+    repair = (
+        f"Предыдущий вариант «{result or 'пусто'}» отклонён: {reason}.\n"
+        "Исправь его. Используй только сущности и смысл указанной темы, не используй примеры из стилевого промпта. "
+        + ("Для второй строки используй другие смысловые слова, а не вариацию главной строки.\n" if avoid_repeats else "")
+        + prompt
+    )
+    result = cleaner(await pool.generate(repair, before_request=pause_waiter))
+    if not _cover_text_matches_topic(result, title, context, headline):
+        raise ValueError("ИИ вернул фразу не по теме; перегенерируйте её или впишите свою")
+    if avoid_repeats and headline and _cover_lines_repeat_meaningful_words(headline, result):
+        raise ValueError("ИИ повторил слова главной строки; перегенерируйте подзаголовок")
+    return result
+
+
+async def _wait_for_cover_text_resume(kind: str) -> None:
+    """Pause applies before each actual API call, including an automatic repair."""
+    attribute = "cover_headlines_paused" if kind == "headline" else "cover_subheadlines_paused"
+    while bool(getattr(load_settings(), attribute, False)):
+        await asyncio.sleep(0.35)
+
+
+def _save_cover_text_progress(settings: Settings) -> None:
+    """Do not overwrite interactive cover-text controls during a running batch."""
+    current = load_settings()
+    settings.cover_text_use_structure = current.cover_text_use_structure
+    settings.cover_text_avoid_repeats = current.cover_text_avoid_repeats
+    settings.cover_headlines_paused = current.cover_headlines_paused
+    settings.cover_subheadlines_paused = current.cover_subheadlines_paused
+    _save_cover_state(settings)
+
+
+def set_cover_text_pause(payload: dict, paused: bool) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    kind = str(payload.get("kind", "")).strip().casefold()
+    if kind not in {"headline", "subheadline"}:
+        raise ValueError("Укажите, что поставить на паузу: заголовки или подзаголовки")
+    attribute = "cover_headlines_paused" if kind == "headline" else "cover_subheadlines_paused"
+    setattr(settings, attribute, paused)
+    _save_cover_state(settings)
+    label = "Заголовки" if kind == "headline" else "Подзаголовки"
+    state = "поставлены на паузу после текущих запросов" if paused else "продолжены"
+    return {**snapshot(), "operationResult": {"kind": f"cover-{kind}-pause", "count": 0,
+                                                  "message": f"{label}: {state}."}}
+
+
+def generate_cover_headlines(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    provider = str(payload.get("provider", settings.cover_headline_provider)).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
+    use_default = bool(payload.get("useDefault"))
+    template = str(payload.get("template", "")).strip()
+    if template and not use_default:
+        settings.cover_headline_template = template[:12000]
+    active_template = Settings().cover_headline_template if use_default else settings.cover_headline_template
+    use_structure = bool(payload.get("useStructure", settings.cover_text_use_structure))
+    avoid_repeats = bool(payload.get("avoidRepeats", settings.cover_text_avoid_repeats))
+    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
+    selected = _select_current_cover_generation_rows(
+        settings, payload, lambda item: _cover_word_should_generate(item, "headline", force=force),
+    )
+    if not selected:
+        raise ValueError("Выберите сценарии для фраз на обложку")
+    pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
+    settings.cover_headline_provider = provider
+    for _index, item in selected:
+        if str(item.get("title", "")).strip():
+            item.update(headline_status="GENERATING", headline_error="")
+    _save_cover_state(settings)
+
+    async def build_one(index: int, item: dict):
+        title = str(item.get("title", "")).strip()
+        if not title:
+            settings.cover_queue[index].update(headline_status="Ошибка заголовка", headline_error="У сценария нет названия")
+            _save_cover_text_progress(settings)
+            return
+        try:
+            variation = int(item.get("headline_variation_index", 0) or 0) + (1 if force else 0)
+            structure = _cover_word_structure_pair(item, variation)
+            recent = [row for row in settings.cover_queue if str(row.get("headline_status", "")).upper() == "READY"]
+            headline, validation, attempts = await _generate_cover_word_v2(
+                pool, "headline", item, active_template, structure,
+                pause_waiter=lambda: _wait_for_cover_text_resume("headline"), recent=recent,
+            )
+            current = settings.cover_queue[index]
+            current.update(cover_headline=headline, headline_source="AI", headline_status="READY", headline_error="",
+                           headline_structure_id=structure["headline_structure_id"], headline_variation_index=variation,
+                           headline_attempt_count=len(attempts), headline_semantic_slots=validation["semantic_slots"],
+                           headline_repair_history=attempts, headline_pattern_signature=_cover_word_pattern_signature(headline),
+                           headline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+            current.pop("cover_headline_suggestion", None)
+        except Exception as exc:
+            settings.cover_queue[index].update(headline_status="FAILED", headline_error=str(exc))
+        # Each finished item is written immediately. Snapshot runs in a
+        # separate bridge process every 900 ms, so the UI sees partial batch
+        # progress rather than blank inputs until the slowest request finishes.
+        _save_cover_text_progress(settings)
+
+    async def build_all():
+        return await asyncio.gather(*(build_one(index, item) for index, item in selected))
+
+    asyncio.run(build_all())
+    return snapshot()
+
+
+def apply_cover_headline_suggestions(payload: dict) -> dict:
+    """Move generated word suggestions into selected cover topics on demand."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    applied = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        suggestion = _clean_cover_headline(str(item.get("cover_headline_suggestion", "")))
+        if suggestion:
+            item.update(cover_headline=suggestion, headline_status="Перенесено в тему")
+            applied += 1
+    if not applied:
+        raise ValueError("Сначала создайте фразы ИИ для выбранных тем")
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-headlines", "count": applied,
+                                                "message": f"Фразы перенесены в темы обложек: {applied}."}}
+
+
+def generate_cover_subheadlines(payload: dict) -> dict:
+    """Create a second thumbnail phrase without replacing the main headline."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    provider = str(payload.get("provider", settings.cover_headline_provider)).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
+    use_default = bool(payload.get("useDefault"))
+    template = str(payload.get("template", "")).strip()
+    if template and not use_default:
+        settings.cover_subheadline_template = template[:12000]
+    active_template = Settings().cover_subheadline_template if use_default else settings.cover_subheadline_template
+    use_structure = bool(payload.get("useStructure", settings.cover_text_use_structure))
+    avoid_repeats = bool(payload.get("avoidRepeats", settings.cover_text_avoid_repeats))
+    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
+    selected = _select_current_cover_generation_rows(
+        settings, payload, lambda item: _cover_word_should_generate(item, "subheadline", force=force),
+    )
+    if not selected:
+        raise ValueError("Выберите сценарии для подзаголовков")
+    pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
+    settings.cover_headline_provider = provider
+    for _index, item in selected:
+        if str(item.get("title", "")).strip():
+            item.update(subheadline_status="GENERATING", subheadline_error="")
+    _save_cover_state(settings)
+
+    async def build_one(index: int, item: dict):
+        title = str(item.get("title", "")).strip()
+        if not title:
+            settings.cover_queue[index].update(subheadline_status="Ошибка подзаголовка", subheadline_error="У сценария нет названия")
+            _save_cover_text_progress(settings)
+            return
+        try:
+            headline = str(item.get("cover_headline", "")).strip()
+            if not headline:
+                raise ValueError("Сначала нужен утверждённый headline")
+            variation = int(item.get("headline_variation_index", 0) or 0)
+            structure = _cover_word_structure_pair(item, variation)
+            recent = [row for row in settings.cover_queue if str(row.get("subheadline_status", "")).upper() == "READY"]
+            subheadline, validation, attempts = await _generate_cover_word_v2(
+                pool, "subheadline", item, active_template, structure, headline=headline,
+                pause_waiter=lambda: _wait_for_cover_text_resume("subheadline"), recent=recent,
+            )
+            current = settings.cover_queue[index]
+            current.update(cover_subheadline=subheadline, subheadline_source="AI", subheadline_status="READY", subheadline_error="",
+                           subheadline_structure_id=structure["subheadline_structure_id"],
+                           subheadline_variation_index=variation, subheadline_attempt_count=len(attempts),
+                           subheadline_semantic_slots=validation["semantic_slots"], subheadline_repair_history=attempts,
+                           subheadline_pattern_signature=_cover_word_pattern_signature(subheadline),
+                           subheadline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+            current.pop("cover_subheadline_suggestion", None)
+        except Exception as exc:
+            settings.cover_queue[index].update(subheadline_status="FAILED", subheadline_error=str(exc))
+        _save_cover_text_progress(settings)
+
+    async def build_all():
+        return await asyncio.gather(*(build_one(index, item) for index, item in selected))
+
+    asyncio.run(build_all())
+    return snapshot()
+
+
+def apply_cover_subheadline_suggestions(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    applied = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        suggestion = _clean_cover_subheadline(str(item.get("cover_subheadline_suggestion", "")))
+        if suggestion:
+            item.update(cover_subheadline=suggestion, subheadline_status="Перенесено в тему")
+            applied += 1
+    if not applied:
+        raise ValueError("Сначала создайте подзаголовки ИИ для выбранных тем")
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-subheadlines", "count": applied,
+                                                "message": f"Подзаголовки перенесены в темы обложек: {applied}."}}
+
+
+def cancel_cover_subheadlines(payload: dict) -> dict:
+    """Clear only the secondary line; primary cover words always remain untouched."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    removed = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        had_value = any(item.get(key) for key in ("cover_subheadline", "cover_subheadline_suggestion",
+                                                   "subheadline_status", "subheadline_error"))
+        for key in ("cover_subheadline", "cover_subheadline_suggestion", "subheadline_status", "subheadline_error"):
+            item.pop(key, None)
+        if had_value:
+            removed += 1
+    _save_cover_state(settings)
+    scope = "выбранных тем" if payload.get("indices") else "всех тем"
+    return {**snapshot(), "operationResult": {"kind": "cover-subheadlines-cancel", "count": removed,
+                                                "message": f"Подзаголовки отменены для {scope}: {removed}. Основные слова сохранены."}}
+
+
+_COVER_SUBHEADLINE_RECOVERY_FIELDS = (
+    "cover_subheadline", "subheadline_source", "subheadline_status", "subheadline_error",
+    "subheadline_structure_id", "subheadline_variation_index", "subheadline_attempt_count",
+    "subheadline_semantic_slots", "subheadline_repair_history", "subheadline_pattern_signature",
+    "subheadline_generation_timestamp",
+)
+
+
+def _restore_missing_cover_subheadlines(settings: Settings, interrupted_queue: list[dict]) -> int:
+    """Restore completed secondary words from an interrupted atomic registry snapshot.
+
+    It is deliberately additive: a line that has since been typed or generated
+    is authoritative, and is never replaced by the old snapshot.
+    """
+    backup_by_identity = {
+        str(item.get("production_item_id") or item.get("id") or item.get("title") or "").strip().casefold(): item
+        for item in interrupted_queue
+        if isinstance(item, dict) and str(item.get("cover_subheadline", "")).strip()
+    }
+    restored = 0
+    for current in settings.cover_queue:
+        identity = str(current.get("production_item_id") or current.get("id") or current.get("title") or "").strip().casefold()
+        saved = backup_by_identity.get(identity)
+        current_value = str(current.get("cover_subheadline", "")).strip()
+        current_status = str(current.get("subheadline_status", "")).upper()
+        if not saved or current_value or current_status in {"MANUAL", "READY"}:
+            continue
+        for field in _COVER_SUBHEADLINE_RECOVERY_FIELDS:
+            if field in saved:
+                current[field] = saved[field]
+            else:
+                current.pop(field, None)
+        restored += 1
+    return restored
+
+
+def generate_cover_texts(payload: dict) -> dict:
+    """Generate the two thumbnail text lines independently in one user action."""
+    headline_payload = dict(payload)
+    headline_payload["template"] = str(payload.get("headlineTemplate", payload.get("template", "")))
+    subheadline_payload = dict(payload)
+    subheadline_payload["template"] = str(payload.get("subheadlineTemplate", ""))
+    generate_cover_headlines(headline_payload)
+    return generate_cover_subheadlines(subheadline_payload)
+
+
+def remove_cover_headline_suggestions(payload: dict) -> dict:
+    """Remove only AI suggestions; never touch the user's applied cover words."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    removed = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested or not item.get("cover_headline_suggestion"):
+            continue
+        item.pop("cover_headline_suggestion", None)
+        if str(item.get("headline_status", "")).startswith("Фраза предложена"):
+            item["headline_status"] = ""
+        removed += 1
+    if not removed:
+        raise ValueError("Нет предложений ИИ для удаления")
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-headlines-remove", "count": removed,
+                                                "message": f"Предложения ИИ удалены: {removed}."}}
+
+
+def import_cover_headlines(payload: dict) -> dict:
+    """Apply user-loaded cover words line-by-line to selected (or all) topics."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    phrases = [_clean_cover_headline(line) for line in str(payload.get("text", "")).replace("\r", "").split("\n")]
+    phrases = [phrase for phrase in phrases if phrase]
+    if not phrases:
+        raise ValueError("В TXT не найдено слов для обложек: укажите одну фразу на строку")
+    requested = [int(index) for index in payload.get("indices", [])]
+    valid = [index for index in requested if 0 <= index < len(settings.cover_queue)]
+    if not valid:
+        valid = list(range(len(settings.cover_queue)))
+    if not valid:
+        raise ValueError("Сначала добавьте темы в очередь обложек")
+    applied = 0
+    for index, phrase in zip(valid, phrases):
+        settings.cover_queue[index].update(cover_headline=phrase, headline_status="Загружено вручную")
+        applied += 1
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-own-headlines", "count": applied,
+                                                "message": f"Ваши слова загружены в темы: {applied}."}}
+
+
+def remove_cover_headlines(payload: dict) -> dict:
+    """Clear rendered headlines, regardless of whether AI or the user wrote them."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    removed = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested or not item.get("cover_headline"):
+            continue
+        item.pop("cover_headline", None)
+        item.pop("cover_headline_suggestion", None)
+        item["headline_status"] = ""
+        item["headline_error"] = ""
+        removed += 1
+    if not removed:
+        raise ValueError("Нет ваших слов на обложке для удаления")
+    _save_cover_state(settings)
+    scope = "выбранных тем" if payload.get("indices") else "всех тем"
+    return {**snapshot(), "operationResult": {"kind": "cover-headlines-remove", "count": removed,
+                                                "message": f"Заголовки удалены для {scope}: {removed}."}}
+
+
+def import_cover_topics(payload: dict) -> dict:
+    """Add one cover topic per non-empty line from a user TXT/MD file."""
+    raw = str(payload.get("text", ""))
+    titles = []
+    for line in raw.replace("\r", "").split("\n"):
+        title = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+        if title and title.casefold() not in {value.casefold() for value in titles}:
+            titles.append(title[:300])
+    if not titles:
+        raise ValueError("В TXT не найдено тем: укажите одну тему в каждой непустой строке или абзаце")
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    existing = {str(item.get("title", "")).casefold() for item in settings.cover_queue}
+    added = 0
+    for title in titles:
+        if title.casefold() in existing:
+            continue
+        settings.cover_queue.append({"title": title, "script": "", "scenario_index": len(settings.cover_queue) + 1,
+                                     "status": "Ожидает", "path": "", "error": "", "headline_status": ""})
+        existing.add(title.casefold())
+        added += 1
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-topics-import", "count": added,
+                                                "message": f"Тем добавлено в обложки: {added}."}}
+
+
+def save_cover_headline(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Сценарий обложки не найден")
+    text = " ".join(str(payload.get("headline", "")).split())
+    settings.cover_queue[index].update(cover_headline=text, headline_source="MANUAL",
+                                       headline_status="MANUAL" if text else "", headline_error="")
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def save_cover_subheadline(payload: dict) -> dict:
+    """Save the secondary thumbnail line typed directly in the cover row."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Сценарий обложки не найден")
+    text = _clean_cover_subheadline(str(payload.get("subheadline", "")))
+    headline = _clean_cover_headline(str(settings.cover_queue[index].get("cover_headline", "")))
+    if settings.cover_text_avoid_repeats and headline and text and _cover_lines_repeat_meaningful_words(headline, text):
+        raise ValueError("Подзаголовок повторяет значимые слова из заголовка. Выключите «Без повторов», если это нужно намеренно.")
+    settings.cover_queue[index].update(
+        cover_subheadline=text,
+        subheadline_source="MANUAL",
+        subheadline_status="MANUAL" if text else "",
+        subheadline_error="",
+    )
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def export_cover_prompts(payload: dict) -> dict:
+    settings = load_settings()
+    path = Path(str(payload.get("path", "")).strip())
+    if not str(path):
+        raise ValueError("Выберите место для TXT с промптами")
+    requested = {int(index) for index in payload.get("indices", [])}
+    rows = [(index, item) for index, item in enumerate(settings.cover_queue)
+            if not requested or index in requested]
+    if not rows:
+        raise ValueError("Нет промптов для выгрузки")
+    content = []
+    for number, (_index, item) in enumerate(rows, 1):
+        options = item.get("image_prompt_options") or [item.get("image_prompt") or "Промпт ещё не создан"]
+        variants = "\n".join(f"  Вариант {variant + 1}{' (выбран)' if variant == int(item.get('selected_prompt_index', 0)) else ''}:\n  {prompt}"
+                             for variant, prompt in enumerate(options))
+        headline = str(item.get("cover_headline") or "")
+        subheadline = str(item.get("cover_subheadline") or "")
+        content.append(f"{number}. {item.get('title', '')}\nТекст на обложке: {headline or 'не задан'}\nПодзаголовок: {subheadline or 'не задан'}\n{variants}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n\n".join(content) + "\n", encoding="utf-8-sig")
+    return {**snapshot(), "operationResult": {"kind": "cover-prompts", "count": len(rows), "folder": str(path.parent),
+                                                 "message": f"Промпты обложек сохранены: {path.name}"}}
+
+
+def save_cover_prompt_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    template = str(payload.get("promptTemplate", "")).strip()
+    if not name:
+        raise ValueError("Укажите название пресета обложек")
+    if not template:
+        raise ValueError("Заполните основной промпт перед сохранением")
+    preset = {
+        "name": name,
+        "provider": str(payload.get("provider", settings.cover_prompt_provider)).casefold(),
+        "promptTemplate": template,
+        "ranges": _clean_cover_ranges(payload.get("ranges", [])),
+        "useScriptContext": bool(payload.get("useScriptContext", settings.cover_use_script_context)),
+        "headlineProvider": str(payload.get("headlineProvider", settings.cover_headline_provider)).casefold(),
+        "headlineTemplate": str(payload.get("headlineTemplate", settings.cover_headline_template)).strip(),
+        "subheadlineTemplate": str(payload.get("subheadlineTemplate", settings.cover_subheadline_template)).strip(),
+        "textMode": str(payload.get("textMode", settings.cover_text_mode)),
+    }
+    settings.cover_prompt_presets = [item for item in settings.cover_prompt_presets
+                                     if str(item.get("name", "")).casefold() != name.casefold()]
+    settings.cover_prompt_presets.append(preset)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-preset", "count": 1,
+                                                 "message": f"Пресет обложек «{name}» сохранён."}}
+
+
+def delete_cover_prompt_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    before = len(settings.cover_prompt_presets)
+    settings.cover_prompt_presets = [item for item in settings.cover_prompt_presets
+                                     if str(item.get("name", "")).casefold() != name.casefold()]
+    if len(settings.cover_prompt_presets) == before:
+        raise ValueError("Пресет обложек не найден")
+    save_settings(settings)
+    return snapshot()
+
+
+def save_cover_headline_preset(payload: dict) -> dict:
+    """Save the paired headline/subheadline rules without visual settings."""
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    headline = str(payload.get("headlineTemplate", "")).strip()
+    subheadline = str(payload.get("subheadlineTemplate", "")).strip()
+    if not name:
+        raise ValueError("Укажите название пресета текстов обложки")
+    if not headline and not subheadline:
+        raise ValueError("Заполните промпт заголовка или подзаголовка")
+    preset = {
+        "name": name,
+        "provider": str(payload.get("provider", settings.cover_headline_provider)).casefold(),
+        "headlineTemplate": headline,
+        "subheadlineTemplate": subheadline,
+    }
+    settings.cover_headline_presets = [item for item in settings.cover_headline_presets
+                                       if str(item.get("name", "")).casefold() != name.casefold()]
+    settings.cover_headline_presets.append(preset)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-headline-preset", "count": 1,
+                                                 "message": f"Пресет текстов обложки «{name}» сохранён."}}
+
+
+def delete_cover_headline_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    before = len(settings.cover_headline_presets)
+    settings.cover_headline_presets = [item for item in settings.cover_headline_presets
+                                       if str(item.get("name", "")).casefold() != name.casefold()]
+    if before == len(settings.cover_headline_presets):
+        raise ValueError("Пресет текстов обложки не найден")
+    save_settings(settings)
+    return snapshot()
+
+
+def select_cover_prompt(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    option = int(payload.get("option", -1))
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Сценарий обложки не найден")
+    options = settings.cover_queue[index].get("image_prompt_options") or []
+    if not 0 <= option < len(options):
+        raise ValueError("Вариант промпта не найден")
+    settings.cover_queue[index].update(selected_prompt_index=option, image_prompt=str(options[option]),
+                                       status="Промпты готовы")
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def _is_retryable_cover_error(error: object) -> bool:
+    text = str(error or "").casefold()
+    return any(marker in text for marker in (
+        "winerror 10060", "timeout", "timed out", "connection", "network", "429", " 5",
+        "temporar", "connection reset", "provider safety", "safety filters",
+    ))
+
+
+def _cover_face_requirement_message(face_mode: str, face_label: str) -> str:
+    """Return only true validation errors for a requested face treatment.
+
+    A local portrait is an optional identity reference.  It cannot be a
+    prerequisite for rendering a scene with a human face because most topics
+    have no matching portrait in the local library.
+    """
+    del face_mode, face_label
+    return ""
+
+
+def _cover_face_visual_requirement(face_mode: str, face_label: str) -> str:
+    """Keep the user's face-mode choice in the provider prompt without a file."""
+    if face_mode == "without":
+        return " Do not show a human face or a portrait in this image."
+    if face_mode == "with" and not face_label:
+        return (
+            " Include one prominent, photorealistic, topic-relevant human face with a clear "
+            "emotion or reaction; it must belong naturally to this exact news scene, not be a random celebrity."
+        )
+    return ""
+
+
+def _cover_fastgen_identity_instruction(face_label: str, *, has_remote_reference: bool) -> str:
+    """Ask FastGen for the matched identity even when the operation accepts no files."""
+    identity = " ".join(str(face_label or "").split())
+    if not identity:
+        return ""
+    if has_remote_reference:
+        return (
+            f" Render a recognisable editorial portrait of {identity}, using the supplied portrait only "
+            "to preserve that person's identity. Keep one person only; do not substitute a different public figure."
+        )
+    return (
+        f" Render one recognisable editorial portrait of {identity}, the named public figure relevant to this story. "
+        "Use a realistic news-photography likeness; do not substitute a different public figure or add a second face."
+    )
+
+
+def _cover_operation_accepts_references(settings: Settings, operation: str) -> bool:
+    """Read the cached FastGen schema before attaching files to a generation prompt."""
+    for capability in (settings.fastgen_capabilities_cache.get("image") or []):
+        if not isinstance(capability, dict):
+            continue
+        identifier = str(capability.get("id") or capability.get("operation") or "")
+        if identifier != operation:
+            continue
+        inputs = capability.get("inputs") if isinstance(capability.get("inputs"), dict) else {}
+        return int(inputs.get("max") or 0) > 0
+    # These two operations are documented in FastGen's live schema as text-only
+    # image generation.  An unavailable capabilities refresh must not make us
+    # send them a portrait they explicitly reject.
+    return operation not in {"flower_image_generate", "grok_image_generate"}
+
+
+def _cover_retry_prompt(title: str, original: str, round_number: int = 2) -> str:
+    """Transport retries reuse the immutable builder output verbatim."""
+    del title, round_number
+    return original
+
+
+def _cover_retry_plan(title: str, original: str) -> list[dict[str, object]]:
+    """Four prompts × four transport attempts, recorded as user-visible rounds."""
+    return [
+        {"round": 1, "prompt": original, "attempts": 4, "rewritten": False},
+        *[
+            {"round": round_number, "prompt": _cover_retry_prompt(title, original, round_number),
+             "attempts": 4, "rewritten": False}
+            for round_number in range(2, 5)
+        ],
+    ]
+
+
+def _run_parallel_cover_workers(indices: list[int], worker) -> list[object]:
+    """Run independent cover topics concurrently without exceeding FastGen's pool.
+
+    A topic remains a single unit: all of its variants and retries run in the
+    same worker, so a retry never duplicates another worker's output.  The
+    maximum is intentionally fixed at the provider-supported ten requests.
+    """
+    ordered = sorted(dict.fromkeys(int(index) for index in indices))
+    if not ordered:
+        return []
+    workers = min(10, len(ordered))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newsflow-cover") as executor:
+        futures = {executor.submit(worker, index): index for index in ordered}
+        completed: dict[int, object] = {}
+        for future in as_completed(futures):
+            completed[futures[future]] = future.result()
+    return [completed[index] for index in ordered]
+
+
+def _cover_generation_lock_path() -> Path:
+    return app_data_root() / "cover-generation.lock"
+
+
+def _cover_generation_process_is_running(pid: object) -> bool:
+    # The process identity check lives with the montage queue because both
+    # long-running bridge actions are hosted by NewsFlowCore.exe.
+    return _montage_process_is_running(pid)
+
+
+def _claim_cover_generation_lock() -> Path | None:
+    """Claim one cross-process cover batch, or return None for an active one."""
+    lock_path = _cover_generation_lock_path()
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            existing = {}
+        if _cover_generation_process_is_running(existing.get("pid")):
+            return None
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return None
+    try:
+        with lock_path.open("x", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "startedAt": datetime.now().isoformat(timespec="seconds")}, stream)
+    except FileExistsError:
+        return None
+    return lock_path
+
+
+def _release_cover_generation_lock(lock_path: Path) -> None:
+    """Release only the lock still owned by this bridge process."""
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        payload = {}
+    if payload.get("pid") != os.getpid():
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def generate_covers(payload: dict) -> dict:
+    """Start one bounded ten-worker cover batch; reject duplicate clicks."""
+    if payload.get("_parallel_cover_worker"):
+        return _generate_covers_unlocked(payload)
+    lock_path = _claim_cover_generation_lock()
+    if lock_path is None:
+        return {**snapshot(), "operationResult": {
+            "kind": "cover-generate", "count": 0,
+            "message": "Генерация обложек уже выполняется: активен один пакет до 10 параллельных тем.",
+        }}
+    try:
+        return _generate_covers_unlocked(payload)
+    finally:
+        _release_cover_generation_lock(lock_path)
+
+
+def _generate_covers_unlocked(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    # "Create covers" is an explicit operator decision to resume this queue.
+    # Without this edge, the worker starts successfully but immediately turns
+    # every row back into "Paused" and never submits a FastGen request.
+    # Internal workers deliberately do not receive this flag, so a real Pause
+    # still stops the next unstarted topic.
+    if payload.get("resumeGeneration") and settings.cover_generation_paused:
+        settings.cover_generation_paused = False
+        _save_cover_state(settings)
+    if payload.get("resumeOnly"):
+        requested = {
+            index for index, _item in _select_current_cover_generation_rows(
+                settings, {"indices": []}, lambda item: item.get("status") == "Приостановлено",
+            )
+        }
+        if not requested:
+            return {**snapshot(), "operationResult": {
+                "kind": "cover-resume", "count": 0,
+                "message": "Нет приостановленных обложек: очередь уже завершена или ещё не запускалась.",
+            }}
+    else:
+        requested = {
+            index for index, _item in _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+        }
+    if not payload.get("resumeOnly") and not payload.get("indices"):
+        # The primary action is always missing-only. Existing valid files are
+        # preserved even after a model change; deliberate replacement uses
+        # the separate regenerate action.
+        requested = {
+            index for index, item in enumerate(settings.cover_queue)
+            if not _cover_has_valid_image(item)
+        }
+    if not payload.get("forceRegenerate"):
+        requested = {
+            index for index in requested
+            if 0 <= index < len(settings.cover_queue) and not _cover_has_valid_image(settings.cover_queue[index])
+        }
+    if not requested:
+        return {**snapshot(), "operationResult": {
+            "kind": "cover-generate", "count": 0,
+            "message": "Все выбранные обложки уже существуют и не требуют генерации.",
+        }}
+    # One cover topic is self-contained (variants, retries and optional local
+    # composition).  Dispatch topics, not individual image variants, so an
+    # automatic retry cannot race a sibling worker for the same output file.
+    # The inner call deliberately reloads Settings for its row; save_settings
+    # merges cover rows by scenario identity with montage progress updates.
+    if not payload.get("_parallel_cover_worker") and len(requested) > 1:
+        base_payload = dict(payload)
+        base_payload["_parallel_cover_worker"] = True
+
+        def run_topic(index: int):
+            worker_payload = dict(base_payload)
+            worker_payload["indices"] = [index]
+            worker_payload["productionItemIds"] = [
+                str(settings.cover_queue[index].get("production_item_id", "")).strip()
+            ]
+            return generate_covers(worker_payload)
+
+        _run_parallel_cover_workers(sorted(requested), run_topic)
+        return snapshot()
+    refine_with_face = bool(payload.get("refineWithFace"))
+    # FastGen accepts the scene/text instruction, while NewsFlow composites
+    # the local cut-out portrait afterwards. This keeps the person sharp and
+    # avoids sending a portrait as an unreliable remote reference for the
+    # text-only rerender path.
+    local_face_only = bool(payload.get("localFaceOnly"))
+    face_mode = str(payload.get("faceMode", "auto")).casefold()
+    # A one-off FastGen text render must not overwrite the user's usual
+    # local-overlay preference for future covers.
+    text_mode = str(payload.get("textMode", settings.cover_text_mode)).casefold()
+    if text_mode not in {"overlay", "fastgen"}:
+        text_mode = settings.cover_text_mode
+    if face_mode not in {"auto", "with", "without"}:
+        face_mode = "auto"
+    build_mode = str(payload.get("buildMode", settings.cover_build_mode)).casefold()
+    if build_mode not in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
+        build_mode = settings.cover_build_mode
+    operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
+    operation_accepts_references = _cover_operation_accepts_references(settings, operation)
+    render_profile = {
+        "build_mode": build_mode,
+        "face_mode": face_mode,
+        "text_mode": text_mode,
+        "local_face_only": local_face_only,
+        "operation": operation,
+    }
+    pool = FastGenPool(_selected_fastgen_keys(settings))
+    output = Path(settings.cover_output_folder)
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        # A current FastGen request cannot be cancelled safely; the pause is
+        # checked before every next topic and therefore never loses work.
+        if load_settings().cover_generation_paused:
+            _cover_step(item, "Приостановлено", int(item.get("progress", 0) or 0), "Продолжите генерацию, когда будете готовы")
+            _save_cover_state(settings)
+            continue
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        # A cover remains reproducible even after the user changes the global
+        # controls. "Repeat current" reads this record instead of guessing
+        # the current screen defaults.
+        item["render_profile"] = dict(render_profile)
+        excerpt = " ".join(str(item.get("script", "")).split())[:1800]
+        prompt_options = [" ".join(str(value).split()) for value in (item.get("image_prompt_options") or [])]
+        prompt_options = list(dict.fromkeys(value for value in prompt_options if value))
+        if not prompt_options:
+            prompt = str(item.get("image_prompt", "")).strip()
+            if not prompt:
+                prompt = settings.cover_prompt_template.replace("{title}", title).replace("{excerpt}", excerpt)
+                item["image_prompt"] = prompt
+            prompt_options = [prompt]
+        # Keep a whole topic together.  This deliberately waits before the
+        # first request when the remaining hourly allowance cannot complete
+        # all prompt variants, so a resume never regenerates a partial topic.
+        requested_images = len(prompt_options) * settings.cover_variant_count
+        rate = cover_rate_limit_decision(
+            settings.cover_rate_usage_events,
+            requested=requested_images,
+            limit_per_hour=settings.cover_rate_limit_per_hour,
+        )
+        if not rate.allowed:
+            resume_at = next_fastgen_resume_at().isoformat()
+            _cover_step(item, "Ожидает лимит FastGen", int(item.get("progress", 0) or 0),
+                        f"Лимит FastGen исчерпан. Продолжение после обновления в {resume_at}.")
+            item.update(error="", rate_limit_wait_until=resume_at, rate_limit_used=rate.used)
+            _save_cover_state(settings)
+            continue
+        try:
+            references, face_label = _cover_references_for_item(
+                item, settings, refine=refine_with_face,
+                face_mode="without" if local_face_only else face_mode, position=index,
+            )
+            if local_face_only and face_mode != "without":
+                face_path, face_label, face_source = _match_cover_face_reference(
+                    item, settings, force=face_mode == "with"
+                )
+                if face_path:
+                    item.update(face_reference_path=face_path, face_reference_label=face_label,
+                                face_reference_source=face_source)
+                else:
+                    item.pop("face_reference_path", None)
+                    item.pop("face_reference_label", None)
+                    item.pop("face_reference_source", None)
+            # Flower/Grok generation endpoints are text-only.  Keep the matched
+            # name below, but never submit a file that their live schema rejects.
+            if not operation_accepts_references:
+                references = []
+        except ValueError as exc:
+            _cover_step(item, "Ошибка подготовки лица", 100, str(exc))
+            item["error"] = str(exc)
+            _save_cover_state(settings)
+            continue
+        message = _cover_face_requirement_message(face_mode, face_label)
+        if message:
+            _cover_step(item, "Нет подходящего лица", 100, message)
+            item["error"] = message
+            _save_cover_state(settings)
+            continue
+        identity_notes: list[str] = []
+        reference_notes: list[str] = []
+        composition_notes: list[str] = []
+        face_requirement = _cover_face_visual_requirement(face_mode, face_label)
+        if face_requirement:
+            identity_notes.append(face_requirement)
+        if references:
+            reference_notes.append(
+                "Supplied references guide composition, scale, contrast and scene density only; adapt them to this topic."
+            )
+        if item.get("visual_reference_to_fastgen") and str(item.get("visual_reference_path", "")).strip():
+            reference_notes.append(
+                "The supplied user reference sets hierarchy and framing; create a new topic-accurate scene."
+            )
+        if face_label:
+            face_layout = _cover_face_layout(item, settings, str(item.get("face_reference_path", "")), face_label)
+            if local_face_only:
+                identity_notes.append(
+                    f"A matching portrait of {face_label} will be composited locally after rendering; leave that zone uncluttered."
+                )
+            else:
+                identity_notes.append(_cover_fastgen_identity_instruction(
+                    face_label, has_remote_reference=bool(references),
+                ))
+            composition_notes.append(face_layout)
+        if refine_with_face:
+            reference_notes.append(
+                "Use the first supplied image as the existing composition reference while redrawing a clean topic-relevant scene."
+            )
+        final_prompt_options = [
+            build_final_provider_prompt(
+                visual_prompt, item,
+                identity_notes=" ".join(note for note in identity_notes if note),
+                reference_notes=" ".join(note for note in reference_notes if note),
+                composition_notes=" ".join(note for note in composition_notes if note),
+                text_mode=text_mode,
+            )
+            for visual_prompt in prompt_options
+        ]
+        item["final_provider_prompt_options"] = final_prompt_options
+        item["final_provider_prompt"] = final_prompt_options[0]
+        item["prompt_sources"] = prompt_sources_debug()
+        _cover_step(item, "Подготовка запросов", 10, f"Промптов: {len(prompt_options)} · картинок на промпт: {settings.cover_variant_count}")
+        # Never let a previous local-face request leak into this attempt. If
+        # FastGen fails, the item must stay an error instead of composing an
+        # old scene and showing a misleading "Лицо наложено" success.
+        item["face_composite_requested"] = False
+        item["error"] = ""
+        _save_cover_state(settings)
+        values: list[str] = []
+        prompt_image_paths: list[dict[str, object]] = []
+        try:
+            def progress(label: str, percent: int, detail: str = ""):
+                _cover_step(item, label, percent, detail)
+                _save_cover_state(settings)
+
+            seed = int(settings.cover_seed) if settings.cover_seed.isdigit() else None
+            generation_history: list[dict[str, object]] = []
+            for prompt_index, final_provider_prompt in enumerate(final_prompt_options, 1):
+                _cover_step(item, "Подготовка варианта", max(10, int((prompt_index - 1) / len(prompt_options) * 80) + 10),
+                            f"Промпт {prompt_index}/{len(prompt_options)}")
+                paths = []
+                last_error: Exception | None = None
+                successful_prompt = final_provider_prompt
+                for retry_round in _cover_retry_plan(title, final_provider_prompt):
+                    round_number = int(retry_round["round"])
+                    retry_prompt = str(retry_round["prompt"])
+                    for attempt in range(1, int(retry_round["attempts"]) + 1):
+                        total_attempt = (round_number - 1) * 4 + attempt
+                        if total_attempt > 1:
+                            delay = min(12, 2 ** (attempt - 1)) if attempt > 1 else 0
+                            _cover_step(
+                                item, f"Круг {round_number}/4 · попытка {attempt}/4",
+                                int(item.get("progress", 10) or 10),
+                                (f"Промпт {'переписан' if retry_round['rewritten'] else 'исходный'} · "
+                                 f"всего попытка {total_attempt}/16" + (f" · повтор через {delay} сек." if delay else "")),
+                            )
+                            item.update(
+                                error="", generation_round=round_number, generation_rounds=4,
+                                generation_attempt=attempt, generation_attempts_per_round=4,
+                                generation_total_attempt=total_attempt, generation_max_attempts=16,
+                            )
+                            _save_cover_state(settings)
+                            if delay:
+                                time.sleep(delay)
+                        try:
+                            paths = pool.generate_media(
+                                retry_prompt,
+                                output, f"{index + 1:03d} — {title} — промпт {prompt_index:02d}", operation,
+                                settings.cover_aspect_ratio, references=references, count=settings.cover_variant_count, seed=seed,
+                                quality=settings.cover_quality or None, resolution=settings.cover_resolution or None,
+                                upscale=settings.cover_upscale, progress_callback=progress,
+                            )
+                            successful_prompt = retry_prompt
+                            generation_history.append({
+                                "promptIndex": prompt_index, "round": round_number, "attempt": attempt,
+                                "totalAttempt": total_attempt, "rewritten": bool(retry_round["rewritten"]),
+                                "status": "success", "at": datetime.now().isoformat(timespec="seconds"),
+                            })
+                            item.update(
+                                generation_round=round_number, generation_rounds=4,
+                                generation_attempt=attempt, generation_attempts_per_round=4,
+                                generation_total_attempt=total_attempt, generation_max_attempts=16,
+                                generation_history=generation_history[-128:],
+                            )
+                            break
+                        except Exception as generation_error:
+                            last_error = generation_error
+                            generation_history.append({
+                                "promptIndex": prompt_index, "round": round_number, "attempt": attempt,
+                                "totalAttempt": total_attempt, "rewritten": bool(retry_round["rewritten"]),
+                                "status": "failed", "error": str(generation_error)[:500],
+                                "at": datetime.now().isoformat(timespec="seconds"),
+                            })
+                            item.update(
+                                generation_round=round_number, generation_rounds=4,
+                                generation_attempt=attempt, generation_attempts_per_round=4,
+                                generation_total_attempt=total_attempt, generation_max_attempts=16,
+                                generation_history=generation_history[-128:], error="",
+                            )
+                            _save_cover_state(settings)
+                            if not _is_retryable_cover_error(generation_error):
+                                raise
+                    if paths:
+                        break
+                    if round_number < 4:
+                        _cover_step(
+                            item, f"Переписываем промпт · круг {round_number + 1}/4",
+                            int(item.get("progress", 10) or 10),
+                            "Четыре попытки не помогли: сохраняем тему и создаём новый, более простой визуальный ход.",
+                        )
+                        _save_cover_state(settings)
+                if not paths:
+                    detail = str(last_error or "FastGen не вернул изображение")
+                    raise RuntimeError(
+                        f"FastGen не создал вариант после 4 кругов × 4 попытки (16 запросов). Последняя причина: {detail}"
+                    )
+                generated = [str(path) for path in paths]
+                required = settings.cover_variant_count
+                if len(generated) != required:
+                    raise RuntimeError(f"FastGen вернул {len(generated)} из {required} картинок для промпта {prompt_index}")
+                values.extend(generated)
+                prompt_image_paths.append({"promptIndex": prompt_index - 1, "prompt": successful_prompt, "paths": generated})
+            _cover_step(item, "Готово", 100)
+            item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
+                        selected_base_path=values[0], prompt_image_paths=prompt_image_paths,
+                        face_composite_requested=bool(face_label and local_face_only), error="")
+            item.pop("rate_limit_wait_until", None)
+            item.pop("rate_limit_used", None)
+            if settings.cover_rate_limit_per_hour and values:
+                settings.cover_rate_usage_events.append({
+                    "at": datetime.now().astimezone().isoformat(), "count": len(values),
+                })
+                settings.cover_rate_usage_events = settings.cover_rate_usage_events[-10000:]
+        except Exception as exc:
+            detail = str(exc)
+            if values:
+                detail = f"{detail}. Получено вариантов: {len(values)} из {len(prompt_options) * settings.cover_variant_count}"
+                item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
+                            selected_base_path=values[0], prompt_image_paths=prompt_image_paths)
+            if any(token in detail.casefold() for token in ("quota", "credit", "limit", "429", "лимит")):
+                resume_at = next_fastgen_resume_at().isoformat()
+                _cover_step(item, "Ожидает лимит FastGen", int(item.get("progress", 0) or 0),
+                            f"FastGen вернул лимит. Продолжение после обновления в {resume_at}.")
+                item.update(error="", rate_limit_wait_until=resume_at)
+            else:
+                _cover_step(item, "Ошибка FastGen", 100, detail)
+                item.update(error=detail)
+        _save_cover_state(settings)
+    # The face reference is not left to the image model alone.  When a topic
+    # has a relevant portrait, apply it locally before putting typography over
+    # the final image.
+    face_indices = [index for index in requested if index < len(settings.cover_queue)
+                    and settings.cover_queue[index].get("face_composite_requested")]
+    if face_indices:
+        compose_cover_faces({"indices": face_indices})
+    if settings.cover_auto_overlay_text and text_mode == "overlay":
+        try:
+            return render_cover_text({"indices": sorted(requested)})
+        except ValueError:
+            # Rendering a clean visual-only cover remains a success when this
+            # topic has no approved cover words yet.
+            pass
+    return snapshot()
+
+
+def render_cover_text_fastgen(payload: dict) -> dict:
+    """Rerender a cover through FastGen using approved words as an instruction.
+
+    Local overlay is the accurate option. This alternate action deliberately
+    creates a new picture because FastGen cannot reliably edit pixels of an
+    existing image in place.
+    """
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    eligible_rows = _select_current_cover_generation_rows(
+        settings, payload,
+        lambda item: str(item.get("image_prompt", "")).strip()
+        and str(item.get("cover_headline", "")).strip(),
+    )
+    if not eligible_rows:
+        raise ValueError("Нужны готовый промпт и заполненный заголовок на обложке")
+    return generate_covers({
+        "indices": [index for index, _item in eligible_rows],
+        "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in eligible_rows],
+        "forceRegenerate": True,
+        "faceMode": payload.get("faceMode", "auto"),
+        "textMode": "fastgen",
+        "localFaceOnly": True,
+    })
+
+
+def select_cover_variant(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    path = str(payload.get("path", "")).strip()
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Обложка не найдена")
+    item = settings.cover_queue[index]
+    # A renderer snapshot can still display a raw image while local face/text
+    # composition has already replaced `paths`. All known outputs remain
+    # selectable so that click cannot fail purely because of that refresh race.
+    known_paths = [
+        *item.get("paths", []), *item.get("raw_paths", []),
+        *item.get("face_composite_paths", []), item.get("text_overlay_path", ""),
+    ]
+    if path not in [str(value) for value in known_paths if value]:
+        raise ValueError("Вариант обложки не найден")
+    item.update(path=path, selected_path=path, selected_base_path=path)
+    _save_cover_state(settings)
+    return snapshot()
+
+
+def _safe_remove_cover_file(path_value: object, output_folder: Path) -> None:
+    path = Path(str(path_value)).resolve()
+    try:
+        path.relative_to(output_folder.resolve())
+    except ValueError:
+        return
+    if path.is_file():
+        path.unlink()
+
+
+def remove_cover_results(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if payload.get("all"):
+        requested = set(range(len(settings.cover_queue)))
+    if not requested:
+        raise ValueError("Выберите обложки, картинки которых нужно удалить")
+    output = Path(settings.cover_output_folder)
+    removed = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
+                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
+        for path in dict.fromkeys(str(value) for value in all_paths if value):
+            if Path(str(path)).is_file():
+                removed += 1
+            _safe_remove_cover_file(path, output)
+        item.update(paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="", selected_path="",
+                    selected_base_path="", status="Промпт готов" if item.get("image_prompt") else "Ожидает", error="")
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-remove-results", "count": removed,
+                                                 "message": f"Удалено изображений: {removed}."}}
+
+
+def remove_cover_image(payload: dict) -> dict:
+    """Delete just one disliked variant while retaining the other cover options."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = int(payload.get("index", -1))
+    path_value = str(payload.get("path", "") or "")
+    if not 0 <= index < len(settings.cover_queue):
+        raise ValueError("Тема обложки не найдена")
+    item = settings.cover_queue[index]
+    paths = [str(value) for value in item.get("paths", [])]
+    raw_paths = [str(value) for value in item.get("raw_paths", [])]
+    composite_paths = [str(value) for value in item.get("face_composite_paths", [])]
+    text_path = str(item.get("text_overlay_path", "") or "")
+    known_paths = [*paths, *raw_paths, *composite_paths, text_path]
+    if path_value not in known_paths:
+        raise ValueError("Вариант обложки не найден")
+    _safe_remove_cover_file(path_value, Path(settings.cover_output_folder))
+    remaining = [path for path in paths if path != path_value and Path(path).is_file()]
+    remaining_raw = [path for path in raw_paths if path != path_value and Path(path).is_file()]
+    remaining_composite = [path for path in composite_paths if path != path_value and Path(path).is_file()]
+    remaining_text = text_path if text_path != path_value and Path(text_path).is_file() else ""
+    selected = str(item.get("selected_path", ""))
+    choices = [*remaining, *remaining_composite, *remaining_raw, remaining_text]
+    next_selected = selected if selected in choices else (choices[0] if choices else "")
+    item.update(paths=remaining, raw_paths=remaining_raw, face_composite_paths=remaining_composite,
+                text_overlay_path=remaining_text, path=next_selected, selected_path=next_selected, selected_base_path=next_selected,
+                status="Готово" if remaining else ("Промпт выбран" if item.get("image_prompt") else "Ожидает"))
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-remove-image", "count": 1, "message": "Вариант обложки удалён."
+    }}
+
+
+def remove_cover_queue(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if payload.get("all"):
+        requested = set(range(len(settings.cover_queue)))
+    if not requested:
+        raise ValueError("Выберите сценарии для удаления из очереди обложек")
+    output = Path(settings.cover_output_folder)
+    kept = []
+    removed_ids: list[str] = []
+    removed = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            kept.append(item)
+            continue
+        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
+                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
+        for path in dict.fromkeys(str(value) for value in all_paths if value):
+            _safe_remove_cover_file(path, output)
+        removed_ids.append(str(item.get("production_item_id", "")))
+        removed += 1
+    settings.cover_queue = kept
+    CoverLibrary(_cover_library_path()).remove(removed_ids)
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-remove-queue", "count": removed,
+                                                 "message": f"Из очереди обложек удалено: {removed}."}}
+
+
+def regenerate_covers(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected_rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    requested = {index for index, _item in selected_rows}
+    selected_ids = {
+        str(item.get("production_item_id", "")).strip()
+        for _index, item in selected_rows
+    }
+    if not requested:
+        raise ValueError("Выберите тему для перегенерации обложки")
+    output = Path(settings.cover_output_folder)
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
+                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
+        for path in dict.fromkeys(str(value) for value in all_paths if value):
+            _safe_remove_cover_file(path, output)
+        item.update(paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="", selected_path="",
+                    selected_base_path="", status="Промпт выбран", error="")
+    _save_cover_state(settings)
+    if payload.get("currentProfile"):
+        # Different selected cards may have been made by different modes.
+        # Render each profile group separately rather than converting all of
+        # them into whichever mode is visible in the settings panel now.
+        groups: dict[tuple[str, str, str, bool, str], list[tuple[int, str]]] = {}
+        for index in sorted(requested):
+            item = settings.cover_queue[index]
+            profile = item.get("render_profile") if isinstance(item.get("render_profile"), dict) else {}
+            build_mode = str(profile.get("build_mode", settings.cover_build_mode)).casefold()
+            face_mode = str(profile.get("face_mode", "auto")).casefold()
+            text_mode = str(profile.get("text_mode", settings.cover_text_mode)).casefold()
+            local_face_only = bool(profile.get("local_face_only", build_mode != "fastgen-full"))
+            operation = str(payload.get("operation") or profile.get("operation") or settings.cover_operation).strip()
+            key = (build_mode, face_mode, text_mode, local_face_only, operation)
+            groups.setdefault(key, []).append((index, str(item.get("production_item_id", "")).strip()))
+        result = snapshot()
+        for (build_mode, face_mode, text_mode, local_face_only, operation), rows in groups.items():
+            indices = [index for index, _identity in rows]
+            production_item_ids = [identity for _index, identity in rows]
+            result = generate_covers({
+                "indices": indices, "buildMode": build_mode, "faceMode": face_mode,
+                "productionItemIds": production_item_ids, "textMode": text_mode,
+                "localFaceOnly": local_face_only, "operation": operation,
+            })
+        return result
+    # Explicit non-current rerender requests keep the route supplied by the
+    # caller; old cards without a saved profile retain the configured default.
+    return generate_covers({
+        "indices": sorted(requested),
+        "productionItemIds": sorted(selected_ids),
+        "operation": payload.get("operation", settings.cover_operation),
+        "buildMode": payload.get("buildMode", settings.cover_build_mode),
+        "localFaceOnly": bool(payload.get("localFaceOnly")),
+        "faceMode": payload.get("faceMode", "with"),
+        "textMode": payload.get("textMode", "fastgen"),
+    })
+
+
+def regenerate_cover_with_face(payload: dict) -> dict:
+    """Rewrite both visual idea and scene for a consciously selected person."""
+    requested = payload.get("indices", [payload.get("index", -1)])
+    if not isinstance(requested, list) or len(requested) != 1:
+        raise ValueError("Выберите одну актуальную тему для перерисовки с лицом")
+    index = int(requested[0])
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if len(selected) != 1 or selected[0][0] != index:
+        raise ValueError("Выбранная задача обложки устарела или больше не активна")
+    production_item_id = str(selected[0][1].get("production_item_id", "")).strip()
+    # Selection is persisted first. `_cover_instruction` then sees the exact
+    # person and tells the prompt agent how to redesign the scene around them.
+    select_cover_face_person({"index": index, "person": payload.get("person", "")})
+    settings = load_settings()
+    provider = str(payload.get("provider", settings.cover_prompt_provider)).casefold()
+    generate_cover_prompts({
+        "indices": [index], "productionItemIds": [production_item_id], "provider": provider, "rewrite": True,
+    })
+    return regenerate_covers({
+        "indices": [index], "productionItemIds": [production_item_id],
+        "faceMode": "with", "textMode": "fastgen", "localFaceOnly": True,
+    })
+
+
+def regenerate_covers_new_prompts(payload: dict) -> dict:
+    """Rewrite visual prompts and leave the selected topics ready for a deliberate render."""
+    # Rewriting is a clean new attempt: old previews must not remain mixed
+    # with prompts that describe a different visual concept.
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected_rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    chosen = [index for index, _item in selected_rows]
+    chosen_ids = {
+        str(item.get("production_item_id", "")).strip()
+        for _index, item in selected_rows
+    }
+    if not chosen:
+        raise ValueError("Выберите актуальные темы для новых промптов")
+    output = Path(settings.cover_output_folder)
+    removed = 0
+    for index in chosen:
+        if not 0 <= index < len(settings.cover_queue):
+            continue
+        item = settings.cover_queue[index]
+        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
+                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
+        for path in dict.fromkeys(str(value) for value in all_paths if value):
+            if Path(path).is_file():
+                removed += 1
+            _safe_remove_cover_file(path, output)
+        item.update(paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="", selected_path="",
+                    selected_base_path="", progress=0, error="", status="Промпты переписываются")
+    _save_cover_state(settings)
+    generate_cover_prompts({
+        "indices": chosen,
+        "productionItemIds": sorted(chosen_ids),
+        "provider": payload.get("provider", "agent"),
+        "rewrite": True,
+    })
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    for item in settings.cover_queue:
+        if str(item.get("production_item_id", "")).strip() not in chosen_ids:
+            continue
+        if item.get("error") or not str(item.get("image_prompt", "")).strip():
+            # Keep a real provider failure visible; do not turn it into a
+            # misleading success just because the rewrite command ended.
+            _cover_step(item, "Ошибка промпта", 100, str(item.get("error") or "Не удалось создать новый промпт"))
+            continue
+        item.update(status="Новые промпты созданы", progress=0, error="")
+        _cover_step(item, "Новые промпты созданы", 0, "Нажмите «Повторить с новыми» или запустите выбранный режим")
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-prompts-rewritten", "count": len(chosen),
+        "message": f"Новые промпты созданы. Удалено старых картинок: {removed}. Нажмите «Повторить с новыми» или выберите режим генерации."
+    }}
+
+
+def refine_cover_faces(payload: dict) -> dict:
+    """Re-render selected existing scenes with the matched/manual portrait reference."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if not selected:
+        raise ValueError("Выберите одну или несколько готовых обложек для перерисовки с лицом")
+    return generate_covers({
+        "indices": [index for index, _item in selected],
+        "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
+        "refineWithFace": True, "localFaceOnly": True,
+    })
+
+
+def remove_cover_prompts(payload: dict) -> dict:
+    """Clear visual prompt variants only; keep the topic, cover words and rendered files."""
+    settings = load_settings()
+    # The durable cover registry is the source of truth across releases.  If
+    # we only save settings here, the next hydration restores the old prompt.
+    _hydrate_cover_library(settings)
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    removed = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        if item.get("image_prompt") or item.get("image_prompt_options"):
+            item.pop("image_prompt", None)
+            item.pop("image_prompt_options", None)
+            item.pop("selected_prompt_index", None)
+            item.pop("prompt_provider", None)
+            item["status"] = "Промпт очищен"
+            # The library may be read by a polling bridge that started with an
+            # older settings snapshot.  A per-row revision makes this explicit
+            # removal win over that stale copy during the next hydration.
+            item["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+            removed += 1
+    if not removed:
+        raise ValueError("Нет промптов для удаления")
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {"kind": "cover-prompts-remove", "count": removed,
+                                                "message": f"Промпты обложек удалены: {removed}."}}
+
+
+def export_covers(payload: dict) -> dict:
+    settings = load_settings()
+    destination = Path(str(payload.get("path", "")).strip())
+    if not str(destination):
+        raise ValueError("Выберите место для ZIP с обложками")
+    requested = {int(index) for index in payload.get("indices", [])}
+    selected = [(index, item) for index, item in enumerate(settings.cover_queue)
+                if (not requested or index in requested) and item.get("selected_path")]
+    if not selected:
+        raise ValueError("Сначала выберите хотя бы одну готовую обложку")
+    if destination.suffix.casefold() != ".zip":
+        destination = destination.with_suffix(".zip")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for number, (_index, item) in enumerate(selected, 1):
+            path = Path(str(item.get("selected_path", "")))
+            if not path.is_file():
+                continue
+            name = f"{number:03d} — {safe_filename(str(item.get('title', 'Обложка')))}{path.suffix.casefold()}"
+            archive.write(path, name)
+            written += 1
+    if not written:
+        destination.unlink(missing_ok=True)
+        raise ValueError("Файлы выбранных обложек не найдены")
+    return {**snapshot(), "operationResult": {"kind": "cover-export", "count": written, "folder": str(destination.parent),
+                                                 "message": f"ZIP с обложками сохранён: {destination.name}"}}
+
+
+def export_cover_images(payload: dict) -> dict:
+    """Export selected gallery cards (or every variant) under stable topic names."""
+    settings = load_settings()
+    destination = Path(str(payload.get("path", "") or "").strip())
+    if not str(destination):
+        raise ValueError("Выберите место для ZIP с обложками")
+    requested_items = payload.get("items")
+    chosen: list[tuple[int, dict, str]] = []
+    if isinstance(requested_items, list) and requested_items:
+        seen: set[tuple[int, str]] = set()
+        for raw in requested_items:
+            if not isinstance(raw, dict):
+                continue
+            index = int(raw.get("index", -1))
+            path = str(raw.get("path", "") or "")
+            key = (index, path)
+            if key in seen or not 0 <= index < len(settings.cover_queue):
+                continue
+            if path in [str(value) for value in settings.cover_queue[index].get("paths", [])] and Path(path).is_file():
+                chosen.append((index, settings.cover_queue[index], path))
+                seen.add(key)
+    else:
+        for index, item in enumerate(settings.cover_queue):
+            for path in item.get("paths", []):
+                if Path(str(path)).is_file():
+                    chosen.append((index, item, str(path)))
+    if not chosen:
+        raise ValueError("Нет готовых обложек для выгрузки")
+    if destination.suffix.casefold() != ".zip":
+        destination = destination.with_suffix(".zip")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    variants_by_topic: dict[int, int] = {}
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, item, raw_path in chosen:
+            path = Path(raw_path)
+            variants_by_topic[index] = variants_by_topic.get(index, 0) + 1
+            name = (f"{index + 1:03d} — {safe_filename(str(item.get('title', 'Обложка')))} "
+                    f"— вариант {variants_by_topic[index]:02d}{path.suffix.casefold()}")
+            archive.write(path, name)
+            written += 1
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-gallery-export", "count": written, "folder": str(destination.parent),
+        "message": f"Обложки выгружены в ZIP: {destination.name}",
+    }}
+
+
+def render_cover_text(payload: dict) -> dict:
+    """Create a controllable text version of selected covers without touching FastGen originals."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise RuntimeError("Не найдена библиотека Pillow для наложения текста") from exc
+    settings = load_settings()
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.cover_queue)))
+    output = Path(settings.cover_output_folder) / "С текстом"
+    output.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for index, item in enumerate(settings.cover_queue):
+        if index not in requested:
+            continue
+        headline = " ".join(str(item.get("cover_headline", "")).split())[:70]
+        subheadline = " ".join(str(item.get("cover_subheadline", "")).split())[:110]
+        # Always render typography from the clean selected base.  The previous
+        # output may already contain text, and using it again would bake in two
+        # copies on top of each other.
+        candidate_paths = [
+            item.get("selected_base_path"), item.get("selected_path"), item.get("path"),
+            *(item.get("face_composite_paths") or []), *(item.get("raw_paths") or []), *(item.get("paths") or []),
+        ]
+        source = next((Path(str(value)) for value in candidate_paths if value and Path(str(value)).is_file()), Path())
+        if not headline or not source.is_file():
+            continue
+        try:
+            image = Image.open(source).convert("RGBA")
+            width, height = image.size
+            # A red breaking-news frame is a local graphic element, not part
+            # of the AI request.  It stays crisp at every resolution and gives
+            # a thumbnail the same immediate edge as a news-channel cover.
+            frame = ImageDraw.Draw(image)
+            frame_width = max(8, min(int(width * .012), int(height * .021)))
+            inset = max(3, frame_width // 3)
+            frame.rounded_rectangle((inset, inset, width - inset - 1, height - inset - 1),
+                                    radius=max(9, frame_width), outline=(239, 24, 35, 255), width=frame_width)
+            frame.rounded_rectangle((frame_width + inset, frame_width + inset,
+                                     width - frame_width - inset - 1, height - frame_width - inset - 1),
+                                    radius=max(5, frame_width // 2), outline=(25, 0, 0, 235), width=max(2, frame_width // 4))
+            fonts = Path(os.environ.get("WINDIR", r"C:\\Windows")) / "Fonts"
+            # A condensed display face has much greater recognition at a
+            # YouTube-grid size than the earlier neutral Arial Bold.  Impact is
+            # available on normal Windows installs; Arial Black is the backup.
+            display_candidates = (fonts / "impact.ttf", fonts / "ariblk.ttf", fonts / "arialbd.ttf")
+            # Without a political portrait the words become the hero: use a
+            # wider, larger lower-centre treatment instead of leaving the
+            # right half of the thumbnail empty.
+            has_face = bool(item.get("face_composite_paths") or item.get("face_reference_path"))
+            target_size = max(42, min(int(width * (.126 if has_face else .158)), int(height * .27)))
+            font = next((ImageFont.truetype(str(path), target_size) for path in display_candidates if path.is_file()), None)
+            if font is None:
+                font = ImageFont.load_default()
+            max_width = int(width * (.55 if has_face else .88))
+            measure = ImageDraw.Draw(image)
+
+            def wrap_text(text: str, active_font, max_lines: int) -> list[str]:
+                lines: list[str] = []
+                line = ""
+                for word in text.split():
+                    candidate = (line + " " + word).strip()
+                    if line and measure.textbbox((0, 0), candidate, font=active_font)[2] > max_width:
+                        lines.append(line)
+                        line = word
+                    else:
+                        line = candidate
+                if line:
+                    lines.append(line)
+                return lines[:max_lines]
+
+            # Headlines are purposefully rendered in all caps: this is the
+            # one strong visual signature of the news-thumbnail style, while
+            # the subtitle remains readable rather than screaming twice.
+            lines = wrap_text(headline.upper(), font, 3 if has_face else 2)
+            subtitle_font_size = max(22, int(target_size * .46))
+            subtitle_candidates = (fonts / "arialbd.ttf", fonts / "ariblk.ttf", fonts / "impact.ttf")
+            subtitle_font = next((ImageFont.truetype(str(path), subtitle_font_size)
+                                  for path in subtitle_candidates if path.is_file()), None)
+            if subtitle_font is None:
+                subtitle_font = ImageFont.load_default()
+            subtitle_lines = wrap_text(subheadline, subtitle_font, 2) if subheadline else []
+            spacing = max(6, target_size // 6)
+            boxes = [measure.textbbox((0, 0), value, font=font, stroke_width=max(1, target_size // 22)) for value in lines]
+            subtitle_boxes = [measure.textbbox((0, 0), value, font=subtitle_font, stroke_width=max(1, subtitle_font_size // 22)) for value in subtitle_lines]
+            text_width = max([*(box[2] - box[0] for box in boxes), *(box[2] - box[0] for box in subtitle_boxes)], default=0)
+            text_height = (sum(box[3] - box[1] for box in boxes) + spacing * max(0, len(boxes) - 1)
+                           + (spacing if subtitle_boxes else 0)
+                           + sum(box[3] - box[1] for box in subtitle_boxes) + max(3, spacing // 2) * max(0, len(subtitle_boxes) - 1))
+            # The coloured backing is tightly fitted to the actual letters.
+            # It must amplify the phrase, not cover half of the image.
+            padding = max(18, target_size // 3)
+            x = int(width * 0.045)
+            y = max(padding, height - text_height - int(height * (.075 if has_face else .09)))
+            overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            # Pick a palette from the actual scene, not a single permanent
+            # yellow/red combination.  Every option stays deliberately loud
+            # at thumbnail scale and keeps a black outline around the letters.
+            if settings.cover_auto_text_color:
+                sample = image.crop((0, int(height * .42), int(width * .58), height)).resize((1, 1))
+                red, green, blue, _alpha = sample.getpixel((0, 0))
+                luminance = (red * 0.299) + (green * 0.587) + (blue * 0.114)
+                if red > blue * 1.25 and red > green * 1.1:
+                    panel_fill, stripe_fill, headline_fill, subtitle_fill = (
+                        (10, 44, 114, 178), (52, 170, 255, 245), (255, 242, 0, 255), (255, 255, 255, 255))
+                elif luminance > 138:
+                    panel_fill, stripe_fill, headline_fill, subtitle_fill = (
+                        (147, 0, 13, 182), (255, 223, 0, 245), (255, 255, 255, 255), (255, 240, 0, 255))
+                elif blue > red * 1.15:
+                    panel_fill, stripe_fill, headline_fill, subtitle_fill = (
+                        (207, 10, 25, 182), (255, 224, 0, 245), (255, 236, 0, 255), (255, 255, 255, 255))
+                else:
+                    panel_fill, stripe_fill, headline_fill, subtitle_fill = (
+                        (24, 18, 10, 176), (190, 255, 0, 245), (225, 255, 0, 255), (255, 255, 255, 255))
+            else:
+                panel_fill, stripe_fill, headline_fill, subtitle_fill = (
+                    (214, 19, 28, 182), (255, 211, 0, 245), (255, 229, 0, 255), (255, 255, 255, 255))
+            # Its clipped right edge keeps the composition dynamic and reserves
+            # the right side for a locally composited face.
+            left = max(0, x - padding)
+            top = max(0, y - padding)
+            right = min(width, x + text_width + int(padding * 1.20))
+            bottom = min(height, y + text_height + int(padding * .72))
+            slant = max(18, padding)
+            overlay_draw.polygon([(left, top), (right, top), (min(width, right + slant), bottom), (left, bottom)],
+                                 fill=panel_fill)
+            overlay_draw.rectangle((left, top, right, min(bottom, top + max(7, padding // 4))), fill=stripe_fill)
+            overlay_draw.line((left, bottom - 2, min(width, right + slant), bottom - 2), fill=(0, 0, 0, 215), width=max(3, padding // 7))
+            image = Image.alpha_composite(image, overlay)
+            draw = ImageDraw.Draw(image)
+            cursor = y
+            for line_value, box in zip(lines, boxes):
+                draw.text((x, cursor), line_value, font=font, fill=headline_fill,
+                          stroke_width=max(4, target_size // 10), stroke_fill=(0, 0, 0, 255))
+                cursor += (box[3] - box[1]) + spacing
+            if subtitle_boxes:
+                cursor += max(0, spacing // 2)
+                for line_value, box in zip(subtitle_lines, subtitle_boxes):
+                    draw.text((x, cursor), line_value, font=subtitle_font, fill=subtitle_fill,
+                              stroke_width=max(3, subtitle_font_size // 11), stroke_fill=(0, 0, 0, 255))
+                    cursor += (box[3] - box[1]) + max(3, spacing // 2)
+            destination = output / f"{index + 1:03d} — {safe_filename(str(item.get('title', 'Обложка')))}.png"
+            image.convert("RGB").save(destination, quality=95)
+            visible_paths = [str(destination) if str(path) == str(source) else str(path)
+                             for path in (item.get("paths") or [str(source)])]
+            if str(destination) not in visible_paths:
+                visible_paths.insert(0, str(destination))
+            item.update(text_overlay_path=str(destination), paths=list(dict.fromkeys(visible_paths)),
+                        selected_path=str(destination), path=str(destination),
+                        status="Готово с текстом", error="")
+            written += 1
+        except Exception as exc:
+            item.update(status="Ошибка текста", error=str(exc))
+        save_settings(settings)
+    if not written:
+        raise ValueError("Нужны выбранная готовая картинка и заполненные слова на обложке")
+    return {**snapshot(), "operationResult": {"kind": "cover-text", "count": written, "folder": str(output),
+                                                 "message": f"Точный текст наложен на {written} обложек."}}
+
+
+def save_seo_settings(payload: dict) -> dict:
+    template = str(payload.get("promptTemplate", "")).strip()
+    provider = str(payload.get("provider", "")).strip().casefold()
+    call_to_action = str(payload.get("callToAction", "")).strip()
+    use_script_context = payload.get("useScriptContext")
+    prefix_ranges = payload.get("descriptionPrefixRanges")
+    prefix_presets = payload.get("descriptionPrefixPresets")
+    fixed_prefix = payload.get("fixedDescriptionPrefix")
+    if (template or provider in {"agent", "openai"} or call_to_action or isinstance(use_script_context, bool)
+            or isinstance(prefix_ranges, list) or isinstance(prefix_presets, list) or isinstance(fixed_prefix, str)):
+        settings = load_settings()
+        if provider in {"agent", "openai"}:
+            settings.seo_provider = provider
+        if template:
+            settings.seo_prompt_template = template
+        if call_to_action:
+            settings.seo_call_to_action = call_to_action[:1000]
+        if isinstance(use_script_context, bool):
+            settings.seo_use_script_context = use_script_context
+        if isinstance(fixed_prefix, str):
+            settings.seo_description_prefix = fixed_prefix.strip()[:4000]
+        if isinstance(prefix_ranges, list):
+            settings.seo_description_prefix_ranges = normalize_prefix_ranges(prefix_ranges)
+        if isinstance(prefix_presets, list):
+            settings.seo_description_prefix_presets = [
+                {"name": " ".join(str(item.get("name", "")).split())[:120],
+                 "ranges": normalize_prefix_ranges(item.get("ranges", []))}
+                for item in prefix_presets if isinstance(item, dict) and str(item.get("name", "")).strip()
+            ]
+        save_settings(settings)
+    return snapshot()
+
+
+def save_tags_settings(payload: dict) -> dict:
+    template = str(payload.get("promptTemplate", "")).strip()
+    provider = str(payload.get("provider", "")).strip().casefold()
+    if template or provider in {"agent", "openai"}:
+        settings = load_settings()
+        if provider in {"agent", "openai"}:
+            settings.tags_provider = provider
+        if template:
+            settings.tags_prompt_template = template
+        save_settings(settings)
+    return snapshot()
+
+
+def save_tag_limits(payload: dict) -> dict:
+    settings = load_settings()
+    try:
+        settings.hashtag_batch_size = max(1, min(30, int(payload.get("hashtagBatchSize", settings.hashtag_batch_size))))
+        settings.tag_char_limit = max(50, min(5000, int(payload.get("tagCharLimit", settings.tag_char_limit))))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Укажите целое число для пачки хештегов и лимита тегов") from exc
+    save_settings(settings)
+    return snapshot()
+
+
+def _parse_seo_json(raw: str) -> dict:
+    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if not match:
+        raise ValueError("ИИ не вернул SEO-данные в формате JSON")
+    value = json.loads(match.group(0))
+    tags = value.get("tags", [])
+    if isinstance(tags, str):
+        tags = [item.strip() for item in tags.split(",") if item.strip()]
+    if not isinstance(tags, list):
+        tags = []
+    hashtags = value.get("hashtags", [])
+    if isinstance(hashtags, str):
+        hashtags = re.split(r"[,\n\s]+", hashtags)
+    if not isinstance(hashtags, list):
+        hashtags = []
+    clean_hashtags = []
+    for item in hashtags:
+        word = re.sub(r"[^\w-]", "", str(item).strip().lstrip("#").replace(" ", ""))
+        if word and word not in clean_hashtags:
+            clean_hashtags.append(f"#{word}")
+    return {"title": str(value.get("title", "")).strip(),
+            "description": str(value.get("description", "")).strip(),
+            "hashtags": clean_hashtags,
+            "tags": [str(item).strip() for item in tags if str(item).strip()]}
+
+
+def _seo_format_instruction() -> str:
+    return (
+        "\n\nЗадача: напиши готовое описание именно этого одного ролика по теме и контексту сценария. "
+        "description должен состоять из 2–4 содержательных предложений (примерно 300–900 символов), объяснять, "
+        "что происходит в сюжете и почему это важно, использовать 2–4 естественных ключевых слова по теме. "
+        "Последнее предложение — самостоятельно придуманный, разный и релевантный именно этой теме естественный призыв посмотреть ролик. Не выдумывай факты. Никогда не пиши "
+        "«пришлите список», «укажите тему», «я подготовлю», инструкции, планы или ответ о своей работе.\n\n"
+        "Формат обязателен: верни только JSON. description — один готовый цельный текст без Markdown, рубрик, "
+        "подписей «SEO-описание», «хештеги», «призыв» или «теги». hashtags — отдельный массив 3–5 значений "
+        "с символом #. Не добавляй поле tags: теги создаются отдельным этапом."
+    )
+
+
+def _valid_seo_description(text: str, source_title: str) -> bool:
+    value = " ".join(str(text or "").split()).casefold()
+    if len(value) < 120:
+        return False
+    forbidden = ("пришлите список", "пришли список", "укажите тему", "вставьте тему", "я подготовлю",
+                 "подготовлю для каждой", "могу подготовить", "предоставьте", "вот как", "seo-описание",
+                 "seo описание", "seo-пакет", "продвижени", "контент-маркетинг", "ключевые слова и релевантные",
+                 "тема и контекст", "как создать seo", "как превратить тему", "хештегов и понятного призыва",
+                 "роль ключевых слов", "почему точная формулировка", "помогают раскрыть контекст видео")
+    if any(fragment in value for fragment in forbidden):
+        return False
+    ignored = {"почему", "когда", "который", "россия", "украина", "европа", "новости", "удары", "война"}
+    topic_words = {word.casefold() for word in re.findall(r"[A-Za-zА-Яа-яЁё]{5,}", source_title)
+                   if word.casefold() not in ignored}
+    return not topic_words or any(word in value for word in topic_words)
+
+
+def _limit_tags(tags: list[str], limit: int) -> list[str]:
+    """Keep complete, unique YouTube tags within a user-selected character budget."""
+    result: list[str] = []
+    used: set[str] = set()
+    for raw in tags:
+        tag = " ".join(str(raw).replace(",", " ").split()).strip()
+        key = tag.casefold()
+        if not tag or key in used:
+            continue
+        candidate_length = sum(len(value) for value in result) + (2 * len(result)) + len(tag)
+        if candidate_length > limit:
+            continue
+        result.append(tag)
+        used.add(key)
+    return result
+
+
+def _scenario_context(value: object) -> str:
+    """Use the transferred finished script itself, not merely its title, for SEO and tags."""
+    return " ".join(str(value or "").split())[:6500]
+
+
+def generate_seo(payload: dict) -> dict:
+    settings = load_settings()
+    provider = str(payload.get("provider", settings.seo_provider)).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
+    settings.seo_provider = provider
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.seo_queue)))
+    pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
+    for index, item in enumerate(settings.seo_queue):
+        if index not in requested:
+            continue
+        source_title = str(item.get("source_title", "")).strip()
+        if not source_title:
+            continue
+        item.update(status="Генерация", error="", title="", description="", hashtags=[])
+        save_settings(settings)
+        try:
+            excerpt = _scenario_context(item.get("script", "")) if settings.seo_use_script_context else ""
+            preferences = " ".join(str(item.get("requirements", "")).split())[:1800]
+            item.update(status="Создание SEO и хештегов")
+            save_settings(settings)
+            prompt = (settings.seo_prompt_template.replace("{title}", source_title)
+                      .replace("{excerpt}", excerpt)
+                      + f"\n\nТЕМА РОЛИКА: {source_title}"
+                      + (f"\nКОНТЕКСТ ГОТОВОГО СЦЕНАРИЯ: {excerpt}" if excerpt else "\nРаботай только по названию темы; не выдумывай конкретные факты.")
+                      + _seo_format_instruction()
+                      + f"\nСделай ровно {settings.hashtag_batch_size} хештегов: это отдельная пачка для этого сценария.")
+            if settings.seo_call_to_action:
+                prompt += f"\n\nДополнительное пожелание к призыву к просмотру: {settings.seo_call_to_action}"
+            if preferences:
+                prompt += f"\n\nИндивидуальные пожелания к этому сценарию: {preferences}"
+            if provider == "agent":
+                prompt = ("Ты SEO-редактор NewsFlow. Сразу создай SEO-пакет только для этой одной темы, "
+                          "не проси прислать список тем и не объясняй, как будешь работать.\n\n" + prompt)
+            parsed = _parse_seo_json(asyncio.run(pool.generate(prompt)))
+            if not _valid_seo_description(parsed["description"], source_title):
+                retry = (prompt + "\n\nПЕРЕДЕЛАЙ: прошлый ответ был мета-комментарием или слишком коротким. "
+                         "Верни содержательное готовое описание конкретного ролика по сценарию, не просьбу к пользователю.")
+                parsed = _parse_seo_json(asyncio.run(pool.generate(retry)))
+            if not _valid_seo_description(parsed["description"], source_title):
+                raise ValueError("ИИ вернул не описание ролика. Повторите генерацию с более точным промптом.")
+            description = prepend_description_prefix(
+                parsed["description"], topic_index=index + 1,
+                ranges=settings.seo_description_prefix_ranges,
+                fixed_prefix=settings.seo_description_prefix,
+            )
+            item.update(status="Готово", title=parsed["title"], description=description,
+                        hashtags=parsed["hashtags"], error="")
+        except Exception as exc:
+            item.update(status="Ошибка", error=str(exc))
+        save_settings(settings)
+    return snapshot()
+
+
+def generate_tags(payload: dict) -> dict:
+    """Refresh only YouTube tags while preserving the approved SEO package."""
+    settings = load_settings()
+    provider = str(payload.get("provider", settings.tags_provider)).strip().casefold()
+    if provider not in {"agent", "openai"}:
+        raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
+    settings.tags_provider = provider
+    requested = {int(index) for index in payload.get("indices", [])}
+    if not requested:
+        requested = set(range(len(settings.seo_queue)))
+    pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
+    for index, item in enumerate(settings.seo_queue):
+        if index not in requested:
+            continue
+        source_title = str(item.get("source_title", "")).strip()
+        if not source_title:
+            continue
+        item.update(tags_status="Создание тегов", tags_error="")
+        save_settings(settings)
+        try:
+            excerpt = _scenario_context(item.get("script", "")) if settings.seo_use_script_context else ""
+            preferences = " ".join(str(item.get("requirements", "")).split())[:1800]
+            prompt = (settings.tags_prompt_template.replace("{title}", source_title)
+                      .replace("{excerpt}", excerpt)
+                      + f"\n\nТЕМА РОЛИКА: {source_title}"
+                      + (f"\nКОНТЕКСТ ГОТОВОГО СЦЕНАРИЯ: {excerpt}" if excerpt else "\nРаботай только по названию темы; не добавляй неясные или посторонние сюжеты.")
+                      + f"\n\nВерни только релевантные YouTube-теги для этого сценария. Общая длина тегов через запятую не должна превышать {settings.tag_char_limit} символов.")
+            if preferences:
+                prompt += f"\n\nИндивидуальные пожелания к этому сценарию: {preferences}"
+            if provider == "agent":
+                prompt = "Ты редактор тегов NewsFlow. Создай теги только для этой одной темы.\n\n" + prompt
+            parsed = _parse_seo_json(asyncio.run(pool.generate(prompt)))
+            tags = _limit_tags(parsed["tags"], settings.tag_char_limit)
+            if not tags:
+                raise ValueError("ИИ не вернул теги")
+            item.update(tags_status="Готово", tags=tags, tags_error="")
+        except Exception as exc:
+            item.update(tags_status="Ошибка", tags_error=str(exc))
+        save_settings(settings)
+    return snapshot()
+
+
+def remove_seo_packages(payload: dict) -> dict:
+    """Remove whole SEO entries, including their description, hashtags and tags."""
+    settings = load_settings()
+    requested = {int(index) for index in payload.get("indices", [])}
+    if bool(payload.get("all", False)):
+        settings.seo_queue = []
+    elif requested:
+        settings.seo_queue = [item for index, item in enumerate(settings.seo_queue) if index not in requested]
+    else:
+        raise ValueError("Выберите SEO-пакеты для удаления")
+    save_settings(settings)
+    return snapshot()
+
+
+def clear_tags(payload: dict) -> dict:
+    """Clear only tags; SEO text, hashtags and queue items remain untouched."""
+    settings = load_settings()
+    requested = {int(index) for index in payload.get("indices", [])}
+    if bool(payload.get("all", False)):
+        requested = set(range(len(settings.seo_queue)))
+    if not requested:
+        raise ValueError("Выберите теги для удаления")
+    for index, item in enumerate(settings.seo_queue):
+        if index in requested:
+            item.update(tags=[], tags_status="Ожидают", tags_error="")
+    save_settings(settings)
+    return snapshot()
+
+
+def save_tags_text(payload: dict) -> dict:
+    """Save manually reviewed tags and enforce the same character budget as generation."""
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.seo_queue):
+        raise ValueError("Пакет тегов не найден")
+    raw = str(payload.get("tags", ""))
+    values = [part.strip() for part in re.split(r"[,\n]", raw) if part.strip()]
+    tags = _limit_tags(values, settings.tag_char_limit)
+    if not tags:
+        raise ValueError("Добавьте хотя бы один тег, который помещается в лимит")
+    settings.seo_queue[index].update(tags=tags, tags_status="Готово", tags_error="")
+    save_settings(settings)
+    return snapshot()
+
+
+def save_seo_text(payload: dict) -> dict:
+    """Save a manually reviewed SEO description without touching its tags."""
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.seo_queue):
+        raise ValueError("SEO-пакет не найден")
+    description = str(payload.get("description", "")).strip()
+    if not description:
+        raise ValueError("SEO-описание не может быть пустым")
+    raw_hashtags = payload.get("hashtags", [])
+    if isinstance(raw_hashtags, str):
+        raw_hashtags = re.split(r"[,\n\s]+", raw_hashtags)
+    hashtags = []
+    for entry in raw_hashtags if isinstance(raw_hashtags, list) else []:
+        word = re.sub(r"[^\w-]", "", str(entry).strip().lstrip("#"))
+        if word and f"#{word}" not in hashtags:
+            hashtags.append(f"#{word}")
+    item = settings.seo_queue[index]
+    item.update(description=description, hashtags=hashtags or _seo_hashtags(item), status="Готово", error="")
+    save_settings(settings)
+    return snapshot()
+
+
+def _seo_hashtags(item: dict) -> list[str]:
+    stored = item.get("hashtags", [])
+    if isinstance(stored, list):
+        values = [str(value).strip() for value in stored if str(value).strip()]
+        if values:
+            return [value if value.startswith("#") else f"#{value}" for value in values]
+    tags = item.get("tags", [])
+    if not isinstance(tags, list):
+        tags = [value.strip() for value in str(tags or "").split(",") if value.strip()]
+    return [f"#{re.sub(r'[^\\w-]', '', value.replace(' ', ''))}" for value in tags[:5]
+            if re.sub(r'[^\\w-]', '', value.replace(' ', ''))]
+
+
+def _seo_export_content(item: dict, include_topic: bool) -> str:
+    parts = []
+    if include_topic:
+        parts.append(str(item.get("source_title", "")).strip())
+    description = str(item.get("description", "")).strip()
+    if description:
+        parts.append(description)
+    hashtags = " ".join(_seo_hashtags(item))
+    if hashtags:
+        parts.append(hashtags)
+    tags = item.get("tags", [])
+    if not isinstance(tags, list):
+        tags = [value.strip() for value in str(tags or "").split(",") if value.strip()]
+    if tags:
+        parts.append(", ".join(str(value).strip() for value in tags if str(value).strip()))
+    return "\n\n".join(parts).strip() + "\n"
+
+
+def _tags_export_content(item: dict, include_topic: bool) -> str:
+    parts = [str(item.get("source_title", "")).strip()] if include_topic else []
+    tags = item.get("tags", [])
+    if not isinstance(tags, list):
+        tags = [value.strip() for value in str(tags or "").split(",") if value.strip()]
+    if tags:
+        parts.append(", ".join(str(value).strip() for value in tags if str(value).strip()))
+    return "\n\n".join(parts).strip() + "\n"
+
+
+def export_seo(payload: dict) -> dict:
+    settings = load_settings()
+    mode = str(payload.get("mode", "combined")).strip().casefold()
+    if mode.startswith("tags-"):
+        ready = [item for item in settings.seo_queue if item.get("tags")]
+    else:
+        ready = [item for item in settings.seo_queue if item.get("status") == "Готово" and item.get("description")]
+    if not ready:
+        raise ValueError("Нет готовых SEO-пакетов для выгрузки")
+    chosen = str(payload.get("path", "")).strip()
+    if mode == "separate":
+        folder = Path(chosen) if chosen else Path(settings.seo_output_folder) / "По темам"
+        folder.mkdir(parents=True, exist_ok=True)
+        for item in ready:
+            (folder / f"{safe_filename(str(item.get('source_title', 'Тема')))}.txt").write_text(
+                _seo_export_content(item, include_topic=True), encoding="utf-8-sig")
+        message = f"Созданы отдельные TXT для {len(ready)} тем."
+    elif mode == "combined":
+        target = Path(chosen) if chosen else Path(settings.seo_output_folder) / "Все SEO-пакеты.txt"
+        if target.suffix.casefold() != ".txt":
+            target = target.with_suffix(".txt")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n\n".join(
+            f"{index}. {_seo_export_content(item, include_topic=True).strip()}" for index, item in enumerate(ready, 1)
+        ) + "\n", encoding="utf-8-sig")
+        folder = target.parent
+        message = f"Все {len(ready)} SEO-пакетов собраны в один TXT."
+    elif mode == "tags-separate":
+        folder = Path(chosen) if chosen else Path(settings.seo_output_folder) / "Теги по темам"
+        folder.mkdir(parents=True, exist_ok=True)
+        for item in ready:
+            (folder / f"{safe_filename(str(item.get('source_title', 'Тема')))} — теги.txt").write_text(
+                _tags_export_content(item, include_topic=True), encoding="utf-8-sig")
+        message = f"Созданы отдельные TXT с тегами для {len(ready)} тем."
+    elif mode == "tags-combined":
+        target = Path(chosen) if chosen else Path(settings.seo_output_folder) / "Все теги.txt"
+        if target.suffix.casefold() != ".txt":
+            target = target.with_suffix(".txt")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n\n".join(
+            f"{index}. {_tags_export_content(item, include_topic=True).strip()}" for index, item in enumerate(ready, 1)
+        ) + "\n", encoding="utf-8-sig")
+        folder = target.parent
+        message = f"Все теги для {len(ready)} тем собраны в один TXT."
+    else:
+        raise ValueError("Неизвестный формат выгрузки SEO")
+    return {**snapshot(), "operationResult": {"kind": "seo-export", "count": len(ready), "folder": str(folder), "message": message}}
+
+
+def _current_voice_batch(settings, titles: list[str]) -> dict:
+    """Return a persisted production-order batch, never a rendered UI order."""
+    ensure_idea_production_items(settings)
+    items_by_title = {
+        str(item.get("title", "")).casefold(): item
+        for item in settings.idea_production_items if isinstance(item, dict)
+    }
+    context = getattr(settings, "idea_scenario_context", {})
+    current_items: list[dict] = []
+    for index, title in enumerate(titles):
+        source = items_by_title.get(str(title).casefold())
+        if source is None:
+            # Manually added scenario rows are legitimate ProductionItems too.
+            # Persist their ID in the scenario context so their voice range
+            # remains stable after a restart and future title-table sorting.
+            source = dict(context.get(title, {}) or {})
+            if not source:
+                source = {"title": title, "manual": True}
+            source.setdefault("title", title)
+            if not str(source.get("id") or "").strip():
+                source["id"] = uuid.uuid4().hex
+            context[title] = source
+            settings.idea_scenario_context = context
+        current_items.append({
+            "id": str(source.get("id") or "").strip(),
+            "title": str(title),
+            "scenario_index": index,
+        })
+    ensure_production_item_ids(current_items)
+    item_ids = [str(item["id"]) for item in current_items]
+    active = next((item for item in settings.voice_tts_batches
+                   if isinstance(item, dict) and str(item.get("id", "")) == settings.voice_active_tts_batch_id), None)
+    active_ids = [str(item.get("production_item_id", "")) for item in (active or {}).get("items", [])
+                  if isinstance(item, dict)]
+    if active is not None and active_ids == item_ids:
+        return active
+    batch = freeze_batch(current_items)
+    settings.voice_tts_batches = [
+        item for item in settings.voice_tts_batches
+        if isinstance(item, dict) and str(item.get("id", "")) != str(batch["id"])
+    ][-29:] + [batch]
+    settings.voice_active_tts_batch_id = str(batch["id"])
+    return batch
+
+
+def prepare_voice_range_preview(settings, titles: list[str]) -> dict:
+    """Resolve and expose a durable range allocation before any TTS request."""
+    (settings.voice_profiles, settings.voice_ranges,
+     settings.voice_default_profile_id, _changed) = migrate_voice_range_settings(
+        settings.voice_profiles, settings.voice_ranges, settings.voice_default_profile_id,
+    )
+    batch = _current_voice_batch(settings, titles)
+    assignments = resolve_assignments(
+        batch, settings.voice_profiles, settings.voice_default_profile_id, settings.voice_ranges,
+    )
+    return {"batch": batch, "items": assignments}
+
+
+def preview_voice_ranges(payload: dict) -> dict:
+    settings = load_settings()
+    titles, _jobs = load_session()
+    preview = prepare_voice_range_preview(settings, titles)
+    save_settings(settings)
+    return {**snapshot(), "voiceRangePreview": preview}
+
+
+def _tts_settings_changed(previous: object, snapshot: dict) -> bool:
+    """Compare only the resolved provider contract, never progress metadata."""
+    if not isinstance(previous, dict):
+        return False
+    return (previous.get("provider") != snapshot.get("provider")
+            or previous.get("settings") != snapshot.get("settings"))
+
+
+def prepare_voice_jobs(settings, titles: list[str], jobs: list[Job], selected: set[int], *, force: bool) -> list[dict]:
+    """Persist immutable TTS contracts; ordinary runs preserve ready audio."""
+    preview = prepare_voice_range_preview(settings, titles)
+    jobs_by_index = {job.request.index: job for job in jobs}
+    snapshots: list[dict] = []
+    for assignment in preview["items"]:
+        index = assignment.get("scenario_index")
+        if not isinstance(index, int) or index not in selected:
+            continue
+        scenario = jobs_by_index.get(index)
+        if scenario is None or scenario.state != RunState.DONE or not scenario.result.strip():
+            continue
+        snapshot = snapshot_tts_job(
+            assignment, scenario.result, output_folder=settings.voicer_output_folder,
+        )
+        # Failover is part of the contract too.  A later edit in the Voices
+        # screen must never silently alter an already queued job.
+        snapshot["fallback_settings"] = [
+            dict(item) for item in settings.voice_profiles
+            if isinstance(item, dict) and bool(item.get("fallback", False))
+        ]
+        output_key = str(index + 1)
+        ready_path = Path(str(settings.voice_scenario_outputs.get(output_key, "")))
+        previous = settings.voice_tts_jobs.get(snapshot["production_item_id"])
+        if ready_path.is_file() and not force:
+            if _tts_settings_changed(previous, snapshot):
+                settings.voice_task_statuses[output_key] = {
+                    "label": "Настройки озвучки изменены", "progress": 100,
+                    "updatedAt": time.strftime("%H:%M:%S"), "error": "",
+                    "jobSnapshotId": str(previous.get("id", "")) if isinstance(previous, dict) else "",
+                }
+            continue
+        snapshot["state"] = "queued"
+        settings.voice_tts_jobs[snapshot["production_item_id"]] = snapshot
+        snapshots.append(snapshot)
+    return snapshots
+
+
+def generate_voice_range(payload: dict) -> dict:
+    """Run or explicitly re-run only one resolved inclusive TTS range."""
+    settings = load_settings()
+    titles, _jobs = load_session()
+    preview = prepare_voice_range_preview(settings, titles)
+    range_id = str(payload.get("rangeId") or "").strip()
+    if not range_id:
+        raise ValueError("Выберите диапазон озвучки")
+    indices = [int(item["scenario_index"]) for item in preview["items"]
+               if str(item.get("range_id", "")) == range_id and isinstance(item.get("scenario_index"), int)]
+    if not indices:
+        raise ValueError("В диапазоне нет сценариев текущего batch")
+    save_settings(settings)
+    return generate_voice({"indices": indices, "force": bool(payload.get("force", False))})
+
+
+def generate_voice_queue(payload: dict) -> dict:
+    """Start only the ready current-session scenarios from the Voice queue.
+
+    This is deliberately separate from ``generate_voice``: the selected-items
+    action must keep its precise contract, while the queue action explains why
+    a non-ready scenario was not submitted.  It never resurrects a persisted
+    legacy TTS job or treats an absent script as an eligible item.
+    """
+    settings = load_settings()
+    _titles, jobs = load_session()
+    eligible: list[int] = []
+    skipped = 0
+    for job in jobs:
+        index = job.request.index
+        if job.state == RunState.DONE and job.result.strip():
+            eligible.append(index)
+            continue
+        skipped += 1
+        settings.voice_task_statuses[str(index + 1)] = {
+            "label": "Пропущено: сценарий не готов", "progress": 0,
+            "updatedAt": time.strftime("%H:%M:%S"),
+            "error": "Для озвучки нужен готовый текст сценария.",
+        }
+    save_settings(settings)
+    if not eligible:
+        return {
+            **snapshot(),
+            "operationResult": {
+                "kind": "voice-queue", "eligible": 0, "skipped": skipped,
+                "message": "В очереди нет готовых сценариев для озвучки.",
+            },
+        }
+    result = generate_voice({"indices": eligible, "force": bool(payload.get("force", False))})
+    return {
+        **result,
+        "operationResult": {
+            "kind": "voice-queue", "eligible": len(eligible), "skipped": skipped,
+            "message": f"В очередь озвучки добавлено: {len(eligible)}.",
+        },
+    }
+
+
+def _voice_profile(settings, one_based_index: int) -> VoiceProfile:
+    profiles = settings.voice_profiles or [{"name": "Новости", "voice_id": "", "stability": .30, "style": .50}]
+    selected = 0
+    for item in settings.voice_ranges:
+        try:
+            if bool(item.get("enabled", True)) and int(item.get("start", 0)) <= one_based_index <= int(item.get("end", 0)):
+                selected = int(item.get("profile", 0))
+        except (TypeError, ValueError):
+            continue
+    profile = profiles[max(0, min(selected, len(profiles) - 1))]
+    return VoiceProfile(str(profile.get("name") or "Новости"), str(profile.get("voice_id") or ""),
+                        float(profile.get("stability", .30)), float(profile.get("style", .50)),
+                        str(profile.get("voice_name") or ""),
+                        str(profile.get("provider") or "chrome"), str(profile.get("model_id") or ""),
+                        str(profile.get("template_id") or ""), str(profile.get("template_signature") or ""),
+                        str(profile.get("settings_preset") or "standard"), int(profile.get("chunk_size", 1200) or 1200),
+                        float(profile.get("delay_between_chunks", .5) or 0), int(profile.get("task_threads", 5) or 5),
+                        str(profile.get("secret_mode") or "emotional"))
+
+
+def _retryable_browser_voice_error(error: Exception) -> bool:
+    """Do not waste retries on cases that require a manual sign-in/fix."""
+    message = str(error).casefold()
+    non_retryable = (
+        "не авторизован", "войди через telegram", "компонент chrome-озвучки не установлен",
+        "processsingleton", "закройте окно chrome", "выбранный голос не найден",
+    )
+    return not any(marker in message for marker in non_retryable)
+
+
+def _voice_error_reason(error: Exception) -> str:
+    """Keep a useful, UI-safe reason with the failed queue item."""
+    value = " ".join(str(error).split())
+    return value[:700] if value else "Сервис озвучки не вернул подробности ошибки."
+
+
+def _can_failover_voice(error: Exception) -> bool:
+    """Retry only when the first service could not consume the task safely."""
+    message = str(error).casefold()
+    return any(marker in message for marker in (
+        "лимит", "баланс", "quota", "subscription", "подписк", "401", "403", "429",
+        "ключ", "api key", "rate limit", "перегруз", "temporar", "недоступ",
+    ))
+
+
+def _profile_from_saved(item: dict) -> VoiceProfile:
+    return VoiceProfile(str(item.get("name") or "Резерв"), str(item.get("voice_id") or ""),
+                        float(item.get("stability", .30)), float(item.get("style", .50)),
+                        str(item.get("voice_name") or ""), str(item.get("provider") or "chrome"),
+                        str(item.get("model_id") or ""), str(item.get("template_id") or ""),
+                        str(item.get("template_signature") or ""), str(item.get("settings_preset") or "standard"),
+                        int(item.get("chunk_size", 1200) or 1200), float(item.get("delay_between_chunks", .5) or 0),
+                        int(item.get("task_threads", 5) or 5), str(item.get("secret_mode") or "emotional"),
+                        str(item.get("wproject_split") or "single"), bool(item.get("wproject_join", True)),
+                        float(item.get("wproject_join_pause", .3) or 0), str(item.get("wproject_autotag") or "off"),
+                        float(item.get("wproject_prosody_speed", 1.0) or 1), float(item.get("wproject_prosody_volume", 0) or 0),
+                        str(item.get("wproject_latency") or "normal"), bool(item.get("wproject_normalize", True)),
+                        bool(item.get("wproject_normalize_loudness", True)), bool(item.get("wproject_tag_compat", True)))
+
+
+def generate_voice(payload: dict) -> dict:
+    settings = load_settings()
+    selected = {int(index) for index in payload.get("indices", [])}
+    if not selected:
+        raise ValueError("Отметьте сценарии, которые нужно озвучить. NewsFlow больше не запускает всю старую очередь автоматически.")
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
+    candidates = []
+    for index in sorted(selected):
+        job = jobs_by_index.get(index)
+        if job is not None and job.state == RunState.DONE and job.result.strip():
+            candidates.append(index)
+    if not candidates:
+        raise ValueError("Нет готовых сценариев для озвучки")
+    if bool(payload.get("resume", False)):
+        # Resume is intentionally different from a normal start: it consumes
+        # the exact immutable contract written before the earlier process was
+        # interrupted.  Current range/profile edits cannot retarget it.
+        snapshots = []
+        for saved in settings.voice_tts_jobs.values():
+            if not isinstance(saved, dict):
+                continue
+            index = saved.get("scenario_index")
+            if not isinstance(index, int) or index not in candidates:
+                continue
+            if str(saved.get("state", "")).casefold() not in {"queued", "running", "interrupted", "retrying"}:
+                continue
+            scenario = jobs_by_index.get(index)
+            expected_hash = str(saved.get("script_hash", "")).strip()
+            actual_hash = hashlib.sha256(str(scenario.result).encode("utf-8")).hexdigest() if scenario else ""
+            if expected_hash and expected_hash != actual_hash:
+                settings.voice_task_statuses[str(index + 1)] = {
+                    "label": "Сценарий изменён — переозвучьте явно", "progress": 0,
+                    "updatedAt": time.strftime("%H:%M:%S"), "error": "",
+                    "jobSnapshotId": str(saved.get("id", "")),
+                }
+                continue
+            saved["state"] = "queued"
+            saved.pop("error", None)
+            snapshots.append(saved)
+    else:
+        snapshots = prepare_voice_jobs(settings, titles, jobs, set(candidates), force=bool(payload.get("force", False)))
+    if not snapshots:
+        save_settings(settings)
+        return snapshot()
+    snapshots_by_index = {
+        int(snapshot["scenario_index"]): snapshot for snapshot in snapshots
+        if isinstance(snapshot.get("scenario_index"), int)
+    }
+    candidates = sorted(snapshots_by_index)
+    browser_profile = app_data_root() / "VoiceChromeProfiles" / settings.voice_browser_profile_id
+    api_keys = [item for item in settings.secret_voicer_keys if item.active and item.secret.strip()]
+    slots = [key for key in api_keys for _ in range(max(1, min(20, int(key.streams))))]
+    lumean_keys = [item for item in settings.lumean_api_keys if item.active and item.secret.strip()]
+    lumean_slots = [key for key in lumean_keys for _ in range(max(1, min(100, int(key.streams))))]
+    voicegen_keys = [item for item in settings.voicegen_api_keys if item.active and item.secret.strip()]
+    voicegen_slots = [key for key in voicegen_keys for _ in range(max(1, min(100, int(key.streams))))]
+    wproject_keys = [item for item in settings.wproject_api_keys if item.active and item.secret.strip()]
+    wproject_slots = [key for key in wproject_keys for _ in range(max(1, min(100, int(key.streams))))]
+    errors: list[str] = []
+    status_lock = threading.Lock()
+    # A different script cannot legitimately yield byte-for-byte identical
+    # speech. Keep the guard in the queue as a second line of defence even if
+    # a service page temporarily exposes a stale result link.
+    browser_audio_hashes: dict[str, int] = {}
+
+    def persist_voice_state() -> None:
+        """Write only queue output/state without overwriting live UI settings.
+
+        The pause button is a second core command running in another process.
+        Reloading first keeps that newly saved flag (and a changed output path)
+        while the active worker publishes its per-task timeline.
+        """
+        latest = load_settings()
+        settings.voice_queue_paused = latest.voice_queue_paused
+        latest.voice_scenario_outputs = dict(settings.voice_scenario_outputs)
+        latest.voice_task_statuses = dict(settings.voice_task_statuses)
+        latest.voice_tts_batches = list(settings.voice_tts_batches)
+        latest.voice_active_tts_batch_id = settings.voice_active_tts_batch_id
+        latest.voice_tts_jobs = dict(settings.voice_tts_jobs)
+        save_settings(latest)
+
+    def set_task_status(index: int, label: str, progress: int, error: str = "", *, artifact: dict | None = None) -> None:
+        """Save each item immediately so the UI can poll its live timeline."""
+        key = str(index + 1)
+        record = {
+            "label": str(label).strip() or "В обработке",
+            "progress": max(0, min(100, int(progress))),
+            "updatedAt": time.strftime("%H:%M:%S"),
+            "error": error,
+            "jobSnapshotId": str(snapshots_by_index.get(index, {}).get("id", "")),
+        }
+        if artifact:
+            record.update(artifact)
+        with status_lock:
+            previous = settings.voice_task_statuses.get(key)
+            # Secret Voicer polls frequently.  Save only a meaningful visual
+            # change, otherwise the settings file would be rewritten every 2s.
+            if (isinstance(previous, dict) and previous.get("label") == record["label"]
+                    and previous.get("error", "") == record["error"]
+                    and previous.get("artifactPath", "") == record.get("artifactPath", "")
+                    and abs(int(previous.get("progress", 0)) - record["progress"]) < 5):
+                return
+            settings.voice_task_statuses[key] = record
+            persist_voice_state()
+
+    def wait_until_resumed() -> None:
+        # A second Electron command can pause this long-running worker without
+        # aborting an MP3 generation that has already reached Secret Voicer.
+        while load_settings().voice_queue_paused:
+            time.sleep(0.4)
+
+    def api_task(index: int, key: SecretVoicerKey, profile: VoiceProfile) -> tuple[int, str]:
+        wait_until_resumed()
+        job = jobs_by_index[index]
+        set_task_status(index, "API: отправляем текст", 15)
+        candidates_keys = [key] + [item for item in api_keys if item is not key]
+        last_error: Exception | None = None
+        for attempt_key in candidates_keys:
+            try:
+                content = SecretVoicerClient(attempt_key.secret).synthesize(
+                    job.result, profile, lambda label, percent: set_task_status(index, f"API: {label}", percent))
+                break
+            except Exception as exc:
+                last_error = exc
+                if not settings.voice_key_failover or not _can_failover_voice(exc):
+                    raise
+                set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+        else:
+            raise last_error or RuntimeError("Secret Voicer не принял задачу")
+        set_task_status(index, "API: сохраняем MP3", 95)
+        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        return index, str(output)
+
+    def lumean_task(index: int, key: LumeanKey, profile: VoiceProfile) -> tuple[int, str]:
+        """Render one Lumean order and persist a reusable template safely."""
+        wait_until_resumed()
+        job = jobs_by_index[index]
+        if profile.provider not in {"lumean", "api", "chrome"}:
+            profile.provider = "lumean"
+        set_task_status(index, "Lumean: готовим профиль", 5)
+        candidates_keys = [key] + [item for item in lumean_keys if item is not key]
+        last_error: Exception | None = None
+        for attempt_key in candidates_keys:
+            try:
+                content, template_id, signature = LumeanClient(attempt_key.secret).synthesize(
+                    job.result, profile, lambda label, percent: set_task_status(index, label, percent))
+                break
+            except Exception as exc:
+                last_error = exc
+                if not settings.voice_key_failover or not _can_failover_voice(exc):
+                    raise
+                set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+        else:
+            raise last_error or RuntimeError("Lumean не принял задачу")
+        # Cache only the opaque template ID and its input signature. The API
+        # key remains inside the encrypted settings entry, never in a project.
+        profiles = settings.voice_profiles or []
+        selected_id = str(snapshots_by_index[index].get("settings", {}).get("id", ""))
+        selected = next((position for position, item in enumerate(profiles)
+                         if str(item.get("id", "")) == selected_id), 0)
+        if profiles:
+            target = profiles[max(0, min(selected, len(profiles) - 1))]
+            target["template_id"] = template_id
+            target["template_signature"] = signature
+            target["provider"] = "lumean"
+        set_task_status(index, "Lumean: сохраняем MP3", 96)
+        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        return index, str(output)
+
+    def voicegen_task(index: int, key: VoiceGenKey, profile: VoiceProfile) -> tuple[int, str]:
+        wait_until_resumed()
+        job = jobs_by_index[index]
+        set_task_status(index, "VoiceGen: готовим задачу", 5)
+        # ``thread_count`` is requested inside one VoiceGen task; it is not a
+        # hidden NewsFlow cap. Pool streams still control how many tasks one
+        # credential sends simultaneously.
+        candidates_keys = [key] + [item for item in voicegen_keys if item is not key]
+        last_error: Exception | None = None
+        for attempt_key in candidates_keys:
+            try:
+                content = VoiceGenClient(attempt_key.secret).synthesize(
+                    job.result, f"{index + 1:03d} — {safe_filename(job.request.title)}.mp3", profile,
+                    threads=max(1, int(profile.task_threads)),
+                    progress=lambda label, percent: set_task_status(index, label, percent))
+                break
+            except Exception as exc:
+                last_error = exc
+                if not settings.voice_key_failover or not _can_failover_voice(exc):
+                    raise
+                set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+        else:
+            raise last_error or RuntimeError("VoiceGen не принял задачу")
+        set_task_status(index, "VoiceGen: сохраняем MP3", 96)
+        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        return index, str(output)
+
+    def wproject_task(index: int, key: WProjectKey, profile: VoiceProfile) -> tuple[int, str]:
+        wait_until_resumed()
+        job = jobs_by_index[index]
+        job_snapshot = snapshots_by_index[index]
+        remote_task = job_snapshot.get("remote_task")
+        if (isinstance(remote_task, dict)
+                and str(remote_task.get("provider", "")).casefold() == "wproject"
+                and str(remote_task.get("task_id", "")).strip()):
+            # The remote task has already been accepted by WProject.  Never
+            # submit the same script again just because NewsFlow restarted or
+            # the polling connection was interrupted: resume that exact task.
+            persisted_label = str(remote_task.get("key_label", "")).strip()
+            resumed_key = next((item for item in wproject_keys if item.label == persisted_label), key)
+            task_id = str(remote_task["task_id"])
+            set_task_status(index, "WProject: продолжаем созданную задачу", 10)
+            content = WProjectClient(resumed_key.secret).wait_download(
+                task_id, progress=lambda label, percent: set_task_status(index, label, percent))
+        else:
+            set_task_status(index, "WProject: готовим задачу", 5)
+            candidates_keys = [key] + [item for item in wproject_keys if item is not key]
+            last_error: Exception | None = None
+            content: bytes | None = None
+            idempotency_key = str(job_snapshot.get("provider_idempotency_key") or "").strip()
+            if not idempotency_key:
+                idempotency_key = f"newsflow:voice:{str(job_snapshot.get('id') or uuid.uuid4().hex)}"[:128]
+                job_snapshot["provider_idempotency_key"] = idempotency_key
+            # The provider can accept a POST while the local process loses its
+            # response. Persist the key first so every retry represents the
+            # same remote request instead of a second billable task.
+            persist_voice_state()
+            for attempt_key in candidates_keys:
+                try:
+                    client = WProjectClient(attempt_key.secret)
+                    task_id = client.create_task(
+                        job.result, f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
+                        threads=max(1, int(profile.task_threads)), idempotency_key=idempotency_key)
+                    # This durable remote identity is written before polling
+                    # or downloading.  A restart now resumes the accepted
+                    # WProject task rather than submitting a duplicate.
+                    job_snapshot["remote_task"] = {
+                        "provider": "wproject", "task_id": str(task_id),
+                        "key_label": attempt_key.label, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                    job_snapshot["state"] = "running"
+                    persist_voice_state()
+                    content = client.wait_download(
+                        str(task_id), progress=lambda label, percent: set_task_status(index, label, percent))
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    # Once WProject returned an id, it owns the task.  Do not
+                    # fail over to another key and accidentally create a
+                    # second paid request; the outer retry will resume it.
+                    if isinstance(job_snapshot.get("remote_task"), dict):
+                        raise
+                    if not settings.voice_key_failover or not _can_failover_voice(exc):
+                        raise
+                    set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+            if content is None:
+                raise last_error or RuntimeError("WProject не принял задачу")
+        set_task_status(index, "WProject: сохраняем MP3", 96)
+        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        return index, str(output)
+
+    def cross_service_fallback(index: int, failed_provider: str) -> tuple[int, str]:
+        """Try explicitly marked reserve profiles from another active service."""
+        if not settings.voice_key_failover:
+            raise RuntimeError("Автопереключение ключей и резервных голосов выключено")
+        job = jobs_by_index[index]
+        job_snapshot = snapshots_by_index[index]
+        for saved in job_snapshot.get("fallback_settings", []):
+            if not isinstance(saved, dict) or not saved.get("fallback"):
+                continue
+            profile = _profile_from_saved(saved)
+            provider = profile.provider
+            # A reserve may intentionally be another voice of the same API,
+            # or a voice from another active provider. Chrome needs a user
+            # session and therefore is never an unattended reserve.
+            if provider == "chrome":
+                continue
+            set_task_status(index, f"Резерв: {profile.name} через {provider}", 12)
+            try:
+                if provider == "api":
+                    keys = [item for item in api_keys if item.active and item.secret.strip()]
+                    if not keys:
+                        continue
+                    content = SecretVoicerClient(keys[0].secret).synthesize(job.result, profile,
+                        lambda label, percent: set_task_status(index, f"Резерв Secret Voicer: {label}", percent))
+                elif provider == "lumean":
+                    keys = [item for item in lumean_keys if item.active and item.secret.strip()]
+                    if not keys:
+                        continue
+                    content, _template, _signature = LumeanClient(keys[0].secret).synthesize(job.result, profile,
+                        lambda label, percent: set_task_status(index, f"Резерв Lumean: {label}", percent))
+                elif provider == "voicegen":
+                    keys = [item for item in voicegen_keys if item.active and item.secret.strip()]
+                    if not keys:
+                        continue
+                    content = VoiceGenClient(keys[0].secret).synthesize(job.result,
+                        f"{index + 1:03d} — {safe_filename(job.request.title)}.mp3", profile,
+                        threads=max(1, profile.task_threads),
+                        progress=lambda label, percent: set_task_status(index, f"Резерв VoiceGen: {label}", percent))
+                elif provider == "wproject":
+                    keys = [item for item in wproject_keys if item.active and item.secret.strip()]
+                    if not keys:
+                        continue
+                        content = WProjectClient(keys[0].secret).synthesize(job.result,
+                            f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
+                            threads=max(1, profile.task_threads),
+                            progress=lambda label, percent: set_task_status(index, f"Резерв WProject: {label}", percent),
+                            idempotency_key=(f"newsflow:voice:{str(job_snapshot.get('id') or uuid.uuid4().hex)}:fallback"[:128]))
+                else:
+                    continue
+                output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+                return index, str(output)
+            except Exception:
+                continue
+        raise RuntimeError("Резервные активные голоса не смогли принять задачу")
+
+    def chrome_task(index: int, job: Job, profile: VoiceProfile) -> bytes:
+        """Recover one stuck browser task without interrupting the batch.
+
+        Each retry opens a fresh Secret Voicer tab in the same authorised
+        profile.  That is stronger than merely clicking reload: a stale UI or
+        an old text field cannot survive into the new attempt.
+        """
+        chrome_profile = (VoiceProfile(profile.name, "", profile.stability, profile.style, "")
+                          if settings.voice_use_chrome_selected_voice else profile)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            wait_until_resumed()
+            if attempt > 1:
+                set_task_status(index, f"Перезапуск Secret Voicer · попытка {attempt}/3", 10)
+                time.sleep(min(5, attempt))
+            try:
+                def chrome_progress(label: str, percent: int) -> None:
+                    set_task_status(index, label, percent)
+                    wait_until_resumed()
+
+                return ChromeSecretVoicer(browser_profile).synthesize(
+                    job.result, chrome_profile, progress=chrome_progress)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= 3 or not _retryable_browser_voice_error(exc):
+                    raise
+                set_task_status(index, f"Интерфейс не ответил — перезагружаем · попытка {attempt + 1}/3", 8)
+        raise last_error or RuntimeError("Не удалось запустить Chrome-озвучку")
+
+    provider_slots: dict[str, list] = {
+        "api": slots, "lumean": lumean_slots, "voicegen": voicegen_slots, "wproject": wproject_slots,
+    }
+    provider_limits = {
+        provider: threading.BoundedSemaphore(max(1, len(provider_slots[provider])))
+        for provider in provider_slots
+    }
+    chrome_limit = threading.BoundedSemaphore(1)
+    browser_hash_lock = threading.Lock()
+
+    def render_snapshot(index: int) -> tuple[int, str]:
+        """Run one saved job contract; no lookup of the live range editor."""
+        snapshot = snapshots_by_index[index]
+        provider = str(snapshot.get("provider", "chrome"))
+        profile = _profile_from_saved(dict(snapshot.get("settings") or {}))
+        job = jobs_by_index[index]
+        set_task_status(index, "В очереди", 0)
+        if provider in provider_slots:
+            available = provider_slots[provider]
+            if not available:
+                label = {"api": "Secret Voicer", "lumean": "Lumean", "voicegen": "VoiceGen", "wproject": "WProject"}[provider]
+                raise ValueError(f"Добавьте хотя бы один активный API-ключ {label}")
+            with provider_limits[provider]:
+                key = available[index % len(available)]
+                for attempt in range(1, 4):
+                    try:
+                        if provider == "api":
+                            return api_task(index, key, profile)
+                        if provider == "lumean":
+                            return lumean_task(index, key, profile)
+                        if provider == "voicegen":
+                            return voicegen_task(index, key, profile)
+                        return wproject_task(index, key, profile)
+                    except Exception as error:
+                        # 429/network/service overload is a queue condition,
+                        # not a reason to discard the immutable job or its
+                        # script-to-audio binding.  Back off within this
+                        # provider slot so every other provider keeps working.
+                        if attempt >= 3 or not _can_failover_voice(error):
+                            raise
+                        delay = min(30, 2 ** attempt)
+                        snapshot["retry_count"] = attempt
+                        snapshot["next_retry_after_seconds"] = delay
+                        set_task_status(index, f"Лимит/сеть {provider} — повтор {attempt + 1}/3 через {delay} с", 8)
+                        time.sleep(delay)
+        if provider != "chrome":
+            raise ValueError(f"Неизвестный провайдер озвучки: {provider}")
+        with chrome_limit:
+            try:
+                content = chrome_task(index, job, profile)
+            except Exception:
+                if not settings.voice_api_fallback or not slots:
+                    raise
+                set_task_status(index, "Chrome недоступен — резерв через API", 15)
+                content = SecretVoicerClient(slots[index % len(slots)].secret).synthesize(job.result, profile)
+            fingerprint = hashlib.sha256(content).hexdigest()
+            with browser_hash_lock:
+                previous_index = browser_audio_hashes.get(fingerprint)
+                if previous_index is not None and previous_index != index:
+                    raise ValueError(
+                        "Secret Voicer вернул тот же MP3, что и для сценария "
+                        f"№{previous_index + 1}. Файл не сохранён: откройте вкладку этого сценария и повторите только его."
+                    )
+                browser_audio_hashes[fingerprint] = index
+            output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+            return index, str(output)
+
+    workers = min(len(candidates), max(1, int(settings.voice_queue_concurrency)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="NewsFlowTTS") as executor:
+        futures = {executor.submit(render_snapshot, index): index for index in candidates}
+        for future in as_completed(futures):
+            index = futures[future]
+            job_snapshot = snapshots_by_index[index]
+            try:
+                completed_index, output = future.result()
+                output, duration = _promote_validated_voice_candidate(settings.voicer_output_folder, output)
+                settings.voice_scenario_outputs[str(completed_index + 1)] = output
+                job_snapshot["state"] = "ready"
+                job_snapshot["output_path"] = output
+                artifact = {
+                    "path": output, "duration_seconds": duration,
+                    "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                job_snapshot["artifact"] = artifact
+                set_task_status(completed_index, "Готово", 100, artifact={
+                    "artifactPath": output, "durationSeconds": duration,
+                })
+            except Exception as exc:
+                if _can_failover_voice(exc):
+                    try:
+                        completed_index, output = cross_service_fallback(index, str(job_snapshot.get("provider", "")))
+                        output, duration = _promote_validated_voice_candidate(settings.voicer_output_folder, output)
+                        settings.voice_scenario_outputs[str(completed_index + 1)] = output
+                        artifact = {"path": output, "duration_seconds": duration,
+                                    "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+                        job_snapshot.update(state="ready", output_path=output, fallback_used=True, artifact=artifact)
+                        set_task_status(completed_index, "Готово через резервный сервис", 100, artifact={
+                            "artifactPath": output, "durationSeconds": duration,
+                        })
+                        continue
+                    except Exception:
+                        pass
+                job_snapshot["state"] = "error"
+                job_snapshot["error"] = _voice_error_reason(exc)
+                reason = job_snapshot["error"]
+                # Keep a previously valid manual or ready audio attachment if
+                # an explicit revoice fails; only the new snapshot is failed.
+                set_task_status(index, "Ошибка озвучки", 0, reason)
+                errors.append(f"{index + 1}: {reason}")
+    persist_voice_state()
+    if errors:
+        raise RuntimeError("; ".join(errors[:5]))
+    return snapshot()
+
+
+def set_voice_queue_paused(payload: dict) -> dict:
+    settings = load_settings()
+    settings.voice_queue_paused = bool(payload.get("paused", True))
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "voice-pause", "count": 0,
+        "message": "Очередь озвучки на паузе." if settings.voice_queue_paused else "Очередь озвучки продолжена.",
+    }}
+
+
+def open_voice_session() -> dict:
+    settings = load_settings()
+    profile = app_data_root() / "VoiceChromeProfiles" / settings.voice_browser_profile_id
+    open_voice_login(profile)
+    return snapshot()
+
+
+def add_footage_folder(payload: dict) -> dict:
+    folder = str(payload.get("folder", "")).strip()
+    if not folder or not Path(folder).is_dir():
+        raise ValueError("Выберите существующую папку с футажами")
+    settings = load_settings()
+    if folder not in settings.footage_folders:
+        settings.footage_folders.append(folder)
+        save_settings(settings)
+    return snapshot()
+
+
+def remove_footage_folder(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if 0 <= index < len(settings.footage_folders):
+        del settings.footage_folders[index]
+        save_settings(settings)
+    return snapshot()
+
+
+def save_footage_settings(payload: dict) -> dict:
+    settings = load_settings()
+    if "downloadFolder" in payload:
+        folder = str(payload.get("downloadFolder", "")).strip()
+        if not folder:
+            raise ValueError("Укажите папку для внешних футажей")
+        settings.footage_download_folder = str(Path(folder).expanduser())
+    if "cutterOutputFolder" in payload:
+        folder = str(payload.get("cutterOutputFolder", "")).strip()
+        if folder:
+            settings.cutter_output_folder = str(Path(folder).expanduser())
+    save_settings(settings)
+    return snapshot()
+
+
+def inspect_footage_tree(payload: dict) -> dict:
+    """Show a bounded recursive library map without loading 20k rows into React."""
+    settings = load_settings()
+    limit = max(100, min(3000, int(payload.get("limit", 800))))
+    roots = []
+    total = 0
+    for raw in settings.footage_folders:
+        root = Path(raw)
+        if not root.is_dir():
+            continue
+        branches: dict[str, int] = {}
+        root_count = 0
+        try:
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.casefold() not in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+                    continue
+                root_count += 1
+                total += 1
+                try:
+                    relative = path.relative_to(root)
+                    branch = relative.parts[0] if len(relative.parts) > 1 else "(в корне)"
+                except ValueError:
+                    branch = "(в корне)"
+                if len(branches) < limit or branch in branches:
+                    branches[branch] = branches.get(branch, 0) + 1
+        except OSError:
+            continue
+        roots.append({"path": str(root), "clips": root_count,
+                      "branches": [{"name": name, "clips": count} for name, count in sorted(branches.items())]})
+    return {**snapshot(), "footageTree": {"total": total, "roots": roots, "limited": total > limit}}
+
+
+def add_cutter_sources(payload: dict) -> dict:
+    settings = load_settings()
+    additions = [str(item).strip() for item in payload.get("paths", []) if Path(str(item)).is_file()]
+    known = {value.casefold() for value in settings.cutter_sources}
+    settings.cutter_sources.extend(value for value in additions if value.casefold() not in known)
+    save_settings(settings)
+    return snapshot()
+
+
+def run_cutter(payload: dict) -> dict:
+    settings = load_settings()
+    output = Path(str(payload.get("outputFolder", settings.cutter_output_folder)).strip() or settings.cutter_output_folder)
+    duration = float(payload.get("duration", 6))
+    fps = int(payload.get("fps", 30))
+    bitrate = str(payload.get("bitrate", "4M")).strip() or "4M"
+    clips = cut_sources(settings.cutter_sources, output, duration, fps, bitrate)
+    settings.cutter_output_folder = str(output)
+    if str(output) not in settings.footage_folders:
+        settings.footage_folders.append(str(output))
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "cutter", "count": len(clips), "folder": str(output)}}
+
+
+def run_mixer(payload: dict) -> dict:
+    settings = load_settings()
+    folder = Path(str(payload.get("folder", settings.cutter_output_folder)).strip() or settings.cutter_output_folder)
+    clips = [str(path) for path in folder.rglob("*.mp4") if path.is_file()]
+    plans = make_mix_plans(clips, int(payload.get("clipsPerVideo", 12)), int(payload.get("count", 10)))
+    output = Path(settings.mixer_output_folder)
+    paths = render_mixes(plans, output)
+    return {**snapshot(), "operationResult": {"kind": "mixer", "count": len(paths), "folder": str(output)}}
+
+
+def search_web_footage(payload: dict) -> dict:
+    query = str(payload.get("query", "")).strip()
+    mode = str(payload.get("source", "all"))
+    if not query:
+        raise ValueError("Введите запрос для поиска")
+    if mode == "youtube":
+        result = search_youtube_videos(query)
+    elif mode == "wikimedia":
+        result = search_wikimedia_videos(query)
+    else:
+        result = search_all_available_videos(query)
+    return {**snapshot(), "webResults": result}
+
+
+def download_web_footage(payload: dict) -> dict:
+    """Download one user-selected result to the footage library.
+
+    This remains an explicit UI action. YouTube sources are requested as a
+    short interval rather than retaining the complete original video.
+    """
+    result = payload.get("result")
+    if not isinstance(result, dict) or not str(result.get("title", "")).strip():
+        raise ValueError("Выберите результат поиска для загрузки")
+    settings = load_settings()
+    folder = Path(str(payload.get("folder", settings.footage_download_folder)).strip()
+                  or settings.footage_download_folder)
+    if str(result.get("source", "")).casefold() == "youtube":
+        item = download_youtube_segment(
+            result, folder,
+            start=max(0.0, float(payload.get("start", 0))),
+            duration=max(0.5, min(60.0, float(payload.get("duration", 6)))),
+        )
+    else:
+        item = download_footage(result, folder)
+    # The timeline must never receive a source with unknown FPS, audio stream
+    # or codec.  Both a manually selected web result and an automatic fallback
+    # go through the same cutter: silent H.264, 30 FPS and predictable chunks.
+    normalized_root = Path(settings.cutter_output_folder) / "Внешние для монтажа"
+    clips = cut_sources([item.path], normalized_root,
+                        duration=max(.5, min(60.0, float(payload.get("duration", 6)))),
+                        fps=30, bitrate="4M")
+    if not clips:
+        raise RuntimeError("Нарезчик не создал клип из внешнего видео")
+    normalized = FootageItem(str(clips[0]), clips[0].name, item.source, item.source_url,
+                             item.license, item.tags)
+    settings.footage_download_folder = str(folder)
+    if str(normalized_root) not in settings.footage_folders:
+        settings.footage_folders.append(str(normalized_root))
+    # The source metadata is recorded together with the normalized clip.
+    ClipIndex(app_data_root() / "footage-index.sqlite3").add_item(normalized)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "download", "count": len(clips), "folder": str(normalized_root)},
+            "downloadedFootage": {"path": normalized.path, "name": normalized.name}}
+
+
+def index_footage(payload: dict) -> dict:
+    """Build the incremental index or enrich existing vectors with semantic labels."""
+    settings = load_settings()
+    enhance = bool(payload.get("enhance"))
+    folders = [str(item) for item in payload.get("folders", settings.footage_folders)
+               if isinstance(item, str) and Path(item).is_dir()]
+    if not folders:
+        raise ValueError("Добавьте хотя бы одну папку с футажами")
+    lock_path = _claim_footage_index_lock()
+    progress = payload.get("_progress") if callable(payload.get("_progress")) else None
+    download_semaphore = payload.get("_downloadSemaphore")
+    index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+    started_at = datetime.now().isoformat(timespec="seconds")
+
+    def report(state) -> None:
+        _write_footage_index_status({
+            "stage": state.stage,
+            "active": state.stage in {"scan", "embedding", "semantic"},
+            "total": state.total,
+            "processed": state.processed,
+            "indexed": state.indexed,
+            "skipped": state.skipped,
+            "failed": state.failed,
+            "current": state.current,
+            "startedAt": started_at,
+            "updatedAt": datetime.now().isoformat(timespec="seconds"),
+        })
+
+    try:
+        if enhance:
+            # Uses already stored CLIP vectors; source files are not decoded again.
+            progress = index.enrich_semantic_tags(progress=report)
+        else:
+            index.remove_missing()
+            media_progress = index.index_folders(folders, progress=report)
+            # Future footage receives the same semantic rules automatically.
+            # After the one deliberate upgrade to a new rules version, this
+            # pass touches only newly indexed clips and never reopens video.
+            progress = index.enrich_semantic_tags(progress=report)
+        report(progress)
+        return {**snapshot(), "operationResult": {"kind": "semantic-index" if enhance else "index", "count": progress.indexed,
+                                                    "folder": str(index.db_path)},
+                "indexResult": {"total": progress.total, "processed": progress.processed,
+                                "indexed": progress.indexed, "skipped": progress.skipped,
+                                "failed": progress.failed}}
+    except Exception as exc:
+        current = _read_footage_index_status()
+        current.update({"stage": "error", "active": False, "error": str(exc),
+                        "updatedAt": datetime.now().isoformat(timespec="seconds")})
+        _write_footage_index_status(current)
+        raise
+    finally:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def save_montage_settings(payload: dict) -> dict:
+    settings = load_settings()
+    ratio = str(payload.get("aspectRatio", settings.montage_aspect_ratio)).strip()
+    if ratio not in {"16:9", "9:16", "1:1"}:
+        raise ValueError("Неподдерживаемое соотношение сторон")
+    settings.montage_aspect_ratio = ratio
+    if "renderer" in payload:
+        renderer = str(payload.get("renderer", "ffmpeg")).casefold()
+        settings.montage_renderer = renderer if renderer in {"remotion", "ffmpeg"} else "ffmpeg"
+        settings.montage_renderer_explicit = True
+    if "remotionFrameConcurrency" in payload:
+        settings.montage_remotion_frame_concurrency = max(1, int(payload.get("remotionFrameConcurrency", 2)))
+    if "exportDaVinciXml" in payload:
+        settings.montage_export_davinci_xml = bool(payload.get("exportDaVinciXml"))
+    if "davinciAutoImport" in payload:
+        settings.montage_davinci_auto_import = bool(payload.get("davinciAutoImport"))
+    if "transitionStyle" in payload:
+        style = str(payload.get("transitionStyle", "crossfade"))
+        settings.montage_transition_style = style if style in {"crossfade", "dip-black", "cut", "slide-left"} else "crossfade"
+    if "transitionFrames" in payload:
+        settings.montage_transition_frames = max(0, min(30, int(payload.get("transitionFrames", 7))))
+    for enabled_key, folder_key, setting_enabled, setting_folder in (
+        ("introEnabled", "introFolder", "montage_intro_enabled", "montage_intro_folder"),
+        ("overlayEnabled", "overlayFolder", "montage_overlay_enabled", "montage_overlay_folder"),
+    ):
+        if enabled_key in payload:
+            setattr(settings, setting_enabled, bool(payload.get(enabled_key)))
+        if folder_key in payload:
+            folder = str(payload.get(folder_key, "")).strip()
+            if folder and not Path(folder).is_dir():
+                raise ValueError("Выберите существующую папку с видео")
+            setattr(settings, setting_folder, folder)
+    if "introDuration" in payload:
+        settings.montage_intro_duration = max(0.0, min(30.0, float(payload.get("introDuration", 6))))
+    if "outputFolder" in payload:
+        folder = str(payload.get("outputFolder", "")).strip()
+        if not folder:
+            raise ValueError("Укажите папку для готовых MP4")
+        settings.montage_output_folder = str(Path(folder).expanduser())
+    if "projectFolder" in payload:
+        folder = str(payload.get("projectFolder", "")).strip()
+        if folder:
+            settings.montage_project_folder = str(Path(folder).expanduser())
+    if "autoWeb" in payload:
+        settings.montage_auto_web = bool(payload.get("autoWeb"))
+    # Automatic montage deliberately does not pull short YouTube fragments.
+    # External automatic search is limited to sources explicitly marked usable
+    # by the app (currently Wikimedia/stock-like providers).
+    settings.montage_auto_youtube = False
+    if "externalOnly" in payload:
+        settings.montage_external_only = bool(payload.get("externalOnly"))
+    if "useScriptText" in payload:
+        settings.montage_use_script_text = bool(payload.get("useScriptText"))
+    if "excludeEnglishText" in payload:
+        settings.montage_exclude_english_text = bool(payload.get("excludeEnglishText"))
+    if "scenePlanner" in payload:
+        planner = str(payload.get("scenePlanner", "local")).casefold()
+        settings.montage_scene_planner = planner if planner in {"local", "agent"} else "local"
+    if "matchThreshold" in payload:
+        settings.montage_match_threshold = max(0.0, min(1.0, float(payload.get("matchThreshold", .22))))
+    if "fastReuseEnabled" in payload:
+        settings.montage_fast_reuse_enabled = bool(payload.get("fastReuseEnabled"))
+    if "uniqueFootagePercent" in payload:
+        settings.montage_unique_footage_percent = max(5, min(100, int(payload.get("uniqueFootagePercent", 100))))
+    if "fastReuseRanges" in payload:
+        settings.montage_fast_reuse_ranges = _clean_fast_reuse_ranges(payload.get("fastReuseRanges"))
+    for payload_key, setting_key in (
+        ("planningWorkers", "montage_planning_workers"),
+        ("downloadWorkers", "montage_download_workers"),
+        ("renderWorkers", "montage_render_workers"),
+    ):
+        if payload_key in payload:
+            setattr(settings, setting_key, max(1, int(payload.get(payload_key, 1))))
+    if "queuePaused" in payload:
+        settings.montage_queue_paused = bool(payload.get("queuePaused"))
+    save_settings(settings)
+    return snapshot()
+
+
+def _clean_fast_reuse_ranges(value: object) -> list[dict[str, int]]:
+    """Normalize the user-facing one-based topic ranges for fast footage reuse."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, int]] = []
+    # A user can split any queue into as many independent topic groups as
+    # needed.  Do not silently drop rules after an arbitrary UI-sized limit.
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start = max(1, int(raw.get("start", 1)))
+            end = max(start, int(raw.get("end", start)))
+            percent = max(5, min(100, int(raw.get("percent", 100))))
+        except (TypeError, ValueError):
+            continue
+        entry = {"start": start, "end": end, "percent": percent}
+        if entry not in result:
+            result.append(entry)
+    return result
+
+
+def _fast_reuse_percent_for_scenario(settings: Settings, scenario_index: int) -> int | None:
+    """Return reuse percentage for one zero-based scenario, or None if off."""
+    if not settings.montage_fast_reuse_enabled:
+        return None
+    ranges = _clean_fast_reuse_ranges(settings.montage_fast_reuse_ranges)
+    if not ranges:
+        return max(5, min(100, int(settings.montage_unique_footage_percent)))
+    number = int(scenario_index) + 1
+    for item in ranges:
+        if item["start"] <= number <= item["end"]:
+            return item["percent"]
+    return None
+
+
+def _random_video(folder: str) -> str:
+    root = Path(folder)
+    candidates = [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}] if root.is_dir() else []
+    return str(random.choice(candidates)) if candidates else ""
+
+
+def _full_intro_duration(path: str, fallback: float = 6.0) -> float:
+    """Use the whole selected news insert, never the old six-second cut."""
+    if not path:
+        return 0.0
+    try:
+        # A full source insert must retain both its last frame and original
+        # audio.  The fallback is only for malformed media that ffprobe cannot
+        # inspect; the renderer will then still show a clear per-task error.
+        return max(0.1, probe_media_duration(Path(path)))
+    except Exception:
+        return max(0.1, float(fallback or 6.0))
+
+
+# High-confidence exclusions keep a scene about Ormuz from silently becoming
+# Ukraine footage merely because both happen to be labelled "war".  We only
+# reject a candidate when its own filename/tags explicitly contradict the
+# scene, so neutral generic footage can still be used as a last resort.
+_MONTAGE_TOPIC_GUARDS = (
+    (("ormuz", "hormuz", "iran", "tehran", "persian gulf", "oil tanker"),
+     ("иран", "тегеран", "ормуз", "hormuz", "persian", "gulf", "танкер", "нефт", "iran"),
+     ("украин", "киев", "зеленск", "zelensk", "донбасс", "одесс", "pokrovsk")),
+    (("ukraine", "kyiv", "odesa", "donbas", "zelensky"),
+     ("украин", "киев", "зеленск", "zelensk", "донбасс", "одесс", "ukraine", "kyiv"),
+     ("ормуз", "hormuz", "иран", "тегеран", "iran", "tehran")),
+    (("nato", "north atlantic"),
+     ("нато", "nato", "alliance", "европ", "russia", "росси"),
+     ("ормуз", "hormuz", "иран", "iran", "тегеран", "tehran")),
+)
+
+# A vector index is excellent at finding visually similar footage, but it may
+# still rank a Kremlin office close to a Russian war report.  These are not
+# interchangeable news visuals.  The rule is intentionally asymmetric: a
+# scene about a named Kremlin meeting may use a political shot; a scene about
+# a strike or frontline may not silently fall back to one.
+_WAR_ACTION_TERMS = (
+    "attack", "strike", "missile", "shelling", "explosion", "blast", "frontline", "front line",
+    "soldier", "soldiers", "military vehicle", "troops", "battle", "war damage", "evacuation",
+    "damaged building", "firefighter", "destroyed", "военн", "удар", "ракет", "обстрел",
+    "взрыв", "фронт", "войск", "солдат", "арм", "наступлен", "разруш", "эвакуац", "пожар",
+)
+_POLITICAL_OFFICE_TERMS = (
+    "kremlin", "moscow government", "putin", "press conference", "government office",
+    "political-office", "кремл", "москва", "путин", "кабинет", "совещан", "пресс-конференц",
+)
+_POLITICAL_SCENE_TERMS = (
+    "kremlin", "putin", "moscow government", "negotiation", "summit", "diplomatic",
+    "press conference", "кремл", "путин", "переговор", "саммит", "дипломат", "встреч",
+)
+_WAR_VISUAL_TAGS = (
+    "frontline-combat", "offensive-advance", "soldiers-patrol", "military-vehicles",
+    "artillery-fire", "missile-air-defense", "missile-strike", "military-drone", "military-logistics", "war-action",
+    "emergency-aftermath", "civilian-evacuation",
+)
+_FRONTLINE_QUERY_TERMS = ("frontline", "front line", "offensive", "advancing", "trench", "battlefield",
+                          "artillery", "soldier", "troops", "military vehicle", "tanks", "armored",
+                          "missile", "rocket", "drone", "uav", "shelling", "attack", "strike", "вoенн", "военн", "наступлен",
+                          "фронт", "окоп", "солдат", "войск", "танк", "артилл", "ракет", "дрон", "обстрел")
+_AGRICULTURE_TERMS = (
+    "agriculture-farming", "potato", "harvest", "farming", "farm tractor", "combine harvester", "wheat field",
+    "grain", "картош", "урож", "сельхоз", "трактор", "комбайн", "пшениц", "зерн", "поле фермер",
+)
+_AGRICULTURE_QUERY_TERMS = ("potato", "harvest", "farming", "agriculture", "tractor", "combine", "wheat", "grain",
+                            "картош", "урож", "сельхоз", "фермер", "трактор", "комбайн", "пшениц", "зерн")
+_MONTAGE_SEMANTIC_RULES = (
+    (_FRONTLINE_QUERY_TERMS, _WAR_VISUAL_TAGS),
+    (("protest", "demonstration", "rally", "picket", "митинг", "протест", "демонстр", "пикет"),
+     ("protest-crowd", "workers-strike", "public-unrest-police")),
+    (("strike", "workers", "labor", "забастов", "рабоч", "стачк"),
+     ("workers-strike", "protest-crowd")),
+    (("migrant", "migrants", "border crossing", "refugee", "migration", "мигрант", "границ", "бежен", "депортац"),
+     ("migrant-border", "refugee-transport", "civilian-evacuation")),
+    (("negotiation", "diplomatic", "summit", "переговор", "дипломат", "саммит"),
+     ("negotiations",)),
+    (("tanker", "port", "seaport", "refinery", "energy", "танкер", "порт", "нефт", "энерг"),
+     ("oil-tanker-port", "port-logistics", "energy-infrastructure")),
+    (_AGRICULTURE_QUERY_TERMS, ("agriculture-farming",)),
+)
+
+
+def _has_any(value: str, terms: tuple[str, ...]) -> bool:
+    return any(term in value for term in terms)
+
+
+def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
+    """Prefer concrete enriched footage for every supported news cluster."""
+    query = str(scene_query or "").casefold()
+    haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
+    bonus = 0.0
+    for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:
+        if _has_any(query, query_terms):
+            matches = sum(tag in haystack for tag in preferred_tags)
+            # A small bounded bonus only breaks ties among visually similar
+            # results; it cannot turn an unrelated clip into a match alone.
+            bonus += min(0.18, matches * 0.06)
+    return min(0.24, bonus)
+
+
+def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
+    query = str(scene_query or "").casefold()
+    haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
+    # Never let a generic Kremlin / politician / cabinet shot illustrate a
+    # concrete military action.  The exception keeps legitimate scenes such
+    # as "Putin comments on strikes" usable when the political subject was
+    # explicitly asked for by the planner.
+    if (_has_any(query, _WAR_ACTION_TERMS) and _has_any(haystack, _POLITICAL_OFFICE_TERMS)
+            and not _has_any(query, _POLITICAL_SCENE_TERMS)):
+        return False
+    # Fields, potato harvests and farm machinery are legitimate only for an
+    # explicitly agricultural report. A visually green tractor shot must not
+    # become a substitute for drones, artillery, missiles or frontline news.
+    if (_has_any(query, _WAR_ACTION_TERMS) and _has_any(haystack, _AGRICULTURE_TERMS)
+            and not _has_any(query, _AGRICULTURE_QUERY_TERMS)):
+        return False
+    for scene_terms, wanted_terms, forbidden_terms in _MONTAGE_TOPIC_GUARDS:
+        if not any(term in query for term in scene_terms):
+            continue
+        if any(term in haystack for term in forbidden_terms):
+            return False
+        # Explicitly indexed footage from the right topic is preferred, but a
+        # neutral clip is allowed. This avoids blank timelines if a library
+        # only has generically named six-second clips.
+        if any(term in haystack for term in wanted_terms):
+            return True
+    return True
+
+
+_MONTAGE_GENERIC_QUERY_PHRASES = {
+    "international news", "documentary footage", "current events", "news footage",
+    "russia current events", "world news", "breaking news",
+}
+
+
+def _normalized_montage_visual_query(value: str) -> str:
+    """Keep concrete visual intent, not duplicated generic planner filler."""
+    raw_parts = re.split(r"[,;|\n]+", str(value or ""))
+    result: list[str] = []
+    seen: list[str] = []
+    for raw in raw_parts:
+        phrase = re.sub(r"\s+", " ", raw).strip(" .,:;|-_")
+        key = phrase.casefold()
+        if not phrase or key in _MONTAGE_GENERIC_QUERY_PHRASES:
+            continue
+        if any(key == previous or difflib.SequenceMatcher(None, key, previous).ratio() >= .92 for previous in seen):
+            continue
+        seen.append(key)
+        result.append(phrase)
+    return ", ".join(result)
+
+
+def _montage_query_variants(value: str) -> list[str]:
+    """Create a small deterministic strict → atom → category query ladder."""
+    normalized = _normalized_montage_visual_query(value)
+    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    variants = [normalized] if normalized else []
+    # Individual planner clauses are complementary semantic atoms. They are
+    # queried in one batched vector pass rather than with 29k disk scans.
+    variants.extend(parts)
+    joined = normalized.casefold()
+    category_terms: list[str] = []
+    if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
+        category_terms.extend(["oil tanker port", "oil refinery industrial infrastructure", "cargo port cranes ships"])
+    if _has_any(joined, _WAR_ACTION_TERMS):
+        category_terms.extend(["explosion aftermath damaged buildings emergency services", "military equipment smoke city aerial"])
+    if _has_any(joined, ("negotiation", "diplomatic", "summit", "government", "parliament", "переговор", "дипломат", "саммит")):
+        category_terms.extend(["government building parliament flags diplomatic meeting", "city government exterior"])
+    for candidate in category_terms:
+        key = candidate.casefold()
+        if key not in {item.casefold() for item in variants}:
+            variants.append(candidate)
+    return variants or ["contextual news footage"]
+
+
+@dataclass(frozen=True)
+class MontageCandidateSelection:
+    item: FootageItem
+    duration: float
+    score: float
+    fallback_level: str
+    reused_reserved_candidate: bool
+    diagnostics: dict[str, int]
+
+
+class MontageSelectionFailure(ValueError):
+    """A bounded selector exhausted every candidate, with inspectable counts."""
+
+    def __init__(self, diagnostics: dict[str, int]):
+        self.diagnostics = dict(diagnostics)
+        super().__init__("Не найдено ни одного допустимого футажа после расширенного поиска")
+
+
+def _safe_reuse_after_reservation_race(selection: MontageCandidateSelection, claim) -> MontageCandidateSelection | None:
+    """Keep a valid winner when another planner claimed it milliseconds first.
+
+    The caller has already excluded this project's own paths/families.  A
+    failed claim therefore means a different batch item won the same source;
+    treating it as the explicit last-resort safe reuse is better than turning
+    a transient reservation race into a whole-video failure.
+    """
+    if claim(selection.item):
+        return selection
+    return replace(selection, fallback_level="SAFE_REUSE", reused_reserved_candidate=True)
+
+
+def _reservation_contains(values, key: str) -> bool:
+    return key in (values or {})
+
+
+def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
+                              required_duration: float, match_threshold: float,
+                              used_paths: set[str], used_families: set[str],
+                              project_used_paths: set[str], project_used_families: set[str],
+                              reserved_paths, reserved_families,
+                              source_exists, source_duration,
+                              recent_project_paths: set[str] | None = None,
+                              immediately_previous_path: str = "") -> MontageCandidateSelection:
+    """Select one valid clip without letting batch uniqueness become a hard failure.
+
+    The candidate collections come from a bounded in-memory vector search.
+    All physical checks happen only after a clip is ranked, and an existing
+    timeline source is never reused by this helper (which prevents adjacent
+    duplicate footage as well as any accidental current-project duplicate).
+    """
+    diagnostics = {
+        "candidates_retrieved": 0, "hard_valid": 0, "strict_accepted": 0, "rejection_events": 0,
+        "rejected_threshold": 0,
+        "rejected_reservation": 0, "rejected_diversity": 0, "rejected_missing": 0,
+        "rejected_duration": 0, "rejected_safety": 0,
+        "unique_rejected_threshold": 0, "unique_rejected_reservation": 0,
+        "unique_rejected_diversity": 0, "unique_rejected_missing": 0,
+        "unique_rejected_duration": 0, "unique_rejected_safety": 0,
+    }
+    strict = list(strict_hits or [])
+    fallback = list(fallback_hits or [])
+    recent_paths = set(recent_project_paths or ())
+    previous_path = _montage_clip_key(immediately_previous_path) if immediately_previous_path else ""
+    diagnostics["candidates_retrieved"] = len({
+        _montage_clip_key(hit.item.path) for hit in [*strict, *fallback]
+    })
+    first_rejection: dict[str, str] = {}
+    hard_valid_paths: set[str] = set()
+
+    def reject(reason: str, key: str) -> None:
+        """Count examination events separately from unique rejected clips."""
+        diagnostics[f"rejected_{reason}"] += 1
+        diagnostics["rejection_events"] += 1
+        if key not in first_rejection:
+            first_rejection[key] = reason
+            diagnostics[f"unique_rejected_{reason}"] += 1
+
+    def choose(pool, *, minimum_score: float | None, allow_historical: bool,
+               allow_reserved: bool, allow_project_reuse: bool, avoid_recent: bool,
+               level: str):
+        seen: set[str] = set()
+        ranked = sorted(
+            pool,
+            key=lambda value: (-float(value.score) - _montage_semantic_bonus(scene_query, value.item),
+                               _montage_clip_key(value.item.path)),
+        )
+        # A last-resort reuse must still avoid A → A whenever another
+        # hard-valid candidate can be tried.  The previous clip remains last
+        # in the order so a one-clip library still produces a complete video.
+        if level == "LAST_RESORT" and previous_path:
+            alternatives = [hit for hit in ranked if _montage_clip_key(hit.item.path) != previous_path]
+            if alternatives:
+                ranked = [*alternatives, *[hit for hit in ranked if _montage_clip_key(hit.item.path) == previous_path]]
+        for hit in ranked:
+            key = _montage_clip_key(hit.item.path)
+            family = _montage_clip_family_key(hit.item.path)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Hard constraints are invariant across every fallback level.
+            # Validate them before quality preferences so diagnostics can
+            # distinguish a viable exhausted pool from a genuinely empty one.
+            if float(hit.duration or 0.0) + .05 < required_duration:
+                reject("duration", key)
+                continue
+            if not _semantic_clip_ok(scene_query, hit.item):
+                reject("safety", key)
+                continue
+            if not source_exists(hit.item):
+                reject("missing", key)
+                continue
+            actual_duration = float(source_duration(hit.item) or 0.0)
+            if actual_duration + .05 < required_duration:
+                reject("duration", key)
+                continue
+            if key not in hard_valid_paths:
+                hard_valid_paths.add(key)
+                diagnostics["hard_valid"] += 1
+            if minimum_score is not None and float(hit.score) < minimum_score:
+                reject("threshold", key)
+                continue
+            if avoid_recent and key in recent_paths:
+                reject("diversity", key)
+                continue
+            if (key in project_used_paths or family in project_used_families) and not allow_project_reuse:
+                reject("diversity", key)
+                continue
+            reserved = _reservation_contains(reserved_paths, key) or _reservation_contains(reserved_families, family)
+            historical = key in used_paths or family in used_families
+            if reserved and not allow_reserved:
+                reject("reservation", key)
+                continue
+            if historical and not allow_historical:
+                reject("diversity", key)
+                continue
+            if level == "STRICT_MATCH":
+                diagnostics["strict_accepted"] += 1
+            return MontageCandidateSelection(
+                hit.item, actual_duration, float(hit.score), level,
+                reserved, dict(diagnostics),
+            )
+        return None
+
+    for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level in (
+        (strict, match_threshold, False, False, False, True, "STRICT_MATCH"),
+        (strict, None, False, False, False, True, "RELAXED_MATCH"),
+        (fallback, None, False, False, False, True, "CATEGORY_CONTEXT_FALLBACK"),
+        ([*strict, *fallback], None, True, False, True, True, "SAFE_REUSE"),
+        ([*strict, *fallback], None, True, True, True, True, "RESERVED_REUSE"),
+        ([*strict, *fallback], None, True, True, True, False, "LAST_RESORT"),
+    ):
+        selected = choose(pool, minimum_score=minimum, allow_historical=old_allowed,
+                          allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
+                          avoid_recent=avoid_recent, level=level)
+        if selected:
+            return selected
+    raise MontageSelectionFailure(diagnostics)
+
+
+def _external_candidate_ok(scene_query: str, candidate: dict) -> bool:
+    """Reject an explicitly contradictory external source before downloading it."""
+    item = FootageItem(
+        path=str(candidate.get("url") or candidate.get("source_url") or ""),
+        name=str(candidate.get("title") or ""),
+        tags=[str(value) for value in candidate.get("tags", []) if value],
+    )
+    return _semantic_clip_ok(scene_query, item)
+
+
+@lru_cache(maxsize=131072)
+def _montage_normalized_path_key(raw_path: str) -> str:
+    """Normalize one Windows path once for the montage candidate hot path."""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.normpath(raw_path)))
+    except (OSError, TypeError, ValueError):
+        return raw_path.casefold()
+
+
+def _montage_clip_key(path: str) -> str:
+    """Return a stable Windows identity without touching the filesystem.
+
+    This sits in the inner candidate-ranking loop. ``Path.resolve()`` calls
+    GetFinalPathName/stat on Windows, so resolving every one of 29k candidates
+    turns one montage plan into millions of filesystem operations. Selected
+    files are still validated separately before they enter the timeline.
+    """
+    return _montage_normalized_path_key(str(path))
+
+
+@lru_cache(maxsize=131072)
+def _montage_family_key_from_normalized_path(candidate: str) -> str:
+    """Pure-string family identity; never invoke Path/stat during ranking."""
+    name = ntpath.basename(candidate).casefold()
+    parent = ntpath.dirname(candidate).casefold()
+    stem = ntpath.splitext(name)[0]
+    parent_name = ntpath.basename(parent).casefold()
+    if re.match(r"^clip[_-]", name) or "slice" in stem or parent_name.endswith("_slices"):
+        return parent
+    stem = re.sub(r"(?:[_\-\s]+(?:clip|slice|part|segment)?[_\-\s]*\d+)$", "", stem)
+    return f"{parent}::{stem}"
+
+
+def _montage_clip_family_key(path: str) -> str:
+    """Return the original-source family of a normalized montage clip.
+
+    The footage cutter names segments independently (``clip_xxx_123.mp4``),
+    so comparing full paths alone permits twenty cuts from the same original
+    video into one montage.  Generated cuts normally live in the directory of
+    that original, which is a stable and cheap family identifier.  For regular
+    files we keep the normalized stem as well, so unrelated footage in one
+    broad folder is not incorrectly treated as a single source.
+    """
+    return _montage_family_key_from_normalized_path(_montage_clip_key(path))
+
+
+def _montage_item_is_excluded(item: FootageItem, excluded_paths: set[str] | None,
+                               excluded_families: set[str] | None) -> bool:
+    return (_montage_clip_key(item.path) in (excluded_paths or set())
+            or _montage_clip_family_key(item.path) in (excluded_families or set()))
+
+
+def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
+                             semaphore: threading.BoundedSemaphore | None = None,
+                             progress=None, excluded: set[str] | None = None,
+                             excluded_families: set[str] | None = None) -> FootageItem | None:
+    """Fetch one short, reusable external shot only when local search is weak.
+
+    The downloader is deliberately conservative: only allowed stock/news
+    sources are queried.  YouTube is intentionally excluded from automatic
+    montage.  Every
+    retained source is immediately converted through the same silent 30 FPS
+    cutter that the manual footage page uses; full external originals never
+    enter the final timeline by accident.
+    """
+    query = str(scene.get("visual_query_en", "")).strip()
+    if not query or not settings.montage_auto_web:
+        return None
+    candidates: list[dict] = []
+    if settings.montage_auto_web:
+        try:
+            candidates.extend(search_wikimedia_videos(query, limit=4))
+        except Exception:
+            pass
+    if not candidates:
+        return None
+    lock = semaphore or threading.BoundedSemaphore(1)
+    for candidate in candidates:
+        try:
+            if not _external_candidate_ok(query, candidate):
+                continue
+            cache_key = str(candidate.get("source_url") or candidate.get("url") or candidate.get("title") or query)
+            with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+                cached = _EXTERNAL_FOOTAGE_CACHE.get(cache_key)
+                source_lock = _EXTERNAL_FOOTAGE_SOURCE_LOCKS.setdefault(cache_key, threading.Lock())
+            if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
+                if progress:
+                    progress("Подбор футажей", f"Кэш внешнего футажа: {Path(cached.path).name}")
+                return cached
+            if progress:
+                progress("Внешний поиск", f"{candidate.get('source', 'источник')}: {candidate.get('title', '')[:90]}")
+            # Several scene planners can find the same source at once.  Only
+            # one of them may download/normalize it; the rest immediately use
+            # its resulting 6-second cache clip instead of encoding a long
+            # source video more than once.
+            with source_lock:
+                with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+                    cached = _EXTERNAL_FOOTAGE_CACHE.get(cache_key)
+                if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
+                    return cached
+                with lock:
+                    folder = Path(settings.footage_download_folder) / "Автоподбор"
+                    item = download_footage(candidate, folder)
+                    if progress:
+                        progress("Нарезка внешнего футажа", Path(item.path).name)
+                    clip = cut_single_clip(Path(item.path), Path(settings.cutter_output_folder) / "Внешние для монтажа",
+                                           duration=6.0, fps=30, bitrate="4M")
+                normalized = FootageItem(str(clip), clip.name, item.source, item.source_url,
+                                         item.license, item.tags)
+                if _montage_item_is_excluded(normalized, excluded, excluded_families):
+                    continue
+                with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+                    _EXTERNAL_FOOTAGE_CACHE[cache_key] = normalized
+            index.add_item(normalized)
+            return normalized
+        except Exception:
+            # A weak or restricted external source must never prevent the
+            # local associative fallback from completing the entire video.
+            continue
+    return None
+
+
+def prepare_montage(payload: dict) -> dict:
+    settings = load_settings()
+    # Queue workers pass one shared semaphore so simultaneous projects do not
+    # download and recut the same external source. Manual "prepare one" calls
+    # have no worker context; ``None`` is the intentional unlimited-local
+    # fallback accepted by _download_scene_fallback.
+    download_semaphore = payload.get("_downloadSemaphore")
+    if download_semaphore is not None and not hasattr(download_semaphore, "acquire"):
+        download_semaphore = None
+    scenario_index = int(payload.get("scenarioIndex", -1))
+    titles, jobs = load_session()
+    if not 0 <= scenario_index < len(titles):
+        raise ValueError("Выберите сценарий для монтажа")
+    job = next((item for item in jobs if item.request.index == scenario_index and item.state == RunState.DONE), None)
+    narration = job.result if job else ""
+    voice_path = settings.voice_scenario_outputs.get(str(scenario_index + 1), "")
+    if not voice_path or not Path(voice_path).is_file():
+        raise ValueError("Добавьте MP3 к этому сценарию: он задаёт точную длину ролика")
+    if settings.montage_use_script_text and not narration.strip():
+        raise ValueError("Включено «Использовать TXT сценария»: импортируйте или создайте текст, либо выключите эту опцию для быстрого монтажа только по названию и MP3")
+    # Manual preparation can omit queue callbacks, but the callback must be
+    # ready before the persistent text-screening step below.
+    # Queue workers pass their callback as the private ``_progress`` field so
+    # it is never serialised into a user-facing project payload.  The former
+    # code only read ``progress`` here: planning continued, but the desktop
+    # timeline remained at 8% for the entire expensive local search.  Accept
+    # both spellings for direct/manual calls and for the background queue.
+    progress_candidate = payload.get("_progress") or payload.get("progress")
+    progress = progress_candidate if callable(progress_candidate) else None
+    index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+    if settings.montage_exclude_english_text and not settings.montage_external_only:
+        try:
+            labeled = index.classify_english_screen_text()
+            if progress and labeled["checked"]:
+                progress("Проверка текста", f"Помечено клипов с английскими надписями: {labeled['blocked']}; безопасных: {labeled['safe']}")
+        except Exception as exc:
+            # A missing local embedding model must not stop an already usable
+            # montage library. The state is visible in the timeline instead.
+            if progress:
+                progress("Проверка текста", f"Проверка английских надписей недоступна: {str(exc)[:120]}")
+    # Do not walk every footage root for each scenario.  The incremental AI
+    # index is the source of truth after indexing; scanning 20–30k files here
+    # made parallel montage planning mostly disk-bound.  We only fall back to
+    # a folder scan when there is no usable indexed footage at all.
+    indexed_count = 0 if settings.montage_external_only else index.count(True)
+    local_items = []
+    if not settings.montage_external_only and not indexed_count:
+        local_items = scan_folders(settings.footage_folders)
+    if not indexed_count and not local_items and not settings.montage_auto_web:
+        raise ValueError("Подключите папку с футажами или включите внешний поиск")
+    if progress:
+        progress("Планирование сцен", "Разбиваем текст под длительность озвучки")
+    # Avoid clips used by previous montage jobs when the library has enough
+    # alternatives. The set still grows per project below, so a clip is never
+    # repeated inside a single video either.
+    historical_used = {_montage_clip_key(path) for path in settings.montage_recent_clip_paths}
+    historical_families = {_montage_clip_family_key(path) for path in settings.montage_recent_clip_paths}
+    # A clip never repeats in the same video.  Recent material is not banned
+    # forever: it is merely deprioritized so later videos still get a varied
+    # sequence instead of consuming the library once and failing.
+    used: set[str] = set(historical_used)
+    used_families: set[str] = set(historical_families)
+    project_used: set[str] = set()
+    project_used_families: set[str] = set()
+    # A parallel batch used to give every planner the same stale settings
+    # snapshot.  Similar topics consequently selected the same "best" clips
+    # at the same time.  The queue now passes one in-memory reservation pool:
+    # claims are atomic and include the original-source family, so two cuts
+    # from one downloaded/source video cannot leak into different projects.
+    batch_usage = payload.get("_batchFootageUsage")
+    batch_lock = batch_usage.get("lock") if isinstance(batch_usage, dict) else None
+    batch_paths = batch_usage.get("paths") if isinstance(batch_usage, dict) else None
+    batch_families = batch_usage.get("families") if isinstance(batch_usage, dict) else None
+    if not isinstance(batch_paths, (set, dict)) or not isinstance(batch_families, (set, dict)) or not hasattr(batch_lock, "__enter__"):
+        batch_lock = None
+        batch_paths = set()
+        batch_families = set()
+
+    def batch_is_reserved(item: FootageItem) -> bool:
+        key = _montage_clip_key(item.path)
+        family = _montage_clip_family_key(item.path)
+        if batch_lock is None:
+            return False
+        with batch_lock:
+            return key in batch_paths or family in batch_families
+
+    def claim_batch_source(item: FootageItem) -> bool:
+        """Reserve one original source across this batch, atomically."""
+        key = _montage_clip_key(item.path)
+        family = _montage_clip_family_key(item.path)
+        if batch_lock is None:
+            return True
+        with batch_lock:
+            if key in batch_paths or family in batch_families:
+                return False
+            if isinstance(batch_paths, dict):
+                batch_paths[key] = scenario_index
+                batch_families[family] = scenario_index
+            else:
+                batch_paths.add(key)
+                batch_families.add(family)
+            return True
+    clips = []
+    voice_duration = probe_media_duration(Path(voice_path))
+    scenes = (fallback_scene_plan(narration, titles[scenario_index])
+              if settings.montage_use_script_text else title_only_scene_plan(titles[scenario_index], voice_duration))
+    if settings.montage_use_script_text and settings.montage_scene_planner == "agent" and settings.openai_api_keys:
+        try:
+            if progress:
+                progress("Планирование сцен", "Видеопланировщик уточняет объекты, людей, места и действия")
+            response = asyncio.run(HybridTextPool([], settings.openai_api_keys, "", settings.openai_model).generate(
+                agent_plan_prompt(titles[scenario_index], narration)
+            ))
+            scenes = parse_agent_scene_plan(response)
+        except Exception as exc:
+            # A quota/network problem must not stop a finished narration from
+            # becoming a video: use the deterministic local visual planner.
+            if progress:
+                progress("Планирование сцен", f"Агент недоступен — локальный план: {str(exc)[:120]}")
+    # Align selection to the MP3 before matching. Full six-second source clips
+    # stay intact; only the final beat is trimmed for exact audio alignment.
+    scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
+    # Fast visual loop searches only a user-selected prefix of the *voice
+    # duration*, not merely the same percentage of scene count.  Afterwards
+    # the chosen source clips are rotated on the original speech boundaries.
+    # This makes a 13% setting mean roughly 13% unique visuals even if some
+    # narration sentences are longer than others.
+    unique_scene_count = len(scenes)
+    fast_reuse_percent = _fast_reuse_percent_for_scenario(settings, scenario_index)
+    fast_reuse = bool(fast_reuse_percent is not None and len(scenes) > 1)
+    if fast_reuse:
+        unique_target = sum(float(scene["duration"]) for scene in scenes) * (fast_reuse_percent / 100.0)
+        running_duration = 0.0
+        unique_scene_count = 0
+        for scene in scenes:
+            running_duration += float(scene["duration"])
+            unique_scene_count += 1
+            if running_duration >= unique_target:
+                break
+        # A single repeated clip looks broken; retain a tiny rotation pool
+        # whenever the narration contains enough scene boundaries.
+        unique_scene_count = min(len(scenes), max(2, unique_scene_count))
+    if progress:
+        mode_detail = (f"быстрый режим {fast_reuse_percent}%: {unique_scene_count} уникальных из {len(scenes)} сцен, затем ротация"
+                       if fast_reuse else f"{len(scenes)} уникальных сцен")
+        progress("Подбор футажей", f"Пакетный поиск: {mode_detail}")
+    # Ask the text model once for the whole scenario and score all scenes
+    # against the shared in-memory vector matrix.  Keep extra candidates so a
+    # later scene can skip clips already used by an earlier one without a new
+    # full database search.
+    if progress and indexed_count:
+        progress("Подбор футажей", f"Загружаем ИИ-индекс: {indexed_count:,} футажей")
+    # Normalise planner output once, then send every strict/atom/category
+    # query through one shared vector pass.  256 is deliberately bounded:
+    # the real oil query had only 25 source families in top-96, while 256
+    # provides enough alternatives for concurrent jobs without any filesystem
+    # rescan or full-library iteration per scene.
+    scene_query_ladders: list[list[str]] = []
+    all_search_queries: list[str] = []
+    for scene in scenes[:unique_scene_count]:
+        original_query = str(scene.get("visual_query_en", ""))
+        ladder = _montage_query_variants(original_query)
+        scene["visual_query_en"] = ladder[0]
+        scene_query_ladders.append(ladder)
+        all_search_queries.extend(ladder)
+    unique_search_queries = list(dict.fromkeys(all_search_queries))
+    if indexed_count:
+        search_by_query = dict(zip(unique_search_queries, index.search_many(unique_search_queries, limit=256)))
+    else:
+        # The first montage after adding a footage folder must remain usable
+        # before the optional CLIP index has been built.  ``scan_folders`` was
+        # already the documented fallback, but its rows were previously never
+        # supplied to the candidate selector.  Keep this bounded and purely
+        # filename/tag-based; normal indexed runs retain their fast vector
+        # search without any filesystem scan.
+        search_by_query = {
+            query: [
+                SearchHit(item, max(.01, 1.0 - position / 512.0))
+                for position, item in enumerate(rank_items(query, local_items)[:256])
+            ]
+            for query in unique_search_queries
+        }
+    existing_paths: dict[str, bool] = {}
+    verified_source_durations: dict[str, float] = {}
+
+    def source_exists(item: FootageItem) -> bool:
+        """A stale index row is rejected once, not once per candidate/scene."""
+        key = _montage_clip_key(item.path)
+        available = existing_paths.get(key)
+        if available is None:
+            available = Path(item.path).is_file()
+            existing_paths[key] = available
+        return available
+
+    def verified_duration(item: FootageItem, fallback: float = 0.0) -> float:
+        """Use the real container duration before a source enters a timeline."""
+        key = _montage_clip_key(item.path)
+        if key not in verified_source_durations:
+            try:
+                verified_source_durations[key] = _cached_or_probed_montage_duration(
+                    index, Path(item.path), verified_source_durations,
+                )
+            except (OSError, ValueError):
+                # Index metadata is only a hint.  A stale row must not become
+                # a valid timeline source merely because it still says "6 s".
+                verified_source_durations[key] = 0.0
+        return verified_source_durations[key]
+
+    def reservation_snapshot():
+        """Copy a consistent reservation view without holding it during search."""
+        if batch_lock is None:
+            return set(), set()
+        with batch_lock:
+            return set(batch_paths), set(batch_families)
+    # item, verified source duration, relevance score, original source label
+    reuse_pool: list[tuple[FootageItem, float, float, str]] = []
+    reuse_cursor = 0
+    for scene_number, scene in enumerate(scenes, 1):
+        if fast_reuse and scene_number > unique_scene_count:
+            required_duration = float(scene["duration"])
+            eligible = [entry for entry in reuse_pool if entry[1] + 0.05 >= required_duration]
+            # At least the unique source selected for its own beat must fit;
+            # this fallback only applies when a later beat is exceptionally
+            # longer. It preserves narration timing rather than cloning a
+            # still frame or truncating the speech.
+            if not eligible:
+                eligible = reuse_pool
+            if not eligible:
+                raise ValueError("Быстрый режим не получил ни одного пригодного уникального футажа")
+            selected, _source_duration, score, original_source = eligible[reuse_cursor % len(eligible)]
+            reuse_cursor += 1
+            clips.append(TimelineClip(path=selected.path, narration=scene["narration"],
+                                      visual_query_en=scene["visual_query_en"], duration=scene["duration"],
+                                      score=score, source=f"повтор: {original_source or 'локальный'}"))
+            if progress:
+                progress("Подбор футажей", f"Ротация {scene_number}/{len(scenes)}: {Path(selected.path).name}")
+            continue
+        query_ladder = scene_query_ladders[scene_number - 1]
+        strict_hits = list(search_by_query.get(query_ladder[0], []))
+        fallback_hits = []
+        seen_candidate_paths: set[str] = {_montage_clip_key(hit.item.path) for hit in strict_hits}
+        for query in query_ladder[1:]:
+            for hit in search_by_query.get(query, []):
+                if _montage_clip_key(hit.item.path) not in seen_candidate_paths:
+                    fallback_hits.append(hit)
+                    seen_candidate_paths.add(_montage_clip_key(hit.item.path))
+        selected_duration = 0.0
+        selected = None
+        score = 0.0
+        source = ""
+        selection = None
+        selection_failure_diagnostics: dict[str, int] = {}
+        # Reuse is acceptable only after quality exhaustion.  Keep a small
+        # local cooldown so fallback yields A → B → A rather than A → A.
+        recent_project_paths = {
+            _montage_clip_key(clip.path) for clip in clips[-3:]
+            if str(clip.path or "").strip()
+        }
+        # A competing planner may reserve one candidate after the snapshot.
+        # Retry the bounded in-memory selection a few times, then use the
+        # safe-reuse level rather than failing an otherwise healthy item.
+        for _attempt in range(3):
+            reserved_paths, reserved_families = reservation_snapshot()
+            try:
+                selection = _select_montage_candidate(
+                    scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=fallback_hits,
+                    required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                    used_paths=used, used_families=used_families,
+                    project_used_paths=project_used, project_used_families=project_used_families,
+                    reserved_paths=reserved_paths, reserved_families=reserved_families,
+                    source_exists=source_exists, source_duration=verified_duration,
+                    recent_project_paths=recent_project_paths,
+                    immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                )
+            except MontageSelectionFailure as error:
+                selection_failure_diagnostics = error.diagnostics
+                selection = None
+                break
+            if selection.reused_reserved_candidate:
+                break
+            # Another planner can reserve this exact candidate between the
+            # snapshot and the atomic claim. It is still a valid non-adjacent
+            # source for this project, so make that race explicit SAFE_REUSE
+            # instead of discarding the whole ProductionItem.
+            selection = _safe_reuse_after_reservation_race(selection, claim_batch_source)
+            break
+        if selection is not None:
+            selected = selection.item
+            selected_duration = selection.duration
+            score = selection.score
+            source = selected.source or "local"
+            if selection.fallback_level != "STRICT_MATCH":
+                source = f"{source} · {selection.fallback_level}"
+        if selected is None:
+            # This is deliberately rare: no bounded local candidate survived
+            # validation. External search remains opt-in and does not change
+            # the user's local-only montage configuration.
+            selected = _download_scene_fallback(scene, settings, index, download_semaphore,
+                                                progress=lambda stage, detail: progress(stage, detail) if progress else None,
+                                                excluded=project_used, excluded_families=project_used_families)
+            if selected and (not batch_is_reserved(selected)) and claim_batch_source(selected):
+                score, source = 1.0, selected.source or "external"
+                selected_duration = verified_duration(selected)
+                selection = MontageCandidateSelection(selected, selected_duration, score, "EXTERNAL_FALLBACK", False, {
+                    "candidates_retrieved": len(seen_candidate_paths), "strict_accepted": 0,
+                    "rejected_threshold": 0, "rejected_reservation": 0, "rejected_diversity": 0,
+                    "rejected_missing": 0, "rejected_duration": 0, "rejected_safety": 0,
+                })
+            else:
+                selected = None
+        if selected is None:
+            diagnostics = selection.diagnostics if selection else selection_failure_diagnostics
+            raise ValueError(
+                f"Не найдено ни одного допустимого футажа для сцены {scene_number}; "
+                f"retrieved={diagnostics.get('candidates_retrieved', len(seen_candidate_paths))}, "
+                f"hard_valid={diagnostics.get('hard_valid', 0)}, "
+                f"reserved_unique={diagnostics.get('unique_rejected_reservation', 0)}, "
+                f"diversity_unique={diagnostics.get('unique_rejected_diversity', 0)}, "
+                f"duration={diagnostics.get('rejected_duration', 0)}, "
+                f"safety={diagnostics.get('rejected_safety', 0)}, "
+                f"missing={diagnostics.get('rejected_missing', 0)}, "
+                f"rejection_events={diagnostics.get('rejection_events', 0)}"
+            )
+        # The index may still contain a row for a user-deleted cut. Never
+        # persist that stale database path into a .newsflow project.
+        if selected is None or not Path(selected.path).is_file():
+            raise FileNotFoundError(
+                f"Подобранный футаж исчез до сохранения таймлайна: {getattr(selected, 'path', '')}"
+            )
+        if selected_duration <= 0.0:
+            selected_duration = verified_duration(selected, float(scene["duration"]))
+        if selected_duration <= 0.05:
+            raise ValueError(f"Подобранный футаж не проходит проверку видео: {selected.path}")
+        used.add(_montage_clip_key(selected.path))
+        used_families.add(_montage_clip_family_key(selected.path))
+        project_used.add(_montage_clip_key(selected.path))
+        project_used_families.add(_montage_clip_family_key(selected.path))
+        clips.append(TimelineClip(path=selected.path, narration=scene["narration"], visual_query_en=scene["visual_query_en"],
+                                  duration=scene["duration"], score=score, source=source))
+        if fast_reuse:
+            reuse_pool.append((selected, max(float(scene["duration"]), selected_duration), score, source))
+        if progress:
+            diagnostics = selection.diagnostics if selection else {}
+            level = selection.fallback_level if selection else "LOCAL"
+            reused = "да" if selection and selection.reused_reserved_candidate else "нет"
+            progress(
+                "Подбор футажей",
+                f"Сцена {scene_number}/{len(scenes)}: {Path(selected.path).name} · {level}; "
+                f"кандидаты {diagnostics.get('candidates_retrieved', 0)}, "
+                f"hard-valid {diagnostics.get('hard_valid', 0)}, "
+                f"strict {diagnostics.get('strict_accepted', 0)}, "
+                f"threshold {diagnostics.get('rejected_threshold', 0)}, "
+                f"резерв {diagnostics.get('rejected_reservation', 0)}, "
+                f"diversity {diagnostics.get('unique_rejected_diversity', 0)}, "
+                f"missing {diagnostics.get('rejected_missing', 0)}, "
+                f"повтор резерва: {reused}",
+            )
+    # The plan already matches the MP3 duration while each footage beat stays
+    # short enough to remain dynamic.
+    title = titles[scenario_index]
+    intro_path = _random_video(settings.montage_intro_folder) if settings.montage_intro_enabled else ""
+    project = TimelineProject(title=title, aspect_ratio=str(payload.get("aspectRatio", settings.montage_aspect_ratio)), clips=clips,
+                              voiceover_path=voice_path,
+                              intro_path=intro_path,
+                              # A selected insert is not footage: it is placed
+                              # in front in full, with its original sound.
+                              intro_duration=_full_intro_duration(intro_path, settings.montage_intro_duration) if intro_path else 0,
+                              overlay_path=_random_video(settings.montage_overlay_folder) if settings.montage_overlay_enabled else "",
+                              transition_style=settings.montage_transition_style,
+                              transition_frames=settings.montage_transition_frames)
+    # Use each selected source in full and close a residual tail with more
+    # real footage.  There is no FFmpeg looping or cloned final frame here;
+    # only the final source that crosses the MP3 boundary is trimmed.
+    try:
+        _complete_project_visual_tail(project, index, settings, download_semaphore)
+    except ValueError as exc:
+        raise RuntimeError(f"Не удалось завершить видеоряд реальными футажами: {exc}") from exc
+    clips = project.clips
+    # Persist only the latest bounded history. It accelerates subsequent
+    # rebuilds while not allowing the settings file to grow without limit.
+    settings.montage_recent_clip_paths = list(dict.fromkeys([
+        *settings.montage_recent_clip_paths,
+        *(clip.path for clip in clips),
+    ]))[-3000:]
+    save_settings(settings)
+    project_folder = Path(settings.montage_project_folder)
+    try:
+        project_folder.mkdir(parents=True, exist_ok=True)
+        path = project_folder / f"{safe_filename(title)}.newsflow"
+        project.save(path)
+        if settings.montage_export_davinci_xml:
+            export_fcpxml(project, path.with_suffix(".fcpxml"))
+            project.save(path)
+    except OSError as exc:
+        # Do not hide the target path behind a generic "Permission denied".
+        # The user can then immediately see which folder is locked or unavailable.
+        raise RuntimeError(f"Не удалось сохранить проект монтажа в «{project_folder}»: {exc}") from exc
+    return {**snapshot(), "preparedProject": {"title": title, "path": str(path), "clips": len(clips), "duration": round(project.duration, 1)}}
+
+
+def render_montage(payload: dict) -> dict:
+    settings = load_settings()
+    project_path = Path(str(payload.get("projectPath", "")).strip())
+    if not project_path.is_file():
+        raise ValueError("Сначала подготовьте или выберите проект монтажа")
+    project = TimelineProject.load(project_path)
+    output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+    rendered = render_project(project, output, renderer=settings.montage_renderer,
+                              remotion_concurrency=settings.montage_remotion_frame_concurrency)
+    voiceover = Path(project.voiceover_path)
+    if voiceover.is_file():
+        validate_rendered_montage(
+            Path(rendered),
+            expected_duration=required_video_duration(probe_media_duration(voiceover), project.intro_duration),
+        )
+    davinci_warning = ""
+    if settings.montage_export_davinci_xml:
+        export_fcpxml(project, project_path.with_suffix(".fcpxml"))
+        if settings.montage_davinci_auto_import:
+            # XML/MP4 are valid even when Resolve is closed.  An optional
+            # auto-import must therefore never turn a successful render into
+            # an error visible to the user.
+            try:
+                with _DAVINCI_IMPORT_LOCK:
+                    import_fcpxml(Path(project.davinci_xml_path), project.title)
+            # Resolve is an optional hand-off.  A missing DLL, a closed
+            # project or an unexpected API exception must never invalidate an
+            # already rendered MP4 and its FCPXML plan.
+            except Exception as error:
+                davinci_warning = f"XML создан, но не импортирован в DaVinci: {error}"
+    project.save(project_path)
+    remotion_path = output.with_suffix(".remotion.json")
+    remotion_path.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+    if str(rendered) not in settings.pipeline_montage_outputs:
+        settings.pipeline_montage_outputs.append(str(rendered))
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "render", "count": 1,
+                                                 "folder": str(rendered.parent), "warning": davinci_warning}}
+
+
+def export_davinci_xml(payload: dict) -> dict:
+    """Create editable FCPXML plans for selected NewsFlow projects.
+
+    XML preparation is intentionally independent from FFmpeg/Remotion. It can
+    be requested before a render, for one plan or for all saved plans.
+    """
+    settings = load_settings()
+    paths = [Path(str(value)) for value in payload.get("paths", []) if str(value).strip()]
+    if payload.get("all"):
+        paths = sorted(Path(settings.montage_project_folder).glob("*.newsflow"))
+    if not paths:
+        value = str(payload.get("projectPath", "")).strip()
+        if value:
+            paths = [Path(value)]
+    if not paths:
+        raise ValueError("Выберите хотя бы один проект для DaVinci XML")
+    exported, errors = [], []
+    for path in paths:
+        try:
+            if path.suffix.casefold() != ".newsflow" or not path.is_file():
+                raise FileNotFoundError("План NewsFlow не найден")
+            project = TimelineProject.load(path)
+            xml = export_fcpxml(project, path.with_suffix(".fcpxml"))
+            project.save(path)
+            exported.append(str(xml))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            errors.append(f"{path.name}: {error}")
+    if not exported:
+        raise RuntimeError("; ".join(errors) or "DaVinci XML не создан")
+    return {**snapshot(), "operationResult": {"kind": "davinci-xml", "count": len(exported),
+                                                 "paths": exported, "errors": errors}}
+
+
+def import_davinci_xml(payload: dict) -> dict:
+    """Ask an open DaVinci Resolve instance to import one or more FCPXML files."""
+    settings = load_settings()
+    paths = [Path(str(value)) for value in payload.get("paths", []) if str(value).strip()]
+    if not paths:
+        project_path = Path(str(payload.get("projectPath", "")).strip())
+        if project_path.is_file():
+            paths = [project_path.with_suffix(".fcpxml")]
+    if not paths:
+        raise ValueError("Выберите проект с готовым DaVinci XML")
+    imported, errors = [], []
+    for xml in paths:
+        try:
+            timeline_name = xml.stem
+            # Creating XML is safely parallel; Resolve imports are deliberately
+            # one at a time into the currently open project.
+            with _DAVINCI_IMPORT_LOCK:
+                result = import_fcpxml(xml, timeline_name)
+            imported.append(result)
+        except Exception as error:
+            errors.append(f"{xml.name}: {error}")
+    if not imported:
+        raise RuntimeError("; ".join(errors) or "DaVinci не импортировал XML")
+    return {**snapshot(), "operationResult": {"kind": "davinci-import", "count": len(imported),
+                                                 "items": imported, "errors": errors}}
+
+
+_MONTAGE_QUEUE_LOCK = threading.RLock()
+# Resolve keeps a single current project/timeline.  XML files can be prepared
+# in parallel, but importing them through its scripting API must be serialized
+# or two completed render workers may overwrite each other's current timeline.
+_DAVINCI_IMPORT_LOCK = threading.RLock()
+
+
+def _montage_task_update(settings: Settings, scenario_index: int, *, status: str | None = None,
+                         phase: str | None = None, progress: int | None = None,
+                         detail: str = "", error: str | None = None, **extra) -> None:
+    """Persist one visible queue event immediately.
+
+    Electron invokes the long montage command in its own process, while the UI
+    polls ``snapshot`` from another.  Saving after every state transition gives
+    the user a real timeline instead of a spinner that appears frozen for a
+    20-minute render.
+    """
+    key = str(scenario_index)
+    with _MONTAGE_QUEUE_LOCK:
+        # The UI changes pause/resume from another Electron invocation.  Keep
+        # that flag from the newest settings file instead of writing an old
+        # in-memory value back while a worker reports its progress.
+        try:
+            settings.montage_queue_paused = load_settings().montage_queue_paused
+        except (OSError, ValueError):
+            pass
+        item = dict(settings.montage_task_statuses.get(key) or {})
+        previous_progress = int(item.get("progress", 0) or 0)
+        previous_status = str(item.get("status", ""))
+        item.setdefault("scenarioIndex", scenario_index)
+        item.setdefault("title", "Без названия")
+        item.setdefault("timeline", [])
+        if status is not None:
+            item["status"] = status
+        if phase is not None:
+            item["phase"] = phase
+        if progress is not None:
+            item["progress"] = max(0, min(100, int(progress)))
+        if error is not None:
+            item["error"] = error
+        item.update({name: value for name, value in extra.items() if value is not None})
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        if status in MONTAGE_ACTIVE_STATUSES:
+            item["lastHeartbeatAt"] = now
+        if status == "Рендер":
+            item.setdefault("renderStartedAt", now)
+            if previous_status != "Рендер":
+                item["renderAttempt"] = int(item.get("renderAttempt", 0) or 0) + 1
+        if progress is not None and int(item.get("progress", 0) or 0) != previous_progress:
+            item["lastProgressAt"] = now
+        event_label = phase or status
+        if event_label:
+            events = list(item.get("timeline") or [])
+            marker = {"at": time.strftime("%H:%M:%S"), "label": str(event_label),
+                      "progress": int(item.get("progress", 0)), "detail": str(detail or "")[:260]}
+            if not events or events[-1] != marker:
+                events.append(marker)
+            item["timeline"] = events[-24:]
+        item["updatedAt"] = now
+        settings.montage_task_statuses[key] = item
+        save_settings(settings)
+
+
+def _montage_wait_if_paused(settings: Settings, scenario_index: int) -> None:
+    """Pause only the next stage; already started FFmpeg work stays intact."""
+    paused = False
+    while load_settings().montage_queue_paused:
+        paused = True
+        _montage_task_update(settings, scenario_index, status="Пауза", phase="Ожидание продолжения", progress=None)
+        time.sleep(.45)
+    if paused:
+        _montage_task_update(settings, scenario_index, status="В очереди", phase="Продолжаем", progress=None)
+
+
+def _remove_montage_output(settings: Settings, scenario_index: int) -> None:
+    """Remove only this task's generated artifacts, never a source MP3 or footage."""
+    item = settings.montage_task_statuses.get(str(scenario_index)) or {}
+    candidates = [str(item.get("outputPath") or "")]
+    title = str(item.get("title") or "")
+    if title:
+        candidates.append(str(Path(settings.montage_output_folder) / f"{safe_filename(title)}.mp4"))
+    for raw in candidates:
+        path = Path(raw)
+        try:
+            if path.is_file() and path.resolve().parent == Path(settings.montage_output_folder).resolve():
+                path.unlink()
+        except OSError:
+            pass
+        settings.pipeline_montage_outputs = [value for value in settings.pipeline_montage_outputs if value != str(path)]
+        package = settings.video_result_packages.pop(str(path), "")
+        package_path = Path(package) if package else None
+        try:
+            result_root = (Path(settings.montage_output_folder) / "Результаты по роликам").resolve()
+            if package_path and package_path.is_dir() and package_path.resolve().is_relative_to(result_root):
+                shutil.rmtree(package_path)
+        except (OSError, ValueError):
+            pass
+
+
+MONTAGE_ACTIVE_STATUSES = frozenset({
+    "В очереди", "Планирование", "Планирование сцен", "Подбор футажей",
+    "Внешний поиск", "Нарезка внешнего футажа", "Ожидает рендер", "Рендер",
+    "Склейка", "Пауза",
+})
+
+
+def _montage_process_is_running(pid: object) -> bool:
+    """Return whether the bridge process that owns a queue task still exists.
+
+    A queue is intentionally a long-lived bridge call.  If the desktop app or
+    core process was terminated, old progress must not keep the next launch
+    locked forever.  ``os.kill(pid, 0)`` is supported by modern Windows and
+    does not terminate anything.
+    """
+    try:
+        process_id = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    if os.name == "nt":
+        # PIDs are reused on Windows.  Merely finding a process with the old
+        # number used to leave the queue locked when an unrelated program got
+        # the same PID after NewsFlow had stopped.
+        try:
+            import ctypes
+            from ctypes import wintypes
+            access = 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+            handle = ctypes.windll.kernel32.OpenProcess(access, False, process_id)
+            if not handle:
+                return False
+            try:
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = wintypes.DWORD(len(buffer))
+                query = ctypes.windll.kernel32.QueryFullProcessImageNameW
+                query.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+                query.restype = wintypes.BOOL
+                if not query(handle, 0, buffer, ctypes.byref(length)):
+                    return False
+                return Path(buffer.value).name.casefold() == "newsflowcore.exe"
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except OSError:
+            return False
+    try:
+        os.kill(process_id, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _recover_interrupted_montage_tasks(settings: Settings) -> bool:
+    """Mark abandoned queue rows as retryable instead of falsely active."""
+    changed = _reconcile_montage_outputs(settings)
+    for key, raw in list(settings.montage_task_statuses.items()):
+        if not isinstance(raw, dict) or str(raw.get("status", "")) not in MONTAGE_ACTIVE_STATUSES:
+            continue
+        # Rows from older NewsFlow builds have no owner pid.  They can only be
+        # leftovers, so recover them too.
+        if _montage_process_is_running(raw.get("queuePid")):
+            continue
+        item = dict(raw)
+        output = _montage_output_path(settings, item)
+        if _is_valid_montage_output(output):
+            item.update({
+                "status": "Готово", "phase": "MP4 восстановлен", "progress": 100,
+                "detail": output.name, "outputPath": str(output), "error": "",
+                "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            settings.montage_task_statuses[str(key)] = item
+            changed = True
+            continue
+        item.update({
+            "status": "Ошибка",
+            "phase": "Предыдущий запуск остановлен",
+            "progress": 100,
+            "error": "Очередь монтажа была остановлена до завершения. Нажмите «Переделать» или «Собрать». ",
+            "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        events = list(item.get("timeline") or [])
+        events.append({"at": time.strftime("%H:%M:%S"), "label": "Предыдущий запуск остановлен",
+                       "progress": 100, "detail": "Можно безопасно запустить повторную сборку."})
+        item["timeline"] = events[-24:]
+        settings.montage_task_statuses[str(key)] = item
+        changed = True
+    return changed
+
+
+def montage_queue_is_active(statuses: dict[str, dict]) -> bool:
+    """True while a batch is running, including a deliberately paused batch."""
+    return any(
+        str(item.get("status", "")) in MONTAGE_ACTIVE_STATUSES
+        for item in statuses.values()
+        if isinstance(item, dict)
+    )
+
+
+def _is_valid_montage_output(path: Path) -> bool:
+    """Return True for a safely published final MP4 without launching FFprobe.
+
+    The file system is authoritative after a restart. A row saying "ready" is
+    not sufficient: an interrupted copy must become retryable, while a real
+    completed video must never be rendered again merely because queue state was
+    saved before the final write.  Starting one FFprobe process per finished
+    row made opening/resuming an 84-video production batch take tens of
+    seconds.  NewsFlow publishes MP4 atomically only after renderer validation
+    and uses ``+faststart``, therefore checking its non-empty ISO-BMFF header
+    here is enough to distinguish a completed package from a missing/partial
+    file. FFprobe remains the strict check during the actual render pipeline.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size < 1024:
+            return False
+        with path.open("rb") as handle:
+            header = handle.read(32)
+        # ISO Base Media File Format writes the major-brand ``ftyp`` atom at
+        # offset four.  FFmpeg's final files use it even when video starts
+        # after an initial audio/metadata atom.
+        return len(header) >= 12 and header[4:8] == b"ftyp"
+    except OSError:
+        return False
+
+
+def montage_ready_count(settings: Settings) -> int:
+    """Count each physically valid final MP4 once across current and legacy state.
+
+    ``pipeline_montage_outputs`` is a compatibility registry, not the source
+    of truth for the current queue: older releases could finish a render after
+    that registry was written. Task output paths therefore participate in the
+    same physical-file validation and the dashboard cannot undercount a batch.
+    """
+    candidates = [
+        *(str(value or "") for value in settings.pipeline_montage_outputs),
+        *(str(item.get("outputPath") or "") for item in settings.montage_task_statuses.values()
+          if isinstance(item, dict)),
+    ]
+    paths: set[str] = set()
+    for raw_path in candidates:
+        path = Path(raw_path.strip())
+        if raw_path.strip() and _is_valid_montage_output(path):
+            paths.add(str(path.resolve()))
+    return len(paths)
+
+
+def _montage_output_path(settings: Settings, item: dict) -> Path:
+    raw = str(item.get("outputPath") or "").strip()
+    if raw:
+        return Path(raw)
+    title = str(item.get("title") or "").strip()
+    return Path(settings.montage_output_folder) / f"{safe_filename(title)}.mp4" if title else Path()
+
+
+def _montage_task_needs_render(settings: Settings, scenario_index: int) -> bool:
+    """Whether an ordinary/resume run may take this row.
+
+    Active jobs and validated final videos are excluded. Forced re-render is
+    the only path allowed to replace an already-ready MP4.
+    """
+    item = dict(settings.montage_task_statuses.get(str(scenario_index)) or {})
+    if _is_valid_montage_output(_montage_output_path(settings, item)):
+        return False
+    return str(item.get("status", "")) not in MONTAGE_ACTIVE_STATUSES
+
+
+def _is_retryable_montage_error(error: object) -> bool:
+    """Classify bounded recoverable renderer and footage failures."""
+    text = str(error or "").casefold()
+    permanent_markers = (
+        "не найден готовый сценарий",
+        "не найден готовый mp3", "не создан проект", "permission denied",
+    )
+    if any(marker in text for marker in permanent_markers):
+        return False
+    transient_markers = (
+        "timed out", "timeout", "winerror 32", "file is busy", "файл занят",
+        "temporar", "connection reset", "network", "resource temporarily", "error code: -28",
+        "таймлайн футажей короче", "таймлайн требует дополнительный футаж", "футаж не найден",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def _reconcile_montage_outputs(settings: Settings, *, force_interrupted: bool = False) -> bool:
+    """Reconcile queue rows with final MP4s without deleting any media.
+
+    A task row and the pipeline registry are persisted independently.  A user
+    can move a completed package between those two saves, leaving an old task
+    path behind even though the same final MP4 is still registered.  The
+    registry is intentionally the only fallback source here: scanning the
+    footage library by title could attach an unrelated source clip as a ready
+    production video.
+    """
+    changed = False
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    valid_registered_outputs: dict[str, Path] = {}
+    retained_pipeline_outputs: list[str] = []
+    seen_pipeline_outputs: set[str] = set()
+    for raw_path in settings.pipeline_montage_outputs:
+        path = Path(str(raw_path or "").strip())
+        normalized_path = str(path)
+        if not normalized_path or normalized_path in seen_pipeline_outputs:
+            continue
+        # Keep every explicit result reference, including a missing file.  The
+        # publication registry needs that link to show recovery state; only a
+        # physically valid MP4 may repair a montage row automatically.
+        retained_pipeline_outputs.append(normalized_path)
+        seen_pipeline_outputs.add(normalized_path)
+        if _is_valid_montage_output(path):
+            valid_registered_outputs.setdefault(safe_filename(path.stem).casefold(), path)
+    if retained_pipeline_outputs != list(settings.pipeline_montage_outputs):
+        settings.pipeline_montage_outputs = retained_pipeline_outputs
+
+    # Packaged result mappings are another explicit output registry.  Do not
+    # remove them here: they can retain publication metadata even when a user
+    # deliberately moves a package, but use a still-valid registered MP4 to
+    # repair the montage row.
+    for raw_path in settings.video_result_packages:
+        path = Path(str(raw_path or "").strip())
+        if _is_valid_montage_output(path):
+            valid_registered_outputs.setdefault(safe_filename(path.stem).casefold(), path)
+
+    for key, raw in list(settings.montage_task_statuses.items()):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        output = _montage_output_path(settings, item)
+        if not _is_valid_montage_output(output):
+            title_key = safe_filename(str(item.get("title") or "")).casefold()
+            output = valid_registered_outputs.get(title_key, output)
+        if _is_valid_montage_output(output):
+            if item.get("status") != "Готово" or item.get("outputPath") != str(output):
+                item.update({
+                    "status": "Готово", "phase": "MP4 восстановлен", "progress": 100,
+                    "detail": output.name, "outputPath": str(output), "error": "", "updatedAt": now,
+                })
+                settings.montage_task_statuses[str(key)] = item
+                changed = True
+            continue
+        if str(item.get("status", "")) == "Готово":
+            item.update({
+                "status": "Ошибка", "phase": "MP4 не найден", "progress": 100,
+                "error": "В проекте отмечен готовый ролик, но его MP4 отсутствует или повреждён. Можно продолжить монтаж.",
+                "updatedAt": now,
+            })
+            settings.montage_task_statuses[str(key)] = item
+            changed = True
+            continue
+        if force_interrupted and str(item.get("status", "")) in MONTAGE_ACTIVE_STATUSES:
+            item.update({
+                "status": "Ошибка", "phase": "Предыдущий запуск остановлен", "progress": 100,
+                "error": "Рендер был прерван до создания MP4. Его можно безопасно продолжить.",
+                "updatedAt": now,
+            })
+            settings.montage_task_statuses[str(key)] = item
+            changed = True
+    return changed
+
+
+def _validated_montage_clip_duration(path: Path) -> float:
+    """Validate a saved footage source before it reaches FFmpeg.
+
+    A database row or a pathname alone is not evidence that an external cut is
+    usable: folders can be cleaned and failed downloads can leave empty files.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return 0.0
+        return probe_video_duration(path)
+    except (OSError, RuntimeError, ValueError):
+        return 0.0
+
+
+def _cached_or_probed_montage_duration(index: ClipIndex | None, path: Path,
+                                       memo: dict[str, float] | None = None) -> float:
+    """Use indexed ``path + size + mtime`` metadata before spawning FFprobe."""
+    key = _montage_clip_key(str(path))
+    if memo is not None and key in memo:
+        return memo[key]
+    duration = None
+    if index is not None:
+        try:
+            duration = index.cached_media_duration(path)
+        except (AttributeError, OSError, RuntimeError, sqlite3.Error):
+            duration = None
+    value = float(duration) if duration is not None else _validated_montage_clip_duration(path)
+    if memo is not None:
+        memo[key] = value
+    return value
+
+
+def _montage_project_missing_clips(project: TimelineProject, index: ClipIndex | None = None) -> list[str]:
+    """Return absent, empty or unreadable timeline clips before FFmpeg starts."""
+    memo: dict[str, float] = {}
+    return [str(clip.path) for clip in project.clips
+            if _cached_or_probed_montage_duration(index, Path(clip.path), memo) <= 0.05]
+
+
+def _repair_missing_project_clips(project: TimelineProject, candidate_provider) -> int:
+    """Replace only broken timeline slots while retaining all healthy edits.
+
+    ``candidate_provider`` supplies ranked FootageItems for the failed scene.
+    It receives the old clip and all prohibited paths/families.  The MP3,
+    title, narration and valid clips never participate in this replacement.
+    """
+    excluded_paths = {_montage_clip_key(clip.path) for clip in project.clips
+                      if _validated_montage_clip_duration(Path(clip.path)) > 0.05}
+    excluded_families = {_montage_clip_family_key(clip.path) for clip in project.clips
+                         if _validated_montage_clip_duration(Path(clip.path)) > 0.05}
+    repaired = 0
+    for position, clip in enumerate(list(project.clips)):
+        if _validated_montage_clip_duration(Path(clip.path)) > 0.05:
+            continue
+        replacement = None
+        for item in candidate_provider(clip, {"paths": excluded_paths, "families": excluded_families}) or []:
+            if _montage_item_is_excluded(item, excluded_paths, excluded_families):
+                continue
+            available = _validated_montage_clip_duration(Path(item.path))
+            if available + 0.05 < float(clip.duration):
+                continue
+            replacement = TimelineClip(
+                path=item.path,
+                narration=clip.narration,
+                visual_query_en=clip.visual_query_en,
+                duration=float(clip.duration),
+                source_start=0.0,
+                score=clip.score,
+                source=item.source or clip.source,
+            )
+            break
+        if replacement is None:
+            continue
+        project.clips[position] = replacement
+        excluded_paths.add(_montage_clip_key(replacement.path))
+        excluded_families.add(_montage_clip_family_key(replacement.path))
+        repaired += 1
+    return repaired
+
+
+def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, settings: Settings,
+                                     download_semaphore: threading.BoundedSemaphore | None = None) -> list[FootageItem]:
+    """Find a bounded, semantically relevant replacement for one broken slot."""
+    query = str(clip.visual_query_en or clip.narration or "news footage").strip()
+    try:
+        hits = index.search_many([query], limit=96)[0]
+    except (OSError, RuntimeError, ValueError, IndexError):
+        hits = []
+    ranked = sorted(
+        hits,
+        key=lambda hit: float(hit.score) + _montage_semantic_bonus(query, hit.item),
+        reverse=True,
+    )
+    candidates = [hit.item for hit in ranked if _semantic_clip_ok(query, hit.item)]
+    if not candidates:
+        try:
+            candidates = [item for item in rank_items(
+                query, index.all_items(exclude_english_text=settings.montage_exclude_english_text)
+            ) if _semantic_clip_ok(query, item)][:96]
+        except (OSError, RuntimeError, ValueError):
+            candidates = []
+    if candidates or not settings.montage_auto_web:
+        return candidates
+    # Local footage can be unavailable after a cleanup.  Download one bounded
+    # fallback only for the missing slot; never recreate the entire project.
+    downloaded = _download_scene_fallback(
+        {"visual_query_en": query, "narration": clip.narration, "duration": clip.duration},
+        settings, index, download_semaphore,
+    )
+    return [downloaded] if downloaded else []
+
+
+def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, settings: Settings,
+                                  download_semaphore: threading.BoundedSemaphore | None = None) -> int:
+    """Verify real source lengths and append clips until the MP3 is covered."""
+    voice = Path(project.voiceover_path)
+    if not voice.is_file():
+        raise FileNotFoundError("Не найден готовый MP3 для проверки таймлайна")
+    # A 30fps MP4 commonly reports its last frame at ``N-1`` frames.  During
+    # a 40–100-shot news sequence that loses roughly one frame per proxy at
+    # concat time. Reserve that deterministic frame budget with real footage
+    # before FFmpeg starts; the audio mux still cuts the final output exactly
+    # at the MP3, never by freezing the last image.
+    target = probe_media_duration(voice) + len(project.clips) / 30.0 + 0.05
+    # Most saved projects already cover their MP3.  Normalise their real
+    # durations without an unnecessary vector-index query.
+    duration_memo: dict[str, float] = {}
+    duration_probe = lambda path: _cached_or_probed_montage_duration(index, path, duration_memo)
+    try:
+        align_timeline_to_audio(project, target, [], duration_probe=duration_probe)
+        return 0
+    except ValueError as initial_error:
+        if "достаточное число валидных футажей" not in str(initial_error):
+            raise
+    last = project.clips[-1] if project.clips else TimelineClip("", project.title, project.title, duration=6.0)
+    candidates = _replacement_candidates_for_clip(index, last, settings, download_semaphore)
+    existing_paths = {_montage_clip_key(clip.path) for clip in project.clips}
+    existing_families = {_montage_clip_family_key(clip.path) for clip in project.clips}
+    # Prefer a new source family.  If the tiny terminal remainder still cannot
+    # be covered, one semantically ranked real clip may be replayed as the
+    # final trimmed beat.  Keeping the immediately previous source last avoids
+    # A → A whenever a different valid candidate exists.
+    unique_items = [
+        item for item in candidates
+        if (_montage_clip_key(item.path) not in existing_paths
+            and _montage_clip_family_key(item.path) not in existing_families)
+    ]
+    reuse_items = [item for item in candidates if item not in unique_items]
+    previous_key = _montage_clip_key(last.path)
+    if any(_montage_clip_key(item.path) != previous_key for item in reuse_items):
+        reuse_items.sort(key=lambda item: _montage_clip_key(item.path) == previous_key)
+    tail_clips = [
+        TimelineClip(item.path, last.narration, last.visual_query_en, duration=6.0,
+                     score=last.score, source=item.source or last.source)
+        for item in [*unique_items, *reuse_items]
+    ]
+    appended = align_timeline_to_audio(
+        project, target, tail_clips, duration_probe=duration_probe, allow_terminal_reuse=True,
+    )
+    return len(appended)
+
+
+def _montage_planning_worker_limit(requested: int, jobs: int, indexed_footage: int) -> int:
+    """Use exactly the user-selected number of planning slots.
+
+    The library size is informative for the UI but no longer imposes a hidden
+    safety ceiling.  A powerful workstation may deliberately trade RAM/VRAM
+    for faster parallel planning, and the queue must honour that choice.
+    """
+    del indexed_footage
+    return max(1, min(int(requested or 1), int(jobs or 1)))
+
+
+def _release_batch_footage_reservations(usage: dict, scenario_index: int) -> int:
+    """Return only a failed planner's in-memory reservations to this batch.
+
+    Reservations never persist beyond one queue invocation.  Keeping ownership
+    still matters while that queue is running: an early planning failure must
+    not poison later items with clips it will never render.
+    """
+    lock = usage.get("lock") if isinstance(usage, dict) else None
+    if not hasattr(lock, "__enter__"):
+        return 0
+    released = 0
+    with lock:
+        for name in ("paths", "families"):
+            values = usage.get(name)
+            if not isinstance(values, dict):
+                continue
+            owned = [key for key, owner in values.items() if owner == scenario_index]
+            for key in owned:
+                values.pop(key, None)
+                released += 1
+    return released
+
+
+def run_montage_queue(payload: dict) -> dict:
+    """Build and render a batch of approved scripts/MP3 files with saved progress.
+
+    It is intentionally one persistent bridge call.  The Electron call itself
+    is asynchronous, so the interface remains usable and keeps polling the
+    JSON settings file; this avoids a fragile hidden service that would lose
+    jobs when the desktop app is updated.
+    """
+    settings = load_settings()
+    _reconcile_montage_outputs(settings)
+    if _recover_interrupted_montage_tasks(settings):
+        save_settings(settings)
+    if montage_queue_is_active(settings.montage_task_statuses):
+        raise ValueError("Очередь монтажа уже выполняется. Дождитесь завершения или поставьте её на паузу.")
+    titles, jobs = load_session()
+    requested = payload.get("indices")
+    indices = sorted({int(value) for value in requested}) if isinstance(requested, list) and requested else []
+    if not indices:
+        indices = [index for index, _title in enumerate(titles)
+                   if Path(settings.voice_scenario_outputs.get(str(index + 1), "")).is_file()
+                   and _montage_task_needs_render(settings, index)]
+    if not indices:
+        raise ValueError("Нет готовых MP3. Передайте сценарии в озвучку или добавьте свой MP3.")
+    valid: list[int] = []
+    jobs_by_index = {job.request.index: job for job in jobs}
+    for index in indices:
+        if not 0 <= index < len(titles):
+            continue
+        if not payload.get("replaceOutput") and not _montage_task_needs_render(settings, index):
+            # Normal start/resume is missing-only. Keeping the invariant here
+            # protects ready videos even if an older interface sends all rows.
+            continue
+        voice = Path(settings.voice_scenario_outputs.get(str(index + 1), ""))
+        narration = str(getattr(jobs_by_index.get(index), "result", "") or "")
+        if voice.is_file() and narration.strip():
+            valid.append(index)
+        else:
+            _montage_task_update(settings, index, status="Ошибка", phase="Проверка входных данных", progress=100,
+                                 detail="Нужен готовый сценарий и соответствующий MP3",
+                                 error="Не найден готовый сценарий или MP3")
+    if not valid:
+        raise ValueError("У выбранных строк нет пары «сценарий + MP3».")
+    # A forced repeat replaces its MP4 only after the new render passes.  The
+    # renderer publishes atomically, so do not delete the previous valid
+    # output or its package merely because a retry was requested.
+    if str(Path(settings.cutter_output_folder) / "Внешние для монтажа") not in settings.footage_folders:
+        settings.footage_folders.append(str(Path(settings.cutter_output_folder) / "Внешние для монтажа"))
+    for index in valid:
+        _montage_task_update(settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
+                             detail="Сценарий и MP3 готовы", error="", title=titles[index],
+                             voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""), outputPath="",
+                             queuePid=os.getpid())
+    save_settings(settings)
+    download_semaphore = threading.BoundedSemaphore(settings.montage_download_workers)
+    # Shared only by this queue invocation.  It reserves footage as soon as a
+    # planner selects it, so concurrent similar stories cannot independently
+    # choose the same top-ranked source before either has saved its project.
+    batch_footage_usage = {"lock": threading.RLock(), "paths": {}, "families": {}}
+
+    def plan_task(index: int) -> tuple[int, str]:
+        _montage_wait_if_paused(settings, index)
+        _montage_task_update(settings, index, status="Планирование", phase="Планирование сцен", progress=8)
+        last_progress = {"value": 8}
+        def progress(stage: str, detail: str):
+            ranges = {"Планирование сцен": 16, "Подбор футажей": 42,
+                      "Внешний поиск": 30, "Нарезка внешнего футажа": 38}
+            value = max(last_progress["value"], ranges.get(stage, 42))
+            # Show real motion during the longest local step.  Choosing each
+            # scene is cheaper than loading/querying the index, but without a
+            # counter it looked indistinguishable from a frozen application.
+            if stage == "Подбор футажей":
+                match = re.search(r"Сцена\s+(\d+)\s*/\s*(\d+)", detail)
+                if match:
+                    current, total = (int(match.group(1)), max(1, int(match.group(2))))
+                    value = max(value, min(55, 42 + int(13 * current / total)))
+            last_progress["value"] = value
+            _montage_task_update(settings, index, status=stage, phase=stage, progress=value, detail=detail)
+        prepared = prepare_montage({"scenarioIndex": index, "aspectRatio": settings.montage_aspect_ratio,
+                                    "_progress": progress, "_downloadSemaphore": download_semaphore,
+                                    "_batchFootageUsage": batch_footage_usage})
+        project = prepared.get("preparedProject", {})
+        project_path = str(project.get("path", ""))
+        if not project_path:
+            raise RuntimeError("Не создан проект монтажа")
+        _montage_task_update(settings, index, status="Ожидает рендер", phase="Таймлайн готов", progress=55,
+                             detail=f"{project.get('clips', 0)} сцен · {project.get('duration', 0)} сек.", projectPath=project_path)
+        return index, project_path
+
+    def render_task(index: int, project_path: str) -> str:
+        _montage_wait_if_paused(settings, index)
+        _montage_task_update(settings, index, status="Рендер", phase="Подготовка рендера", progress=60)
+        project = TimelineProject.load(Path(project_path))
+        project_index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+        missing_clips = _montage_project_missing_clips(project, project_index)
+        if missing_clips:
+            # A footage folder can be cleaned or an external cut can vanish.
+            # Keep the existing project, MP3 and healthy edits; replace only
+            # failed slots and persist after every repair attempt.
+            _montage_task_update(
+                settings, index, status="Планирование", phase="Восстанавливаем футажи", progress=42,
+                detail=f"Пропало футажей: {len(missing_clips)}. Подбираем замену.", error="",
+            )
+            replaced = 0
+            for attempt in range(1, 4):
+                def candidates_for(clip: TimelineClip, _excluded: dict) -> list[FootageItem]:
+                    return _replacement_candidates_for_clip(project_index, clip, settings, download_semaphore)
+                changed = _repair_missing_project_clips(project, candidates_for)
+                replaced += changed
+                project.save(Path(project_path))
+                remaining = _montage_project_missing_clips(project, project_index)
+                if not remaining:
+                    break
+                _montage_task_update(
+                    settings, index, status="Планирование", phase="Восстанавливаем футажи", progress=42,
+                    detail=(f"Попытка восстановления {attempt}/3: заменено {changed}, "
+                            f"осталось {len(remaining)}."), error="",
+                )
+                if not changed:
+                    break
+            remaining = _montage_project_missing_clips(project, project_index)
+            if remaining:
+                raise FileNotFoundError(
+                    f"Не удалось восстановить футаж после 3 попыток: {remaining[0]}"
+                )
+            _montage_task_update(
+                settings, index, status="Рендер", phase="Рендер после восстановления", progress=60,
+                detail=f"Заменено футажей: {replaced}", projectPath=project_path,
+            )
+        # A clip may be technically valid but have a shorter real duration
+        # than old index metadata claimed.  Validate the complete project
+        # immediately before rendering and append normal footage for any tail.
+        try:
+            tail_added = _complete_project_visual_tail(
+                project, project_index, settings, download_semaphore,
+            )
+        except ValueError as exc:
+            raise RuntimeError(f"Таймлайн требует дополнительный футаж: {exc}") from exc
+        if tail_added:
+            project.save(Path(project_path))
+            _montage_task_update(
+                settings, index, status="Рендер", phase="Завершаем видеоряд", progress=58,
+                detail=f"Добавлено футажей для хвоста: {tail_added}", projectPath=project_path,
+            )
+        output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+        def heartbeat(pid: int | None):
+            _montage_task_update(
+                settings, index, status="Рендер", phase="Рендер футажей", progress=None,
+                detail=("FFmpeg работает" if pid else "FFmpeg завершил этап"), ffmpegPid=int(pid or 0),
+            )
+        def progress(done: int, total: int, label: str):
+            if "Remotion" in label or "Композици" in label or "Кадр" in label:
+                value = max(60, min(99, 60 + int(38 * done / max(1, total))))
+                phase = label
+            else:
+                value = 60 + int(38 * done / max(1, total))
+                phase = "Склейка" if label == "Склейка" else ("Готовим MP4" if label == "Готово" else "Рендер футажей")
+            _montage_task_update(settings, index, status="Рендер", phase=phase, progress=value, detail=label)
+        rendered = render_project(project, output, progress=progress, renderer=settings.montage_renderer,
+                                  remotion_concurrency=settings.montage_remotion_frame_concurrency,
+                                  remotion_parallel_jobs=rendering_workers, heartbeat=heartbeat)
+        voiceover = Path(project.voiceover_path)
+        expected_duration = required_video_duration(
+            probe_media_duration(voiceover), project.intro_duration,
+        )
+        validate_rendered_montage(Path(rendered), expected_duration=expected_duration)
+        if settings.montage_export_davinci_xml:
+            _montage_task_update(settings, index, status="Рендер", phase="Создаём DaVinci XML", progress=99)
+            export_fcpxml(project, Path(project_path).with_suffix(".fcpxml"))
+            if settings.montage_davinci_auto_import:
+                try:
+                    with _DAVINCI_IMPORT_LOCK:
+                        import_fcpxml(Path(project.davinci_xml_path), project.title)
+                except Exception as error:
+                    # The video and XML are valid without a currently open Resolve;
+                    # retain the result and show the exact import issue in timeline.
+                    _montage_task_update(settings, index, detail=f"XML готов; DaVinci: {error}")
+        project.save(Path(project_path))
+        remotion_path = output.with_suffix(".remotion.json")
+        remotion_path.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+        with _MONTAGE_QUEUE_LOCK:
+            if str(rendered) not in settings.pipeline_montage_outputs:
+                settings.pipeline_montage_outputs.append(str(rendered))
+        _montage_task_update(settings, index, status="Готово", phase="MP4 сохранён", progress=100,
+                             detail=rendered.name, outputPath=str(rendered), projectPath=project_path, error="")
+        return str(rendered)
+
+    rendered_count = 0
+    requested_planning_workers = min(settings.montage_planning_workers, len(valid))
+    try:
+        indexed_footage = ClipIndex(app_data_root() / "footage-index.sqlite3").count(True)
+    except (OSError, sqlite3.Error):
+        indexed_footage = 0
+    planning_workers = _montage_planning_worker_limit(requested_planning_workers, len(valid), indexed_footage)
+    requested_render_workers = min(settings.montage_render_workers, len(valid))
+    # The user controls every parallelism value.  A worker pool cannot exceed
+    # the number of actual queue entries, but there is no hidden safety cap.
+    rendering_workers = requested_render_workers
+    with ThreadPoolExecutor(max_workers=planning_workers, thread_name_prefix="newsflow-plan") as planners, \
+            ThreadPoolExecutor(max_workers=rendering_workers, thread_name_prefix="newsflow-render") as renderers:
+        planned = {planners.submit(plan_task, index): index for index in valid}
+        renders = {}
+        # Drain both pools together. The old two-loop implementation waited
+        # for every planner before observing any render future, so a failed
+        # FFmpeg job could look like endless "Рендер" in a large batch.
+        while planned or renders:
+            completed, _pending = wait([*planned, *renders], return_when=FIRST_COMPLETED)
+            for future in completed:
+                if future in planned:
+                    index = planned.pop(future)
+                    try:
+                        planned_index, project_path = future.result()
+                        renders[renderers.submit(render_task, planned_index, project_path)] = planned_index
+                    except Exception as exc:
+                        _release_batch_footage_reservations(batch_footage_usage, index)
+                        _montage_task_update(settings, index, status="Ошибка", phase="Ошибка подготовки", progress=100,
+                                             detail=str(exc), error=str(exc))
+                    continue
+                index = renders.pop(future)
+                try:
+                    future.result()
+                    rendered_count += 1
+                except Exception as exc:
+                    attempt = int((settings.montage_task_statuses.get(str(index)) or {}).get("renderAttempt", 1) or 1)
+                    if _is_retryable_montage_error(exc) and attempt < 3:
+                        delay = attempt * 2
+                        _montage_task_update(
+                            settings, index, status="Ожидает рендер",
+                            phase=f"Рендер завис — повтор через {delay} сек.", progress=58,
+                            detail=f"Попытка {attempt + 1}/3: {str(exc)[:180]}", error="",
+                            retryAt=time.strftime("%Y-%m-%d %H:%M:%S"),
+                        )
+                        # Keep retries bounded and inside the same persistent
+                        # queue. Other planners/renders remain independent.
+                        time.sleep(delay)
+                        project_path = str((settings.montage_task_statuses.get(str(index)) or {}).get("projectPath") or "")
+                        if project_path:
+                            renders[renderers.submit(render_task, index, project_path)] = index
+                            continue
+                    _montage_task_update(settings, index, status="Ошибка", phase="Ошибка рендера", progress=100,
+                                         detail=str(exc), error=str(exc))
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "montage-queue", "count": rendered_count, "folder": settings.montage_output_folder,
+        "message": f"Готово MP4: {rendered_count} из {len(valid)}."
+    }}
+
+
+def remove_montage_results(payload: dict) -> dict:
+    settings = load_settings()
+    requested = payload.get("indices")
+    if payload.get("all"):
+        indices = [int(key) for key in settings.montage_task_statuses if str(key).isdigit()]
+    else:
+        indices = sorted({int(value) for value in requested}) if isinstance(requested, list) else []
+    removed = 0
+    for index in indices:
+        previous = dict(settings.montage_task_statuses.get(str(index)) or {})
+        if previous.get("outputPath") or previous.get("status") == "Готово":
+            _remove_montage_output(settings, index)
+            title = previous.get("title", "Без названия")
+            settings.montage_task_statuses[str(index)] = {
+                **previous, "title": title, "status": "Удалено", "phase": "MP4 удалён", "progress": 0,
+                "outputPath": "", "error": "", "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            removed += 1
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "montage-remove", "count": removed,
+                                                "folder": settings.montage_output_folder}}
+
+
+def remove_montage_projects(payload: dict) -> dict:
+    """Remove saved timeline plans, never the original media or rendered MP4."""
+    settings = load_settings()
+    root = Path(settings.montage_project_folder).resolve()
+    requested = payload.get("paths")
+    paths = [path for path in requested if isinstance(path, str)] if isinstance(requested, list) else []
+    if payload.get("all"):
+        paths = [str(path) for path in root.glob("*.newsflow")]
+    removed = 0
+    errors: list[str] = []
+    for raw in paths:
+        try:
+            project_path = Path(raw).resolve()
+            # Protect everything outside the dedicated project folder.  A UI
+            # payload can never remove an MP3, source clip or exported MP4.
+            if project_path.parent != root or project_path.suffix.casefold() != ".newsflow":
+                raise ValueError("Можно удалить только файл проекта из папки «Проекты монтажа»")
+            if not project_path.is_file():
+                continue
+            project_path.unlink()
+            remotion_path = Path(settings.montage_output_folder) / f"{project_path.stem}.remotion.json"
+            try:
+                if remotion_path.is_file():
+                    remotion_path.unlink()
+            except OSError as exc:
+                errors.append(f"{project_path.stem}: Remotion JSON не удалён: {exc}")
+            fcpxml_path = project_path.with_suffix(".fcpxml")
+            try:
+                if fcpxml_path.is_file():
+                    fcpxml_path.unlink()
+            except OSError as exc:
+                errors.append(f"{project_path.stem}: DaVinci XML не удалён: {exc}")
+            removed += 1
+        except (OSError, ValueError) as exc:
+            errors.append(f"{Path(raw).name}: {exc}")
+    return {**snapshot(), "operationResult": {
+        "kind": "montage-project-remove", "count": removed, "folder": str(root),
+        "message": "; ".join(errors[:3]) if errors else f"Удалено проектов: {removed}.",
+    }}
+
+
+def package_outputs(payload: dict) -> dict:
+    settings = load_settings()
+    titles, jobs = load_session()
+    jobs_by_title = {job.request.title: job for job in jobs if job.state == RunState.DONE}
+    covers_by_title = {str(item.get("title", "")): item for item in settings.cover_queue}
+    seo_by_title = {str(item.get("source_title", "")): item for item in settings.seo_queue if item.get("status") == "Готово"}
+    root = Path(settings.montage_output_folder) / "Результаты по роликам"
+    created = 0
+    for video in settings.pipeline_montage_outputs:
+        source = Path(video)
+        if not source.is_file():
+            continue
+        title = source.stem
+        folder = root / safe_filename(title)
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{safe_filename(title)}.mp4"
+        if not target.exists():
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copy2(source, target)
+        xml_source = Path(settings.montage_project_folder) / f"{safe_filename(title)}.fcpxml"
+        if xml_source.is_file():
+            shutil.copy2(xml_source, folder / f"{safe_filename(title)}.fcpxml")
+        job = jobs_by_title.get(title)
+        cover = covers_by_title.get(title)
+        seo = seo_by_title.get(title, {})
+        tags = seo.get("tags", []) if isinstance(seo.get("tags", []), list) else []
+        hashtags = seo.get("hashtags", []) if isinstance(seo.get("hashtags", []), list) else []
+        scenario_title = str(getattr(getattr(job, "request", None), "title", "") or title)
+        seo_title = str(seo.get("title") or "")
+        seo_phrases = seo.get("phrases", seo.get("keywords", []))
+        if not isinstance(seo_phrases, list):
+            seo_phrases = []
+        seo_phrases = [str(value).strip() for value in ([seo_title] + seo_phrases + tags) if str(value).strip()]
+        seo_phrases = list(dict.fromkeys(seo_phrases))
+        # The scenario title is the actual YouTube title source.  SEO receives
+        # its own editable file and never silently replaces it during upload.
+        (folder / "Название сценария.txt").write_text(scenario_title + "\n", encoding="utf-8-sig")
+        (folder / "Заголовок.txt").write_text(scenario_title + "\n", encoding="utf-8-sig")
+        (folder / "SEO-заголовок.txt").write_text(seo_title + "\n", encoding="utf-8-sig")
+        (folder / "Сценарий.txt").write_text((job.result if job else "") + "\n", encoding="utf-8-sig")
+        (folder / "Описание.txt").write_text(str(seo.get("description") or "") + "\n", encoding="utf-8-sig")
+        (folder / "SEO-фразы.txt").write_text("\n".join(seo_phrases) + "\n", encoding="utf-8-sig")
+        (folder / "Теги.txt").write_text(", ".join(tags) + "\n", encoding="utf-8-sig")
+        hashtag_text = " ".join(str(tag) for tag in hashtags if str(tag).strip())
+        if not hashtag_text:
+            hashtag_text = " ".join("#" + re.sub(r"[^\w-]", "", tag.replace(" ", "")) for tag in tags)
+        (folder / "Хештеги.txt").write_text(hashtag_text + "\n", encoding="utf-8-sig")
+        if cover and Path(str(cover.get("path", ""))).is_file():
+            cover_path = Path(cover["path"])
+            shutil.copy2(cover_path, folder / f"Обложка{cover_path.suffix}")
+        settings.video_result_packages[str(source)] = str(folder)
+        created += 1
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "package", "count": created, "folder": str(root)}}
+
+
+def queue_ready_publication_outputs(payload: dict) -> dict:
+    """Transfer completed NewsFlow packages into the persistent upload queue."""
+
+    settings = load_settings()
+    requested = {str(value) for value in payload.get("videos", []) if str(value).strip()}
+    known_folders = {str(item.get("packageFolder", "")) for item in settings.youtube_publication_jobs}
+    added = 0
+    skipped = 0
+    for source_video, package_folder in settings.video_result_packages.items():
+        if requested and str(source_video) not in requested:
+            continue
+        if str(package_folder) in known_folders:
+            skipped += 1
+            continue
+        try:
+            job = create_publication_job_from_package(str(source_video), str(package_folder))
+        except ValueError:
+            skipped += 1
+            continue
+        record = publication_job_record(job)
+        settings.youtube_publication_jobs.append(record)
+        settings.youtube_publication_activity.append({
+            "at": datetime.now().astimezone().isoformat(), "kind": "queued", "jobId": job.id,
+            "title": job.title, "detail": "Готовый пакет добавлен в очередь публикации",
+        })
+        known_folders.add(str(package_folder))
+        added += 1
+    save_settings(settings)
+    message = f"В очередь добавлено готовых роликов: {added}."
+    if skipped:
+        message += f" Пропущено: {skipped}."
+    return {**snapshot(), "operationResult": {"kind": "publication-queue", "count": added, "message": message}}
+
+
+def save_publication_settings(payload: dict) -> dict:
+    """Persist explicit publication controls without silently applying limits."""
+
+    settings = load_settings()
+    if "uploadConcurrency" in payload:
+        try:
+            concurrency = int(payload["uploadConcurrency"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Количество одновременных загрузок должно быть целым числом.") from exc
+        if concurrency < 1:
+            raise ValueError("Количество одновременных загрузок должно быть не меньше 1.")
+        settings.youtube_publication_upload_concurrency = concurrency
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-settings",
+        "message": f"Одновременных загрузок: {settings.youtube_publication_upload_concurrency}.",
+    }}
+
+
+def save_youtube_engagement_policy(payload: dict) -> dict:
+    """Save independent automatic post, card and end-screen rules per channel."""
+
+    channel_id = str(payload.get("channelId", "")).strip()
+    if not channel_id:
+        raise ValueError("Выберите канал для правил автоматизации.")
+    settings = load_settings()
+    known_channels = {str(item.get("profile_id", "")).strip() for item in settings.analytics_channels}
+    if channel_id not in known_channels:
+        raise ValueError("Выбранный канал не найден.")
+    policy = {
+        "channelId": channel_id,
+        "enabled": bool(payload.get("enabled", True)),
+        "postsEnabled": bool(payload.get("postsEnabled", True)),
+        "cardsEnabled": bool(payload.get("cardsEnabled", True)),
+        "endScreensEnabled": bool(payload.get("endScreensEnabled", True)),
+    }
+    settings.youtube_engagement_policies = [
+        item for item in settings.youtube_engagement_policies
+        if str(item.get("channelId", "")).strip() != channel_id
+    ]
+    settings.youtube_engagement_policies.append(policy)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "youtube-engagement-policy", "count": 1,
+        "message": "Правила автопоста, карточек и конечных заставок сохранены.",
+    }}
+
+
+def run_youtube_engagement(payload: dict) -> dict:
+    """Run selected queued Studio tasks in their own channel Chrome profiles.
+
+    Work is deliberately sequential per request: a profile may be in use by
+    the operator and Studio itself serializes edits for a video.  A failed
+    task keeps its state and error so the operator can retry it without
+    recreating a post or duplicating completed steps.
+    """
+
+    requested = {str(item).strip() for item in payload.get("jobIds", []) if str(item).strip()}
+    if not requested:
+        raise ValueError("Выберите хотя бы одно задание Studio.")
+    requested_steps = {str(item).strip() for item in payload.get("steps", []) if str(item).strip()}
+    unknown_steps = requested_steps - {"post", "cards", "end-screen"}
+    if unknown_steps:
+        raise ValueError("Выбраны неизвестные действия Studio.")
+    settings = load_settings()
+    channels = {str(item.get("profile_id", "")).strip(): dict(item) for item in settings.analytics_channels}
+    succeeded = 0
+    failed = 0
+    changed_tasks: list[dict] = []
+    for source in settings.youtube_engagement_tasks:
+        task = dict(source)
+        if str(task.get("jobId", "")).strip() not in requested:
+            changed_tasks.append(task)
+            continue
+        channel_id = str(task.get("channelId", "")).strip()
+        channel = channels.get(channel_id)
+        if not channel or not str(channel.get("channel_id", "")).strip():
+            task["lastError"] = "Для задачи не найден подключённый YouTube-канал."
+            failed += 1
+            changed_tasks.append(task)
+            continue
+        try:
+            task["lastRunAt"] = datetime.now().astimezone().isoformat()
+            completed = execute_studio_task(
+                task, profile_dir=_youtube_channel_profile_dir(channel_id),
+                youtube_channel_id=str(channel.get("channel_id", "")).strip(),
+                action_kinds=requested_steps or None,
+            )
+            for item in completed:
+                if item == "post":
+                    task = transition_engagement_step(task, "post", "scheduled")
+                elif item == "cards":
+                    task = transition_engagement_step(task, "cards", "done")
+                elif item == "end-screen":
+                    task = transition_engagement_step(task, "endScreen", "done")
+            task.pop("lastError", None)
+            succeeded += 1
+        except StudioAutomationError as exc:
+            task["lastError"] = str(exc)
+            task["lastRunAt"] = datetime.now().astimezone().isoformat()
+            failed += 1
+        changed_tasks.append(task)
+    settings.youtube_engagement_tasks = changed_tasks
+    now = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_activity.append({
+        "at": now, "kind": "youtube-engagement-run",
+        "detail": f"Studio: выполнено {succeeded}, требуют повтора {failed}.",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    message = f"Studio-задач выполнено: {succeeded}."
+    if failed:
+        message += f" Требуют повторной попытки: {failed}."
+    return {**snapshot(), "operationResult": {
+        "kind": "youtube-engagement-run", "count": succeeded, "failed": failed, "message": message,
+    }}
+
+
+def queue_existing_youtube_engagement(payload: dict) -> dict:
+    """Adopt already uploaded videos into Studio automation without duplicating posts."""
+
+    requested = {str(item).strip() for item in payload.get("jobIds", []) if str(item).strip()}
+    if not requested:
+        raise ValueError("Выберите уже загруженные ролики.")
+    settings = load_settings()
+    adopted = 0
+    for record in settings.youtube_publication_jobs:
+        if str(record.get("id", "")).strip() not in requested:
+            continue
+        if str(record.get("status", "")).strip() not in {"uploaded", "published"}:
+            raise ValueError("В оформление можно передать только уже загруженный ролик.")
+        post = dict(record.get("post") or {})
+        if not post:
+            post = build_linked_community_post(_publication_job_from_record(record), video_url=str(record.get("videoUrl", "")))
+        task = _queue_youtube_engagement_task(settings, record, post)
+        if task is None:
+            continue
+        # If an older job already had a prepared/manual post, do not create a
+        # second one. Only the remaining Studio steps are queued.
+        if str(post.get("status", "")) in {"prepared", "published-manually", "scheduled", "done"}:
+            task = transition_engagement_step(task, "post", "scheduled", reason="Пост был подготовлен до новой автоматизации")
+            for index, item in enumerate(settings.youtube_engagement_tasks):
+                if str(item.get("jobId", "")).strip() == str(task.get("jobId", "")).strip():
+                    settings.youtube_engagement_tasks[index] = task
+                    break
+        adopted += 1
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "youtube-engagement-adopt", "count": adopted,
+        "message": f"В новую очередь Studio передано роликов: {adopted}. Посты не будут повторены.",
+    }}
+
+
+def update_channel_allocation(payload: dict) -> dict:
+    """Persist an explicit per-channel quota, lock and duration choice."""
+
+    channel_id = str(payload.get("channelId", "")).strip()
+    if not channel_id:
+        raise ValueError("Выберите канал для изменения конструктора.")
+    settings = load_settings()
+    profiles = _publication_allocation_profiles(settings)
+    profile = next((item for item in profiles if str(item.get("channelId", "")) == channel_id), None)
+    if profile is None:
+        raise ValueError("Канал конструктора не найден.")
+    try:
+        quota = int(payload.get("quota", profile.get("quota") or 0))
+        minimum = float(payload.get("minDurationSeconds", profile.get("minDurationSeconds", 0)) or 0)
+        maximum = float(payload.get("maxDurationSeconds", profile.get("maxDurationSeconds", 0)) or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Лимит и длительность должны быть числами.") from exc
+    if quota < 0 or minimum < 0 or maximum < 0 or (maximum and maximum < minimum):
+        raise ValueError("Проверьте лимит и диапазон длительности.")
+    profile.update({"quota": quota, "quotaLocked": bool(payload.get("quotaLocked", True)),
+                    "minDurationSeconds": minimum, "maxDurationSeconds": maximum})
+    _save_publication_allocation_profiles(settings, profiles)
+    settings.youtube_publication_allocation_updated_at = datetime.now().astimezone().isoformat()
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "allocation-channel", "count": 1,
+            "message": "Параметры канала сохранены."}}
+
+
+def refresh_publication_allocation(payload: dict) -> dict:
+    """Recalculate factual recommendations only; assignments and quotas stay put."""
+
+    settings = load_settings()
+    settings.youtube_publication_allocation_updated_at = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_activity.append({"at": settings.youtube_publication_allocation_updated_at,
+        "kind": "allocation-refreshed", "detail": "Обновлены рекомендации без переназначения роликов."})
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "allocation-refresh", "count": len(settings.analytics_channels),
+            "message": "Рекомендации конструктора обновлены; назначения не менялись."}}
+
+
+def apply_publication_recommendations(payload: dict) -> dict:
+    """Apply 3/2/1 only for channel rows not manually locked by the operator."""
+
+    settings = load_settings()
+    profiles = _publication_allocation_profiles(settings)
+    summary = build_allocation_summary(profiles, settings.youtube_publication_jobs)
+    recommended = {str(item["channelId"]): int(item["recommendedQuota"]) for item in summary["channels"]}
+    changed = 0
+    for profile in profiles:
+        if not bool(profile.get("quotaLocked", False)):
+            next_quota = recommended[str(profile["channelId"])]
+            changed += int(profile.get("quota") != next_quota)
+            profile["quota"] = next_quota
+    _save_publication_allocation_profiles(settings, profiles)
+    settings.youtube_publication_allocation_updated_at = datetime.now().astimezone().isoformat()
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "allocation-apply", "count": changed,
+            "message": f"Применено рекомендаций: {changed}."}}
+
+
+def assign_publication_jobs(payload: dict) -> dict:
+    """Apply only operator-requested compatible allocation suggestions; never upload."""
+
+    settings = load_settings()
+    profiles = _publication_allocation_profiles(settings)
+    requested_job_ids = {str(value).strip() for value in payload.get("jobIds", []) if str(value).strip()}
+    requested_channel_ids = {str(value).strip() for value in payload.get("channelIds", []) if str(value).strip()}
+    if not requested_job_ids or not requested_channel_ids:
+        raise ValueError("Выберите ролики и каналы для распределения.")
+    selected_profiles = [profile for profile in profiles if str(profile["channelId"]) in requested_channel_ids]
+    if not selected_profiles:
+        raise ValueError("Выбранные каналы не найдены в конструкторе.")
+    selected_jobs = [item for item in settings.youtube_publication_jobs if str(item.get("id", "")) in requested_job_ids]
+    if len(selected_jobs) != len(requested_job_ids):
+        raise ValueError("Один или несколько роликов не найдены в очереди.")
+    proposed = allocate_ready_jobs(selected_profiles, selected_jobs)
+    lookup = {str(item.get("id", "")): item for item in settings.youtube_publication_jobs}
+    assigned = 0
+    for channel_id, job_ids in proposed["assignments"].items():
+        for job_id in job_ids:
+            lookup[job_id]["channelId"] = channel_id
+            assigned += 1
+    now = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_activity.append({"at": now, "kind": "allocation-assigned",
+        "detail": f"Конструктор назначил роликов: {assigned}."})
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "allocation-assign", "count": assigned,
+            "message": f"Назначено совместимых роликов: {assigned}.", "skipped": proposed["skipped"]}}
+
+
+def save_publication_allocation_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Укажите название пресета конструктора.")
+    settings = load_settings()
+    channel_ids = [str(item.get("channelId", "")) for item in _publication_allocation_profiles(settings)]
+    value = {"name": name, "channelIds": channel_ids,
+             "profiles": settings.youtube_publication_allocation_profiles}
+    settings.youtube_publication_allocation_presets = [item for item in settings.youtube_publication_allocation_presets
+                                                         if str(item.get("name", "")).casefold() != name.casefold()]
+    settings.youtube_publication_allocation_presets.append(value)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "allocation-preset", "count": 1,
+            "message": f"Пресет конструктора «{name}» сохранён."}}
+
+
+def _clear_production_folder(folder: str) -> int:
+    """Delete children of one configured output folder, never the folder itself."""
+    target = Path(folder).expanduser().resolve()
+    if not target.exists():
+        return 0
+    if target == target.parent or target == app_data_root().resolve():
+        raise ValueError("Небезопасный путь производственной папки")
+    removed = 0
+    for child in target.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+        removed += 1
+    return removed
+
+
+def clear_production_queue(payload: dict) -> dict:
+    """Erase production artefacts and queue metadata after explicit confirmation."""
+
+    if (payload.get("confirmed") is not True
+            or str(payload.get("confirmationPhrase") or "").strip() != "УДАЛИТЬ ПРОИЗВОДСТВО"):
+        raise ValueError("Введите контрольную фразу «УДАЛИТЬ ПРОИЗВОДСТВО» для очистки производственной очереди.")
+    settings = load_settings()
+    folders = {
+        settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
+        settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
+        settings.footage_download_folder, settings.mixer_output_folder, settings.montage_output_folder,
+        settings.montage_project_folder,
+    }
+    removed_files = sum(_clear_production_folder(folder) for folder in folders if str(folder).strip())
+    settings.youtube_publication_jobs = []
+    settings.youtube_publication_activity = []
+    settings.youtube_publication_items = {}
+    settings.youtube_publication_snapshots = {}
+    settings.youtube_publication_executions = {}
+    settings.youtube_publication_receipts = {}
+    settings.youtube_publication_assignments = {}
+    settings.youtube_engagement_tasks = []
+    settings.pipeline_montage_outputs = []
+    settings.video_result_packages = {}
+    settings.montage_task_statuses = {}
+    settings.voice_scenario_outputs = {}
+    settings.voice_task_statuses = {}
+    settings.voice_tts_batches = []
+    settings.voice_active_tts_batch_id = ""
+    settings.voice_tts_jobs = {}
+    # Directions are the user's reusable editorial library, not production
+    # artefacts. Clearing a release must never erase this library.
+    settings.idea_plan = []
+    settings.idea_results = []
+    settings.idea_result_sources = {}
+    settings.idea_title_metadata = {}
+    settings.idea_title_memory = []
+    settings.idea_raw_signals = []
+    settings.idea_events = []
+    settings.idea_production_items = []
+    settings.idea_rejected_items = []
+    settings.idea_portfolio_summary = {}
+    settings.idea_scenario_context = {}
+    settings.idea_suggested_topics = []
+    settings.youtube_suggested_topics = []
+    settings.cover_queue = []
+    settings.seo_queue = []
+    settings.cover_rate_usage_events = []
+    allow_empty_release_state(
+        settings,
+        "idea_results", "idea_result_sources", "idea_title_metadata", "idea_scenario_context",
+        "idea_production_items", "voice_scenario_outputs", "voice_task_statuses", "voice_tts_jobs",
+        "pipeline_montage_outputs", "video_result_packages", "montage_task_statuses", "seo_queue",
+        "youtube_publication_jobs", "youtube_publication_items", "youtube_publication_snapshots",
+        "youtube_publication_executions", "youtube_publication_receipts", "youtube_publication_assignments",
+        "cover_queue",
+    )
+    save_session([], [])
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "production-reset", "count": removed_files,
+            "message": f"Производство очищено: удалено объектов в рабочих папках: {removed_files}. Каналы, OAuth, ключи и настройки сохранены."}}
+
+
+def _publication_job_from_record(record: dict) -> PublicationJob:
+    """Rehydrate a trusted local queue record for pure schedule calculations."""
+
+    raw_publish_at = str(record.get("publishAt", "")).strip()
+    publish_at = datetime.fromisoformat(raw_publish_at) if raw_publish_at else None
+    return PublicationJob(
+        id=str(record.get("id", "")),
+        video_path=str(record.get("videoPath", "")),
+        package_folder=str(record.get("packageFolder", "")),
+        title=str(record.get("title", "")),
+        status=str(record.get("status", "ready")),
+        privacy=str(record.get("privacy", "private")),
+        publish_at=publish_at,
+        channel_id=str(record.get("channelId", "")),
+        script_name=str(record.get("scriptName", "")),
+        seo_title=str(record.get("seoTitle", "")),
+        seo_description=str(record.get("seoDescription", "")),
+        seo_phrases=[str(value) for value in record.get("seoPhrases", []) if str(value).strip()],
+        tags=[str(value) for value in record.get("tags", []) if str(value).strip()],
+        hashtags=[str(value) for value in record.get("hashtags", []) if str(value).strip()],
+        thumbnail_path=str(record.get("thumbnailPath", "")),
+        duration_seconds=(float(record["durationSeconds"])
+                          if record.get("durationSeconds") not in (None, "", 0) else None),
+        title_rewrite_instruction=str(record.get("titleRewriteInstruction", "")),
+    )
+
+
+def schedule_publication_jobs(payload: dict) -> dict:
+    """Apply an explicit, repeatable publishing grid to selected queue jobs."""
+
+    settings = load_settings()
+    requested_ids = [str(value) for value in payload.get("jobIds", []) if str(value).strip()]
+    if not requested_ids:
+        raise ValueError("Выберите ролики для назначения расписания.")
+    selected = [item for item in settings.youtube_publication_jobs if str(item.get("id", "")) in set(requested_ids)]
+    if len(selected) != len(set(requested_ids)):
+        raise ValueError("Одна или несколько выбранных задач не найдены в очереди.")
+    try:
+        first_cycle_at = datetime.fromisoformat(str(payload.get("firstCycleAt", "")))
+    except ValueError as exc:
+        raise ValueError("Укажите дату и время начала сетки публикаций.") from exc
+    channel_ids = [str(value).strip() for value in payload.get("channelIds", []) if str(value).strip()]
+    try:
+        interval_minutes = int(payload.get("intervalMinutes", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Интервал публикаций укажите целым числом минут.") from exc
+    planned = plan_jobs_on_publication_grid(
+        [_publication_job_from_record(item) for item in selected],
+        channel_ids=channel_ids,
+        first_cycle_at=first_cycle_at,
+        interval_minutes=interval_minutes,
+        distribution=str(payload.get("distribution", "spread")),
+        slot_minutes=max(1, int(payload.get("slotMinutes", 15) or 15)),
+        batch_capacity=max(1, int(payload.get("batchCapacity", 1) or 1)),
+    )
+    planned_records = {job.id: publication_job_record(job) for job in planned}
+    settings.youtube_publication_jobs = [planned_records.get(str(item.get("id", "")), item) for item in settings.youtube_publication_jobs]
+    now = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_activity.extend({
+        "at": now,
+        "kind": "scheduled",
+        "jobId": job.id,
+        "title": job.title,
+        "detail": f"Назначено: {job.publish_at.isoformat()} · канал {job.channel_id}",
+    } for job in planned)
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-schedule",
+        "count": len(planned),
+        "message": f"В расписание назначено роликов: {len(planned)}.",
+    }}
+
+
+def duplicate_publication_job(payload: dict) -> dict:
+    """Create a new scheduled upload from an existing local publication package.
+
+    The original YouTube video and its URL remain untouched.  Upload-specific
+    fields are deliberately removed so the duplicate cannot be mistaken for an
+    already uploaded video.
+    """
+
+    job_id = str(payload.get("jobId", "")).strip()
+    if not job_id:
+        raise ValueError("Выберите ролик для повторной загрузки.")
+    try:
+        publish_at = datetime.fromisoformat(str(payload.get("publishAt", "")))
+    except ValueError as exc:
+        raise ValueError("Укажите дату и время повторной публикации.") from exc
+    if publish_at.tzinfo is None:
+        raise ValueError("Время повторной публикации должно содержать часовой пояс.")
+    settings = load_settings()
+    source = next((dict(item) for item in settings.youtube_publication_jobs
+                   if str(item.get("id", "")) == job_id), None)
+    if source is None:
+        raise ValueError("Исходный ролик не найден в очереди публикаций.")
+    clone = dict(source)
+    clone.update({
+        "id": uuid.uuid4().hex,
+        "status": "scheduled",
+        "videoStatus": "scheduled",
+        "privacy": "private",
+        "publishAt": publish_at.isoformat(),
+    })
+    for key in ("videoId", "videoUrl", "youtubePrivacyStatus", "uploadedAt", "uploadError", "post"):
+        clone.pop(key, None)
+    settings.youtube_publication_jobs.append(clone)
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "duplicated-for-reupload",
+        "jobId": str(clone["id"]), "title": str(clone.get("title", "")),
+        "detail": f"Создана отдельная повторная загрузка на {publish_at.isoformat()}; исходный ролик сохранён.",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-duplicate", "count": 1,
+        "jobId": str(clone["id"]),
+        "message": "Создана отдельная задача повторной загрузки.",
+    }}
+
+
+def save_publication_preset(payload: dict) -> dict:
+    """Save an operator schedule preset; replacing the same name is explicit."""
+
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Укажите название пресета публикаций.")
+    try:
+        interval_minutes = int(payload.get("intervalMinutes", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Интервал пресета укажите целым числом минут.") from exc
+    if interval_minutes < 1:
+        raise ValueError("Интервал пресета должен быть не меньше минуты.")
+    distribution = str(payload.get("distribution", "first-then-batches"))
+    if distribution not in {"spread", "aligned", "allow-overlap", "first-then-batches", "always-batches", "stretch-cycle"}:
+        raise ValueError("Неизвестный метод распределения публикаций.")
+    try:
+        slot_minutes = int(payload.get("slotMinutes", 15) or 15)
+        batch_capacity = int(payload.get("batchCapacity", 1) or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Шаг слотов и вместимость пачки должны быть целыми числами.") from exc
+    if slot_minutes < 1 or batch_capacity < 1:
+        raise ValueError("Шаг слотов и вместимость пачки должны быть не меньше 1.")
+    channel_ids = [str(value).strip() for value in payload.get("channelIds", []) if str(value).strip()]
+    if not channel_ids:
+        raise ValueError("Для пресета выберите хотя бы один канал.")
+    preset = {"name": name, "intervalMinutes": interval_minutes, "distribution": distribution, "channelIds": channel_ids}
+    if "slotMinutes" in payload or "batchCapacity" in payload:
+        preset.update({"slotMinutes": slot_minutes, "batchCapacity": batch_capacity})
+    settings = load_settings()
+    settings.youtube_publication_presets = [item for item in settings.youtube_publication_presets if str(item.get("name", "")) != name]
+    settings.youtube_publication_presets.append(preset)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-preset", "count": len(settings.youtube_publication_presets), "message": f"Пресет «{name}» сохранён."}}
+
+
+def move_publication_job(payload: dict) -> dict:
+    """Move one scheduled task without recalculating neighbouring tasks."""
+
+    job_id = str(payload.get("jobId", "")).strip()
+    if not job_id:
+        raise ValueError("Выберите задачу для изменения времени.")
+    try:
+        publish_at = datetime.fromisoformat(str(payload.get("publishAt", "")))
+    except ValueError as exc:
+        raise ValueError("Укажите новую дату и время публикации.") from exc
+    if publish_at.tzinfo is None:
+        raise ValueError("Время публикации должно содержать часовой пояс.")
+    settings = load_settings()
+    changed: dict | None = None
+    updated: list[dict] = []
+    for item in settings.youtube_publication_jobs:
+        if str(item.get("id", "")) != job_id:
+            updated.append(item)
+            continue
+        changed = dict(item)
+        changed["publishAt"] = publish_at.isoformat()
+        changed["privacy"] = "private"
+        if str(changed.get("status", "ready")) == "ready":
+            changed["status"] = "scheduled"
+        updated.append(changed)
+    if changed is None:
+        raise ValueError("Задача публикации не найдена.")
+    settings.youtube_publication_jobs = updated
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "moved", "jobId": job_id,
+        "title": str(changed.get("title", "")), "detail": f"Время вручную изменено: {publish_at.isoformat()}",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-move", "count": 1, "message": "Время публикации изменено."}}
+
+
+def move_publication_job_channel(payload: dict) -> dict:
+    """Move one queue item to any existing operator channel without changing its slot."""
+
+    job_id = str(payload.get("jobId", "")).strip()
+    channel_id = str(payload.get("channelId", "")).strip()
+    if not job_id or not channel_id:
+        raise ValueError("Выберите ролик и канал для переноса.")
+    settings = load_settings()
+    known_channels = {str(item.get("profile_id", "")).strip() for item in settings.analytics_channels}
+    if channel_id not in known_channels:
+        raise ValueError("Выбранный канал не найден.")
+    job = next((item for item in settings.youtube_publication_jobs if str(item.get("id", "")) == job_id), None)
+    if job is None:
+        raise ValueError("Ролик не найден в очереди публикаций.")
+    job["channelId"] = channel_id
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "publication-channel-moved", "jobId": job_id,
+        "title": str(job.get("title", "")), "detail": f"Ролик перенесён в канал {channel_id}.",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-channel-moved", "count": 1,
+            "message": "Ролик перенесён в выбранный канал."}}
+
+
+def rewrite_publication_title(payload: dict) -> dict:
+    """Apply an operator-reviewed YouTube-safe title to one blocked queue job."""
+
+    job_id = str(payload.get("jobId", "")).strip()
+    title = str(payload.get("title", "")).strip()
+    if not job_id:
+        raise ValueError("Выберите ролик для изменения заголовка.")
+    settings = load_settings()
+    changed: dict | None = None
+    updated: list[dict] = []
+    for item in settings.youtube_publication_jobs:
+        if str(item.get("id", "")) != job_id:
+            updated.append(item)
+            continue
+        current = dict(item)
+        publication_job = _publication_job_from_record(current)
+        candidate = suggest_youtube_title(publication_job) if bool(payload.get("automatic")) else title
+        rewritten = publication_job_record(apply_rewritten_title(publication_job, candidate))
+        current.update(rewritten)
+        changed = current
+        updated.append(current)
+    if changed is None:
+        raise ValueError("Задача публикации не найдена.")
+    settings.youtube_publication_jobs = updated
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "title-rewritten", "jobId": job_id,
+        "title": str(changed.get("title", "")), "detail": "Заголовок приведён к лимиту YouTube.",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-title-rewritten", "count": 1,
+        "message": "Заголовок сохранён и готов для YouTube.",
+    }}
+
+
+def mark_publication_post_done(payload: dict) -> dict:
+    """Record the operator's manual Community-post confirmation accurately."""
+
+    job_id = str(payload.get("jobId", "")).strip()
+    if not job_id:
+        raise ValueError("Выберите ролик для отметки поста.")
+    settings = load_settings()
+    changed: dict | None = None
+    for index, item in enumerate(settings.youtube_publication_jobs):
+        if str(item.get("id", "")) != job_id:
+            continue
+        current = dict(item)
+        post = dict(current.get("post") or {})
+        if str(post.get("status", "")) not in {"prepared", "published-manually"}:
+            raise ValueError("Для этого ролика ещё не подготовлен пост.")
+        post.update({"status": "published-manually", "publishedAt": datetime.now().astimezone().isoformat()})
+        current["post"] = post
+        settings.youtube_publication_jobs[index] = current
+        changed = current
+        break
+    if changed is None:
+        raise ValueError("Задача публикации не найдена.")
+    settings.youtube_publication_activity.append({
+        "at": datetime.now().astimezone().isoformat(), "kind": "post-published-manually", "jobId": job_id,
+        "title": str(changed.get("title", "")), "detail": "Оператор подтвердил публикацию поста в Studio.",
+    })
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-post-marked", "count": 1,
+        "message": "Пост отмечен опубликованным вручную.",
+    }}
+
+
+def upload_publication_jobs(payload: dict) -> dict:
+    """Upload selected queue jobs to their explicitly connected OAuth channels.
+
+    A task is marked uploaded only after YouTube returns its actual video ID.
+    The operator-controlled concurrency is used as-is; it is not silently
+    reduced by NewsFlow.  Community posts remain prepared hand-offs because
+    the public YouTube API has no endpoint to publish them.
+    """
+
+    requested_ids = [str(value).strip() for value in payload.get("jobIds", []) if str(value).strip()]
+    if not requested_ids:
+        raise ValueError("Выберите хотя бы один ролик для загрузки.")
+    settings = load_settings()
+    records = {str(item.get("id", "")): dict(item) for item in settings.youtube_publication_jobs}
+    selected = [records.get(job_id) for job_id in requested_ids]
+    if any(item is None for item in selected):
+        raise ValueError("Одна или несколько задач публикации не найдены.")
+    candidates: list[dict] = []
+    for item in selected:
+        assert item is not None
+        job = _publication_job_from_record(item)
+        if not can_upload(job):
+            raise ValueError(f"Ролик «{job.title}» нельзя загрузить: проверьте заголовок и статус.")
+        if not job.channel_id:
+            raise ValueError(f"Для ролика «{job.title}» не выбран канал.")
+        if not settings.youtube_oauth_tokens.get(job.channel_id):
+            raise ValueError(f"Для канала ролика «{job.title}» не выполнен OAuth-вход.")
+        candidates.append(item)
+    workers = int(settings.youtube_publication_upload_concurrency or 1)
+    if workers < 1:
+        raise ValueError("Количество одновременных загрузок должно быть не меньше 1.")
+    call_to_action = str(payload.get("callToAction", "")).strip()
+
+    def upload_one(item: dict) -> tuple[str, dict, dict, dict]:
+        job = _publication_job_from_record(item)
+        credentials = json.loads(settings.youtube_oauth_tokens[job.channel_id])
+        body = build_private_video_insert_body(
+            title=job.title, description=job.seo_description, tags=job.tags,
+            publish_at=job.publish_at.isoformat() if job.publish_at else "",
+        )
+        result, refreshed_credentials = upload_private_video(
+            credentials, video_path=job.video_path, body=body, thumbnail_path=job.thumbnail_path,
+        )
+        post = build_linked_community_post(job, video_url=result["videoUrl"], call_to_action=call_to_action)
+        return job.id, result, refreshed_credentials, post
+
+    succeeded: list[str] = []
+    failures: list[tuple[str, str]] = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newsflow-youtube-upload") as executor:
+        future_to_id = {executor.submit(upload_one, item): str(item["id"]) for item in candidates}
+        for future in as_completed(future_to_id):
+            job_id = future_to_id[future]
+            try:
+                completed_id, result, refreshed_credentials, post = future.result()
+                current = records[completed_id]
+                current.update({
+                    "status": "uploaded", "videoStatus": "uploaded", "videoId": result["videoId"],
+                    "videoUrl": result["videoUrl"], "youtubePrivacyStatus": result["privacyStatus"],
+                    "post": post,
+                })
+                _queue_youtube_engagement_task(settings, current, post)
+                channel_id = str(current.get("channelId", ""))
+                settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed_credentials, ensure_ascii=False)
+                succeeded.append(completed_id)
+            except Exception as exc:  # Each task retains its own recoverable error.
+                current = records[job_id]
+                current.update({"status": "failed", "videoStatus": "failed", "uploadError": str(exc)})
+                failures.append((job_id, str(exc)))
+    settings.youtube_publication_jobs = [records.get(str(item.get("id", "")), item) for item in settings.youtube_publication_jobs]
+    now = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_activity.extend({
+        "at": now, "kind": "uploaded", "jobId": job_id,
+        "title": str(records[job_id].get("title", "")),
+        "detail": f"Ролик загружен: {records[job_id].get('videoUrl', '')}",
+    } for job_id in succeeded)
+    settings.youtube_publication_activity.extend({
+        "at": now, "kind": "upload-failed", "jobId": job_id,
+        "title": str(records[job_id].get("title", "")), "detail": error,
+    } for job_id, error in failures)
+    settings.youtube_publication_activity = settings.youtube_publication_activity[-5000:]
+    save_settings(settings)
+    message = f"Загружено роликов: {len(succeeded)}."
+    if failures:
+        message += f" Ошибок: {len(failures)}."
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-upload", "count": len(succeeded), "failed": len(failures), "message": message,
+    }}
+
+
+def migrate_publication_v2(payload: dict) -> dict:
+    """Create V2 records without deleting or rewriting legacy publication jobs."""
+    settings = load_settings()
+    report = migrate_legacy_publication_data(settings)
+    reconcile_publication_items(settings)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-migration", "count": report.migrated_items,
+            "message": f"Publication V2: перенесено роликов {report.migrated_items}; legacy-заданий {report.migrated_jobs}; отсутствующих файлов {report.missing_artifacts}."}}
+
+
+def save_publication_v2_rules(payload: dict) -> dict:
+    settings = load_settings()
+    rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
+    settings.youtube_channel_publication_rules = {str(channel_id): dict(rule) for channel_id, rule in rules.items()
+                                                  if isinstance(rule, dict) and str(channel_id).strip()}
+    save_settings(settings)
+    return snapshot()
+
+
+def preview_publication_v2_distribution(payload: dict) -> dict:
+    settings = load_settings()
+    reconcile_publication_items(settings)
+    rules = [dict(rule) for rule in settings.youtube_channel_publication_rules.values()]
+    bulk_schedule = payload.get("bulkSchedule") if isinstance(payload.get("bulkSchedule"), dict) else None
+    if bulk_schedule is not None:
+        selected_channels = {str(value).strip() for value in bulk_schedule.get("channelIds", []) if str(value).strip()}
+        if not selected_channels:
+            raise ValueError("Выберите хотя бы один канал для массового диапазона.")
+        try:
+            max_per_channel = max(1, int(bulk_schedule.get("maxPerChannel", 1)))
+        except (TypeError, ValueError) as error:
+            raise ValueError("Укажите положительный лимит роликов на канал.") from error
+        rules = [
+            {**rule, "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel)}
+            for rule in rules
+            if str(rule.get("channelId", "")).strip() in selected_channels
+        ]
+    preview = build_distribution_preview(settings.youtube_publication_items,
+                                         rules,
+                                         settings.youtube_publication_assignments)
+    if bulk_schedule is not None:
+        preview["assignments"] = apply_bulk_schedule_range(preview["assignments"], bulk_schedule)
+    return {**snapshot(), "publicationPreview": preview}
+
+
+def confirm_publication_v2_distribution(payload: dict) -> dict:
+    settings = load_settings()
+    reconcile_publication_items(settings)
+    assignments = payload.get("assignments") if isinstance(payload.get("assignments"), list) else []
+    for assignment in assignments:
+        if isinstance(assignment, dict) and str(assignment.get("productionItemId", "")).strip():
+            settings.youtube_publication_assignments[str(assignment["productionItemId"])] = dict(assignment)
+    snapshot_ids = confirm_publication_snapshots(settings, assignments, settings.youtube_channel_publication_rules)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-confirm", "count": len(snapshot_ids),
+            "message": f"Созданы или подтверждены snapshots: {len(snapshot_ids)}."}}
+
+
+def retry_publication_v2_stage(payload: dict) -> dict:
+    settings = load_settings()
+    retry_publication_stage(settings, str(payload.get("snapshotId", "")), str(payload.get("stage", "")))
+    save_settings(settings)
+    return snapshot()
+
+
+def set_publication_v2_paused(payload: dict) -> dict:
+    settings = load_settings()
+    settings.youtube_publication_queue_paused = bool(payload.get("paused", False))
+    save_settings(settings)
+    return snapshot()
+
+
+def cancel_publication_v2_execution(payload: dict) -> dict:
+    settings = load_settings()
+    cancel_publication_execution(settings, str(payload.get("snapshotId", "")).strip())
+    save_settings(settings)
+    return snapshot()
+
+
+def publication_v2_receipt(payload: dict) -> dict:
+    settings = load_settings()
+    receipt = persist_publication_receipt(settings, str(payload.get("snapshotId", "")).strip())
+    save_settings(settings)
+    return {**snapshot(), "publicationReceipt": receipt}
+
+
+def upload_publication_v2_snapshots(payload: dict) -> dict:
+    """Run explicitly selected frozen V2 uploads with durable pre-transport leases.
+
+    Saving the RUNNING lease happens before the network call.  A crash before
+    YouTube returns an ID is therefore reconciled as user-action-required,
+    rather than silently issuing a second insert.  Thumbnail work is excluded
+    from this transport call and will be a separate downstream stage.
+    """
+    requested = list(dict.fromkeys(str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()))
+    if not requested:
+        raise ValueError("Выберите хотя бы один подтверждённый snapshot для загрузки.")
+    settings = load_settings()
+    if settings.youtube_publication_queue_paused:
+        raise ValueError("Очередь публикаций приостановлена.")
+    executions = dict(settings.youtube_publication_executions or {})
+    snapshots = dict(settings.youtube_publication_snapshots or {})
+    missing = [snapshot_id for snapshot_id in requested if snapshot_id not in executions or snapshot_id not in snapshots]
+    if missing:
+        raise ValueError("Один или несколько подтверждённых snapshots не найдены.")
+    limit = max(1, int(settings.youtube_publication_upload_concurrency or 1))
+    active = sum(1 for execution in executions.values()
+                 if str((execution.get("steps", {}).get("VIDEO_UPLOAD", {}) or {}).get("status", "")).upper() == "RUNNING")
+    available = max(0, limit - active)
+    worker_prefix = f"publication-v2-{uuid.uuid4().hex[:8]}"
+    blocked: list[tuple[str, str]] = []
+    if not available:
+        return {**snapshot(), "operationResult": {"kind": "publication-v2-upload", "count": 0,
+                "failed": 0, "message": "Все upload workers заняты; новые передачи останутся в очереди до освобождения слота."}}
+
+    lock = threading.Lock()
+    succeeded: list[str] = []
+    failures: list[tuple[str, str]] = []
+
+    def upload_one(position: int, snapshot_id: str) -> None:
+        worker_id = f"{worker_prefix}-{position + 1}"
+        with lock:
+            preflight = validate_publication_snapshot(settings, snapshot_id)
+            if preflight["uploadAlreadyExists"]:
+                blocked.append((snapshot_id, "MP4 уже имеет YouTube ID; повторная загрузка запрещена"))
+                return
+            if not preflight["ok"]:
+                first = preflight["reasons"][0]
+                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", str(first["kind"]), str(first["message"]))
+                save_settings(settings)
+                blocked.append((snapshot_id, str(first["message"])))
+                return
+            try:
+                begin_upload_attempt(settings, snapshot_id, worker_id)
+                # This is the durable crash/restart boundary: the RUNNING
+                # lease exists on disk before the request can leave the PC.
+                save_settings(settings)
+            except Exception as exc:
+                blocked.append((snapshot_id, str(exc)))
+                return
+            snapshot_record = dict(snapshots[snapshot_id])
+            metadata = dict(snapshot_record.get("metadata", {}) or {})
+            channel_id = str(snapshot_record.get("channelId", "")).strip()
+        try:
+            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
+            body = build_private_video_insert_body(
+                title=str(metadata.get("title", "")), description=str(metadata.get("description", "")),
+                tags=[str(value) for value in metadata.get("tags", []) if str(value).strip()],
+                publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
+                privacy=str(snapshot_record.get("privacy", "private")),
+            )
+            result, refreshed = upload_private_video(credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
+                                                       thumbnail_path="")
+            with lock:
+                complete_upload_attempt(settings, snapshot_id, worker_id, result)
+                settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
+                save_settings(settings)
+                succeeded.append(snapshot_id)
+        except Exception as exc:
+            with lock:
+                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", classify_publication_error(exc), str(exc))
+                release_execution(settings, snapshot_id, worker_id)
+                save_settings(settings)
+                failures.append((snapshot_id, str(exc)))
+
+    with ThreadPoolExecutor(max_workers=min(available, len(requested)), thread_name_prefix="newsflow-publication-v2") as executor:
+        futures = [executor.submit(upload_one, position, snapshot_id) for position, snapshot_id in enumerate(requested)]
+        for future in as_completed(futures):
+            future.result()
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-upload", "count": len(succeeded),
+            "failed": len(failures) + len(blocked), "message": f"Передано MP4: {len(succeeded)}. Ошибок или блокировок: {len(failures) + len(blocked)}."}}
+
+
+def reconcile_publication_v2_youtube(payload: dict) -> dict:
+    """Confirm known YouTube videos and advance only stages backed by API evidence."""
+    requested = list(dict.fromkeys(str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()))
+    if not requested:
+        raise ValueError("Выберите хотя бы один snapshot для проверки YouTube.")
+    settings = load_settings()
+    confirmed = 0
+    failures: list[tuple[str, str]] = []
+    for snapshot_id in requested:
+        snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+        execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+        video_id = str(execution.get("youtubeVideoId") or "").strip()
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        if not snapshot_record or not video_id:
+            failures.append((snapshot_id, "Для проверки требуется сохранённый YouTube ID."))
+            continue
+        try:
+            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
+            video, refreshed = fetch_youtube_video_state(credentials, video_id)
+            reconcile_youtube_video_state(settings, snapshot_id, video)
+            settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
+            confirmed += 1
+        except Exception as exc:
+            fail_publication_stage(settings, snapshot_id, "YOUTUBE_PROCESSING", classify_publication_error(exc), str(exc))
+            failures.append((snapshot_id, str(exc)))
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-reconcile", "count": confirmed,
+            "failed": len(failures), "message": f"YouTube подтверждён для роликов: {confirmed}. Ошибок: {len(failures)}."}}
+
+
+def run_publication_v2_thumbnails(payload: dict) -> dict:
+    """Apply only the thumbnail stage to known videos; MP4 transport is never invoked here."""
+    requested = list(dict.fromkeys(str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()))
+    if not requested:
+        raise ValueError("Выберите хотя бы один snapshot для установки обложки.")
+    settings = load_settings()
+    succeeded = 0
+    failures: list[tuple[str, str]] = []
+    for position, snapshot_id in enumerate(requested, start=1):
+        snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+        execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+        video_id = str(execution.get("youtubeVideoId") or "").strip()
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        thumbnail_path = str(snapshot_record.get("thumbnailPath", "")).strip()
+        if not snapshot_record or not video_id:
+            failures.append((snapshot_id, "Нельзя поставить обложку до подтверждённого YouTube ID."))
+            continue
+        if not thumbnail_path or not Path(thumbnail_path).is_file():
+            fail_publication_stage(settings, snapshot_id, "THUMBNAIL", "USER_ACTION_REQUIRED", "Файл обложки не найден; загрузка MP4 сохранена.")
+            failures.append((snapshot_id, "Файл обложки не найден."))
+            continue
+        worker_id = f"publication-v2-thumbnail-{uuid.uuid4().hex[:8]}-{position}"
+        if not claim_execution(settings, snapshot_id, worker_id):
+            failures.append((snapshot_id, "Snapshot занят другим worker."))
+            continue
+        steps = dict((settings.youtube_publication_executions[snapshot_id].get("steps", {}) or {}))
+        step = dict(steps.get("THUMBNAIL", {}) or {})
+        step.update({"status": "RUNNING", "attempts": int(step.get("attempts", 0) or 0) + 1, "startedAt": datetime.now().astimezone().isoformat(), "error": None})
+        steps["THUMBNAIL"] = step
+        settings.youtube_publication_executions[snapshot_id]["steps"] = steps
+        settings.youtube_publication_executions[snapshot_id]["currentStage"] = "THUMBNAIL"
+        save_settings(settings)
+        try:
+            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
+            result = set_youtube_thumbnail(credentials, video_id, thumbnail_path)
+            complete_publication_stage(settings, snapshot_id, worker_id, "THUMBNAIL", {"path": thumbnail_path, "response": result.get("response", {})})
+            settings.youtube_oauth_tokens[channel_id] = json.dumps(result.get("credentials", credentials), ensure_ascii=False)
+            save_settings(settings)
+            succeeded += 1
+        except Exception as exc:
+            fail_publication_stage(settings, snapshot_id, "THUMBNAIL", classify_publication_error(exc), str(exc))
+            release_execution(settings, snapshot_id, worker_id)
+            save_settings(settings)
+            failures.append((snapshot_id, str(exc)))
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-thumbnail", "count": succeeded,
+            "failed": len(failures), "message": f"Обложки установлены: {succeeded}. Ошибок: {len(failures)}."}}
+
+
+def run_auto_pipeline(payload: dict) -> dict:
+    """Run the production chain after the user has manually approved ideas.
+
+    The function deliberately does not call idea generation. Every downstream
+    network or paid operation is invoked only through the explicit
+    ``Запустить автоэтапы`` button in Electron. Individual stages can be
+    disabled in the request for a manual review workflow.
+    """
+    settings = load_settings()
+    settings.auto_montage_enabled = bool(payload.get("enabled", True))
+    save_settings(settings)
+    if not settings.auto_montage_enabled:
+        return {**snapshot(), "pipelineResult": {"status": "manual", "message": "Автоконвейер выключен"}}
+
+    stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else settings.auto_pipeline_stages
+    enabled = lambda name: bool(stages.get(name, settings.auto_pipeline_stages.get(name, True)))
+    titles, jobs = load_session()
+    if not titles:
+        raise ValueError("Сначала вручную добавьте одобренные идеи в сценарии")
+    completed = {job.request.index for job in jobs if job.state == RunState.DONE and job.result.strip()}
+    pending = [index for index in range(len(titles)) if index not in completed]
+    if pending and enabled("scenarios"):
+        generate_scenarios({"indices": pending, "chatUrl": payload.get("chatUrl", "")})
+        titles, jobs = load_session()
+        completed = {job.request.index for job in jobs if job.state == RunState.DONE and job.result.strip()}
+    if not completed:
+        raise ValueError("Нет готовых сценариев: проверьте Chrome-сессии или ключ OpenAI")
+    indices = sorted(completed)
+    if enabled("covers"):
+        transfer_scenarios({"target": "covers", "indices": indices})
+        settings = load_settings()
+        pending_cover_rows = _select_current_cover_generation_rows(
+            settings, {}, lambda item: item.get("status") != "Готово",
+        )
+        if pending_cover_rows:
+            generate_covers({
+                "indices": [index for index, _item in pending_cover_rows],
+                "productionItemIds": [str(item.get("production_item_id", "")).strip()
+                                      for _index, item in pending_cover_rows],
+            })
+    if enabled("seo"):
+        transfer_scenarios({"target": "seo", "indices": indices})
+        settings = load_settings()
+        pending_seo = [index for index, item in enumerate(settings.seo_queue)
+                       if item.get("status") != "Готово"]
+        if pending_seo:
+            generate_seo({"indices": pending_seo, "chatUrl": payload.get("chatUrl", "")})
+    if enabled("voice"):
+        transfer_scenarios({"target": "voice", "indices": indices})
+        generate_voice({"indices": indices})
+    if enabled("montage"):
+        settings = load_settings()
+        if not settings.footage_folders:
+            raise ValueError("Для автомонтажа добавьте папку с футажами и выполните ИИ-индексацию")
+        for index in indices:
+            voice_path = settings.voice_scenario_outputs.get(str(index + 1), "")
+            if not voice_path or not Path(voice_path).is_file():
+                continue
+            prepared = prepare_montage({"scenarioIndex": index, "aspectRatio": settings.montage_aspect_ratio})
+            project_path = prepared.get("preparedProject", {}).get("path", "")
+            if project_path:
+                render_montage({"projectPath": project_path})
+    if enabled("package"):
+        package_outputs({})
+    return {**snapshot(), "pipelineResult": {"status": "done", "scenarios": len(indices)}}
+
+
+def generate_media(payload: dict) -> dict:
+    settings = load_settings()
+    prompt = str(payload.get("prompt", "")).strip()
+    operation = str(payload.get("operation", "")).strip()
+    media_type = str(payload.get("type", "image"))
+    if not prompt or not operation:
+        raise ValueError("Введите промпт и выберите модель")
+    pool = FastGenPool(_selected_fastgen_keys(settings))
+    suffix = "Видео" if media_type == "video" else "Фото"
+    output = Path(settings.media_output_folder) / suffix
+    paths = pool.generate_media(prompt, output, f"{media_type}-{len(list(output.glob('*'))) + 1:03d}", operation,
+                                str(payload.get("aspectRatio", "16:9")), count=max(1, min(6, int(payload.get("count", 1)))))
+    return {**snapshot(), "operationResult": {"kind": "media", "count": len(paths), "folder": str(output)}}
+
+
+def save_template(payload: dict) -> dict:
+    settings = load_settings()
+    template = str(payload.get("template", "")).strip()
+    if not template:
+        raise ValueError("Введите общий шаблон сценария")
+    settings.template = template
+    ranges = payload.get("ranges")
+    if isinstance(ranges, list):
+        settings.prompt_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
+                                   "prompt": str(item.get("prompt", "")), "target_chars": max(0, int(item.get("target_chars", 0) or 0)),
+                                   "allowed_min": max(0, int(item.get("allowed_min", 0) or 0)), "allowed_max": max(0, int(item.get("allowed_max", 0) or 0))} for item in ranges if isinstance(item, dict)]
+    save_settings(settings)
+    return snapshot()
+
+
+def save_template_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    template = str(payload.get("template", "")).strip()
+    if not name:
+        raise ValueError("Укажите название пресета")
+    if not template:
+        raise ValueError("Заполните общий промпт перед сохранением пресета")
+    ranges = payload.get("ranges", [])
+    safe_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
+                    "prompt": str(item.get("prompt", "")), "target_chars": max(0, int(item.get("target_chars", 0) or 0)),
+                    "allowed_min": max(0, int(item.get("allowed_min", 0) or 0)), "allowed_max": max(0, int(item.get("allowed_max", 0) or 0))} for item in ranges if isinstance(item, dict)] if isinstance(ranges, list) else []
+    existing = next((item for item in settings.scenario_templates
+                     if item.get("topic") == "__newsflow_desktop__" and str(item.get("name", "")).casefold() == name.casefold()), None)
+    value = {"name": name, "topic": "__newsflow_desktop__", "template": template, "ranges": safe_ranges}
+    if existing is None:
+        settings.scenario_templates.append(value)
+    else:
+        existing.update(value)
+    settings.template = template
+    settings.prompt_ranges = safe_ranges
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "template-preset", "count": 1,
+                                                "message": f"Пресет «{name}» сохранён."}}
+
+
+def delete_template_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    before = len(settings.scenario_templates)
+    settings.scenario_templates = [item for item in settings.scenario_templates
+                                   if not (item.get("topic") == "__newsflow_desktop__"
+                                           and str(item.get("name", "")).casefold() == name.casefold())]
+    if len(settings.scenario_templates) == before:
+        raise ValueError("Пресет не найден")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "template-preset", "count": 1,
+                                                "message": f"Пресет «{name}» удалён."}}
+
+
+def save_range_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    ranges = payload.get("ranges", [])
+    if not name:
+        raise ValueError("Укажите название пресета диапазонов")
+    if not isinstance(ranges, list) or not ranges:
+        raise ValueError("Добавьте хотя бы один диапазон для сохранения")
+    safe_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
+                    "prompt": str(item.get("prompt", "")), "target_chars": max(0, int(item.get("target_chars", 0) or 0)),
+                    "allowed_min": max(0, int(item.get("allowed_min", 0) or 0)), "allowed_max": max(0, int(item.get("allowed_max", 0) or 0))} for item in ranges if isinstance(item, dict)]
+    existing = next((item for item in settings.range_templates
+                     if item.get("topic") == "__newsflow_desktop__" and str(item.get("name", "")).casefold() == name.casefold()), None)
+    value = {"name": name, "topic": "__newsflow_desktop__", "ranges": safe_ranges}
+    if existing is None:
+        settings.range_templates.append(value)
+    else:
+        existing.update(value)
+    settings.prompt_ranges = safe_ranges
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "range-preset", "count": len(safe_ranges),
+                                                "message": f"Набор диапазонов «{name}» сохранён."}}
+
+
+def delete_range_preset(payload: dict) -> dict:
+    settings = load_settings()
+    name = " ".join(str(payload.get("name", "")).split())
+    before = len(settings.range_templates)
+    settings.range_templates = [item for item in settings.range_templates
+                                if not (item.get("topic") == "__newsflow_desktop__"
+                                        and str(item.get("name", "")).casefold() == name.casefold())]
+    if len(settings.range_templates) == before:
+        raise ValueError("Пресет диапазонов не найден")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "range-preset", "count": 1,
+                                                "message": f"Набор диапазонов «{name}» удалён."}}
+
+
+def add_api_key(payload: dict) -> dict:
+    kind = str(payload.get("kind", "")).strip()
+    label = str(payload.get("label", "")).strip() or "Новый ключ"
+    secret = str(payload.get("secret", "")).strip()
+    if not secret:
+        raise ValueError("Введите API-ключ")
+    settings = load_settings()
+    if kind == "fastgen":
+        settings.cover_api_keys.append(FastGenKey(label, secret, True))
+    elif kind == "openai":
+        settings.openai_api_keys.append(OpenAIKey(label, secret, True))
+    elif kind == "voicer":
+        settings.secret_voicer_keys.append(SecretVoicerKey(label, secret, True))
+    elif kind == "lumean":
+        settings.lumean_api_keys.append(LumeanKey(label, secret, True))
+    elif kind == "voicegen":
+        settings.voicegen_api_keys.append(VoiceGenKey(label, secret, True))
+    elif kind == "wproject":
+        settings.wproject_api_keys.append(WProjectKey(label, secret, True))
+    elif kind == "youtube":
+        settings.youtube_api_key = secret
+        settings.youtube_api_enabled = True
+    else:
+        raise ValueError("Неизвестный тип API-ключа")
+    save_settings(settings)
+    return snapshot()
+
+
+def set_key_active(payload: dict) -> dict:
+    settings = load_settings()
+    kind = str(payload.get("kind", ""))
+    if kind == "youtube":
+        if not settings.youtube_api_key:
+            raise ValueError("Ключ YouTube Data API не добавлен")
+        settings.youtube_api_enabled = bool(payload.get("active", True))
+        save_settings(settings)
+        return snapshot()
+    entries = {"fastgen": settings.cover_api_keys, "openai": settings.openai_api_keys,
+               "voicer": settings.secret_voicer_keys, "lumean": settings.lumean_api_keys,
+               "voicegen": settings.voicegen_api_keys, "wproject": settings.wproject_api_keys}.get(kind)
+    index = int(payload.get("index", -1))
+    if entries is None or not 0 <= index < len(entries):
+        raise ValueError("Ключ не найден")
+    entries[index].active = bool(payload.get("active", True))
+    save_settings(settings)
+    return snapshot()
+
+
+def save_api_key_note(payload: dict) -> dict:
+    settings = load_settings()
+    kind = str(payload.get("kind", "")).strip()
+    if kind not in {"fastgen", "openai", "voicer", "lumean", "voicegen", "wproject", "youtube"}:
+        raise ValueError("Неизвестный тип API-ключа")
+    index = 0 if kind == "youtube" else int(payload.get("index", -1))
+    entries = {"fastgen": settings.cover_api_keys, "openai": settings.openai_api_keys,
+               "voicer": settings.secret_voicer_keys, "lumean": settings.lumean_api_keys,
+               "voicegen": settings.voicegen_api_keys, "wproject": settings.wproject_api_keys}.get(kind)
+    if kind == "youtube":
+        if not settings.youtube_api_key:
+            raise ValueError("Ключ YouTube Data API не добавлен")
+    elif entries is None or not 0 <= index < len(entries):
+        raise ValueError("Ключ не найден")
+    note = " ".join(str(payload.get("note", "")).split())[:500]
+    key_id = _api_key_id(kind, index)
+    if note:
+        settings.api_key_notes[key_id] = note
+    else:
+        settings.api_key_notes.pop(key_id, None)
+    save_settings(settings)
+    return snapshot()
+
+
+def update_voicer_key_settings(payload: dict) -> dict:
+    """Persist enabled keys and their per-key parallel stream capacity together."""
+    settings = load_settings()
+    rows = payload.get("keys")
+    if not isinstance(rows, list):
+        raise ValueError("Передайте список ключей Secret Voicer")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index = int(row.get("index", -1))
+        if not 0 <= index < len(settings.secret_voicer_keys):
+            continue
+        key = settings.secret_voicer_keys[index]
+        key.active = bool(row.get("active", key.active))
+        key.streams = max(1, min(20, int(row.get("streams", key.streams))))
+    save_settings(settings)
+    return snapshot()
+
+
+def refresh_voicer_balances(payload: dict) -> dict:
+    """Explicitly query read-only Secret Voicer account/quota endpoints."""
+    settings = load_settings()
+    for key in settings.secret_voicer_keys:
+        if not key.active or not key.secret.strip():
+            continue
+        try:
+            key.balance = SecretVoicerClient(key.secret).balance_label()
+            key.balance_status = "ok"
+        except Exception as exc:
+            # Do not invent a balance when this deployment does not expose it.
+            key.balance = "—"
+            key.balance_status = str(exc)[:220]
+    save_settings(settings)
+    return snapshot()
+
+
+def update_lumean_key_settings(payload: dict) -> dict:
+    """Save Lumean pool membership and per-key service concurrency."""
+    settings = load_settings()
+    rows = payload.get("keys")
+    if not isinstance(rows, list):
+        raise ValueError("Передайте список ключей Lumean")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index = int(row.get("index", -1))
+        if not 0 <= index < len(settings.lumean_api_keys):
+            continue
+        key = settings.lumean_api_keys[index]
+        key.active = bool(row.get("active", key.active))
+        key.streams = max(1, min(100, int(row.get("streams", key.streams))))
+    save_settings(settings)
+    return snapshot()
+
+
+def refresh_lumean_catalog(payload: dict) -> dict:
+    """Fetch Lumean voice/model metadata and usage with no synthesis order."""
+    settings = load_settings()
+    keys = [item for item in settings.lumean_api_keys if item.active and item.secret.strip()]
+    if not keys:
+        raise ValueError("Добавьте активный API-ключ Lumean")
+    client = LumeanClient(keys[0].secret)
+    errors: list[str] = []
+    try:
+        settings.lumean_voice_cache = client.voices()
+    except Exception as exc:
+        errors.append(f"голоса: {_voice_error_reason(exc)}")
+    try:
+        settings.lumean_model_cache = client.models()
+    except Exception as exc:
+        errors.append(f"модели: {_voice_error_reason(exc)}")
+    for key in keys:
+        try:
+            key.balance = LumeanClient(key.secret).balance_label()
+            key.balance_status = "ok"
+        except Exception as exc:
+            key.balance = "—"
+            key.balance_status = _voice_error_reason(exc)[:220]
+    save_settings(settings)
+    result = snapshot()
+    if errors:
+        result["operationResult"] = {"kind": "lumean-catalog", "count": len(settings.lumean_voice_cache),
+                                      "message": "Lumean обновлён частично: " + "; ".join(errors)}
+    else:
+        result["operationResult"] = {"kind": "lumean-catalog", "count": len(settings.lumean_voice_cache),
+                                      "message": f"Lumean: загружено голосов {len(settings.lumean_voice_cache)}, моделей {len(settings.lumean_model_cache)}."}
+    return result
+
+
+def update_voicegen_key_settings(payload: dict) -> dict:
+    settings = load_settings()
+    rows = payload.get("keys")
+    if not isinstance(rows, list):
+        raise ValueError("Передайте список ключей VoiceGen")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index = int(row.get("index", -1))
+        if not 0 <= index < len(settings.voicegen_api_keys):
+            continue
+        key = settings.voicegen_api_keys[index]
+        key.active = bool(row.get("active", key.active))
+        key.streams = max(1, min(100, int(row.get("streams", key.streams))))
+    save_settings(settings)
+    return snapshot()
+
+
+def refresh_voicegen_catalog(payload: dict) -> dict:
+    """Read-only VoiceGen profile, voices and V3 presets; never make a task."""
+    settings = load_settings()
+    keys = [item for item in settings.voicegen_api_keys if item.active and item.secret.strip()]
+    if not keys:
+        raise ValueError("Добавьте активный API-ключ VoiceGen")
+    client = VoiceGenClient(keys[0].secret)
+    errors: list[str] = []
+    try:
+        settings.voicegen_profile_cache = client.profile()
+    except Exception as exc:
+        errors.append(f"профиль: {_voice_error_reason(exc)}")
+    try:
+        voices, capacity = client.voices()
+        settings.voicegen_voice_cache = voices
+        if capacity:
+            settings.voicegen_profile_cache["voice_capacity"] = capacity
+    except Exception as exc:
+        errors.append(f"голоса: {_voice_error_reason(exc)}")
+    try:
+        settings.voicegen_preset_cache = client.presets("elevenLabsV3")
+    except Exception as exc:
+        errors.append(f"пресеты: {_voice_error_reason(exc)}")
+    try:
+        settings.voicegen_engine_cache = client.engines()
+    except Exception as exc:
+        errors.append(f"движки: {_voice_error_reason(exc)}")
+    for key in keys:
+        try:
+            key.balance = VoiceGenClient(key.secret).balance_label()
+            key.balance_status = "ok"
+        except Exception as exc:
+            key.balance = "—"
+            key.balance_status = _voice_error_reason(exc)[:220]
+    save_settings(settings)
+    result = snapshot()
+    result["operationResult"] = {"kind": "voicegen-catalog", "count": len(settings.voicegen_voice_cache),
+                                  "message": ("VoiceGen обновлён: " if not errors else "VoiceGen обновлён частично: ")
+                                  + (f"голосов {len(settings.voicegen_voice_cache)}, движков {len(settings.voicegen_engine_cache)}, пресетов {len(settings.voicegen_preset_cache)}" if not errors else "; ".join(errors))}
+    return result
+
+
+def update_wproject_key_settings(payload: dict) -> dict:
+    """Persist WProject pool membership and its documented task capacity."""
+    settings = load_settings()
+    rows = payload.get("keys")
+    if not isinstance(rows, list):
+        raise ValueError("Передайте список ключей WProject")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index = int(row.get("index", -1))
+        if not 0 <= index < len(settings.wproject_api_keys):
+            continue
+        key = settings.wproject_api_keys[index]
+        key.active = bool(row.get("active", key.active))
+        key.streams = max(1, min(100, int(row.get("streams", key.streams))))
+    save_settings(settings)
+    return snapshot()
+
+
+def refresh_wproject_catalog(payload: dict) -> dict:
+    """Read account/usage/voice data without creating a WProject TTS task."""
+    settings = load_settings()
+    keys = [item for item in settings.wproject_api_keys if item.active and item.secret.strip()]
+    if not keys:
+        raise ValueError("Добавьте активный API-ключ WProject")
+    client = WProjectClient(keys[0].secret)
+    errors: list[str] = []
+    try:
+        settings.wproject_profile_cache = client.profile()
+    except Exception as exc:
+        errors.append(f"профиль: {_voice_error_reason(exc)}")
+    try:
+        settings.wproject_usage_cache = client.usage()
+    except Exception as exc:
+        errors.append(f"лимиты: {_voice_error_reason(exc)}")
+    try:
+        settings.wproject_voice_cache = client.voices()
+    except Exception as exc:
+        errors.append(f"голоса: {_voice_error_reason(exc)}")
+    # WProject's usage document is the authoritative quota source.  Keep the
+    # full payload in a dedicated cache and show only a safe compact summary
+    # next to each key; API secrets never leave Settings.
+    for key in keys:
+        try:
+            usage = WProjectClient(key.secret).usage()
+            characters = dict(usage.get("characters", {}) or {}) if isinstance(usage, dict) else {}
+            used, limit = characters.get("used"), characters.get("limit")
+            key.balance = (f"символы: {used}/{limit}" if used is not None and limit is not None else "доступ подтверждён")
+            key.balance_status = "ok"
+        except Exception as exc:
+            key.balance = "—"
+            key.balance_status = _voice_error_reason(exc)[:220]
+    save_settings(settings)
+    result = snapshot()
+    result["operationResult"] = {
+        "kind": "wproject-catalog", "count": len(settings.wproject_voice_cache),
+        "message": (f"WProject: загружено голосов {len(settings.wproject_voice_cache)}."
+                    if not errors else "WProject обновлён частично: " + "; ".join(errors)),
+    }
+    return result
+
+
+def open_chrome_session(payload: dict) -> dict:
+    settings = load_settings()
+    index = int(payload.get("index", -1))
+    if not 0 <= index < len(settings.chrome_sessions):
+        raise ValueError("Сессия не найдена")
+    open_login_window(settings.chrome_sessions[index], str(payload.get("url", "")) or "https://studio.youtube.com")
+    return snapshot()
+
+
+def main() -> None:
+    command = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
+    try:
+        payload = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+        if command in COMMAND_CONTRACT:
+            validate_command_request(command, payload)
+        if command == "snapshot":
+            result = snapshot()
+        elif command == "reconcile-runtime-state":
+            result = reconcile_runtime_state(payload if isinstance(payload, dict) else {})
+        elif command == "save-settings":
+            result = save_settings_patch(payload if isinstance(payload, dict) else {})
+        elif command == "save-obsidian-settings":
+            result = save_obsidian_settings(payload if isinstance(payload, dict) else {})
+        elif command == "test-obsidian-mcp":
+            result = test_obsidian_mcp()
+        elif command == "export-obsidian-notes":
+            result = export_obsidian_notes(payload if isinstance(payload, dict) else {})
+        elif command == "add-topic":
+            result = add_topic(payload if isinstance(payload, dict) else {})
+        elif command == "delete-topics":
+            result = delete_topics(payload if isinstance(payload, dict) else {})
+        elif command == "suggest-topics":
+            result = suggest_topics(payload if isinstance(payload, dict) else {})
+        elif command == "add-suggested-topics-to-favorites":
+            result = add_suggested_topics_to_favorites(payload if isinstance(payload, dict) else {})
+        elif command == "clear-suggested-topics":
+            result = clear_suggested_topics()
+        elif command == "reject-suggested-topics":
+            result = reject_suggested_topics(payload if isinstance(payload, dict) else {})
+        elif command == "add-idea-reference-channel":
+            result = add_idea_reference_channel(payload if isinstance(payload, dict) else {})
+        elif command == "remove-idea-reference-channel":
+            result = remove_idea_reference_channel(payload if isinstance(payload, dict) else {})
+        elif command == "save-idea-reference-rules":
+            result = save_idea_reference_rules(payload if isinstance(payload, dict) else {})
+        elif command == "analyze-idea-reference-channels":
+            result = analyze_idea_reference_channels(payload if isinstance(payload, dict) else {})
+        elif command == "research-youtube-topics":
+            result = research_youtube_topics(payload if isinstance(payload, dict) else {})
+        elif command == "clear-youtube-suggested-topics":
+            result = clear_youtube_suggested_topics()
+        elif command == "add-session":
+            result = add_session(payload if isinstance(payload, dict) else {})
+        elif command == "add-topics-to-plan":
+            result = add_topics_to_plan(payload if isinstance(payload, dict) else {})
+        elif command == "set-idea-route":
+            result = set_idea_route(payload if isinstance(payload, dict) else {})
+        elif command == "save-idea-route-preset":
+            result = save_idea_route_preset(payload if isinstance(payload, dict) else {})
+        elif command == "update-idea-plan":
+            result = update_idea_plan(payload if isinstance(payload, dict) else {})
+        elif command == "generate-ideas":
+            result = generate_ideas(payload if isinstance(payload, dict) else {})
+        elif command == "delete-idea-results":
+            result = delete_idea_results(payload if isinstance(payload, dict) else {})
+        elif command == "regenerate-idea-results":
+            result = regenerate_idea_results(payload if isinstance(payload, dict) else {})
+        elif command == "add-ideas-to-scenarios":
+            result = add_ideas_to_scenarios(payload if isinstance(payload, dict) else {})
+        elif command == "transfer-ideas":
+            result = transfer_ideas(payload if isinstance(payload, dict) else {})
+        elif command == "export-ideas":
+            result = export_ideas()
+        elif command == "import-manual-scenario":
+            result = import_manual_scenario(payload if isinstance(payload, dict) else {})
+        elif command == "import-manual-scenarios":
+            result = import_manual_scenarios(payload if isinstance(payload, dict) else {})
+        elif command == "import-voiceover":
+            result = import_voiceover(payload if isinstance(payload, dict) else {})
+        elif command == "import-voiceover-files":
+            result = import_voiceover_files(payload if isinstance(payload, dict) else {})
+        elif command == "import-voiceover-folder":
+            result = import_voiceover_folder(payload if isinstance(payload, dict) else {})
+        elif command == "remove-voiceovers":
+            result = remove_voiceovers(payload if isinstance(payload, dict) else {})
+        elif command == "export-stage":
+            result = export_stage(payload if isinstance(payload, dict) else {})
+        elif command == "export-scenario-titles":
+            result = export_scenario_titles()
+        elif command == "export-scenarios":
+            result = export_scenarios(payload if isinstance(payload, dict) else {})
+        elif command == "export-scenarios-separate-txt":
+            result = export_scenarios_separate_txt(payload if isinstance(payload, dict) else {})
+        elif command == "set-session-active":
+            result = set_session_active(payload if isinstance(payload, dict) else {})
+        elif command == "set-session-usage":
+            result = set_session_usage(payload if isinstance(payload, dict) else {})
+        elif command == "add-channel":
+            result = add_channel(payload if isinstance(payload, dict) else {})
+        elif command == "import-channel-research-txt":
+            result = import_channel_research_txt(payload if isinstance(payload, dict) else {})
+        elif command == "update-analytics-channel-metadata":
+            result = update_analytics_channel_metadata(payload if isinstance(payload, dict) else {})
+        elif command == "open-analytics-channel":
+            result = open_analytics_channel(payload if isinstance(payload, dict) else {})
+        elif command == "remove-analytics-channel":
+            result = remove_analytics_channel(payload if isinstance(payload, dict) else {})
+        elif command == "save-google-oauth":
+            result = save_google_oauth(payload if isinstance(payload, dict) else {})
+        elif command == "save-youtube-oauth-service":
+            result = save_youtube_oauth_service(payload if isinstance(payload, dict) else {})
+        elif command == "start-youtube-channel-handoff":
+            result = start_youtube_channel_handoff(payload if isinstance(payload, dict) else {})
+        elif command == "finish-youtube-channel-handoff":
+            result = finish_youtube_channel_handoff(payload if isinstance(payload, dict) else {})
+        elif command == "cancel-youtube-channel-handoff":
+            result = cancel_youtube_channel_handoff(payload if isinstance(payload, dict) else {})
+        elif command == "connect-youtube-channel":
+            result = connect_youtube_channel(payload if isinstance(payload, dict) else {})
+        elif command == "reset-youtube-channel-account":
+            result = reset_youtube_channel_account(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-analytics":
+            result = refresh_analytics(payload if isinstance(payload, dict) else {})
+        elif command == "add-scenarios":
+            result = add_scenarios(payload if isinstance(payload, dict) else {})
+        elif command == "generate-scenarios":
+            result = generate_scenarios(payload if isinstance(payload, dict) else {})
+        elif command == "rename-scenario":
+            result = rename_scenario_command(payload if isinstance(payload, dict) else {})
+        elif command == "remove-scenarios":
+            result = remove_scenarios_command(payload if isinstance(payload, dict) else {})
+        elif command == "save-scenario-text":
+            result = save_scenario_text(payload if isinstance(payload, dict) else {})
+        elif command == "transfer-scenarios":
+            result = transfer_scenarios(payload if isinstance(payload, dict) else {})
+        elif command == "enqueue-montage-audio":
+            result = enqueue_montage_audio(payload if isinstance(payload, dict) else {})
+        elif command == "save-cover-settings":
+            result = save_cover_settings(payload if isinstance(payload, dict) else {})
+        elif command == "save-cover-prompt-preset":
+            result = save_cover_prompt_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-cover-prompt-preset":
+            result = delete_cover_prompt_preset(payload if isinstance(payload, dict) else {})
+        elif command == "save-cover-headline-preset":
+            result = save_cover_headline_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-cover-headline-preset":
+            result = delete_cover_headline_preset(payload if isinstance(payload, dict) else {})
+        elif command == "select-cover-prompt":
+            result = select_cover_prompt(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-fastgen":
+            result = refresh_fastgen(payload if isinstance(payload, dict) else {})
+        elif command == "generate-cover-prompts":
+            result = generate_cover_prompts(payload if isinstance(payload, dict) else {})
+        elif command == "generate-cover-headlines":
+            result = generate_cover_headlines(payload if isinstance(payload, dict) else {})
+        elif command == "generate-cover-subheadlines":
+            result = generate_cover_subheadlines(payload if isinstance(payload, dict) else {})
+        elif command == "pause-cover-text-generation":
+            result = set_cover_text_pause(payload if isinstance(payload, dict) else {}, True)
+        elif command == "resume-cover-text-generation":
+            result = set_cover_text_pause(payload if isinstance(payload, dict) else {}, False)
+        elif command == "generate-cover-texts":
+            result = generate_cover_texts(payload if isinstance(payload, dict) else {})
+        elif command == "apply-cover-headline-suggestions":
+            result = apply_cover_headline_suggestions(payload if isinstance(payload, dict) else {})
+        elif command == "apply-cover-subheadline-suggestions":
+            result = apply_cover_subheadline_suggestions(payload if isinstance(payload, dict) else {})
+        elif command == "cancel-cover-subheadlines":
+            result = cancel_cover_subheadlines(payload if isinstance(payload, dict) else {})
+        elif command == "remove-cover-headline-suggestions":
+            result = remove_cover_headline_suggestions(payload if isinstance(payload, dict) else {})
+        elif command == "import-cover-headlines":
+            result = import_cover_headlines(payload if isinstance(payload, dict) else {})
+        elif command == "remove-cover-headlines":
+            result = remove_cover_headlines(payload if isinstance(payload, dict) else {})
+        elif command == "import-cover-topics":
+            result = import_cover_topics(payload if isinstance(payload, dict) else {})
+        elif command == "save-cover-headline":
+            result = save_cover_headline(payload if isinstance(payload, dict) else {})
+        elif command == "save-cover-subheadline":
+            result = save_cover_subheadline(payload if isinstance(payload, dict) else {})
+        elif command == "export-cover-prompts":
+            result = export_cover_prompts(payload if isinstance(payload, dict) else {})
+        elif command == "generate-covers":
+            result = generate_covers(payload if isinstance(payload, dict) else {})
+        elif command == "reconcile-cover-gallery":
+            result = reconcile_cover_gallery(payload if isinstance(payload, dict) else {})
+        elif command == "pause-cover-generation":
+            result = set_cover_generation_paused(True)
+        elif command == "resume-cover-generation":
+            set_cover_generation_paused(False)
+            settings = load_settings()
+            _hydrate_cover_library(settings)
+            paused_rows = _select_current_cover_generation_rows(
+                settings, {}, lambda item: item.get("status") in {"Приостановлено", "Ожидает лимит FastGen"},
+            )
+            # A click on Continue must never look like a failure when the
+            # queue was not paused. In that case return a normal notice;
+            # the UI's primary button starts the selected ready topics.
+            result = generate_covers({
+                "indices": [index for index, _item in paused_rows],
+                "productionItemIds": [str(item.get("production_item_id", "")).strip()
+                                      for _index, item in paused_rows],
+            }) if paused_rows else {
+                **snapshot(), "operationResult": {
+                    "kind": "cover-resume", "count": 0,
+                    "message": "Паузы нет: выберите готовые темы и запустите создание обложек.",
+                }
+            }
+        elif command == "prepare-cover-face-library":
+            result = prepare_cover_face_library(payload if isinstance(payload, dict) else {})
+        elif command == "select-cover-face":
+            result = select_cover_face(payload if isinstance(payload, dict) else {})
+        elif command == "select-cover-face-person":
+            result = select_cover_face_person(payload if isinstance(payload, dict) else {})
+        elif command == "clear-cover-face":
+            result = clear_cover_face(payload if isinstance(payload, dict) else {})
+        elif command == "select-cover-visual-reference":
+            result = select_cover_visual_reference(payload if isinstance(payload, dict) else {})
+        elif command == "set-cover-visual-reference-target":
+            result = set_cover_visual_reference_target(payload if isinstance(payload, dict) else {})
+        elif command == "refine-cover-faces":
+            result = refine_cover_faces(payload if isinstance(payload, dict) else {})
+        elif command == "compose-cover-faces":
+            result = compose_cover_faces(payload if isinstance(payload, dict) else {})
+        elif command == "regenerate-covers":
+            result = regenerate_covers(payload if isinstance(payload, dict) else {})
+        elif command == "regenerate-cover-with-face":
+            result = regenerate_cover_with_face(payload if isinstance(payload, dict) else {})
+        elif command == "regenerate-covers-new-prompts":
+            result = regenerate_covers_new_prompts(payload if isinstance(payload, dict) else {})
+        elif command == "remove-cover-prompts":
+            result = remove_cover_prompts(payload if isinstance(payload, dict) else {})
+        elif command == "select-cover-variant":
+            result = select_cover_variant(payload if isinstance(payload, dict) else {})
+        elif command == "remove-cover-results":
+            result = remove_cover_results(payload if isinstance(payload, dict) else {})
+        elif command == "remove-cover-image":
+            result = remove_cover_image(payload if isinstance(payload, dict) else {})
+        elif command == "remove-cover-queue":
+            result = remove_cover_queue(payload if isinstance(payload, dict) else {})
+        elif command == "export-covers":
+            result = export_covers(payload if isinstance(payload, dict) else {})
+        elif command == "export-cover-images":
+            result = export_cover_images(payload if isinstance(payload, dict) else {})
+        elif command == "render-cover-text":
+            result = render_cover_text(payload if isinstance(payload, dict) else {})
+        elif command == "render-cover-text-fastgen":
+            result = render_cover_text_fastgen(payload if isinstance(payload, dict) else {})
+        elif command == "save-seo-settings":
+            result = save_seo_settings(payload if isinstance(payload, dict) else {})
+        elif command == "save-tags-settings":
+            result = save_tags_settings(payload if isinstance(payload, dict) else {})
+        elif command == "save-tag-limits":
+            result = save_tag_limits(payload if isinstance(payload, dict) else {})
+        elif command == "generate-seo":
+            result = generate_seo(payload if isinstance(payload, dict) else {})
+        elif command == "generate-tags":
+            result = generate_tags(payload if isinstance(payload, dict) else {})
+        elif command == "remove-seo-packages":
+            result = remove_seo_packages(payload if isinstance(payload, dict) else {})
+        elif command == "clear-tags":
+            result = clear_tags(payload if isinstance(payload, dict) else {})
+        elif command == "save-tags-text":
+            result = save_tags_text(payload if isinstance(payload, dict) else {})
+        elif command == "save-seo-text":
+            result = save_seo_text(payload if isinstance(payload, dict) else {})
+        elif command == "export-seo":
+            result = export_seo(payload if isinstance(payload, dict) else {})
+        elif command == "generate-voice":
+            result = generate_voice(payload if isinstance(payload, dict) else {})
+        elif command == "generate-voice-queue":
+            result = generate_voice_queue(payload if isinstance(payload, dict) else {})
+        elif command == "generate-voice-range":
+            result = generate_voice_range(payload if isinstance(payload, dict) else {})
+        elif command == "preview-voice-ranges":
+            result = preview_voice_ranges(payload if isinstance(payload, dict) else {})
+        elif command == "set-voice-queue-paused":
+            result = set_voice_queue_paused(payload if isinstance(payload, dict) else {})
+        elif command == "open-voice-session":
+            result = open_voice_session()
+        elif command == "save-voice-settings":
+            result = save_voice_settings(payload if isinstance(payload, dict) else {})
+        elif command == "save-voice-range-preset":
+            result = save_voice_range_preset(payload if isinstance(payload, dict) else {})
+        elif command == "apply-voice-range-preset":
+            result = apply_voice_range_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-voice-range-preset":
+            result = delete_voice_range_preset(payload if isinstance(payload, dict) else {})
+        elif command == "add-footage-folder":
+            result = add_footage_folder(payload if isinstance(payload, dict) else {})
+        elif command == "remove-footage-folder":
+            result = remove_footage_folder(payload if isinstance(payload, dict) else {})
+        elif command == "save-footage-settings":
+            result = save_footage_settings(payload if isinstance(payload, dict) else {})
+        elif command == "inspect-footage-tree":
+            result = inspect_footage_tree(payload if isinstance(payload, dict) else {})
+        elif command == "add-cutter-sources":
+            result = add_cutter_sources(payload if isinstance(payload, dict) else {})
+        elif command == "run-cutter":
+            result = run_cutter(payload if isinstance(payload, dict) else {})
+        elif command == "run-mixer":
+            result = run_mixer(payload if isinstance(payload, dict) else {})
+        elif command == "search-web-footage":
+            result = search_web_footage(payload if isinstance(payload, dict) else {})
+        elif command == "download-web-footage":
+            result = download_web_footage(payload if isinstance(payload, dict) else {})
+        elif command == "index-footage":
+            result = index_footage(payload if isinstance(payload, dict) else {})
+        elif command == "save-montage-settings":
+            result = save_montage_settings(payload if isinstance(payload, dict) else {})
+        elif command == "prepare-montage":
+            result = prepare_montage(payload if isinstance(payload, dict) else {})
+        elif command == "render-montage":
+            result = render_montage(payload if isinstance(payload, dict) else {})
+        elif command == "export-davinci-xml":
+            result = export_davinci_xml(payload if isinstance(payload, dict) else {})
+        elif command == "import-davinci-xml":
+            result = import_davinci_xml(payload if isinstance(payload, dict) else {})
+        elif command == "run-montage-queue":
+            result = run_montage_queue(payload if isinstance(payload, dict) else {})
+        elif command == "remove-montage-results":
+            result = remove_montage_results(payload if isinstance(payload, dict) else {})
+        elif command == "remove-montage-projects":
+            result = remove_montage_projects(payload if isinstance(payload, dict) else {})
+        elif command == "package-outputs":
+            result = package_outputs(payload if isinstance(payload, dict) else {})
+        elif command == "queue-ready-publication-outputs":
+            result = queue_ready_publication_outputs(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-settings":
+            result = save_publication_settings(payload if isinstance(payload, dict) else {})
+        elif command == "save-youtube-engagement-policy":
+            result = save_youtube_engagement_policy(payload if isinstance(payload, dict) else {})
+        elif command == "run-youtube-engagement":
+            result = run_youtube_engagement(payload if isinstance(payload, dict) else {})
+        elif command == "reconcile-youtube-engagement":
+            result = reconcile_youtube_engagement_tasks(payload if isinstance(payload, dict) else {})
+        elif command == "queue-existing-youtube-engagement":
+            result = queue_existing_youtube_engagement(payload if isinstance(payload, dict) else {})
+        elif command == "update-channel-allocation":
+            result = update_channel_allocation(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-publication-allocation":
+            result = refresh_publication_allocation(payload if isinstance(payload, dict) else {})
+        elif command == "apply-publication-recommendations":
+            result = apply_publication_recommendations(payload if isinstance(payload, dict) else {})
+        elif command == "assign-publication-jobs":
+            result = assign_publication_jobs(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-allocation-preset":
+            result = save_publication_allocation_preset(payload if isinstance(payload, dict) else {})
+        elif command == "clear-production-queue":
+            result = clear_production_queue(payload if isinstance(payload, dict) else {})
+        elif command == "schedule-publication-jobs":
+            result = schedule_publication_jobs(payload if isinstance(payload, dict) else {})
+        elif command == "duplicate-publication-job":
+            result = duplicate_publication_job(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-preset":
+            result = save_publication_preset(payload if isinstance(payload, dict) else {})
+        elif command == "move-publication-job":
+            result = move_publication_job(payload if isinstance(payload, dict) else {})
+        elif command == "move-publication-job-channel":
+            result = move_publication_job_channel(payload if isinstance(payload, dict) else {})
+        elif command == "rewrite-publication-title":
+            result = rewrite_publication_title(payload if isinstance(payload, dict) else {})
+        elif command == "mark-publication-post-done":
+            result = mark_publication_post_done(payload if isinstance(payload, dict) else {})
+        elif command == "upload-publication-jobs":
+            result = upload_publication_jobs(payload if isinstance(payload, dict) else {})
+        elif command == "migrate-publication-v2":
+            result = migrate_publication_v2(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-v2-rules":
+            result = save_publication_v2_rules(payload if isinstance(payload, dict) else {})
+        elif command == "preview-publication-v2-distribution":
+            result = preview_publication_v2_distribution(payload if isinstance(payload, dict) else {})
+        elif command == "confirm-publication-v2-distribution":
+            result = confirm_publication_v2_distribution(payload if isinstance(payload, dict) else {})
+        elif command == "retry-publication-v2-stage":
+            result = retry_publication_v2_stage(payload if isinstance(payload, dict) else {})
+        elif command == "set-publication-v2-paused":
+            result = set_publication_v2_paused(payload if isinstance(payload, dict) else {})
+        elif command == "cancel-publication-v2-execution":
+            result = cancel_publication_v2_execution(payload if isinstance(payload, dict) else {})
+        elif command == "publication-v2-receipt":
+            result = publication_v2_receipt(payload if isinstance(payload, dict) else {})
+        elif command == "upload-publication-v2-snapshots":
+            result = upload_publication_v2_snapshots(payload if isinstance(payload, dict) else {})
+        elif command == "reconcile-publication-v2-youtube":
+            result = reconcile_publication_v2_youtube(payload if isinstance(payload, dict) else {})
+        elif command == "run-publication-v2-thumbnails":
+            result = run_publication_v2_thumbnails(payload if isinstance(payload, dict) else {})
+        elif command == "run-auto-pipeline":
+            result = run_auto_pipeline(payload if isinstance(payload, dict) else {})
+        elif command == "generate-media":
+            result = generate_media(payload if isinstance(payload, dict) else {})
+        elif command == "save-template":
+            result = save_template(payload if isinstance(payload, dict) else {})
+        elif command == "save-template-preset":
+            result = save_template_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-template-preset":
+            result = delete_template_preset(payload if isinstance(payload, dict) else {})
+        elif command == "save-range-preset":
+            result = save_range_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-range-preset":
+            result = delete_range_preset(payload if isinstance(payload, dict) else {})
+        elif command == "add-api-key":
+            result = add_api_key(payload if isinstance(payload, dict) else {})
+        elif command == "set-key-active":
+            result = set_key_active(payload if isinstance(payload, dict) else {})
+        elif command == "save-api-key-note":
+            result = save_api_key_note(payload if isinstance(payload, dict) else {})
+        elif command == "update-voicer-key-settings":
+            result = update_voicer_key_settings(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-voicer-balances":
+            result = refresh_voicer_balances(payload if isinstance(payload, dict) else {})
+        elif command == "update-lumean-key-settings":
+            result = update_lumean_key_settings(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-lumean-catalog":
+            result = refresh_lumean_catalog(payload if isinstance(payload, dict) else {})
+        elif command == "update-voicegen-key-settings":
+            result = update_voicegen_key_settings(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-voicegen-catalog":
+            result = refresh_voicegen_catalog(payload if isinstance(payload, dict) else {})
+        elif command == "update-wproject-key-settings":
+            result = update_wproject_key_settings(payload if isinstance(payload, dict) else {})
+        elif command == "refresh-wproject-catalog":
+            result = refresh_wproject_catalog(payload if isinstance(payload, dict) else {})
+        elif command == "open-chrome-session":
+            result = open_chrome_session(payload if isinstance(payload, dict) else {})
+        else:
+            raise ValueError(f"Unsupported bridge command: {command}")
+        if command in COMMAND_CONTRACT:
+            validate_command_result(command, result)
+        print(json.dumps(result, ensure_ascii=False))
+    except Exception as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

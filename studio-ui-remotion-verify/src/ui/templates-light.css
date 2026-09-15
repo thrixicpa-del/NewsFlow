@@ -1,0 +1,73 @@
+.nf-template-workspace {
+  display: grid;
+  gap: 0;
+  border-color: color-mix(in srgb, #3a5a78 64%, transparent);
+  background:
+    linear-gradient(145deg, rgba(21, 38, 58, .88), rgba(8, 21, 34, .96) 52%),
+    #081522;
+}
+
+.nf-template-workspace-header {
+  padding: 24px 24px 18px;
+  border-bottom: 1px solid rgba(96, 139, 177, .22);
+}
+
+.nf-template-workspace-header .nf-eyebrow {
+  display: block;
+  margin-bottom: 7px;
+  color: #78b3e6;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .14em;
+}
+
+.nf-template-library {
+  display: grid;
+  grid-template-columns: minmax(150px, .8fr) minmax(180px, 1fr) repeat(3, auto);
+  align-items: end;
+  padding: 16px 24px;
+  border-bottom: 1px solid rgba(96, 139, 177, .16);
+  background: rgba(5, 14, 24, .36);
+}
+
+.nf-template-library select,
+.nf-template-library input {
+  min-width: 0;
+  height: 36px;
+  border: 1px solid #2b4c6b;
+  border-radius: 8px;
+  background: #081522;
+  color: #d4e4f2;
+  padding: 0 10px;
+}
+
+.nf-template-editor {
+  margin: 20px 24px 4px;
+}
+
+.nf-template-editor textarea {
+  min-height: 190px;
+  border-color: #2d577a;
+  background: rgba(4, 14, 25, .78);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height: 1.55;
+}
+
+.nf-template-workspace .template-ranges {
+  margin-top: 16px;
+  padding: 20px 24px 24px;
+  background: rgba(4, 14, 25, .36);
+}
+
+.nf-template-workspace .ranges-title {
+  align-items: start;
+}
+
+.nf-template-workspace .template-range {
+  border-color: #274b6a;
+  background: rgba(8, 25, 43, .82);
+}
+
+@media (max-width: 880px) {
+  .nf-template-library { grid-template-columns: 1fr 1fr; }
+}

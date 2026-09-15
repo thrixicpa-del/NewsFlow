@@ -1,0 +1,496 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from scriptor import bridge
+from scriptor.config import LumeanKey, SecretVoicerKey, Settings, VoiceGenKey, WProjectKey
+from scriptor.core import ScenarioRequest
+from scriptor.runner import Job, RunState
+from scriptor.voicer import ChromeSecretVoicer, LumeanClient, SecretVoicerClient, VoiceGenClient, WProjectClient, VoiceProfile, safe_audio_name, split_text
+
+
+class VoicerTests(unittest.TestCase):
+    def test_manual_import_rejects_unreadable_audio_without_attaching_it(self):
+        """A file extension alone must never turn a broken MP3 into READY."""
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as output:
+            source = Path(directory) / "broken.mp3"
+            source.write_bytes(b"not an audio stream")
+            settings = Settings(voicer_output_folder=output)
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [])):
+                with self.assertRaisesRegex(ValueError, "длительность озвучки"):
+                    bridge.import_voiceover({"scenarioIndex": 0, "path": str(source)})
+
+            self.assertEqual(settings.voice_scenario_outputs, {})
+            self.assertEqual(settings.voice_task_statuses, {})
+
+    def test_generated_voice_marks_invalid_audio_as_error_not_ready(self):
+        """A provider response is not READY until the saved audio is decodable."""
+        class FakeClient:
+            def __init__(self, _key):
+                pass
+
+            def synthesize(self, _text, _profile, progress=None):
+                if progress:
+                    progress("Secret Voicer обрабатывает текст", 62)
+                return b"not an audio stream"
+
+            def save_audio(self, folder, name, content):
+                target = Path(folder) / f"{name}.mp3"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                return target
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voice_provider="api", voicer_output_folder=folder,
+                secret_voicer_keys=[SecretVoicerKey("Тест", "key")], voice_scenario_outputs={"1": ""},
+                voice_profiles=[{"id": "api-profile", "name": "API", "provider": "api", "voice_id": "voice-1"}],
+                voice_default_profile_id="api-profile",
+            )
+            job = Job(ScenarioRequest(0, "Сценарий", ""), RunState.DONE, "Точный текст", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "SecretVoicerClient", FakeClient):
+                with self.assertRaisesRegex(RuntimeError, "длительность озвучки"):
+                    bridge.generate_voice({"indices": [0]})
+
+        self.assertEqual(settings.voice_scenario_outputs["1"], "")
+        self.assertEqual(settings.voice_task_statuses["1"]["label"], "Ошибка озвучки")
+
+    def test_recursive_audio_scan_matches_parent_folder_and_leaves_ambiguous_unattached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exact = root / "ПВО отражает атаку — последствия для города"
+            ambiguous = root / "Мирные переговоры"
+            unmatched = root / "Чужая тема"
+            for folder, name in ((exact, "40_narration.mp3"), (ambiguous, "41_narration.mp3"), (unmatched, "42_narration.wav")):
+                folder.mkdir()
+                (folder / name).write_bytes(b"audio")
+
+            result = bridge.scan_voiceover_folder(root, [
+                "ПВО отражает атаку: последствия для города",
+                "Мирные переговоры России и Украины",
+                "Мирные переговоры США и Ирана",
+            ])
+
+        self.assertEqual(result["foldersFound"], 3)
+        self.assertEqual(result["audioFound"], 3)
+        self.assertEqual([item["scenarioIndex"] for item in result["matched"]], [0])
+        self.assertEqual(len(result["requiresChoice"]), 1)
+        self.assertEqual(len(result["unmatched"]), 1)
+        self.assertEqual(result["errors"], [])
+
+    def test_folder_import_copies_only_unique_matches_and_persists_review_summary(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as output:
+            root = Path(directory)
+            source = root / "ПВО отражает атаку — последствия для города" / "40_narration.mp3"
+            source.parent.mkdir()
+            source.write_bytes(b"original-audio")
+            settings = Settings(voicer_output_folder=output)
+            titles = ["ПВО отражает атаку: последствия для города"]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(titles, [])), \
+                 patch.object(bridge, "snapshot", return_value={"reloaded": True}), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                result = bridge.import_voiceover_folder({"root": str(root)})
+
+            attached = Path(settings.voice_scenario_outputs["1"])
+            self.assertTrue(source.is_file())
+            self.assertEqual(source.read_bytes(), b"original-audio")
+            self.assertTrue(attached.is_file())
+            self.assertEqual(attached.read_bytes(), b"original-audio")
+            self.assertEqual(settings.voice_task_statuses["1"]["label"], "Готово: импорт из папки")
+            self.assertEqual(settings.voice_import_summary["matched"], 1)
+            self.assertEqual(result["operationResult"]["matched"], 1)
+
+    def test_folder_import_keeps_an_existing_different_audio_copy(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as output:
+            root = Path(directory)
+            source = root / "ПВО отражает атаку — последствия для города" / "40_narration.mp3"
+            source.parent.mkdir()
+            source.write_bytes(b"recovered-audio")
+            previous = Path(output) / "Импортированные" / "0001_ПВО отражает атаку последствия для города.mp3"
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"older-audio")
+            settings = Settings(voicer_output_folder=output)
+            titles = ["ПВО отражает атаку: последствия для города"]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(titles, [])), \
+                 patch.object(bridge, "snapshot", return_value={"reloaded": True}), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.import_voiceover_folder({"root": str(root)})
+
+            attached = Path(settings.voice_scenario_outputs["1"])
+            self.assertEqual(previous.read_bytes(), b"older-audio")
+            self.assertEqual(attached.read_bytes(), b"recovered-audio")
+            self.assertIn("Восстановлено", str(attached))
+
+    def test_normalizes_numbered_audio_filename_for_scenario_matching(self):
+        from scriptor.bridge import audio_title_key
+        self.assertEqual(audio_title_key("001 — Тема: Ормуз.mp3"), audio_title_key("Тема Ормуз"))
+
+    class _ConfigurePage:
+        def __init__(self, accepted_text: str):
+            self.accepted_text = accepted_text
+            self.calls = []
+
+        def evaluate(self, script, value=None):
+            self.calls.append((script, value))
+            if "эмоциональн|emotional" in script:
+                return True
+            if "data-newsflow-voice-text" in script and "return area ?" in script:
+                return self.accepted_text
+            if "const areas" in script:
+                return {"found": True, "value": value["text"]}
+            raise AssertionError("Unexpected browser script")
+
+        def wait_for_timeout(self, _milliseconds):
+            pass
+
+    def test_splits_long_text_at_sentence_boundary(self):
+        text = "Первая часть. " + "слово " * 30 + "Вторая часть."
+        chunks = split_text(text, 40)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(" ".join(chunks).replace(". Вторая", ". Вторая"), text.strip())
+        self.assertTrue(all(len(item) <= 40 for item in chunks))
+
+    def test_synthesizes_and_saves_audio(self):
+        client = SecretVoicerClient("secret", poll_seconds=0)
+        response = iter([
+            (json.dumps({"task_id": "task-1"}).encode(), "application/json"),
+            (json.dumps({"status": "PROCESSING", "progress": 0.5}).encode(), "application/json"),
+            (json.dumps({"status": "COMPLETED", "audio_url": "https://audio.test/file.mp3"}).encode(), "application/json"),
+            (b"MP3", "audio/mpeg"),
+        ])
+        with patch.object(client, "_request", side_effect=response):
+            progress = []
+            result = client.synthesize("Привет", VoiceProfile(voice_id="voice-1"),
+                                       lambda label, value: progress.append((label, value)))
+        self.assertEqual(result, b"MP3")
+        self.assertEqual(progress[-1][1], 100)
+        with tempfile.TemporaryDirectory() as folder:
+            saved = client.save_audio(Path(folder), "Новости: тест", result)
+            self.assertEqual(saved.name, "Новости_ тест.mp3")
+            self.assertEqual(saved.read_bytes(), b"MP3")
+
+    def test_lumean_template_is_reused_only_for_matching_voice_settings(self):
+        profile = VoiceProfile(voice_id="voice-1", provider="lumean", model_id="eleven_multilingual_v2",
+                               stability=.30, style=.50)
+        signature = LumeanClient.template_signature(profile)
+        self.assertTrue(signature)
+        self.assertNotEqual(signature, LumeanClient.template_signature(
+            VoiceProfile(voice_id="voice-1", provider="lumean", model_id="other", stability=.30, style=.50)
+        ))
+
+    def test_lumean_synthesis_creates_template_then_downloads_finished_order(self):
+        client = LumeanClient("test", poll_seconds=0)
+        profile = VoiceProfile(voice_id="voice-1", provider="lumean", model_id="eleven_multilingual_v2")
+        with patch.object(client, "create_template", return_value="template-1") as create_template, \
+             patch.object(client, "create_order", return_value="order-1"), \
+             patch.object(client, "_wait_order", return_value=["audio/test.mp3"]), \
+             patch.object(client, "_download_storage", return_value=b"MP3"):
+            content, template_id, signature = client.synthesize("Текст", profile)
+        self.assertEqual(content, b"MP3")
+        self.assertEqual(template_id, "template-1")
+        self.assertEqual(signature, LumeanClient.template_signature(profile))
+        create_template.assert_called_once_with(profile)
+
+    def test_lumean_voice_task_marks_status_and_keeps_template_cache(self):
+        class FakeLumean:
+            def __init__(self, _key):
+                pass
+            def synthesize(self, _text, _profile, progress=None):
+                if progress:
+                    progress("Lumean создаёт озвучку", 68)
+                return b"MP3", "template-1", "signature-1"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(voice_provider="lumean", voicer_output_folder=folder,
+                lumean_api_keys=[LumeanKey("Lumean", "key", streams=2)],
+                voice_profiles=[{"name": "Lumean news", "provider": "lumean", "voice_id": "voice-1",
+                                 "model_id": "eleven_multilingual_v2", "stability": .3, "style": .5}],
+                voice_scenario_outputs={"1": ""})
+            job = Job(ScenarioRequest(0, "Сценарий", ""), RunState.DONE, "Точный текст", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "LumeanClient", FakeLumean), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.generate_voice({"indices": [0]})
+            self.assertTrue(Path(settings.voice_scenario_outputs["1"]).is_file())
+        self.assertEqual(settings.voice_task_statuses["1"]["label"], "Готово")
+        self.assertEqual(settings.voice_profiles[0]["template_id"], "template-1")
+
+    def test_voicegen_task_uses_profile_preset_and_key_streams(self):
+        class FakeVoiceGen:
+            calls = []
+            def __init__(self, _key):
+                pass
+            def synthesize(self, text, filename, profile, *, threads, progress=None):
+                self.calls.append((text, filename, profile, threads))
+                if progress:
+                    progress("VoiceGen: создаёт озвучку", 72)
+                return b"MP3"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(voice_provider="voicegen", voicer_output_folder=folder,
+                voicegen_api_keys=[VoiceGenKey("VoiceGen", "key", streams=7)],
+                voice_profiles=[{"name": "V3", "provider": "voicegen", "voice_id": "voice-1",
+                                 "model_id": "elevenLabsV3", "settings_preset": "expressive",
+                                 "chunk_size": 1200, "delay_between_chunks": .5, "task_threads": 9}], voice_scenario_outputs={"1": ""})
+            job = Job(ScenarioRequest(0, "Сценарий", ""), RunState.DONE, "Точный текст", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", FakeVoiceGen), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.generate_voice({"indices": [0]})
+            self.assertTrue(Path(settings.voice_scenario_outputs["1"]).is_file())
+        self.assertEqual(settings.voice_task_statuses["1"]["label"], "Готово")
+        self.assertEqual(FakeVoiceGen.calls[0][3], 9)
+
+    def test_voicegen_client_sends_direct_v3_task_and_downloads_result(self):
+        client = VoiceGenClient("test", poll_seconds=0)
+        profile = VoiceProfile(voice_id="voice-1", provider="voicegen", model_id="elevenLabsV3",
+                               settings_preset="expressive", chunk_size=1200, delay_between_chunks=.5)
+        with patch.object(client, "create_task", return_value="task-1") as create, \
+             patch.object(client, "wait_download", return_value=b"MP3"):
+            self.assertEqual(client.synthesize("Текст", "voice.mp3", profile, threads=4), b"MP3")
+        create.assert_called_once()
+
+    def test_wproject_client_uses_official_async_task_contract(self):
+        client = WProjectClient("WA-test", poll_seconds=0)
+        profile = VoiceProfile(
+            voice_id="voice-1", provider="wproject", task_threads=10,
+            wproject_split="single", wproject_join=True, wproject_join_pause=.4,
+            wproject_autotag="medium", wproject_prosody_speed=1.1,
+            wproject_prosody_volume=2, wproject_latency="balanced",
+            wproject_normalize=True, wproject_normalize_loudness=True,
+            wproject_tag_compat=True,
+        )
+        with patch.object(client, "_json", return_value={"task_id": "task-1", "state": "queued"}) as request:
+            self.assertEqual(client.create_task("Текст", "Тема", profile, threads=50), "task-1")
+        body = request.call_args.args[2]
+        self.assertEqual(request.call_args.args[:2], ("POST", "/v1/tts"))
+        self.assertEqual(body["voice_id"], "voice-1")
+        self.assertEqual(body["threads"], 50)
+        self.assertEqual(body["params"], {
+            "split": "single", "join": True, "join_pause": .4, "autotag": "medium",
+            "prosody_speed": 1.1, "prosody_volume": 2, "latency": "balanced",
+            "normalize": True, "normalize_loudness": True, "tag_compat": True,
+        })
+
+    def test_wproject_task_submission_sends_the_required_idempotency_key(self):
+        """A retry must carry the durable key mandated by POST /v1/tts."""
+        client = WProjectClient("WA-test", poll_seconds=0)
+        profile = VoiceProfile(voice_id="voice-1", provider="wproject")
+        with patch.object(client, "_json", return_value={"task_id": "task-1"}) as request:
+            self.assertEqual(
+                client.create_task(
+                    "Текст", "Тема", profile, threads=1,
+                    idempotency_key="newsflow:voice:stable-job-1",
+                ),
+                "task-1",
+            )
+        self.assertEqual(
+            request.call_args.kwargs["headers"],
+            {"Idempotency-Key": "newsflow:voice:stable-job-1"},
+        )
+
+    def test_wproject_http_request_keeps_the_idempotency_header(self):
+        """The required header must reach urllib, not stop at the JSON wrapper."""
+        class Response:
+            class Headers:
+                @staticmethod
+                def get_content_type():
+                    return "application/json"
+
+            headers = Headers()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return b'{"task_id":"task-1"}'
+
+        client = WProjectClient("WA-test", poll_seconds=0)
+        with patch("scriptor.voicer.urllib.request.urlopen", return_value=Response()) as open_url:
+            self.assertEqual(
+                client._json("POST", "/v1/tts", {"text": "Текст"},
+                             headers={"Idempotency-Key": "stable-idempotency-key"}),
+                {"task_id": "task-1"},
+            )
+
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.get_header("Idempotency-key"), "stable-idempotency-key")
+
+    def test_safe_audio_name(self):
+        self.assertEqual(safe_audio_name("  <news>?  "), "news.mp3")
+
+    def test_browser_provider_recognizes_only_authorized_app_url(self):
+        self.assertTrue(ChromeSecretVoicer._authorized_url("https://secretvoicer.com/app/"))
+        self.assertFalse(ChromeSecretVoicer._authorized_url("https://secretvoicer.com/login/"))
+        self.assertFalse(ChromeSecretVoicer._authorized_url("https://example.test/app/"))
+
+    def test_browser_provider_requires_the_current_scenario_in_history(self):
+        scenario = "Первый сценарий про Ормузский пролив и нефть. " + "текст " * 12
+        candidates = [
+            {"href": "https://audio.test/old.mp3", "text": "Другой старый сценарий"},
+            {"href": "https://audio.test/current.mp3", "text": scenario},
+        ]
+        self.assertEqual(
+            ChromeSecretVoicer._matching_audio_href(scenario, candidates),
+            "https://audio.test/current.mp3",
+        )
+        self.assertEqual(
+            ChromeSecretVoicer._matching_audio_href(scenario, candidates[:1]), ""
+        )
+
+    def test_history_preview_is_matched_before_its_download_button(self):
+        scenario = "Тегеран усиливает давление на Ормузский пролив. " + "Контекст " * 10
+        rows = [
+            {"id": "old", "text": "Старый текст про другие события", "href": "", "hasDownload": True},
+            {"id": "current", "text": scenario[:110] + "…", "href": "", "hasDownload": True},
+        ]
+        match = ChromeSecretVoicer._matching_history_candidate(scenario, rows)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["id"], "current")
+
+    def test_browser_configure_inserts_and_verifies_exact_scenario_text(self):
+        text = "Точный текст сценария для озвучки."
+        page = self._ConfigurePage(text)
+        ChromeSecretVoicer(Path("unused"))._configure(page, text, VoiceProfile())
+        text_write = next(value for script, value in page.calls if "const areas" in script)
+        self.assertEqual(text_write["text"], text)
+
+    def test_browser_configure_refuses_to_start_when_site_keeps_old_text(self):
+        page = self._ConfigurePage("Старый текст из предыдущей вкладки")
+        with self.assertRaisesRegex(Exception, "не принял текст текущего сценария"):
+            ChromeSecretVoicer(Path("unused"))._configure(
+                page, "Новый текст, который нельзя подменять.", VoiceProfile()
+            )
+
+    def test_voice_status_is_saved_per_completed_task(self):
+        class FakeClient:
+            def __init__(self, _key):
+                pass
+
+            def synthesize(self, _text, _profile, progress=None):
+                if progress:
+                    progress("Secret Voicer обрабатывает текст", 62)
+                return b"MP3"
+
+            def save_audio(self, folder, name, content):
+                target = Path(folder) / f"{name}.mp3"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                return target
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voice_provider="api",
+                voicer_output_folder=folder,
+                secret_voicer_keys=[SecretVoicerKey("Тест", "key")],
+                voice_scenario_outputs={"1": ""},
+                voice_profiles=[{"id": "api-profile", "name": "API", "provider": "api", "voice_id": "voice-1"}],
+                voice_default_profile_id="api-profile",
+            )
+            job = Job(ScenarioRequest(0, "Сценарий", ""), RunState.DONE, "Точный текст", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings") as save_settings, \
+                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "SecretVoicerClient", FakeClient), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                result = bridge.generate_voice({"indices": [0]})
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(settings.voice_task_statuses["1"]["label"], "Готово")
+            self.assertEqual(settings.voice_task_statuses["1"]["progress"], 100)
+            self.assertEqual(settings.voice_task_statuses["1"]["durationSeconds"], 1.0)
+            self.assertTrue(Path(settings.voice_scenario_outputs["1"]).is_file())
+            saved_job = next(iter(settings.voice_tts_jobs.values()))
+            self.assertEqual(saved_job["artifact"]["duration_seconds"], 1.0)
+            self.assertEqual(saved_job["artifact"]["path"], settings.voice_scenario_outputs["1"])
+            self.assertGreaterEqual(save_settings.call_count, 3)
+
+    def test_only_transient_browser_errors_are_retried(self):
+        self.assertTrue(bridge._retryable_browser_voice_error(RuntimeError("Таймаут ожидания MP3")))
+        self.assertTrue(bridge._retryable_browser_voice_error(RuntimeError("Secret Voicer не принял текст")))
+        self.assertFalse(bridge._retryable_browser_voice_error(RuntimeError("Chrome не авторизован в Secret Voicer")))
+        self.assertFalse(bridge._retryable_browser_voice_error(RuntimeError("Закройте окно Chrome, открытое для входа")))
+
+    def test_voice_error_reason_is_kept_for_the_queue_row(self):
+        self.assertEqual(
+            bridge._voice_error_reason(RuntimeError("  Chrome  не   принял\nтекст  ")),
+            "Chrome не принял текст",
+        )
+        self.assertLessEqual(len(bridge._voice_error_reason(RuntimeError("x" * 900))), 700)
+
+    def test_voice_failover_detects_limits_but_not_completed_audio_errors(self):
+        self.assertTrue(bridge._can_failover_voice(RuntimeError("429 rate limit")))
+        self.assertTrue(bridge._can_failover_voice(RuntimeError("Active subscription required")))
+        self.assertFalse(bridge._can_failover_voice(RuntimeError("пустой MP3")))
+
+    def test_wproject_catalog_and_pool_settings_are_read_only_and_persisted(self):
+        class FakeWProject:
+            def __init__(self, _key):
+                pass
+            def profile(self):
+                return {"id": "account-1", "plan": "pro"}
+            def usage(self):
+                return {"characters": {"used": 12, "limit": 1000}}
+            def voices(self):
+                return [{"id": "voice-1", "name": "Новости"}]
+
+        settings = Settings(wproject_api_keys=[WProjectKey("WProject основной", "WA-test", streams=2)])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"ok": True}), \
+             patch.object(bridge, "WProjectClient", FakeWProject):
+            bridge.update_wproject_key_settings({"keys": [{"index": 0, "active": True, "streams": 10}]})
+            result = bridge.refresh_wproject_catalog({})
+
+        self.assertEqual(settings.wproject_api_keys[0].streams, 10)
+        self.assertEqual(settings.wproject_voice_cache, [{"id": "voice-1", "name": "Новости"}])
+        self.assertEqual(settings.wproject_profile_cache["id"], "account-1")
+        self.assertEqual(settings.wproject_usage_cache["characters"]["limit"], 1000)
+        self.assertEqual(result["operationResult"]["kind"], "wproject-catalog")
+
+    def test_wproject_key_is_supported_by_common_api_key_commands(self):
+        settings = Settings()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"ok": True}):
+            bridge.add_api_key({"kind": "wproject", "label": "W", "secret": "WA-test"})
+            bridge.set_key_active({"kind": "wproject", "index": 0, "active": False})
+            bridge.save_api_key_note({"kind": "wproject", "index": 0, "note": "основной"})
+
+        self.assertFalse(settings.wproject_api_keys[0].active)
+        self.assertEqual(settings.api_key_notes[bridge._api_key_id("wproject", 0)], "основной")
+
+    def test_voice_range_preset_roundtrip_keeps_enabled_ranges_and_backup_profiles(self):
+        settings = Settings(voice_profiles=[{"name": "Основной", "provider": "voicegen"}],
+                            voice_ranges=[{"start": 1, "end": 3, "profile": 0, "enabled": True}])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), patch.object(bridge, "snapshot", return_value={"ok": True}):
+            bridge.save_voice_range_preset({"name": "Новости", "profiles": settings.voice_profiles,
+                                            "ranges": settings.voice_ranges, "keyFailover": True})
+        self.assertEqual(settings.voice_range_presets[0]["ranges"][0]["enabled"], True)
+
+
+if __name__ == "__main__":
+    unittest.main()

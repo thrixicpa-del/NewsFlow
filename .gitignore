@@ -1,0 +1,95 @@
+# Secrets and local provider configuration
+.env
+.env.*
+!.env.example
+*.secret
+*.token
+*.key
+
+# Node and frontend build outputs
+node_modules/
+dist/
+dist-electron/
+build/
+out/
+release/
+release-*/
+remotion-bundle/
+.artifacts/
+coverage/
+allure-results/
+allure-report/
+
+# Python and local dependency/build caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.ai-deps/
+.build-deps/
+.core-packaging-deps/
+.packaging-tools/
+.cache/
+
+# NewsFlow generated core and historical build work
+.build-core-*/
+.core-bin-*/
+.core-build-*/
+.core-bin-backups/
+.core-bin-staging/
+build-core-*/
+studio-ui-remotion-verify/node_modules/
+studio-ui-remotion-verify/dist/
+studio-ui-remotion-verify/dist-electron/
+studio-ui-remotion-verify/remotion-bundle/
+studio-ui-remotion-verify/core-bin/
+studio-ui-remotion-verify/release-*/
+oauth-site/worker/node_modules/
+
+# Local/disposable runtime state, browser profiles, and user media
+work/
+.test-storage/
+user-data/
+production-data/
+test-data/
+disposable-data/
+settings.json
+session.json
+covers-library.json
+footage-index-status.json
+.newsflow-test-root
+Cookies
+Cookies-journal
+Login Data
+Login Data-journal
+Web Data
+Web Data-journal
+Local Storage/
+Session Storage/
+
+# Generated media and runtime logs
+*.mp3
+*.wav
+*.mp4
+*.mov
+*.mkv
+*.log
+*.tmp
+*.cache
+
+# Historical local smoke output and package exports
+/.core-smoke-*.json
+/.cover-reconcile-*.json
+/snapshot-*.json
+/remotion-smoke-*.json
+/NewsFlow-OAuth-site-*.zip
+*.bak
+studio-ui-remotion-verify/scripts/launch-*-test-rc.cmd
+studio-ui-remotion-verify/packaged-snapshot.json
+
+# Local machine metadata
+.DS_Store
+Thumbs.db

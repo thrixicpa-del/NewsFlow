@@ -1,0 +1,174 @@
+import os
+import json
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from scriptor.core import ScenarioRequest
+from scriptor.config import Settings, save_settings
+from scriptor.runner import Job, RunState
+from scriptor.session import (backup_session_path, legacy_session_path, load_session,
+                              migrate_legacy_session, remove_scenarios, rename_scenario,
+                              save_session, session_path)
+
+
+class SessionTests(unittest.TestCase):
+    def test_rename_scenario_updates_saved_job_title(self):
+        job = Job(ScenarioRequest(0, "Старая", "P"), RunState.PAUSED, "Ответ", "Причина")
+        titles, jobs = rename_scenario(["Старая"], [job], 0, "  Новая тема  ")
+        self.assertEqual(titles, ["Новая тема"])
+        self.assertEqual(jobs[0].request.title, "Новая тема")
+        self.assertEqual(jobs[0].result, "Ответ")
+    def test_remove_selected_scenarios_reindexes_remaining_jobs(self):
+        titles = ["A", "B", "C", "D"]
+        jobs = [
+            Job(ScenarioRequest(i, title, f"P{i}"), RunState.DONE, f"R{i}", "")
+            for i, title in enumerate(titles)
+        ]
+        remaining_titles, remaining_jobs = remove_scenarios(titles, jobs, {1, 3})
+        self.assertEqual(remaining_titles, ["A", "C"])
+        self.assertEqual([job.request.index for job in remaining_jobs], [0, 1])
+        self.assertEqual([job.request.title for job in remaining_jobs], ["A", "C"])
+        self.assertEqual(remaining_jobs[1].result, "R2")
+
+    def test_completed_and_failed_jobs_survive_restart(self):
+        jobs = [
+            Job(ScenarioRequest(0, "Первый", "P1"), RunState.DONE, "Текст", ""),
+            Job(ScenarioRequest(1, "Второй", "P2"), RunState.ERROR, "", "Ошибка сети"),
+        ]
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_session(["Первый", "Второй"], jobs)
+            titles, restored = load_session()
+            self.assertEqual(titles, ["Первый", "Второй"])
+            self.assertEqual(restored[0].result, "Текст")
+            self.assertEqual(restored[0].state, RunState.DONE)
+            self.assertEqual(restored[1].error, "Ошибка сети")
+
+    def test_invalid_session_is_ignored(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            path = os.path.join(folder, "NewsFlow")
+            os.makedirs(path)
+            with open(os.path.join(path, "session.json"), "w", encoding="utf-8") as stream:
+                stream.write("not json")
+            self.assertEqual(load_session(), ([], []))
+
+    def test_session_uses_newsflow_data_folder_and_keeps_backup(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            first = [Job(ScenarioRequest(0, "Первый", "P"), RunState.DONE, "Первый текст", "")]
+            second = [Job(ScenarioRequest(0, "Первый", "P"), RunState.DONE, "Новый текст", "")]
+            save_session(["Первый"], first)
+            save_session(["Первый"], second)
+            self.assertIn("NewsFlow", str(session_path()))
+            self.assertTrue(backup_session_path().is_file())
+            session_path().write_text("broken", encoding="utf-8")
+            titles, restored = load_session()
+            self.assertEqual(titles, ["Первый"])
+            self.assertEqual(restored[0].result, "Первый текст")
+
+    def test_legacy_session_is_ignored_until_explicit_migration(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            legacy_session_path().parent.mkdir(parents=True)
+            legacy_session_path().write_text(
+                '{"titles":["Старый"],"jobs":[{"index":0,"title":"Старый","prompt":"","state":"Готово","result":"Текст","error":""}]}',
+                encoding="utf-8",
+            )
+            titles, restored = load_session()
+            self.assertEqual((titles, restored), ([], []))
+            self.assertFalse(session_path().exists())
+
+    def test_explicit_legacy_session_migration_preserves_current_session_priority(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            legacy_session_path().parent.mkdir(parents=True)
+            legacy_session_path().write_text(
+                '{"titles":["Старый"],"jobs":[{"index":0,"title":"Старый","prompt":"","state":"Готово","result":"Текст","error":""}]}',
+                encoding="utf-8",
+            )
+            titles, restored = migrate_legacy_session()
+
+            self.assertEqual(titles, ["Старый"])
+            self.assertEqual(restored[0].result, "Текст")
+            self.assertTrue(session_path().is_file())
+
+    def test_current_session_does_not_recover_legacy_texts_automatically(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            legacy_session_path().parent.mkdir(parents=True)
+            legacy_session_path().write_text(
+                '{"titles":["Первый","Второй"],"jobs":['
+                '{"index":0,"title":"Первый","prompt":"P1","state":"Готово","result":"Текст 1","error":""},'
+                '{"index":1,"title":"Второй","prompt":"P2","state":"Готово","result":"Текст 2","error":""}]}',
+                encoding="utf-8",
+            )
+            session_path().parent.mkdir(parents=True, exist_ok=True)
+            session_path().write_text('{"version":1,"titles":["Второй","Первый"],"jobs":[]}', encoding="utf-8")
+            titles, restored = load_session()
+            self.assertEqual(titles, ["Второй", "Первый"])
+            self.assertEqual(restored, [])
+
+    def test_recovers_empty_primary_session_from_matching_backup(self):
+        """A stale empty primary file must not hide an active production batch."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            titles = ["Первый", "Второй"]
+            jobs = [
+                Job(ScenarioRequest(0, "Первый", "P1"), RunState.DONE, "Текст 1", ""),
+                Job(ScenarioRequest(1, "Второй", "P2"), RunState.DONE, "Текст 2", ""),
+            ]
+            session_path().parent.mkdir(parents=True, exist_ok=True)
+            (session_path().parent / "settings.json").write_text(
+                json.dumps({"idea_results": titles}, ensure_ascii=False), encoding="utf-8",
+            )
+            save_session(titles, jobs)
+            save_session([], [])
+
+            restored_titles, restored_jobs = load_session()
+
+            self.assertEqual(restored_titles, titles)
+            self.assertEqual([job.result for job in restored_jobs], ["Текст 1", "Текст 2"])
+
+    def test_does_not_restore_backup_after_an_intentional_empty_queue(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_session(["Первый"], [Job(ScenarioRequest(0, "Первый", "P"), RunState.DONE, "Текст", "")])
+            save_session([], [])
+
+            self.assertEqual(load_session(), ([], []))
+
+    def test_recovers_empty_primary_from_cover_queue_when_idea_list_is_stale(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            titles = ["Актуальная тема", "Ещё одна тема"]
+            jobs = [
+                Job(ScenarioRequest(0, titles[0], "P1"), RunState.DONE, "Текст 1", ""),
+                Job(ScenarioRequest(1, titles[1], "P2"), RunState.DONE, "Текст 2", ""),
+            ]
+            session_path().parent.mkdir(parents=True, exist_ok=True)
+            (session_path().parent / "settings.json").write_text(json.dumps({
+                "idea_results": ["Устаревшая тема"],
+                "cover_queue": [{"title": title} for title in titles],
+            }, ensure_ascii=False), encoding="utf-8")
+            save_session(titles, jobs)
+            save_session([], [])
+
+            restored_titles, restored_jobs = load_session()
+
+            self.assertEqual(restored_titles, titles)
+            self.assertEqual([job.result for job in restored_jobs], ["Текст 1", "Текст 2"])
+
+    def test_empty_primary_never_restores_a_backup_containing_a_deleted_scenario(self):
+        """A stale cover title is not authority to undo an explicit deletion."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            titles = ["Оставить", "Удалено"]
+            jobs = [
+                Job(ScenarioRequest(0, titles[0], "P1", "keep"), RunState.DONE, "Текст 1", ""),
+                Job(ScenarioRequest(1, titles[1], "P2", "deleted"), RunState.DONE, "Текст 2", ""),
+            ]
+            save_settings(Settings(
+                idea_results=titles,
+                cover_queue=[{"title": title} for title in titles],
+                deleted_scenario_production_ids=["deleted"],
+            ))
+            save_session(titles, jobs)
+            save_session([], [])
+
+            self.assertEqual(load_session(), ([], []))
+
+
+if __name__ == "__main__":
+    unittest.main()

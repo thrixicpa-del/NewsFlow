@@ -1,0 +1,9 @@
+.nf-voice,.nf-audio{display:grid;gap:14px}
+.nf-audio-production-console{position:relative;isolation:isolate}
+.nf-audio-production-console::before{content:"AUDIO PRODUCTION CONSOLE";position:absolute;z-index:-1;top:-18px;right:8px;color:#4f82aa2b;font-size:10px;font-weight:900;letter-spacing:.16em}
+.nf-voice>.nf-toolbar,.nf-audio>.nf-toolbar{margin:0;padding:12px;border:1px solid #244b6b;border-radius:12px;background:linear-gradient(145deg,#0d2841,#091a2c);box-shadow:0 12px 30px #010b1533}
+.nf-voice .voice-range-preview,.nf-voice .voice-import-summary{border-color:#285779;background:linear-gradient(145deg,#0c2842,#091b2e)}
+.nf-voice .voice-list>button,.nf-audio .project-list>button{border-color:#244b6b;background:#0a2035}
+.nf-audio .audio-provenance{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0;padding:12px;border:1px solid #244f70;border-radius:10px;background:#091827}.nf-audio .audio-provenance>div{min-width:0}.nf-audio .audio-provenance dt{color:#7e9bb8;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.nf-audio .audio-provenance dd{overflow-wrap:anywhere;margin:3px 0 0;color:#d5e9f8;font-size:12px;line-height:1.4}.nf-audio .audio-provenance>div:last-child{grid-column:1/-1}
+.nf-voice .voice-queue-workbench{display:grid;gap:13px;border-color:#244f70;background:linear-gradient(120deg,#0b2237,#091827)}.nf-voice .voice-queue-workbench .panel-title{margin:0}.nf-voice .voice-queue-workbench .nf-table{min-width:760px}
+.voice-provider-readiness{margin-bottom:14px;border-color:#244f70;background:linear-gradient(120deg,#0b2237,#091827)}.voice-provider-readiness .panel-title{margin:0}.voice-provider-readiness-sheet{display:grid;gap:14px}.voice-provider-readiness-sheet .voice-api-pool{margin:0}

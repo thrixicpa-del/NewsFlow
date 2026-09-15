@@ -1,0 +1,7 @@
+.nf-seo,.nf-tags{display:grid;gap:14px}
+.nf-metadata-control-deck{margin:0;border-color:#244f70;background:linear-gradient(120deg,#0b2237,#091827)}.nf-metadata-control-deck .panel-title{margin:0}.nf-metadata-configuration{display:grid;gap:14px}.nf-metadata-configuration>.panel{margin:0}
+.nf-seo>.panel,.nf-tags>.panel{margin:0;border-color:#244b6b;background:linear-gradient(145deg,#0d2841,#091a2c)}
+.nf-seo .seo-table,.nf-tags .seo-table{border-color:#285779}
+.nf-seo .prompt-editor,.nf-tags .prompt-editor{margin-top:14px}
+.nf-distribution-workspace{position:relative;isolation:isolate}
+.nf-distribution-workspace::before{content:"DISTRIBUTION DESK";position:absolute;z-index:-1;top:-18px;right:8px;color:#4f82aa2b;font-size:10px;font-weight:900;letter-spacing:.16em}

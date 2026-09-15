@@ -1,0 +1,21 @@
+.custom-topic-entry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: min(100%, 430px);
+}
+
+.custom-topic-entry input {
+  width: 300px;
+  min-width: 0;
+}
+
+.youtube-research-controls.reference-controls {
+  grid-template-columns: 110px minmax(220px, 1fr) minmax(160px, 0.7fr) auto auto;
+}
+
+@media (max-width: 970px) {
+  .youtube-research-controls.reference-controls {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,47 @@
+.publication-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 0 18px 16px;
+  border-top: 1px solid #17344b;
+  padding-top: 13px;
+}
+
+.publication-preset-row input {
+  min-height: 35px;
+  min-width: 200px;
+  border: 1px solid #31587d;
+  border-radius: 8px;
+  background: #081b2c;
+  color: #eef6fd;
+  padding: 0 9px;
+}
+
+.publication-preset-row .button {
+  min-height: 35px;
+}
+
+.publication-channel-line {
+  display: flex !important;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.publication-channel-line img {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 1px solid rgba(98, 177, 255, .55);
+  background: #10253f;
+}
+
+.publication-channel-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

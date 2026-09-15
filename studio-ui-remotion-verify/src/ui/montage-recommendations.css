@@ -1,0 +1,36 @@
+/* These are recommendations, not validation limits. The underlying fields
+   accept and save any positive integer selected by the operator. */
+.montage-grid label:nth-of-type(4)::after,
+.montage-grid label:nth-of-type(5)::after,
+.montage-grid label:nth-of-type(6)::after,
+.remotion-controls label:nth-of-type(3)::after {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 1px;
+  padding: 2px 6px;
+  border: 1px solid #1e5a57;
+  border-radius: 999px;
+  background: #0b2b2c;
+  color: #84d7c6;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  line-height: 1.25;
+}
+
+.montage-grid label:nth-of-type(4)::after { content: 'Рекомендация: 12'; }
+.montage-grid label:nth-of-type(5)::after { content: 'Рекомендация: 5–8'; }
+.montage-grid label:nth-of-type(6)::after { content: 'Рекомендация: 4'; }
+.remotion-controls label:nth-of-type(3)::after { content: 'Рекомендация: 2–3; не лимит'; }
+
+.remotion-controls aside small::after {
+  content: ' Введённые значения не урезаются.';
+  color: #9bdccd;
+}
+
+@media (max-width: 620px) {
+  .montage-grid label:nth-of-type(4)::after,
+  .montage-grid label:nth-of-type(5)::after,
+  .montage-grid label:nth-of-type(6)::after,
+  .remotion-controls label:nth-of-type(3)::after { white-space: normal; }
+}
