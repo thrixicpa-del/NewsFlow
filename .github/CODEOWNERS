@@ -1,0 +1,23 @@
+# Single-owner policy. Expand these entries when the team grows.
+* @borovojarkadij-png
+
+# Desktop UI and IPC
+/studio-ui-remotion-verify/src/ui/ @borovojarkadij-png
+/studio-ui-remotion-verify/electron/ @borovojarkadij-png
+
+# Core and persistence
+/scriptor/ @borovojarkadij-png
+/tests/ @borovojarkadij-png
+
+# Domain-critical runtime zones
+/scriptor/voicer.py @borovojarkadij-png
+/scriptor/covers.py @borovojarkadij-png
+/scriptor/timeline.py @borovojarkadij-png
+/scriptor/publication_v2.py @borovojarkadij-png
+/scriptor/config.py @borovojarkadij-png
+
+# Packaging and release safety
+/Scriptor.spec @borovojarkadij-png
+/studio-ui-remotion-verify/package.json @borovojarkadij-png
+/studio-ui-remotion-verify/scripts/ @borovojarkadij-png
+/.github/ @borovojarkadij-png
