@@ -1,0 +1,47 @@
+import { cpSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2);
+const valueAfter = (name, fallback = "") => args.includes(name) ? args[args.indexOf(name) + 1] || fallback : fallback;
+const outputRoot = valueAfter("--output-root", process.env.NEWSFLOW_RC_OUTPUT_ROOT || "");
+const buildType = valueAfter("--type", "TEST");
+const rc = valueAfter("--rc");
+const target = valueAfter("--target", "portable");
+const dryRun = args.includes("--dry-run");
+
+if (!outputRoot) throw new Error("--output-root or NEWSFLOW_RC_OUTPUT_ROOT is required");
+if (!new Set(["portable", "nsis"]).has(target)) throw new Error("--target must be portable or nsis");
+
+const node = process.execPath;
+const run = (command, commandArgs, options = {}) => execFileSync(command, commandArgs, { cwd: appRoot, stdio: "inherit", ...options });
+const prepared = execFileSync(node, ["scripts/prepare-immutable-rc.mjs", "--output-root", outputRoot, "--type", buildType, "--rc", rc], { cwd: appRoot, encoding: "utf8" });
+const artifactRoot = prepared.trim().split(/\r?\n/).at(-1);
+
+if (dryRun) {
+  process.stdout.write(`IMMUTABLE_RC_DRY_RUN=PASS\n${artifactRoot}\n`);
+  process.exit(0);
+}
+
+const stagingRoot = path.join(path.resolve(outputRoot), ".staging", path.basename(artifactRoot));
+mkdirSync(stagingRoot, { recursive: true });
+try {
+  const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+  run(pnpm, ["verify:custom-direction-ui"]);
+  run(pnpm, ["verify:build-runtime"]);
+  run(pnpm, ["verify:core-runtime"]);
+  run(pnpm, ["verify:security"]);
+  run(pnpm, ["verify:secrets"]);
+  run(pnpm, ["verify:dependencies"]);
+  run(pnpm, ["verify:remotion-native-assets"]);
+  run(pnpm, ["build"]);
+  run(pnpm, ["exec", "electron-builder", "--win", target, "--config", `--config.directories.output=${stagingRoot}`]);
+  run(node, ["scripts/verify-portable.mjs", stagingRoot]);
+  cpSync(stagingRoot, artifactRoot, { recursive: true, force: false, errorOnExist: true });
+  run(node, ["scripts/finalize-immutable-rc.mjs", "--directory", artifactRoot]);
+  process.stdout.write(`IMMUTABLE_RC_PACKAGE=PASS\n${artifactRoot}\n`);
+} finally {
+  rmSync(stagingRoot, { recursive: true, force: true });
+}
