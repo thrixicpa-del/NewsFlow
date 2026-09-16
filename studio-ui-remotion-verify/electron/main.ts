@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron';
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureTclRuntime } from './core-runtime.js';
 import { environmentWindowTitle, isolatedElectronUserDataRoot } from './test-user-data.js';
+import { ALLOWED_CORE_COMMANDS } from './allowed-core-commands.js';
 
 const isolatedUserDataRoot = isolatedElectronUserDataRoot(process.env);
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
@@ -23,6 +24,42 @@ const remotionRunner = app.isPackaged
   // renderer source is deliberately unpacked by electron-builder below.
   ? path.join(process.resourcesPath, 'app.asar.unpacked', 'remotion', 'render.mjs')
   : path.resolve(dirname, '../remotion/render.mjs');
+
+const approvedOpenPaths = new Set<string>();
+
+function normalizedExistingPath(candidate: unknown): string | null {
+  if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) return null;
+  const normalized = path.normalize(path.resolve(candidate));
+  return existsSync(normalized) ? normalized : null;
+}
+
+function registerApprovedOpenPaths(value: unknown, depth = 0): void {
+  if (depth > 8 || value === null || value === undefined) return;
+  const directPath = normalizedExistingPath(value);
+  if (directPath) {
+    approvedOpenPaths.add(directPath);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry) => registerApprovedOpenPaths(entry, depth + 1));
+  } else if (typeof value === 'object') {
+    Object.values(value as Record<string, unknown>).forEach((entry) => registerApprovedOpenPaths(entry, depth + 1));
+  }
+}
+
+async function openApprovedPath(target: unknown): Promise<string> {
+  const normalized = normalizedExistingPath(target);
+  if (!normalized || !approvedOpenPaths.has(normalized)) {
+    throw new Error('Этот путь не был выдан текущим runtime NewsFlow.');
+  }
+  return shell.openPath(normalized);
+}
+
+function assertAllowedCoreCommand(command: unknown): asserts command is string {
+  if (typeof command !== 'string' || !ALLOWED_CORE_COMMANDS.has(command)) {
+    throw new Error('Недопустимая команда NewsFlow.');
+  }
+}
 
 function pythonExecutable() {
   // Portable builds carry a PyInstaller bridge, so they do not depend on a
@@ -85,7 +122,11 @@ function callCore(command: string, payload: unknown = {}) {
           } catch { /* process error below is the useful fallback */ }
           return reject(new Error(stderr || error.message));
         }
-        try { resolve(JSON.parse(stdout)); } catch { reject(new Error(`Некорректный ответ ядра: ${stdout || stderr}`)); }
+        try {
+          const response = JSON.parse(stdout);
+          registerApprovedOpenPaths(response);
+          resolve(response);
+        } catch { reject(new Error(`Некорректный ответ ядра: ${stdout || stderr}`)); }
       });
   });
 }
@@ -187,9 +228,19 @@ function createWindow() {
   const window = new BrowserWindow({
     width: 1440, height: 900, minWidth: 720, minHeight: 720,
     backgroundColor: '#07101d', title: environmentWindowTitle(process.env),
-    webPreferences: { preload: path.join(dirname, 'preload.mjs'), contextIsolation: true, nodeIntegration: false, sandbox: false },
+    webPreferences: { preload: path.join(dirname, 'preload.mjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   window.setMenuBarVisibility(false);
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const target = new URL(url);
+      if (target.protocol === 'https:' || target.protocol === 'http:') void shell.openExternal(target.toString());
+    } catch { /* invalid renderer target remains blocked */ }
+    return { action: 'deny' };
+  });
+  window.webContents.on('will-navigate', (event, url) => {
+    if (url !== window.webContents.getURL()) event.preventDefault();
+  });
   void window.loadFile(path.join(dirname, '../dist/index.html'));
 }
 
@@ -202,11 +253,28 @@ app.whenReady().then(() => {
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-ipcMain.handle('newsflow:snapshot', () => callCore('snapshot'));
-ipcMain.handle('newsflow:footage-index-status', () => readFootageIndexStatus());
-ipcMain.handle('newsflow:open-path', (_event, target: string) => shell.openPath(target));
-ipcMain.handle('newsflow:save-settings', (_event, patch: unknown) => callCore('save-settings', patch));
-ipcMain.handle('newsflow:command', async (_event, command: string, payload: unknown) => {
+function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const senderUrl = event.senderFrame?.url || '';
+  if (!window || event.sender !== window.webContents || !senderUrl.startsWith('file:')) {
+    throw new Error('IPC отклонён: недоверенный renderer.');
+  }
+}
+
+type TrustedIpcHandler = (event: IpcMainInvokeEvent, ...args: any[]) => unknown;
+function handleTrusted(channel: string, handler: TrustedIpcHandler): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    assertTrustedIpcSender(event);
+    return handler(event, ...args);
+  });
+}
+
+handleTrusted('newsflow:snapshot', () => callCore('snapshot'));
+handleTrusted('newsflow:footage-index-status', () => readFootageIndexStatus());
+handleTrusted('newsflow:open-path', (_event, target: unknown) => openApprovedPath(target));
+handleTrusted('newsflow:save-settings', (_event, patch: unknown) => callCore('save-settings', patch));
+handleTrusted('newsflow:command', async (_event, command: unknown, payload: unknown) => {
+  assertAllowedCoreCommand(command);
   if (command === 'run-montage-queue') {
     await startMontageQueue(payload);
     await new Promise(resolve => setTimeout(resolve, 180));
@@ -214,40 +282,40 @@ ipcMain.handle('newsflow:command', async (_event, command: string, payload: unkn
   }
   return callCore(command, payload);
 });
-ipcMain.handle('newsflow:youtube-oauth-start', (_event, input: { index: number; includeMonetary: boolean }) => startYoutubeOAuthHandoff(input));
-ipcMain.handle('newsflow:youtube-oauth-status', (_event, id: string) => {
+handleTrusted('newsflow:youtube-oauth-start', (_event, input: { index: number; includeMonetary: boolean }) => startYoutubeOAuthHandoff(input));
+handleTrusted('newsflow:youtube-oauth-status', (_event, id: string) => {
   const job = youtubeOAuthJobs.get(id);
   return job ? { id: job.id, channelIndex: job.channelIndex, state: job.state, expiresAt: job.expiresAt, message: job.message } : null;
 });
-ipcMain.handle('newsflow:youtube-oauth-cancel', (_event, id: string) => cancelYoutubeOAuthHandoff(id));
-ipcMain.handle('newsflow:choose-folder', async () => {
+handleTrusted('newsflow:youtube-oauth-cancel', (_event, id: string) => cancelYoutubeOAuthHandoff(id));
+handleTrusted('newsflow:choose-folder', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   return result.canceled ? '' : result.filePaths[0] || '';
 });
-ipcMain.handle('newsflow:choose-videos', async () => {
+handleTrusted('newsflow:choose-videos', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Видео', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'] }] });
   return result.canceled ? [] : result.filePaths;
 });
-ipcMain.handle('newsflow:choose-images', async () => {
+handleTrusted('newsflow:choose-images', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
     filters: [{ name: 'Изображения', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
   });
   return result.canceled ? [] : result.filePaths;
 });
-ipcMain.handle('newsflow:choose-audio', async () => {
+handleTrusted('newsflow:choose-audio', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Аудио или ZIP', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'zip'] }] });
   return result.canceled ? '' : result.filePaths[0] || '';
 });
-ipcMain.handle('newsflow:choose-audio-files', async () => {
+handleTrusted('newsflow:choose-audio-files', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Аудио или ZIP', extensions: ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'zip'] }] });
   return result.canceled ? [] : result.filePaths;
 });
-ipcMain.handle('newsflow:choose-json', async () => {
+handleTrusted('newsflow:choose-json', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Google OAuth JSON', extensions: ['json'] }] });
   return result.canceled ? '' : result.filePaths[0] || '';
 });
-ipcMain.handle('newsflow:choose-prompt-text', async () => {
+handleTrusted('newsflow:choose-prompt-text', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Промпты', extensions: ['txt', 'md', 'markdown'] }] });
   const file = result.canceled ? '' : result.filePaths[0] || '';
   if (!file) return '';
@@ -255,7 +323,7 @@ ipcMain.handle('newsflow:choose-prompt-text', async () => {
   if (text.length > 1_000_000) throw new Error('Файл промпта больше 1 МБ. Разделите его на несколько TXT-файлов.');
   return text;
 });
-ipcMain.handle('newsflow:choose-scenario-texts', async () => {
+handleTrusted('newsflow:choose-scenario-texts', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
     filters: [{ name: 'Сценарии TXT / Markdown', extensions: ['txt', 'md', 'markdown'] }],
@@ -267,21 +335,21 @@ ipcMain.handle('newsflow:choose-scenario-texts', async () => {
     return { title: path.parse(file).name, text };
   }).filter(item => item.text.trim());
 });
-ipcMain.handle('newsflow:choose-save-path', async (_event, suggestedName: string) => {
+handleTrusted('newsflow:choose-save-path', async (_event, suggestedName: string) => {
   const result = await dialog.showSaveDialog({
     defaultPath: suggestedName || 'Сценарии.txt',
     filters: [{ name: 'Текстовые файлы', extensions: ['txt'] }],
   });
   return result.canceled ? '' : result.filePath || '';
 });
-ipcMain.handle('newsflow:choose-zip-save-path', async (_event, suggestedName: string) => {
+handleTrusted('newsflow:choose-zip-save-path', async (_event, suggestedName: string) => {
   const result = await dialog.showSaveDialog({
     defaultPath: suggestedName || 'Обложки NewsFlow.zip',
     filters: [{ name: 'ZIP-архив', extensions: ['zip'] }],
   });
   return result.canceled ? '' : result.filePath || '';
 });
-ipcMain.handle('newsflow:choose-audio-save-path', async (_event, suggestedName: string) => {
+handleTrusted('newsflow:choose-audio-save-path', async (_event, suggestedName: string) => {
   const result = await dialog.showSaveDialog({
     defaultPath: suggestedName || 'Озвучка.mp3',
     filters: [{ name: 'MP3', extensions: ['mp3'] }],

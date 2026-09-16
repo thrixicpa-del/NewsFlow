@@ -101,7 +101,7 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
             page = next(page for context in browser.contexts for page in context.pages)
             page.locator(".nf-page-header h1").wait_for(timeout=20_000)
-            page.add_script_tag(path=str(axe_source))
+            page.add_script_tag(url=axe_source.as_uri())
             report = page.evaluate("""async () => (await axe.run(document, {
                 runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] },
             })).violations.map(({ id, impact, nodes }) => ({
