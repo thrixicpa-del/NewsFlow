@@ -1,0 +1,19 @@
+name: Windows native
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  source-electron:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with: { version: '11.19.0' }
+      - uses: actions/setup-node@v6
+        with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
+      - run: pnpm install --frozen-lockfile
+        working-directory: studio-ui-remotion-verify
+      - run: pnpm build:web
+        working-directory: studio-ui-remotion-verify
+      - run: pnpm build:desktop
+        working-directory: studio-ui-remotion-verify
