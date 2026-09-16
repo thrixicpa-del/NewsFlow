@@ -2,6 +2,7 @@ import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { releaseChannel } from "./release-channel.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -13,11 +14,12 @@ const target = valueAfter("--target", "portable");
 const dryRun = args.includes("--dry-run");
 
 if (!outputRoot) throw new Error("--output-root or NEWSFLOW_RC_OUTPUT_ROOT is required");
+const channel = releaseChannel(buildType);
 if (!new Set(["portable", "nsis"]).has(target)) throw new Error("--target must be portable or nsis");
 
 const node = process.execPath;
 const run = (command, commandArgs, options = {}) => execFileSync(command, commandArgs, { cwd: appRoot, stdio: "inherit", ...options });
-const prepared = execFileSync(node, ["scripts/prepare-immutable-rc.mjs", "--output-root", outputRoot, "--type", buildType, "--rc", rc], { cwd: appRoot, encoding: "utf8" });
+const prepared = execFileSync(node, ["scripts/prepare-immutable-rc.mjs", "--output-root", outputRoot, "--type", channel.name, "--rc", rc], { cwd: appRoot, encoding: "utf8" });
 const artifactRoot = prepared.trim().split(/\r?\n/).at(-1);
 
 if (dryRun) {

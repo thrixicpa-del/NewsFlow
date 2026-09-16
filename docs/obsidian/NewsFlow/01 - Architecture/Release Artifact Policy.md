@@ -10,6 +10,17 @@ NewsFlow-<version>-<channel>-rc<NN>-<short-git-sha>
 
 The directory is reserved before any build work starts. A duplicate reservation fails; a candidate is never overwritten in place. A failed candidate remains inspectable instead of being silently replaced.
 
+## Channels
+
+| Channel | Purpose | Immutable artifact | Authoritative release gate | Manual acceptance |
+| --- | --- | --- | --- | --- |
+| DEV | Developer-local iteration | No | No | No |
+| TEST | Disposable automated/manual validation | Yes | Not required | No |
+| RC | Candidate for release validation | Yes | Required | No |
+| STABLE | Accepted production release | Yes | Required | Required |
+
+No channel enables auto-update. That work remains deferred until it receives a separate security and rollback review.
+
 Each artifact directory contains:
 
 - `build-manifest.json`: application version, full Git SHA and branch, current core-bin SHA-256, storage schema version, lockfile SHA-256, build timestamp and channel;
