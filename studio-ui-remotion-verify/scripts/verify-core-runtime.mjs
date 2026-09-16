@@ -25,12 +25,13 @@ const sourceBridge = path.resolve(appRoot, '..', 'scriptor', 'bridge.py');
 const sourceTimeline = path.resolve(appRoot, '..', 'scriptor', 'timeline.py');
 const sourceScenarioCore = path.resolve(appRoot, '..', 'scriptor', 'core.py');
 const sourcePromptBuilder = path.resolve(appRoot, '..', 'scriptor', 'thumbnail_prompt_v2.py');
+const sourceObservability = path.resolve(appRoot, '..', 'scriptor', 'observability.py');
 const sourceMain = path.resolve(appRoot, '..', 'bridge_main.py');
 const binaryTime = fs.statSync(executable).mtimeMs;
 // The provider prompt is imported by bridge.py but is a distinct source file.
 // Track it explicitly: otherwise a portable build could pass this guard while
 // embedding a core compiled before a prompt-builder repair.
-const staleSource = [sourceBridge, sourceTimeline, sourceScenarioCore, sourcePromptBuilder, sourceMain]
+const staleSource = [sourceBridge, sourceTimeline, sourceScenarioCore, sourcePromptBuilder, sourceObservability, sourceMain]
   .filter((file) => fs.existsSync(file))
   .find((file) => fs.statSync(file).mtimeMs > binaryTime);
 

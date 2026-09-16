@@ -44,11 +44,20 @@ function pythonExecutable() {
   return configuredPython || (existsSync(developmentPython) ? developmentPython : 'python');
 }
 
+function actionTracePayload(payload: unknown) {
+  // The renderer has no filesystem access and receives no diagnostic log. It
+  // sends only an opaque action ID through the existing generic IPC payload so
+  // the bridge's local trace and returned result can be correlated.
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  return { ...payload as Record<string, unknown>, _actionTrace: { id: crypto.randomUUID() } };
+}
+
 function callCore(command: string, payload: unknown = {}) {
   return new Promise<unknown>((resolve, reject) => {
     const executable = pythonExecutable();
     const bundled = app.isPackaged && executable.toLowerCase().endsWith('.exe') && executable.includes('core-bin');
-    const args = bundled ? [command, JSON.stringify(payload)] : ['-m', 'scriptor.bridge', command, JSON.stringify(payload)];
+    const tracedPayload = actionTracePayload(payload);
+    const args = bundled ? [command, JSON.stringify(tracedPayload)] : ['-m', 'scriptor.bridge', command, JSON.stringify(tracedPayload)];
     // The dedicated Chrome profile inherits the parent process' show state on
     // Windows. Do not hide the short-lived core process that starts OAuth, or
     // Chrome can exit without creating its visible authorization window.
@@ -126,7 +135,8 @@ async function cancelYoutubeOAuthHandoff(id: string): Promise<PublicOAuthJob> {
 function startMontageQueue(payload: unknown = {}): Promise<void> {
   const executable = pythonExecutable();
   const bundled = app.isPackaged && executable.toLowerCase().endsWith('.exe') && executable.includes('core-bin');
-  const args = bundled ? ['run-montage-queue', JSON.stringify(payload)] : ['-m', 'scriptor.bridge', 'run-montage-queue', JSON.stringify(payload)];
+  const tracedPayload = actionTracePayload(payload);
+  const args = bundled ? ['run-montage-queue', JSON.stringify(tracedPayload)] : ['-m', 'scriptor.bridge', 'run-montage-queue', JSON.stringify(tracedPayload)];
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { windowsHide: true, cwd: coreRoot, detached: false, stdio: 'ignore', env: { ...process.env, PYTHONPATH: coreRoot, NEWSFLOW_REMOTION_NODE: process.execPath, NEWSFLOW_REMOTION_RUNNER: remotionRunner, NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2' } });
     child.once('error', (error) => reject(new Error(`Не удалось запустить очередь монтажа: ${error.message}`)));

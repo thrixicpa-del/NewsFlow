@@ -101,6 +101,27 @@ provider results. `tests.test_failure_matrix` parses the referenced source
 tests, so deleting or renaming a mapped case breaks the infrastructure gate.
 No scenario contacts an external service or invokes system-level chaos.
 
+## Structured action trace
+
+Every current bridge command now emits a compact local JSONL lifecycle record
+at `NewsFlow/diagnostics/action-trace.jsonl`: `started` and either `succeeded`
+or `failed`.  The record carries a generated `actionId`/`correlationId`, the
+command, an inferred provider where applicable, elapsed time, and only durable
+job/ProductionItem/snapshot/execution identifiers.  The bridge returns the
+same opaque identifier as additive `actionTrace.id`; the renderer is not
+required to display it.
+
+The trace never stores arbitrary payloads or provider responses.  Secret-like
+fields and values are redacted before a write, and a trace I/O failure cannot
+alter the command outcome.  Under `tests/run_isolated.py` the trace lives
+strictly below `NEWSFLOW_TEST_ROOT`; no test may write a production diagnostic
+file.  It is a local provider-neutral boundary for later OpenTelemetry/Sentry
+adapters, not an automatic external telemetry integration.
+
+```powershell
+python tests/run_isolated.py tests.test_observability
+```
+
 ## Core contract boundary
 
 Passing source tests does not prove a release. The frozen core test invokes the actual `NewsFlowCore.exe` selected by the package configuration. The release freshness guard remains authoritative: any source module that changes packaged behavior must cause a core-bin rebuild before a package can pass release validation.
