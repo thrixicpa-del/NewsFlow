@@ -9,6 +9,9 @@ permissions:
 
 jobs:
   dependency-review:
+    # Private repositories without GitHub Advanced Security cannot run this
+    # hosted action. Local npm/pip audits remain fail-closed release gates.
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

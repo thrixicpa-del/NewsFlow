@@ -23,6 +23,14 @@ class ElectronSecurityGateTests(unittest.TestCase):
             self.assertTrue(file.is_file(), file)
             self.assertIn(expected_fragment, file.read_text(encoding="utf-8"), file)
 
+    def test_dependency_review_is_documented_as_optional_when_github_advanced_security_is_unavailable(self):
+        workflow = (ROOT / ".github" / "workflows" / "dependency-review.yml").read_text(encoding="utf-8")
+        security_docs = (ROOT / "docs" / "obsidian" / "NewsFlow" / "01 - Architecture" / "Security Gates.md").read_text(encoding="utf-8")
+
+        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("GitHub Advanced Security", security_docs)
+        self.assertIn("local dependency audits remain required", security_docs)
+
     def test_security_gate_enforces_renderer_and_ipc_hardening(self):
         result = subprocess.run(
             ["node", "scripts/security-gate.mjs"],

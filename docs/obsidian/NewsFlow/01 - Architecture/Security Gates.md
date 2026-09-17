@@ -18,7 +18,7 @@ The renderer is sandboxed, has context isolation, and receives only the document
 ## Hosted controls
 
 - `codeql.yml` scans Python and JavaScript/TypeScript on pull requests, main pushes and a weekly schedule.
-- `dependency-review.yml` blocks newly introduced high-severity runtime dependency vulnerabilities on pull requests.
+- `dependency-review.yml` checks newly introduced high-severity runtime dependency vulnerabilities on pull requests when GitHub Advanced Security is available. The hosted action is non-blocking on this private repository because GitHub reports it unsupported without that plan; local dependency audits remain required and fail closed in CI/release gate.
 - `dependabot.yml` opens reviewable weekly dependency pull requests and ignores automatic SemVer-major version updates. No bot is allowed to merge directly to `main`.
 
 GitHub repository branch protection must mark the applicable workflow checks as required; this is a repository-admin action and is tracked by the CI/operations phase.
