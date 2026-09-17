@@ -13,6 +13,19 @@ if (-not (Test-Path -LiteralPath $ProductionRoot -PathType Container)) {
     throw "Production root does not exist: $ProductionRoot"
 }
 
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        return [System.BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '')
+    } finally {
+        $stream.Dispose()
+        $hasher.Dispose()
+    }
+}
+
 function Get-CriticalInventory {
     param([Parameter(Mandatory = $true)][string]$Root)
 
@@ -22,7 +35,7 @@ function Get-CriticalInventory {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             $files[$name] = [ordered]@{
                 exists = $true
-                sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+                sha256 = Get-Sha256 -Path $path
             }
         } else {
             $files[$name] = [ordered]@{
