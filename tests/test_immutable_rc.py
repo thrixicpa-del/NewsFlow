@@ -19,6 +19,13 @@ class ImmutableRcTests(unittest.TestCase):
         self.assertIn('shell: process.platform === "win32"', wrapper)
         self.assertIn('`--config.directories.output="${stagingRoot}"`', wrapper)
 
+    def test_windows_packaging_uses_a_short_subst_workdir_for_nsis_templates(self):
+        wrapper = (APP / "scripts" / "package-immutable-rc.mjs").read_text(encoding="utf-8")
+
+        self.assertIn("createWindowsPackagingWorkdir", wrapper)
+        self.assertIn('"subst.exe"', wrapper)
+        self.assertIn("{ cwd: packagingWorkdir.cwd }", wrapper)
+
     def test_rc_directory_is_commit_addressed_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             command = ["node", "scripts/prepare-immutable-rc.mjs", "--output-root", directory, "--type", "TEST", "--rc", "01"]
