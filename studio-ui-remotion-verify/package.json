@@ -36,7 +36,7 @@
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-tooltip": "^1.2.16",
     "@remotion/bundler": "4.0.515",
-    "@remotion/cli": "4.0.515",
+    "@remotion/cli": "4.0.524",
     "@remotion/media": "4.0.515",
     "@remotion/renderer": "4.0.515",
     "@tanstack/react-table": "^8.21.3",
