@@ -16,6 +16,13 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("WindowsPowerShell\\v1.0\\powershell.exe", script)
         self.assertNotIn("-FilePath 'powershell'", script)
 
+    def test_gate_checks_native_exit_codes_without_treating_successful_stderr_as_a_failure(self):
+        script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$savedErrorActionPreference = $ErrorActionPreference", script)
+        self.assertIn("$ErrorActionPreference = 'Continue'", script)
+        self.assertIn("$ErrorActionPreference = $savedErrorActionPreference", script)
+
     def test_dry_run_lists_the_complete_fail_closed_release_sequence(self):
         result = subprocess.run(
             [

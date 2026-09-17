@@ -66,17 +66,23 @@ function Invoke-GateStep {
     )
 
     $saved = @{}
+    $savedErrorActionPreference = $ErrorActionPreference
     try {
         Push-Location $WorkingDirectory
         foreach ($entry in $Environment.GetEnumerator()) {
             $saved[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key, 'Process')
             [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
         }
+        # pnpm emits its nested command trace on stderr even when it exits 0.
+        # Gate native programs by their exit code, not PowerShell's treatment of
+        # that informational stderr record under the outer fail-closed policy.
+        $ErrorActionPreference = 'Continue'
         $output = & $FilePath @Arguments 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "$Name failed (exit $LASTEXITCODE):`n$($output -join [Environment]::NewLine)"
         }
     } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
         foreach ($entry in $saved.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
         }
