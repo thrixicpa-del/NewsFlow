@@ -40,8 +40,8 @@
 | --- | --- | --- |
 | Structured logs/correlation and Electron hardening | PASS | Redaction, current correlation and CSP/sandbox/IPC/navigation boundary contracts pass. |
 | Local secrets and dependency audits | PASS | Secret scan, `pnpm audit --prod --audit-level=high` and `pip-audit --strict` pass. |
-| Hosted CI quality | PASS | PR #1 head `1624dbe` completed `quality` successfully. |
-| Windows native source lane | PASS | PR #1 head `1624dbe` completed `source-electron` successfully. |
+| Hosted CI quality | PASS | PR #1 current head `b6b654f` completed `quality` successfully. |
+| Windows native source lane | PASS | PR #1 current head `b6b654f` completed `source-electron` successfully. |
 | CodeQL upload | DEFERRED | Private code-scanning entitlement is unavailable; opt-in variable `NEWSFLOW_CODE_SCANNING_ENABLED=true` preserves the workflow; local security gates remain mandatory. |
 | Dependency review upload | DEFERRED | Advanced Security is unavailable; opt-in `NEWSFLOW_DEPENDENCY_REVIEW_ENABLED=true` preserves the workflow; local audits remain mandatory. |
 | Clean Windows release machine | PARTIAL | Native lane and clean-machine strategy exist; no independent Sandbox/VM acceptance was run. |
@@ -50,7 +50,7 @@
 
 ## Pilot and final state
 
-**PILOT END-TO-END ENGINEERING FLOW — PASS.** The pilot followed regression → commit → local gate → PR CI → release gate → immutable TEST RC → manifest → Allure → integrity verification. Candidate runtime inputs are commit `6476f391`; later commits through `1624dbe` affect only documentation, hosted CI handling and their tests.
+**PILOT END-TO-END ENGINEERING FLOW — PASS.** The pilot followed regression → commit → local gate → PR CI → release gate → immutable TEST RC → manifest → Allure → integrity verification. Candidate runtime inputs are commit `6476f391`; later commits through `b6b654f` affect only documentation, hosted CI handling and their tests.
 
 | Item | Result |
 | --- | --- |
