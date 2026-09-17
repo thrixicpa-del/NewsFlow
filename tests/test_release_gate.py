@@ -23,6 +23,15 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("$ErrorActionPreference = 'Continue'", script)
         self.assertIn("$ErrorActionPreference = $savedErrorActionPreference", script)
 
+    def test_ci_provisions_the_pinned_python_dependency_auditor_required_by_release(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        audit_script = (ROOT / "scripts" / "audit-python-dependencies.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("pip-audit==2.10.1", workflow)
+        self.assertIn("-m pip_audit", audit_script)
+        self.assertIn("--strict", audit_script)
+        self.assertIn("audit-python-dependencies.ps1", workflow)
+
     def test_dry_run_lists_the_complete_fail_closed_release_sequence(self):
         result = subprocess.run(
             [
