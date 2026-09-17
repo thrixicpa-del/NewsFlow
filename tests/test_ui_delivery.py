@@ -61,6 +61,13 @@ class ActiveInterfaceTests(unittest.TestCase):
         self.assertIn("child.once('error'", main)
         self.assertIn("await startMontageQueue(payload)", main)
 
+    def test_source_e2e_owns_and_can_terminate_its_electron_process(self):
+        """The test launcher must not hide Electron behind a pnpm child process on Windows."""
+        source = (APP_PATH.parents[3] / "tests" / "test_electron_e2e.py").read_text(encoding="utf-8")
+
+        self.assertIn('APP_ROOT / "node_modules" / "electron" / "dist"', source)
+        self.assertNotIn('[pnpm, "exec", "electron"', source)
+
     def test_packaged_runtime_never_falls_back_to_a_previous_core_layout(self):
         """A current package must fail clearly instead of booting an older embedded core."""
         main = (APP_PATH.parents[2] / "electron" / "main.ts").read_text(encoding="utf-8")

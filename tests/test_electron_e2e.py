@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 import subprocess
 import time
@@ -44,10 +43,10 @@ class ElectronE2ESmokeTests(unittest.TestCase):
         elif target == "source":
             if not (APP_ROOT / "dist" / "index.html").is_file() or not (APP_ROOT / "dist-electron" / "main.js").is_file():
                 self.skipTest("build source Electron first: pnpm --dir studio-ui-remotion-verify build:web && pnpm --dir studio-ui-remotion-verify build:desktop")
-            pnpm = shutil.which("pnpm.cmd") or shutil.which("pnpm")
-            if not pnpm:
-                self.skipTest("pnpm is required to launch source Electron E2E")
-            command = [pnpm, "exec", "electron", f"--remote-debugging-port={self.port}", "."]
+            electron = APP_ROOT / "node_modules" / "electron" / "dist" / ("electron.exe" if os.name == "nt" else "electron")
+            if not electron.is_file():
+                self.skipTest("install the pinned Electron dependency before source E2E")
+            command = [str(electron), f"--remote-debugging-port={self.port}", "."]
             cwd = APP_ROOT
         else:
             self.fail(f"Unknown NEWSFLOW_E2E_TARGET: {target}")
@@ -76,7 +75,8 @@ class ElectronE2ESmokeTests(unittest.TestCase):
         self._wait_for_cdp()
         from playwright.sync_api import sync_playwright
 
-        artifact = self.test_root / "artifacts" / "electron-e2e.png"
+        artifact_root = Path(os.environ.get("NEWSFLOW_TEST_ARTIFACTS_DIR", self.test_root / "artifacts")).resolve()
+        artifact = artifact_root / "electron-e2e.png"
         artifact.parent.mkdir(parents=True, exist_ok=True)
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
