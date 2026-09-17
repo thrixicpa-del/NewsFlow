@@ -18,7 +18,15 @@ const channel = releaseChannel(buildType);
 if (!new Set(["portable", "nsis"]).has(target)) throw new Error("--target must be portable or nsis");
 
 const node = process.execPath;
-const run = (command, commandArgs, options = {}) => execFileSync(command, commandArgs, { cwd: appRoot, stdio: "inherit", ...options });
+const run = (command, commandArgs, options = {}) => execFileSync(command, commandArgs, {
+  cwd: appRoot,
+  stdio: "inherit",
+  ...options,
+  // Node cannot directly exec a Windows .cmd shim. The local pnpm shim is
+  // intentionally used so the pinned runtime remains on PATH; invoke just
+  // that command class through cmd while native executables stay direct.
+  shell: process.platform === "win32" && command.toLowerCase().endsWith(".cmd"),
+});
 const prepared = execFileSync(node, ["scripts/prepare-immutable-rc.mjs", "--output-root", outputRoot, "--type", channel.name, "--rc", rc], { cwd: appRoot, encoding: "utf8" });
 const artifactRoot = prepared.trim().split(/\r?\n/).at(-1);
 

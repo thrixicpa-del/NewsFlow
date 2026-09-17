@@ -12,6 +12,12 @@ APP = ROOT / "studio-ui-remotion-verify"
 
 
 class ImmutableRcTests(unittest.TestCase):
+    def test_packaging_wrapper_executes_windows_pnpm_shims_through_cmd(self):
+        wrapper = (APP / "scripts" / "package-immutable-rc.mjs").read_text(encoding="utf-8")
+
+        self.assertIn('command.toLowerCase().endsWith(".cmd")', wrapper)
+        self.assertIn('shell: process.platform === "win32"', wrapper)
+
     def test_rc_directory_is_commit_addressed_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             command = ["node", "scripts/prepare-immutable-rc.mjs", "--output-root", directory, "--type", "TEST", "--rc", "01"]
