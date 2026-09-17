@@ -23,6 +23,12 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("$ErrorActionPreference = 'Continue'", script)
         self.assertIn("$ErrorActionPreference = $savedErrorActionPreference", script)
 
+    def test_packaged_smoke_targets_the_unpacked_electron_runtime_not_the_portable_loader(self):
+        script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$packagedSmokeRoot = Join-Path $candidateRoot 'win-unpacked'", script)
+        self.assertIn("Get-ChildItem -LiteralPath $packagedSmokeRoot", script)
+
     def test_ci_provisions_the_pinned_python_dependency_auditor_required_by_release(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         audit_script = (ROOT / "scripts" / "audit-python-dependencies.ps1").read_text(encoding="utf-8")
