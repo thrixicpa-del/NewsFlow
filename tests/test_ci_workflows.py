@@ -30,7 +30,7 @@ class CiWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
         security_docs = (ROOT / "docs" / "obsidian" / "NewsFlow" / "01 - Architecture" / "Security Gates.md").read_text(encoding="utf-8")
 
-        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("vars.NEWSFLOW_CODE_SCANNING_ENABLED == 'true'", workflow)
         self.assertIn("CodeQL", security_docs)
         self.assertIn("local security gates remain required", security_docs)
 

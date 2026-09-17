@@ -17,8 +17,8 @@ The renderer is sandboxed, has context isolation, and receives only the document
 
 ## Hosted controls
 
-- `CodeQL` (`codeql.yml`) scans Python and JavaScript/TypeScript on pull requests, main pushes and a weekly schedule when GitHub code scanning is available. The hosted upload is non-blocking on this private repository because the entitlement is unavailable; local security gates remain required and fail closed in CI/release gate.
-- `dependency-review.yml` checks newly introduced high-severity runtime dependency vulnerabilities on pull requests when GitHub Advanced Security is available. The hosted action is non-blocking on this private repository because GitHub reports it unsupported without that plan; local dependency audits remain required and fail closed in CI/release gate.
+- `CodeQL` (`codeql.yml`) scans Python and JavaScript/TypeScript on pull requests, main pushes and a weekly schedule when GitHub code scanning is available. Set repository variable `NEWSFLOW_CODE_SCANNING_ENABLED=true` only after the entitlement is active. Otherwise the job is explicitly skipped; local security gates remain required and fail closed in CI/release gate.
+- `dependency-review.yml` checks newly introduced high-severity runtime dependency vulnerabilities on pull requests when GitHub Advanced Security is available. Set repository variable `NEWSFLOW_DEPENDENCY_REVIEW_ENABLED=true` only after that plan is active. Otherwise the job is explicitly skipped; local dependency audits remain required and fail closed in CI/release gate.
 - `dependabot.yml` opens reviewable weekly dependency pull requests and ignores automatic SemVer-major version updates. No bot is allowed to merge directly to `main`.
 
 GitHub repository branch protection must mark the applicable workflow checks as required; this is a repository-admin action and is tracked by the CI/operations phase.

@@ -27,7 +27,7 @@ class ElectronSecurityGateTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "dependency-review.yml").read_text(encoding="utf-8")
         security_docs = (ROOT / "docs" / "obsidian" / "NewsFlow" / "01 - Architecture" / "Security Gates.md").read_text(encoding="utf-8")
 
-        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("vars.NEWSFLOW_DEPENDENCY_REVIEW_ENABLED == 'true'", workflow)
         self.assertIn("GitHub Advanced Security", security_docs)
         self.assertIn("local dependency audits remain required", security_docs)
 

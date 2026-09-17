@@ -17,7 +17,7 @@ jobs:
     # Code scanning uploads are unavailable on this private repository without
     # the required GitHub entitlement. Keep the analysis configured, while
     # local security gates remain the mandatory release authority.
-    continue-on-error: true
+    if: ${{ vars.NEWSFLOW_CODE_SCANNING_ENABLED == 'true' }}
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     strategy:
