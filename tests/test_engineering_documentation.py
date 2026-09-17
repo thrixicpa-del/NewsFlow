@@ -41,3 +41,11 @@ class EngineeringDocumentationTests(unittest.TestCase):
         self.assertIn("current verified runtime", text)
         self.assertIn("release-gate.ps1", text)
         self.assertIn("production", text)
+
+    def test_final_audit_records_evidence_and_platform_limitations_without_false_passes(self) -> None:
+        audit = VAULT / "19 - Release Baselines" / "2026-09-17 Final Engineering Audit.md"
+
+        self.assertTrue(audit.is_file(), audit)
+        contents = audit.read_text(encoding="utf-8")
+        for required in ("PASS", "PARTIAL", "DEFERRED", "RELEASE GATE - PASS", "PRODUCTION_WRITE_GUARD=PASS"):
+            self.assertIn(required, contents)
