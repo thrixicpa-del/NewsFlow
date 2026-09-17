@@ -47,7 +47,7 @@ try {
   run(pnpm, ["verify:dependencies"]);
   run(pnpm, ["verify:remotion-native-assets"]);
   run(pnpm, ["build"]);
-  run(pnpm, ["exec", "electron-builder", "--win", target, "--config", `--config.directories.output=${stagingRoot}`]);
+  run(pnpm, ["exec", "electron-builder", "--win", target, "--config", `--config.directories.output="${stagingRoot}"`]);
   run(node, ["scripts/verify-portable.mjs", stagingRoot]);
   cpSync(stagingRoot, artifactRoot, { recursive: true, force: false, errorOnExist: true });
   run(node, ["scripts/finalize-immutable-rc.mjs", "--directory", artifactRoot]);

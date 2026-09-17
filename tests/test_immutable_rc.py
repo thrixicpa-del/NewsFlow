@@ -17,6 +17,7 @@ class ImmutableRcTests(unittest.TestCase):
 
         self.assertIn('command.toLowerCase().endsWith(".cmd")', wrapper)
         self.assertIn('shell: process.platform === "win32"', wrapper)
+        self.assertIn('`--config.directories.output="${stagingRoot}"`', wrapper)
 
     def test_rc_directory_is_commit_addressed_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
