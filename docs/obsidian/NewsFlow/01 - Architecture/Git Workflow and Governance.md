@@ -47,6 +47,13 @@ When GitHub plan support is available, configure PR-required merging, no force-p
 
 One task uses one branch and one linked worktree. Never run two Codex sessions against the same physical checkout.
 
+The engineering delivery branch is `engineering/infrastructure`. Completed
+phase commits are never amended or replayed merely to re-run their checks.
+Before continuing after an interrupted session, inspect `git status`, the
+recent commit history, and the current phase evidence; then begin with the
+first incomplete phase. Keep generated test reports, test roots, packaged
+outputs, credentials, and user data outside commits.
+
 ```powershell
 # Create a new isolated task checkout from main.
 .\scripts\worktree-new.ps1 -Kind fix -TaskName cover-retry

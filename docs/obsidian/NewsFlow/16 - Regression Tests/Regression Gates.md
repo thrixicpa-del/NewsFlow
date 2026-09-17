@@ -19,3 +19,12 @@
 Run the compact gate only in an isolated test data root. It verifies settings restart/update/corruption behavior; tombstones; contract/path uniqueness; topic/script measurement; voice artifact mapping; V2 cover payload and file validation; FAST NEWS MONTAGE artifact/duration/benchmark; preserved SEO/tags; publication idempotency; unrelated-worker isolation; and real UI status transitions. External services are reported only as PASS, FAIL, NOT VERIFIED or REAL USER ACTION REQUIRED.
 
 For legacy production-write isolation, additionally run `scriptor.test_config.SchemaVersionSafetyTests`, `tests.test_cover_queue_tombstones`, `scriptor.test_cover_library`, `tests.test_covers`, `pnpm typecheck` and the current-core freshness guard. These tests always run through `tests/run_isolated.py`; no provider request or production storage is permitted.
+
+## Evidence lanes
+
+The release gate combines isolated Python, UI, visual, security, performance,
+current-core, immutable artifact, and packaged-smoke lanes. Visual baseline
+updates require their test-only update flag and a second compare without it;
+see [[01 - Architecture/Visual Testing]]. Allure report generation preserves
+the existing command results and their test-owned failure attachments; it does
+not substitute a report for a passing test command.

@@ -40,6 +40,10 @@ The wrapper reserves the immutable destination, runs the applicable source/runti
 
 Before a package can enter packaged smoke, `verify-immutable-rc.mjs` re-reads the build manifest and every recorded artifact. It rejects a missing EXE, an unsafe relative path, a size/hash mismatch, or a manifest identity mismatch.
 
+[[Build Manifest and Verification]] documents the exact evidence contract and
+operator procedure. [[Release Gate]] remains the only authority that can
+declare the artifact release-ready.
+
 `NEWSFLOW_RC_OUTPUT_ROOT` may be used instead of `--output-root` in controlled CI. The package configuration's `release-staging` directory is never a deliverable and must not be shared as a release candidate.
 
 ## Safety boundary

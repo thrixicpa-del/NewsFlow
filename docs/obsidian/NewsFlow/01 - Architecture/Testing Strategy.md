@@ -125,3 +125,20 @@ python tests/run_isolated.py tests.test_observability
 ## Core contract boundary
 
 Passing source tests does not prove a release. The frozen core test invokes the actual `NewsFlowCore.exe` selected by the package configuration. The release freshness guard remains authoritative: any source module that changes packaged behavior must cause a core-bin rebuild before a package can pass release validation.
+
+## Unified report evidence
+
+`scripts/run-allure-report.ps1` generates a standard Allure report from the
+existing isolated Python, frontend, and integration commands without replacing
+their tooling. Source Electron E2E and packaged smoke are explicit opt-ins;
+when not requested their report result is `skipped`, never a false pass. On a
+failure, the report retains redacted stdout/stderr and test-owned screenshots
+or artifacts below `.artifacts/allure`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-allure-report.ps1
+```
+
+The report root is rejected if it resolves inside production NewsFlow storage.
+See [[Visual Testing]] for visual baseline evidence and [[Release Gate]] for
+the authoritative package sequence.
