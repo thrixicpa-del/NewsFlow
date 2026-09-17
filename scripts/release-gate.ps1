@@ -11,6 +11,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $appRoot = Join-Path $repoRoot 'studio-ui-remotion-verify'
+$powerShellExecutable = if ($env:WINDIR) {
+    Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+} else {
+    (Get-Command pwsh -ErrorAction Stop).Source
+}
+if (-not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
+    throw "RELEASE GATE - FAIL: required PowerShell host is unavailable: $powerShellExecutable"
+}
 $steps = @(
     'repo-state',
     'toolchain',
@@ -82,12 +90,12 @@ $failure = $null
 try {
     Set-Location $repoRoot
     if (git status --porcelain) { throw 'repo-state failed: release gate requires a clean Git worktree.' }
-    Invoke-GateStep -Name 'toolchain' -FilePath 'powershell' -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/verify-toolchain.ps1')
-    Invoke-GateStep -Name 'production-integrity-capture' -FilePath 'powershell' -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/check-production-integrity.ps1', '-Mode', 'Capture', '-SnapshotPath', $integritySnapshot)
+    Invoke-GateStep -Name 'toolchain' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/verify-toolchain.ps1')
+    Invoke-GateStep -Name 'production-integrity-capture' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/check-production-integrity.ps1', '-Mode', 'Capture', '-SnapshotPath', $integritySnapshot)
     $integrityCaptured = $true
     Invoke-GateStep -Name 'dependencies' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'verify:dependencies')
-    Invoke-GateStep -Name 'dependencies-python' -FilePath 'powershell' -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/audit-python-dependencies.ps1')
-    Invoke-GateStep -Name 'lint' -FilePath 'powershell' -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/release-lint.ps1')
+    Invoke-GateStep -Name 'dependencies-python' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/audit-python-dependencies.ps1')
+    Invoke-GateStep -Name 'lint' -FilePath $powerShellExecutable -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/release-lint.ps1')
     Invoke-GateStep -Name 'frontend-typecheck' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'typecheck')
     Invoke-GateStep -Name 'python-suite' -FilePath 'python' -Arguments @('tests/run_isolated.py', 'discover', '-s', 'tests', '-q')
     Invoke-GateStep -Name 'frontend-suite' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'test:ui')
@@ -116,7 +124,7 @@ try {
 } finally {
     if ($integrityCaptured) {
         try {
-            Invoke-GateStep -Name 'production-integrity-verify' -FilePath 'powershell' -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/check-production-integrity.ps1', '-Mode', 'Verify', '-SnapshotPath', $integritySnapshot)
+            Invoke-GateStep -Name 'production-integrity-verify' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/check-production-integrity.ps1', '-Mode', 'Verify', '-SnapshotPath', $integritySnapshot)
         } catch {
             if (-not $failure) { $failure = $_ }
         }

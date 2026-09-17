@@ -9,6 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseGateTests(unittest.TestCase):
+    def test_gate_uses_an_explicit_powershell_host_for_nested_integrity_steps(self):
+        script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("$powerShellExecutable", script)
+        self.assertIn("WindowsPowerShell\\v1.0\\powershell.exe", script)
+        self.assertNotIn("-FilePath 'powershell'", script)
+
     def test_dry_run_lists_the_complete_fail_closed_release_sequence(self):
         result = subprocess.run(
             [
