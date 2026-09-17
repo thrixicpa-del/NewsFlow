@@ -61,6 +61,21 @@ describe("workstation visual capture contract", () => {
     expect(captureScript).toContain("app.exit();");
   });
 
+  it("waits for the disposable Vite process tree before terminating visual capture", () => {
+    const captureScript = readFileSync(
+      resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
+      "utf8",
+    );
+    const stopVite = captureScript.indexOf("async function stopDisposableVite(vite)");
+    const awaitStop = captureScript.indexOf("await stopDisposableVite(vite);");
+    const exit = captureScript.indexOf("app.exit();", awaitStop);
+
+    expect(stopVite).toBeGreaterThan(-1);
+    expect(awaitStop).toBeGreaterThan(stopVite);
+    expect(exit).toBeGreaterThan(awaitStop);
+    expect(captureScript).toContain('taskkill.exe');
+  });
+
   it("clears disposable renderer preferences before loading each visual case", () => {
     const captureScript = readFileSync(
       resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
