@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from urllib.request import urlopen
 
-
 ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "studio-ui-remotion-verify"
 

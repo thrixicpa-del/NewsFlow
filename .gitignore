@@ -95,3 +95,9 @@ studio-ui-remotion-verify/packaged-snapshot.json
 # Local machine metadata
 .DS_Store
 Thumbs.db
+
+# Git LFS creates these helper hooks beside the tracked local quality hook.
+/.githooks/post-checkout
+/.githooks/post-commit
+/.githooks/post-merge
+/.githooks/pre-push

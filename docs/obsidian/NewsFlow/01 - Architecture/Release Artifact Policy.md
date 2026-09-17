@@ -38,6 +38,8 @@ pnpm --dir studio-ui-remotion-verify package:release -- --output-root 'D:\NewsFl
 
 The wrapper reserves the immutable destination, runs the applicable source/runtime/security checks, packages into a disposable sibling staging directory, verifies native portable resources, copies successful results into the reserved destination and writes the final artifact hashes. The staging directory is removed after the attempt; the immutable candidate directory is retained for evidence.
 
+Before a package can enter packaged smoke, `verify-immutable-rc.mjs` re-reads the build manifest and every recorded artifact. It rejects a missing EXE, an unsafe relative path, a size/hash mismatch, or a manifest identity mismatch.
+
 `NEWSFLOW_RC_OUTPUT_ROOT` may be used instead of `--output-root` in controlled CI. The package configuration's `release-staging` directory is never a deliverable and must not be shared as a release candidate.
 
 ## Safety boundary

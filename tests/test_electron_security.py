@@ -39,15 +39,23 @@ class ElectronSecurityGateTests(unittest.TestCase):
     def test_release_scripts_run_the_security_gate(self):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
         scripts = package["scripts"]
+        immutable_wrapper = (APP_ROOT / "scripts" / "package-immutable-rc.mjs").read_text(encoding="utf-8")
         self.assertIn("verify:security", scripts)
         self.assertIn("verify:secrets", scripts)
         self.assertIn("verify:dependencies", scripts)
-        self.assertIn("verify:security", scripts["package:preview"])
-        self.assertIn("verify:secrets", scripts["package:preview"])
-        self.assertIn("verify:dependencies", scripts["package:preview"])
-        self.assertIn("verify:security", scripts["package:release"])
-        self.assertIn("verify:secrets", scripts["package:release"])
-        self.assertIn("verify:dependencies", scripts["package:release"])
+        self.assertIn("package-immutable-rc.mjs", scripts["package:preview"])
+        self.assertIn("package-immutable-rc.mjs", scripts["package:release"])
+        self.assertIn('run(pnpm, ["verify:security"])', immutable_wrapper)
+        self.assertIn('run(pnpm, ["verify:secrets"])', immutable_wrapper)
+        self.assertIn('run(pnpm, ["verify:dependencies"])', immutable_wrapper)
+
+    def test_renderer_styles_do_not_require_remote_google_fonts_blocked_by_csp(self):
+        """A secure packaged renderer must not depend on an external stylesheet for its base font."""
+        styles = (APP_ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
+        index = (APP_ROOT / "index.html").read_text(encoding="utf-8")
+
+        self.assertNotIn("fonts.googleapis.com", styles)
+        self.assertIn("style-src 'self'", index)
 
     def test_known_high_severity_transitive_dependencies_are_pinned_safe(self):
         workspace = (APP_ROOT / "pnpm-workspace.yaml").read_text(encoding="utf-8")

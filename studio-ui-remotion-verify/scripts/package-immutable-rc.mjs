@@ -43,6 +43,7 @@ try {
   run(node, ["scripts/verify-portable.mjs", stagingRoot]);
   cpSync(stagingRoot, artifactRoot, { recursive: true, force: false, errorOnExist: true });
   run(node, ["scripts/finalize-immutable-rc.mjs", "--directory", artifactRoot]);
+  run(node, ["scripts/verify-immutable-rc.mjs", "--directory", artifactRoot]);
   process.stdout.write(`IMMUTABLE_RC_PACKAGE=PASS\n${artifactRoot}\n`);
 } finally {
   rmSync(stagingRoot, { recursive: true, force: true });

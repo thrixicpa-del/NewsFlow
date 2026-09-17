@@ -1,7 +1,6 @@
 import json
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 APP_PATH = Path(__file__).resolve().parents[1] / "studio-ui-remotion-verify" / "src" / "ui" / "App.tsx"
 
@@ -42,10 +41,12 @@ class ActiveInterfaceTests(unittest.TestCase):
         app_root = APP_PATH.parents[2]
         package = json.loads((app_root / "package.json").read_text(encoding="utf-8"))
         guard = app_root / "scripts" / "verify-build-runtime.mjs"
+        immutable_wrapper = app_root / "scripts" / "package-immutable-rc.mjs"
 
         self.assertIn("verify:build-runtime", package["scripts"])
-        self.assertIn("pnpm verify:build-runtime", package["scripts"]["package:preview"])
-        self.assertIn("pnpm verify:build-runtime", package["scripts"]["package:release"])
+        self.assertIn("package-immutable-rc.mjs", package["scripts"]["package:preview"])
+        self.assertIn("package-immutable-rc.mjs", package["scripts"]["package:release"])
+        self.assertIn('run(pnpm, ["verify:build-runtime"])', immutable_wrapper.read_text(encoding="utf-8"))
         source = guard.read_text(encoding="utf-8")
         self.assertIn("pnpm-lock.yaml", source)
         self.assertIn("SETTINGS_SCHEMA_VERSION", source)

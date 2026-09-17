@@ -67,3 +67,41 @@ class ImmutableRcTests(unittest.TestCase):
             self.assertTrue((target / "build-manifest.json").is_file())
             second = subprocess.run(command, cwd=APP, text=True, capture_output=True, check=False)
             self.assertNotEqual(0, second.returncode)
+
+    def test_rc_verifier_rejects_a_tampered_packaged_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepared = subprocess.run(
+                ["node", "scripts/prepare-immutable-rc.mjs", "--output-root", directory, "--type", "TEST", "--rc", "04"],
+                cwd=APP,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, prepared.returncode, prepared.stdout + prepared.stderr)
+            artifact_root = Path(prepared.stdout.strip().splitlines()[-1])
+            exe = artifact_root / "NewsFlow Studio.exe"
+            exe.write_bytes(b"verified portable artifact")
+            subprocess.run(
+                ["node", "scripts/finalize-immutable-rc.mjs", "--directory", str(artifact_root)],
+                cwd=APP,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            verified = subprocess.run(
+                ["node", "scripts/verify-immutable-rc.mjs", "--directory", str(artifact_root)],
+                cwd=APP,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, verified.returncode, verified.stdout + verified.stderr)
+            exe.write_bytes(b"tampered portable artifact")
+            rejected = subprocess.run(
+                ["node", "scripts/verify-immutable-rc.mjs", "--directory", str(artifact_root)],
+                cwd=APP,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(0, rejected.returncode)

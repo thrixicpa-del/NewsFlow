@@ -25,3 +25,12 @@ class LocalQualityGateTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("FAST_LOCAL_GATE=PASS", result.stdout)
 
+    def test_lfs_generated_hooks_do_not_dirty_the_release_worktree(self):
+        """Git LFS helper hooks are local runtime artifacts, not release source files."""
+        for name in ("post-checkout", "post-commit", "post-merge", "pre-push"):
+            result = subprocess.run(
+                ["git", "check-ignore", "-q", f".githooks/{name}"],
+                cwd=ROOT,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, name)
