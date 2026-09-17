@@ -1,5 +1,6 @@
 import { app, BrowserWindow, nativeImage } from "electron";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,7 +13,9 @@ if (process.env.NEWSFLOW_TEST_MODE !== "1") {
 const root = process.cwd();
 const artifactRoot = path.join(root, ".artifacts", "workstation-visual-baselines");
 const testUserData = path.join(tmpdir(), "NewsFlow-workstation-visual-test-user-data");
-const baselineRoot = path.join(artifactRoot, "approved");
+// Approved references are versioned test fixtures so a clean checkout can run
+// the same comparison. Current captures and manifests remain disposable.
+const baselineRoot = path.join(root, "tests", "visual-baselines", "approved");
 const currentRoot = path.join(artifactRoot, "current");
 const sourceUrl = process.env.NEWSFLOW_VISUAL_BASELINE_URL || "http://127.0.0.1:5174/";
 const updateBaselines = process.env.NEWSFLOW_UPDATE_VISUAL_BASELINES === "1";
@@ -95,6 +98,23 @@ async function startDisposableVite() {
   }
   vite.kill();
   throw new Error(`Disposable Vite server did not become available: ${sourceUrl}`);
+}
+
+async function stopDisposableVite(vite) {
+  if (!vite || vite.exitCode !== null) return;
+  // Electron's Node-mode Vite child can retain Chromium descendants on
+  // Windows. It is spawned above with an isolated test root, so terminating
+  // this exact child tree is safe and prevents a release gate deadlock.
+  if (process.platform === "win32" && vite.pid) {
+    const taskkill = spawn("taskkill.exe", ["/pid", String(vite.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    await Promise.race([once(taskkill, "close"), delay(5_000)]);
+  } else {
+    vite.kill("SIGTERM");
+  }
+  if (vite.exitCode === null) await Promise.race([once(vite, "exit"), delay(5_000)]);
 }
 
 async function clickVisibleButton(window, label) {
@@ -333,13 +353,16 @@ async function captureBaselines() {
     console.log(JSON.stringify(results));
   } finally {
     if (!window.isDestroyed()) window.destroy();
-    vite?.kill();
+    await stopDisposableVite(vite);
     app.exit();
   }
 }
 
-void captureBaselines().catch((error) => {
-  console.error(error);
-  app.exit();
-  process.exitCode = 1;
-});
+void captureBaselines().then(
+  () => process.exit(0),
+  (error) => {
+    console.error(error);
+    app.exit();
+    process.exit(1);
+  },
+);

@@ -1082,7 +1082,7 @@ export function Dashboard({
         <div>
           <span>КОНВЕЙЕР</span>
           <b>Цель выпуска</b>
-          <input value={target} onChange={(e) => setTarget(e.target.value)} />
+          <input aria-label="Цель выпуска" value={target} onChange={(e) => setTarget(e.target.value)} />
           <Button onClick={saveTarget}>Сохранить</Button>
         </div>
         <div className="pipeline-counts">

@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { isolatedElectronUserDataRoot } from "./test-user-data.js";
+import { environmentWindowTitle, isolatedElectronUserDataRoot } from "./test-user-data.js";
 
 describe("isolated Electron user-data root", () => {
   it("uses a dedicated child of the explicit test root", () => {
@@ -26,5 +26,27 @@ describe("isolated Electron user-data root", () => {
       NEWSFLOW_TEST_ROOT: production,
       NEWSFLOW_PRODUCTION_LOCALAPPDATA: production,
     })).toThrow("production");
+  });
+
+  it("rejects a test root inside the canonical production NewsFlow folder", () => {
+    const production = path.resolve("C:/Users/borov/AppData/Local");
+
+    expect(() => isolatedElectronUserDataRoot({
+      NEWSFLOW_TEST_MODE: "1",
+      NEWSFLOW_TEST_ROOT: path.join(production, "NewsFlow", "nested-test"),
+      NEWSFLOW_PRODUCTION_LOCALAPPDATA: production,
+    })).toThrow("production");
+  });
+
+  it("marks a validated test launch in the native window title", () => {
+    expect(environmentWindowTitle({
+      NEWSFLOW_TEST_MODE: "1",
+      NEWSFLOW_TEST_ROOT: path.resolve("D:/NewsFlow-RC/disposable/phase-4"),
+      NEWSFLOW_PRODUCTION_LOCALAPPDATA: path.resolve("C:/Users/borov/AppData/Local"),
+    })).toBe("NewsFlow Studio [TEST]");
+  });
+
+  it("keeps the production title for a normal launch", () => {
+    expect(environmentWindowTitle({})).toBe("NewsFlow Studio");
   });
 });

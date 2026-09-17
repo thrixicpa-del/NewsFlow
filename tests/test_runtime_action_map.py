@@ -10,7 +10,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 UI_ROOT = ROOT / "studio-ui-remotion-verify" / "src"
 APP_ROOT = ROOT / "studio-ui-remotion-verify"
@@ -42,9 +41,11 @@ class RuntimeActionMapTests(unittest.TestCase):
         preload = (APP_ROOT / "electron" / "preload.mts").read_text(encoding="utf-8")
         main = (APP_ROOT / "electron" / "main.ts").read_text(encoding="utf-8")
         channels = set(re.findall(r"ipcRenderer\.invoke\('([^']+)'", preload))
-        handled = set(re.findall(r"ipcMain\.handle\('([^']+)'", main))
+        handled = set(re.findall(r"handleTrusted\('([^']+)'", main))
 
         self.assertFalse(channels - handled, f"Preload channels without Electron handler: {sorted(channels - handled)}")
+        self.assertIn("assertTrustedIpcSender(event)", main)
+        self.assertIn("assertAllowedCoreCommand(command)", main)
         self.assertIn("callCore('snapshot')", main)
         self.assertIn("callCore('save-settings', patch)", main)
         self.assertIn("callCore('start-youtube-channel-handoff'", main)

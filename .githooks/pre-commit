@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/fast-local-gate.ps1 -Staged

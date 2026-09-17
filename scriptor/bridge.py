@@ -80,6 +80,7 @@ from .tts_ranges import (RangeValidationError, ensure_production_item_ids, freez
                          validate_ranges)
 from .channel_research import channel_research_state, new_task, parse_txt_sources
 from .command_contract import COMMAND_CONTRACT, validate_command_request, validate_command_result
+from .observability import start_action_trace
 from .youtube_oauth import (CloudflareOAuthSession, authorize_desktop_channel,
                             cancel_cloudflare_authorization, open_channel_authorization,
                             start_cloudflare_channel_authorization,
@@ -12572,8 +12573,11 @@ def open_chrome_session(payload: dict) -> dict:
 
 def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
+    trace = None
+    payload = {}
     try:
         payload = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+        trace = start_action_trace(command, payload)
         if command in COMMAND_CONTRACT:
             validate_command_request(command, payload)
         if command == "snapshot":
@@ -12992,9 +12996,15 @@ def main() -> None:
             raise ValueError(f"Unsupported bridge command: {command}")
         if command in COMMAND_CONTRACT:
             validate_command_result(command, result)
+        trace.succeeded(result)
+        if isinstance(result, dict):
+            result["actionTrace"] = trace.result_context()
         print(json.dumps(result, ensure_ascii=False))
     except Exception as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        if trace is None:
+            trace = start_action_trace(command, {})
+        trace.failed(exc)
+        print(json.dumps({"error": str(exc), "actionTrace": trace.result_context()}, ensure_ascii=False))
         raise SystemExit(1)
 
 

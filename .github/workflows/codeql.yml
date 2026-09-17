@@ -1,0 +1,33 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    # Code scanning uploads are unavailable on this private repository without
+    # the required GitHub entitlement. Keep the analysis configured, while
+    # local security gates remain the mandatory release authority.
+    if: ${{ vars.NEWSFLOW_CODE_SCANNING_ENABLED == 'true' }}
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/autobuild@v4
+      - uses: github/codeql-action/analyze@v4

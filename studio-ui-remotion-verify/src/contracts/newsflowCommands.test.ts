@@ -25,9 +25,13 @@ describe("NewsFlow renderer command contract", () => {
     const preload = readFileSync(resolve(process.cwd(), "electron/preload.mts"), "utf8");
     const main = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
     const bridge = readFileSync(resolve(process.cwd(), "../scriptor/bridge.py"), "utf8");
+    const observability = readFileSync(resolve(process.cwd(), "../scriptor/observability.py"), "utf8");
 
     expect(preload).toContain("newsflow:command");
-    expect(main).toContain("ipcMain.handle('newsflow:command'");
+    expect(main).toContain("handleTrusted('newsflow:command'");
+    expect(main).toContain("assertAllowedCoreCommand(command)");
+    expect(main).toContain("_actionTrace");
+    expect(observability).toContain('payload.get("_actionTrace")');
     for (const command of ["generate-ideas", "generate-scenarios", "generate-covers", "run-montage-queue"]) {
       expect(bridge).toContain(`command == "${command}"`);
     }

@@ -1,7 +1,6 @@
 import json
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 APP_PATH = Path(__file__).resolve().parents[1] / "studio-ui-remotion-verify" / "src" / "ui" / "App.tsx"
 
@@ -42,10 +41,12 @@ class ActiveInterfaceTests(unittest.TestCase):
         app_root = APP_PATH.parents[2]
         package = json.loads((app_root / "package.json").read_text(encoding="utf-8"))
         guard = app_root / "scripts" / "verify-build-runtime.mjs"
+        immutable_wrapper = app_root / "scripts" / "package-immutable-rc.mjs"
 
         self.assertIn("verify:build-runtime", package["scripts"])
-        self.assertIn("pnpm verify:build-runtime", package["scripts"]["package:preview"])
-        self.assertIn("pnpm verify:build-runtime", package["scripts"]["package:release"])
+        self.assertIn("package-immutable-rc.mjs", package["scripts"]["package:preview"])
+        self.assertIn("package-immutable-rc.mjs", package["scripts"]["package:release"])
+        self.assertIn('run(pnpm, ["verify:build-runtime"])', immutable_wrapper.read_text(encoding="utf-8"))
         source = guard.read_text(encoding="utf-8")
         self.assertIn("pnpm-lock.yaml", source)
         self.assertIn("SETTINGS_SCHEMA_VERSION", source)
@@ -59,6 +60,13 @@ class ActiveInterfaceTests(unittest.TestCase):
         self.assertIn("function startMontageQueue(payload: unknown = {}): Promise<void>", main)
         self.assertIn("child.once('error'", main)
         self.assertIn("await startMontageQueue(payload)", main)
+
+    def test_source_e2e_owns_and_can_terminate_its_electron_process(self):
+        """The test launcher must not hide Electron behind a pnpm child process on Windows."""
+        source = (APP_PATH.parents[3] / "tests" / "test_electron_e2e.py").read_text(encoding="utf-8")
+
+        self.assertIn('APP_ROOT / "node_modules" / "electron" / "dist"', source)
+        self.assertNotIn('[pnpm, "exec", "electron"', source)
 
     def test_packaged_runtime_never_falls_back_to_a_previous_core_layout(self):
         """A current package must fail clearly instead of booting an older embedded core."""

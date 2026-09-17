@@ -33,6 +33,7 @@ venv/
 .core-packaging-deps/
 .packaging-tools/
 .cache/
+.worktrees/
 
 # NewsFlow generated core and historical build work
 .build-core-*/
@@ -45,6 +46,7 @@ studio-ui-remotion-verify/node_modules/
 studio-ui-remotion-verify/dist/
 studio-ui-remotion-verify/dist-electron/
 studio-ui-remotion-verify/remotion-bundle/
+studio-ui-remotion-verify/storybook-static/
 studio-ui-remotion-verify/core-bin/
 studio-ui-remotion-verify/release-*/
 oauth-site/worker/node_modules/
@@ -93,3 +95,9 @@ studio-ui-remotion-verify/packaged-snapshot.json
 # Local machine metadata
 .DS_Store
 Thumbs.db
+
+# Git LFS creates these helper hooks beside the tracked local quality hook.
+/.githooks/post-checkout
+/.githooks/post-commit
+/.githooks/post-merge
+/.githooks/pre-push

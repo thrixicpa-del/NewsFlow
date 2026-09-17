@@ -25,6 +25,11 @@ class TestStorageIsolationError(RuntimeError):
     """A test attempted to use persistent NewsFlow storage without a sandbox."""
 
 
+def _is_same_or_descendant(path: Path, parent: Path) -> bool:
+    """Return whether a resolved path is the parent itself or lives beneath it."""
+    return path == parent or parent in path.parents
+
+
 def _test_storage_root() -> Path | None:
     """Return the required isolated root for a test process, never production.
 
@@ -46,7 +51,9 @@ def _test_storage_root() -> Path | None:
     production_local_appdata = Path(os.environ.get(
         _PRODUCTION_LOCALAPPDATA_ENV, os.environ.get("LOCALAPPDATA", Path.home())
     )).expanduser().resolve()
-    if root == production_local_appdata or root / "NewsFlow" == production_local_appdata / "NewsFlow":
+    production_storage = production_local_appdata / "NewsFlow"
+    if (root == production_local_appdata
+            or _is_same_or_descendant(root, production_storage)):
         raise TestStorageIsolationError(
             "NEWSFLOW_TEST_ROOT указывает на production NewsFlow storage; тест остановлен."
         )
@@ -137,7 +144,9 @@ def app_data_root() -> Path:
         production_local_appdata = Path(os.environ.get(
             _PRODUCTION_LOCALAPPDATA_ENV, Path.home()
         )).expanduser().resolve()
-        if local_appdata == production_local_appdata:
+        production_storage = production_local_appdata / "NewsFlow"
+        if (local_appdata == production_local_appdata
+                or _is_same_or_descendant(local_appdata / "NewsFlow", production_storage)):
             raise TestStorageIsolationError(
                 "Тестовый runtime пытается использовать production LOCALAPPDATA; тест остановлен."
             )

@@ -1,0 +1,11 @@
+title = "NewsFlow tracked-source secret policy"
+
+[extend]
+useDefault = true
+
+# Local user data, provider credentials, OAuth state and generated media are
+# ignored by .gitignore and must never be added to a scan allow-list.
+[allowlist]
+paths = [
+  '''(^|/)\.gitignore$''',
+]

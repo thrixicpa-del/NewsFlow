@@ -3,3 +3,9 @@ allowBuilds:
   # Remotion's static bundle and Vite both invoke the native esbuild binary.
   # It must be built during the isolated install used for the Windows package.
   esbuild: true
+
+# Pinned transitive fixes identified by the Phase 19 production dependency audit.
+# Direct package majors remain unchanged; any later removal needs a clean audit.
+overrides:
+  js-yaml: 4.3.2
+  fast-uri: 3.1.6

@@ -22,3 +22,6 @@
 
 # Required local build asset. Kept separately from generated user media.
 assets/ffmpeg.exe filter=lfs diff=lfs merge=lfs -text
+
+# Approved, disposable visual-regression references are binary test fixtures.
+studio-ui-remotion-verify/tests/visual-baselines/approved/*.png filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,21 @@
+name: Dependency review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    # Private repositories without GitHub Advanced Security cannot run this
+    # hosted action. Local npm/pip audits remain fail-closed release gates.
+    if: ${{ vars.NEWSFLOW_DEPENDENCY_REVIEW_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime
