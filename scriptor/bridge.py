@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .config import (ChromeSession, FastGenKey, OpenAIKey, SecretVoicerKey, LumeanKey, VoiceGenKey, WProjectKey, Settings,
                      allow_empty_release_state, app_data_root, load_settings, save_settings)
-from .covers import FastGenPool
+from .covers import FastGenError, FastGenPool
 from .cover_library import CoverLibrary
 from .openai_client import HybridTextPool, OpenAIAPIError
 from .voicer import (ChromeSecretVoicer, LumeanClient, SecretVoicerClient, VoiceGenClient, WProjectClient,
@@ -715,8 +715,9 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
 
 
 def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
-                               face_mode: str = "auto", position: int = 0) -> tuple[list[str], str]:
-    """Keep references within FastGen's common ten-file limit and show match state."""
+                               face_mode: str = "auto", position: int = 0,
+                               max_references: int = 10) -> tuple[list[str], str]:
+    """Keep references within the operation limit and reserve a selected face slot."""
     manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
     if face_mode == "without" or item.get("face_reference_disabled"):
         face_path, face_label, face_source = "", "", ""
@@ -747,10 +748,8 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
         scene_references.append(str(scene_path))
     scene_references.extend(_cover_reference_paths_for_item(item, position, settings))
     scene_references.extend(_cover_ai_reference_paths_for_fastgen(item, position, settings))
-    references = [_prepare_cover_visual_reference(Path(reference)) for reference in scene_references]
-    references = [str(reference) for reference in references]
+    references = [str(_prepare_cover_visual_reference(Path(reference))) for reference in scene_references]
     if face_path:
-        references.append(face_path)
         item.update(face_reference_path=face_path, face_reference_label=face_label, face_reference_source=face_source)
     else:
         item.pop("face_reference_path", None)
@@ -758,9 +757,14 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
         item.pop("face_reference_source", None)
     unique: list[str] = []
     for reference in references:
-        if reference not in unique:
+        if reference != face_path and reference not in unique:
             unique.append(reference)
-    return unique[:10], face_label
+    limit = max(0, int(max_references))
+    if face_path and limit:
+        # The identity reference is mandatory for the all-FastGen face route.
+        # Keep scene/style order stable, but reserve its provider input slot.
+        return [*unique[:limit - 1], face_path], face_label
+    return unique[:limit], face_label
 
 
 def _cover_face_layout(item: dict, settings: Settings, face_path: str, face_label: str) -> str:
@@ -5597,6 +5601,28 @@ def _cover_prompt_should_generate(item: dict, *, force: bool = False) -> bool:
     return not str(item.get("image_prompt", "")).strip()
 
 
+def _cover_text_revision(item: dict) -> str:
+    """Identify the exact approved text pair used to plan a visual prompt."""
+    values = [
+        " ".join(str(item.get("cover_headline", "")).split()),
+        " ".join(str(item.get("cover_subheadline", "")).split()),
+    ]
+    return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+
+def _cover_prompt_revision(item: dict) -> str:
+    prompt = " ".join(str(item.get("image_prompt", "")).split())
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16] if prompt else ""
+
+
+def _mark_cover_prompt_stale_for_current_text(item: dict) -> None:
+    """Prevent a visual brief authored for old cover words from looking current."""
+    has_prompt = bool(str(item.get("image_prompt", "")).strip() or item.get("image_prompt_options"))
+    if has_prompt and item.get("prompt_text_signature") != _cover_text_revision(item):
+        item.update(status="Промпты устарели", progress=0,
+                    error="Текст обложки изменён: создайте новый визуальный промпт")
+
+
 def _clean_cover_prompts(value: str, count: int) -> tuple[list[str], int]:
     text = str(value or "").strip()
     prompts: list[object] = []
@@ -5656,6 +5682,12 @@ def _cover_provider_error_message(error: object) -> str:
     """Keep operator-visible provider failures useful without persisting credentials."""
     message = " ".join(str(error or "Provider request failed").split())
     message = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[REDACTED]", message)
+    message = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", message)
+    message = re.sub(
+        r"(?i)\b(api[_ -]?key|authorization|token)\s*[:=]\s*[^\s,;]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        message,
+    )
     return message[:500]
 
 
@@ -5765,7 +5797,8 @@ def generate_cover_prompts(payload: dict) -> dict:
             _cover_step(item, "Промпты готовы", 100,
                         f"Подготовлено вариантов: {len(options)}")
             item.update(image_prompt_options=options, selected_prompt_index=chosen, image_prompt=options[chosen],
-                        prompt_provider=provider, error="")
+                        prompt_provider=provider, prompt_text_signature=_cover_text_revision(item), error="")
+            item["prompt_revision_id"] = _cover_prompt_revision(item)
         except Exception as exc:
             if _cover_prompt_safety_blocked(exc):
                 fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
@@ -5773,7 +5806,9 @@ def generate_cover_prompts(payload: dict) -> dict:
                 _cover_step(item, "Промпты готовы", 100,
                             "Провайдер отклонил формулировку: создан безопасный локальный вариант")
                 item.update(image_prompt_options=options, selected_prompt_index=0,
-                            image_prompt=options[0], prompt_provider="local-fallback", error="")
+                            image_prompt=options[0], prompt_provider="local-fallback",
+                            prompt_text_signature=_cover_text_revision(item), error="")
+                item["prompt_revision_id"] = _cover_prompt_revision(item)
             else:
                 reason = _cover_provider_error_message(exc)
                 _cover_step(item, "Ошибка промпта", 100, reason)
@@ -6398,6 +6433,7 @@ def generate_cover_headlines(payload: dict) -> dict:
                            headline_attempt_count=len(attempts), headline_semantic_slots=validation["semantic_slots"],
                            headline_repair_history=attempts, headline_pattern_signature=_cover_word_pattern_signature(headline),
                            headline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+            _mark_cover_prompt_stale_for_current_text(current)
             current["headline_provider_attempt_count"] = provider_call.attempts
             current.pop("cover_headline_suggestion", None)
         except Exception as exc:
@@ -6431,6 +6467,7 @@ def apply_cover_headline_suggestions(payload: dict) -> dict:
         suggestion = _clean_cover_headline(str(item.get("cover_headline_suggestion", "")))
         if suggestion:
             item.update(cover_headline=suggestion, headline_status="Перенесено в тему")
+            _mark_cover_prompt_stale_for_current_text(item)
             applied += 1
     if not applied:
         raise ValueError("Сначала создайте фразы ИИ для выбранных тем")
@@ -6502,6 +6539,7 @@ def generate_cover_subheadlines(payload: dict) -> dict:
                            subheadline_semantic_slots=validation["semantic_slots"], subheadline_repair_history=attempts,
                            subheadline_pattern_signature=_cover_word_pattern_signature(subheadline),
                            subheadline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+            _mark_cover_prompt_stale_for_current_text(current)
             current["subheadline_provider_attempt_count"] = provider_call.attempts
             current.pop("cover_subheadline_suggestion", None)
         except Exception as exc:
@@ -6531,6 +6569,7 @@ def apply_cover_subheadline_suggestions(payload: dict) -> dict:
         suggestion = _clean_cover_subheadline(str(item.get("cover_subheadline_suggestion", "")))
         if suggestion:
             item.update(cover_subheadline=suggestion, subheadline_status="Перенесено в тему")
+            _mark_cover_prompt_stale_for_current_text(item)
             applied += 1
     if not applied:
         raise ValueError("Сначала создайте подзаголовки ИИ для выбранных тем")
@@ -6554,6 +6593,7 @@ def cancel_cover_subheadlines(payload: dict) -> dict:
                                                    "subheadline_status", "subheadline_error"))
         for key in ("cover_subheadline", "cover_subheadline_suggestion", "subheadline_status", "subheadline_error"):
             item.pop(key, None)
+        _mark_cover_prompt_stale_for_current_text(item)
         if had_value:
             removed += 1
     _save_cover_state(settings)
@@ -6686,6 +6726,7 @@ def import_cover_headlines(payload: dict) -> dict:
     applied = 0
     for index, phrase in zip(valid, phrases):
         settings.cover_queue[index].update(cover_headline=phrase, headline_status="Загружено вручную")
+        _mark_cover_prompt_stale_for_current_text(settings.cover_queue[index])
         applied += 1
     _save_cover_state(settings)
     return {**snapshot(), "operationResult": {"kind": "cover-own-headlines", "count": applied,
@@ -6707,6 +6748,7 @@ def remove_cover_headlines(payload: dict) -> dict:
         item.pop("cover_headline_suggestion", None)
         item["headline_status"] = ""
         item["headline_error"] = ""
+        _mark_cover_prompt_stale_for_current_text(item)
         removed += 1
     if not removed:
         raise ValueError("Нет ваших слов на обложке для удаления")
@@ -6751,6 +6793,7 @@ def save_cover_headline(payload: dict) -> dict:
     text = " ".join(str(payload.get("headline", "")).split())
     settings.cover_queue[index].update(cover_headline=text, headline_source="MANUAL",
                                        headline_status="MANUAL" if text else "", headline_error="")
+    _mark_cover_prompt_stale_for_current_text(settings.cover_queue[index])
     _save_cover_state(settings)
     return snapshot()
 
@@ -6772,6 +6815,7 @@ def save_cover_subheadline(payload: dict) -> dict:
         subheadline_status="MANUAL" if text else "",
         subheadline_error="",
     )
+    _mark_cover_prompt_stale_for_current_text(settings.cover_queue[index])
     _save_cover_state(settings)
     return snapshot()
 
@@ -6887,6 +6931,8 @@ def select_cover_prompt(payload: dict) -> dict:
         raise ValueError("Вариант промпта не найден")
     settings.cover_queue[index].update(selected_prompt_index=option, image_prompt=str(options[option]),
                                        status="Промпты готовы")
+    settings.cover_queue[index]["prompt_text_signature"] = _cover_text_revision(settings.cover_queue[index])
+    settings.cover_queue[index]["prompt_revision_id"] = _cover_prompt_revision(settings.cover_queue[index])
     _save_cover_state(settings)
     return snapshot()
 
@@ -6895,7 +6941,7 @@ def _is_retryable_cover_error(error: object) -> bool:
     text = str(error or "").casefold()
     return any(marker in text for marker in (
         "winerror 10060", "timeout", "timed out", "connection", "network", "429", " 5",
-        "temporar", "connection reset", "provider safety", "safety filters",
+        "temporar", "try again later", "connection reset", "provider safety", "safety filters",
     ))
 
 
@@ -6938,8 +6984,8 @@ def _cover_fastgen_identity_instruction(face_label: str, *, has_remote_reference
     )
 
 
-def _cover_operation_accepts_references(settings: Settings, operation: str) -> bool:
-    """Read the cached FastGen schema before attaching files to a generation prompt."""
+def _cover_operation_reference_limit(settings: Settings, operation: str) -> int | None:
+    """Return the live/cached provider input limit, or None without schema evidence."""
     for capability in (settings.fastgen_capabilities_cache.get("image") or []):
         if not isinstance(capability, dict):
             continue
@@ -6947,7 +6993,18 @@ def _cover_operation_accepts_references(settings: Settings, operation: str) -> b
         if identifier != operation:
             continue
         inputs = capability.get("inputs") if isinstance(capability.get("inputs"), dict) else {}
-        return int(inputs.get("max") or 0) > 0
+        try:
+            return max(0, int(inputs.get("max") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return None
+
+
+def _cover_operation_accepts_references(settings: Settings, operation: str) -> bool:
+    """Keep compatibility behavior for scene-only routes without cached schemas."""
+    limit = _cover_operation_reference_limit(settings, operation)
+    if limit is not None:
+        return limit > 0
     # These two operations are documented in FastGen's live schema as text-only
     # image generation.  An unavailable capabilities refresh must not make us
     # send them a portrait they explicitly reject.
@@ -6961,15 +7018,25 @@ def _cover_retry_prompt(title: str, original: str, round_number: int = 2) -> str
 
 
 def _cover_retry_plan(title: str, original: str) -> list[dict[str, object]]:
-    """Four prompts × four transport attempts, recorded as user-visible rounds."""
-    return [
-        {"round": 1, "prompt": original, "attempts": 4, "rewritten": False},
-        *[
-            {"round": round_number, "prompt": _cover_retry_prompt(title, original, round_number),
-             "attempts": 4, "rewritten": True}
-            for round_number in range(2, 5)
-        ],
-    ]
+    """One immutable provider request with at most four pre-billing attempts."""
+    del title
+    return [{"round": 1, "prompt": original, "attempts": 4, "rewritten": False}]
+
+
+def _cover_accepted_generation_id(error: object) -> str:
+    return str(getattr(error, "generation_id", "") or "").strip()
+
+
+def _is_prebilling_cover_rejection(error: object) -> bool:
+    if _cover_accepted_generation_id(error):
+        return False
+    if isinstance(error, FastGenError):
+        return not error.quota_exhausted and error.status_code != 429
+    return _is_retryable_cover_error(error)
+
+
+class _CoverPromptNeedsRewrite(RuntimeError):
+    """The immutable create request was rejected four times before acceptance."""
 
 
 def _run_parallel_cover_workers(indices: list[int], worker) -> list[object]:
@@ -7136,6 +7203,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
     if build_mode not in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
         build_mode = settings.cover_build_mode
     operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
+    operation_reference_limit = _cover_operation_reference_limit(settings, operation)
     operation_accepts_references = _cover_operation_accepts_references(settings, operation)
     render_profile = {
         "build_mode": build_mode,
@@ -7191,6 +7259,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             references, face_label = _cover_references_for_item(
                 item, settings, refine=refine_with_face,
                 face_mode="without" if local_face_only else face_mode, position=index,
+                max_references=operation_reference_limit if operation_reference_limit is not None else 10,
             )
             if local_face_only and face_mode != "without":
                 face_path, face_label, face_source = _match_cover_face_reference(
@@ -7203,8 +7272,30 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     item.pop("face_reference_path", None)
                     item.pop("face_reference_label", None)
                     item.pop("face_reference_source", None)
-            # Flower/Grok generation endpoints are text-only.  Keep the matched
-            # name below, but never submit a file that their live schema rejects.
+            # A full-FastGen face cover is accepted only when the provider can
+            # receive the selected portrait. Falling back to a name-only prompt
+            # would silently produce a different person and cannot count as the
+            # requested scene + face + text workflow.
+            if build_mode == "fastgen-full" and face_label and operation_reference_limit is None:
+                detail = (
+                    "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
+                    "обновите список моделей или выберите reference-capable operation."
+                )
+                _cover_step(item, "Операция FastGen без references", 100, detail)
+                item["error"] = detail
+                _save_cover_state(settings)
+                continue
+            if build_mode == "fastgen-full" and face_label and not operation_accepts_references:
+                detail = (
+                    f"Операция FastGen {operation} не поддерживает image/reference input; "
+                    "выберите reference-capable operation для режима «Всё через FastGen»."
+                )
+                _cover_step(item, "Операция FastGen без references", 100, detail)
+                item["error"] = detail
+                _save_cover_state(settings)
+                continue
+            # Text-only generation endpoints must not receive files in the
+            # remaining scene-only and diagnostic routes.
             if not operation_accepts_references:
                 references = []
         except ValueError as exc:
@@ -7282,78 +7373,74 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 paths = []
                 last_error: Exception | None = None
                 successful_prompt = final_provider_prompt
-                for retry_round in _cover_retry_plan(title, final_provider_prompt):
-                    round_number = int(retry_round["round"])
-                    retry_prompt = str(retry_round["prompt"])
-                    for attempt in range(1, int(retry_round["attempts"]) + 1):
-                        total_attempt = (round_number - 1) * 4 + attempt
-                        if total_attempt > 1:
-                            delay = min(12, 2 ** (attempt - 1)) if attempt > 1 else 0
-                            _cover_step(
-                                item, f"Круг {round_number}/4 · попытка {attempt}/4",
-                                int(item.get("progress", 10) or 10),
-                                (f"Промпт {'переписан' if retry_round['rewritten'] else 'исходный'} · "
-                                 f"всего попытка {total_attempt}/16" + (f" · повтор через {delay} сек." if delay else "")),
-                            )
-                            item.update(
-                                error="", generation_round=round_number, generation_rounds=4,
-                                generation_attempt=attempt, generation_attempts_per_round=4,
-                                generation_total_attempt=total_attempt, generation_max_attempts=16,
-                            )
-                            _save_cover_state(settings)
-                            if delay:
-                                time.sleep(delay)
-                        try:
-                            paths = pool.generate_media(
-                                retry_prompt,
-                                output, f"{index + 1:03d} — {title} — промпт {prompt_index:02d}", operation,
-                                settings.cover_aspect_ratio, references=references, count=settings.cover_variant_count, seed=seed,
-                                quality=settings.cover_quality or None, resolution=settings.cover_resolution or None,
-                                upscale=settings.cover_upscale, progress_callback=progress,
-                            )
-                            successful_prompt = retry_prompt
-                            generation_history.append({
-                                "promptIndex": prompt_index, "round": round_number, "attempt": attempt,
-                                "totalAttempt": total_attempt, "rewritten": bool(retry_round["rewritten"]),
-                                "status": "success", "at": datetime.now().isoformat(timespec="seconds"),
-                            })
-                            item.update(
-                                generation_round=round_number, generation_rounds=4,
-                                generation_attempt=attempt, generation_attempts_per_round=4,
-                                generation_total_attempt=total_attempt, generation_max_attempts=16,
-                                generation_history=generation_history[-128:],
-                            )
-                            break
-                        except Exception as generation_error:
-                            last_error = generation_error
-                            generation_history.append({
-                                "promptIndex": prompt_index, "round": round_number, "attempt": attempt,
-                                "totalAttempt": total_attempt, "rewritten": bool(retry_round["rewritten"]),
-                                "status": "failed", "error": str(generation_error)[:500],
-                                "at": datetime.now().isoformat(timespec="seconds"),
-                            })
-                            item.update(
-                                generation_round=round_number, generation_rounds=4,
-                                generation_attempt=attempt, generation_attempts_per_round=4,
-                                generation_total_attempt=total_attempt, generation_max_attempts=16,
-                                generation_history=generation_history[-128:], error="",
-                            )
-                            _save_cover_state(settings)
-                            if not _is_retryable_cover_error(generation_error):
-                                raise
-                    if paths:
-                        break
-                    if round_number < 4:
-                        _cover_step(
-                            item, f"Переписываем промпт · круг {round_number + 1}/4",
-                            int(item.get("progress", 10) or 10),
-                            "Четыре попытки не помогли: сохраняем тему и создаём новый, более простой визуальный ход.",
+                retry_prompt = final_provider_prompt
+                for attempt in range(1, 5):
+                    delay = min(12, 2 ** (attempt - 1)) if attempt > 1 else 0
+                    _cover_step(
+                        item, f"Повтор того же промпта · попытка {attempt}/4",
+                        int(item.get("progress", 10) or 10),
+                        "FastGen ещё не принял задачу; prompt и reference не меняются."
+                        + (f" Повтор через {delay} сек." if delay else ""),
+                    )
+                    item.update(
+                        error="", generation_round=1, generation_rounds=1,
+                        generation_attempt=attempt, generation_attempts_per_round=4,
+                        generation_total_attempt=attempt, generation_max_attempts=4,
+                        generation_prebilling_attempt_count=attempt,
+                        generation_rejected_before_acceptance=False,
+                        generation_prompt_revision_id=_cover_prompt_revision(item),
+                        generation_text_revision_id=_cover_text_revision(item),
+                    )
+                    _save_cover_state(settings)
+                    if delay:
+                        time.sleep(delay)
+                    try:
+                        paths = pool.generate_media(
+                            retry_prompt,
+                            output, f"{index + 1:03d} — {title} — промпт {prompt_index:02d}", operation,
+                            settings.cover_aspect_ratio, references=references, count=settings.cover_variant_count, seed=seed,
+                            quality=settings.cover_quality or None, resolution=settings.cover_resolution or None,
+                            upscale=settings.cover_upscale, progress_callback=progress,
                         )
+                        successful_prompt = retry_prompt
+                        generation_history.append({
+                            "promptIndex": prompt_index, "round": 1, "attempt": attempt,
+                            "totalAttempt": attempt, "rewritten": False, "preBilling": True,
+                            "status": "success", "at": datetime.now().isoformat(timespec="seconds"),
+                        })
+                        item.update(
+                            generation_history=generation_history[-128:],
+                            generation_rejected_before_acceptance=False,
+                        )
+                        break
+                    except Exception as generation_error:
+                        last_error = generation_error
+                        accepted_generation_id = _cover_accepted_generation_id(generation_error)
+                        reason = _cover_provider_error_message(generation_error)
+                        generation_history.append({
+                            "promptIndex": prompt_index, "round": 1, "attempt": attempt,
+                            "totalAttempt": attempt, "rewritten": False,
+                            "preBilling": not bool(accepted_generation_id),
+                            "status": "failed", "error": reason,
+                            "at": datetime.now().isoformat(timespec="seconds"),
+                        })
+                        item.update(
+                            generation_history=generation_history[-128:],
+                            generation_last_rejection=reason,
+                            generation_rejected_before_acceptance=not bool(accepted_generation_id),
+                            error="",
+                        )
+                        if accepted_generation_id:
+                            item["accepted_generation_id"] = accepted_generation_id
+                            _save_cover_state(settings)
+                            raise
                         _save_cover_state(settings)
+                        if not _is_prebilling_cover_rejection(generation_error):
+                            raise
                 if not paths:
-                    detail = str(last_error or "FastGen не вернул изображение")
-                    raise RuntimeError(
-                        f"FastGen не создал вариант после 4 кругов × 4 попытки (16 запросов). Последняя причина: {detail}"
+                    reason = _cover_provider_error_message(last_error or "FastGen не принял запрос")
+                    raise _CoverPromptNeedsRewrite(
+                        f"FastGen отклонил текущий prompt 4 раза: {reason}"
                     )
                 generated = [str(path) for path in paths]
                 required = settings.cover_variant_count
@@ -7365,6 +7452,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
                         selected_base_path=values[0], prompt_image_paths=prompt_image_paths,
                         face_composite_requested=bool(face_label and local_face_only), error="")
+            item.pop("accepted_generation_id", None)
+            item.pop("generation_last_rejection", None)
             item.pop("rate_limit_wait_until", None)
             item.pop("rate_limit_used", None)
             if settings.cover_rate_limit_per_hour and values:
@@ -7373,12 +7462,41 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 })
                 settings.cover_rate_usage_events = settings.cover_rate_usage_events[-10000:]
         except Exception as exc:
-            detail = str(exc)
+            detail = _cover_provider_error_message(exc)
             if values:
                 detail = f"{detail}. Получено вариантов: {len(values)} из {len(prompt_options) * settings.cover_variant_count}"
                 item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
                             selected_base_path=values[0], prompt_image_paths=prompt_image_paths)
-            if any(token in detail.casefold() for token in ("quota", "credit", "limit", "429", "лимит")):
+            accepted_generation_id = _cover_accepted_generation_id(exc)
+            if isinstance(exc, _CoverPromptNeedsRewrite):
+                evidence = {
+                    key: item.get(key) for key in (
+                        "generation_prebilling_attempt_count", "generation_last_rejection",
+                        "generation_rejected_before_acceptance", "generation_prompt_revision_id",
+                        "generation_text_revision_id", "generation_history",
+                    )
+                }
+                _clear_cover_render_state(item, status="Нужен новый промпт")
+                item.update(evidence)
+                _cover_step(item, "Нужен новый промпт", 100, detail)
+                item["error"] = detail
+            elif accepted_generation_id:
+                evidence = {
+                    key: item.get(key) for key in (
+                        "generation_prebilling_attempt_count", "generation_last_rejection",
+                        "generation_rejected_before_acceptance", "generation_prompt_revision_id",
+                        "generation_text_revision_id", "generation_history", "accepted_generation_id",
+                    )
+                }
+                _clear_cover_render_state(item, status="Требуется восстановление FastGen")
+                item.update(evidence)
+                item["accepted_generation_id"] = accepted_generation_id
+                _cover_step(
+                    item, "Требуется восстановление FastGen", 100,
+                    f"FastGen уже принял задачу {accepted_generation_id}; новый платный create-запрос не отправлен. {detail}",
+                )
+                item["error"] = detail
+            elif any(token in detail.casefold() for token in ("quota", "credit", "limit", "429", "лимит")):
                 resume_at = next_fastgen_resume_at().isoformat()
                 _cover_step(item, "Ожидает лимит FastGen", int(item.get("progress", 0) or 0),
                             f"FastGen вернул лимит. Продолжение после обновления в {resume_at}.")
@@ -7501,6 +7619,9 @@ def _clear_cover_render_state(item: dict, *, status: str) -> None:
         "prompt_image_paths", "generation_round", "generation_rounds", "generation_attempt",
         "generation_attempts_per_round", "generation_total_attempt", "generation_max_attempts",
         "generation_history", "rate_limit_wait_until", "rate_limit_used",
+        "generation_prebilling_attempt_count", "generation_last_rejection",
+        "generation_rejected_before_acceptance", "generation_prompt_revision_id",
+        "generation_text_revision_id", "accepted_generation_id",
     ):
         item.pop(key, None)
     _advance_cover_revision(item)
@@ -7667,6 +7788,34 @@ def regenerate_covers(payload: dict) -> dict:
     })
 
 
+_COVER_MANUAL_RETRY_STATUSES = {"Ошибка FastGen", "Нужен новый промпт", "Ошибка рендера"}
+
+
+def retry_cover_generation(payload: dict) -> dict:
+    """Start a deliberate new render cycle without changing its current contract."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if not selected:
+        raise ValueError("Выберите обложки для повторной генерации")
+    blocked = [
+        str(item.get("title", "") or index + 1)
+        for index, item in selected
+        if item.get("status") not in _COVER_MANUAL_RETRY_STATUSES
+        or bool(str(item.get("accepted_generation_id", "")).strip())
+    ]
+    if blocked:
+        raise ValueError(
+            "Ручной повтор недоступен для выбранных тем: " + ", ".join(blocked)
+            + ". Дождитесь завершения активной/принятой задачи или выберите только terminal errors."
+        )
+    return regenerate_covers({
+        "indices": [index for index, _item in selected],
+        "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
+        "currentProfile": True,
+    })
+
+
 def regenerate_cover_with_face(payload: dict) -> dict:
     """Rewrite both visual idea and scene for a consciously selected person."""
     requested = payload.get("indices", [payload.get("index", -1)])
@@ -7778,6 +7927,8 @@ def remove_cover_prompts(payload: dict) -> dict:
             item.pop("image_prompt_options", None)
             item.pop("selected_prompt_index", None)
             item.pop("prompt_provider", None)
+            item.pop("prompt_text_signature", None)
+            item.pop("prompt_revision_id", None)
             item["status"] = "Промпт очищен"
             # The library may be read by a polling bridge that started with an
             # older settings snapshot.  A per-row revision makes this explicit
@@ -7918,14 +8069,10 @@ def render_cover_text(payload: dict) -> dict:
             # wider, larger lower-centre treatment instead of leaving the
             # right half of the thumbnail empty.
             has_face = bool(item.get("face_composite_paths") or item.get("face_reference_path"))
-            target_size = max(42, min(int(width * (.126 if has_face else .158)), int(height * .27)))
-            font = next((ImageFont.truetype(str(path), target_size) for path in display_candidates if path.is_file()), None)
-            if font is None:
-                font = ImageFont.load_default()
             max_width = int(width * (.55 if has_face else .88))
             measure = ImageDraw.Draw(image)
 
-            def wrap_text(text: str, active_font, max_lines: int) -> list[str]:
+            def wrap_text(text: str, active_font) -> list[str]:
                 lines: list[str] = []
                 line = ""
                 for word in text.split():
@@ -7937,31 +8084,61 @@ def render_cover_text(payload: dict) -> dict:
                         line = candidate
                 if line:
                     lines.append(line)
-                return lines[:max_lines]
+                return lines
 
             # Headlines are purposefully rendered in all caps: this is the
             # one strong visual signature of the news-thumbnail style, while
             # the subtitle remains readable rather than screaming twice.
-            lines = wrap_text(headline.upper(), font, 3 if has_face else 2)
-            subtitle_font_size = max(22, int(target_size * .46))
             subtitle_candidates = (fonts / "arialbd.ttf", fonts / "ariblk.ttf", fonts / "impact.ttf")
-            subtitle_font = next((ImageFont.truetype(str(path), subtitle_font_size)
-                                  for path in subtitle_candidates if path.is_file()), None)
-            if subtitle_font is None:
-                subtitle_font = ImageFont.load_default()
-            subtitle_lines = wrap_text(subheadline, subtitle_font, 2) if subheadline else []
-            spacing = max(6, target_size // 6)
-            boxes = [measure.textbbox((0, 0), value, font=font, stroke_width=max(1, target_size // 22)) for value in lines]
-            subtitle_boxes = [measure.textbbox((0, 0), value, font=subtitle_font, stroke_width=max(1, subtitle_font_size // 22)) for value in subtitle_lines]
+            maximum_headline_lines = 3 if has_face else 2
+            target_size = max(42, min(int(width * (.126 if has_face else .158)), int(height * .27)))
+            layout = None
+            for candidate_size in range(target_size, 41, -4):
+                candidate_font = next((ImageFont.truetype(str(path), candidate_size)
+                                       for path in display_candidates if path.is_file()), None)
+                if candidate_font is None:
+                    candidate_font = ImageFont.load_default()
+                candidate_subtitle_size = max(22, int(candidate_size * .46))
+                candidate_subtitle_font = next((ImageFont.truetype(str(path), candidate_subtitle_size)
+                                                for path in subtitle_candidates if path.is_file()), None)
+                if candidate_subtitle_font is None:
+                    candidate_subtitle_font = ImageFont.load_default()
+                candidate_lines = wrap_text(headline.upper(), candidate_font)
+                candidate_subtitle_lines = wrap_text(subheadline, candidate_subtitle_font) if subheadline else []
+                headline_stroke = max(4, candidate_size // 10)
+                subtitle_stroke = max(3, candidate_subtitle_size // 11)
+                candidate_boxes = [measure.textbbox((0, 0), value, font=candidate_font,
+                                                     stroke_width=headline_stroke) for value in candidate_lines]
+                candidate_subtitle_boxes = [measure.textbbox((0, 0), value, font=candidate_subtitle_font,
+                                                              stroke_width=subtitle_stroke)
+                                            for value in candidate_subtitle_lines]
+                candidate_spacing = max(6, candidate_size // 6)
+                subtitle_spacing = max(3, candidate_spacing // 2)
+                candidate_height = (
+                    sum(box[3] - box[1] for box in candidate_boxes)
+                    + candidate_spacing * max(0, len(candidate_boxes) - 1)
+                    + (candidate_spacing if candidate_subtitle_boxes else 0)
+                    + sum(box[3] - box[1] for box in candidate_subtitle_boxes)
+                    + subtitle_spacing * max(0, len(candidate_subtitle_boxes) - 1)
+                )
+                candidate_padding = max(18, candidate_size // 3)
+                layout = (
+                    candidate_size, candidate_font, candidate_subtitle_size, candidate_subtitle_font,
+                    candidate_lines, candidate_subtitle_lines, candidate_boxes, candidate_subtitle_boxes,
+                    candidate_spacing, candidate_height, candidate_padding,
+                )
+                if (len(candidate_lines) <= maximum_headline_lines
+                        and len(candidate_subtitle_lines) <= 2
+                        and candidate_height <= height - (2 * candidate_padding)):
+                    break
+            assert layout is not None
+            (target_size, font, subtitle_font_size, subtitle_font, lines, subtitle_lines, boxes,
+             subtitle_boxes, spacing, text_height, padding) = layout
             text_width = max([*(box[2] - box[0] for box in boxes), *(box[2] - box[0] for box in subtitle_boxes)], default=0)
-            text_height = (sum(box[3] - box[1] for box in boxes) + spacing * max(0, len(boxes) - 1)
-                           + (spacing if subtitle_boxes else 0)
-                           + sum(box[3] - box[1] for box in subtitle_boxes) + max(3, spacing // 2) * max(0, len(subtitle_boxes) - 1))
             # The coloured backing is tightly fitted to the actual letters.
             # It must amplify the phrase, not cover half of the image.
-            padding = max(18, target_size // 3)
             x = int(width * 0.045)
-            y = max(padding, height - text_height - int(height * (.075 if has_face else .09)))
+            y = max(padding, height - text_height - padding)
             overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
             overlay_draw = ImageDraw.Draw(overlay)
             # Pick a palette from the actual scene, not a single permanent
@@ -8001,13 +8178,13 @@ def render_cover_text(payload: dict) -> dict:
             draw = ImageDraw.Draw(image)
             cursor = y
             for line_value, box in zip(lines, boxes):
-                draw.text((x, cursor), line_value, font=font, fill=headline_fill,
+                draw.text((x - box[0], cursor - box[1]), line_value, font=font, fill=headline_fill,
                           stroke_width=max(4, target_size // 10), stroke_fill=(0, 0, 0, 255))
                 cursor += (box[3] - box[1]) + spacing
             if subtitle_boxes:
                 cursor += max(0, spacing // 2)
                 for line_value, box in zip(subtitle_lines, subtitle_boxes):
-                    draw.text((x, cursor), line_value, font=subtitle_font, fill=subtitle_fill,
+                    draw.text((x - box[0], cursor - box[1]), line_value, font=subtitle_font, fill=subtitle_fill,
                               stroke_width=max(3, subtitle_font_size // 11), stroke_fill=(0, 0, 0, 255))
                     cursor += (box[3] - box[1]) + max(3, spacing // 2)
             destination = output / f"{index + 1:03d} — {safe_filename(str(item.get('title', 'Обложка')))}.png"
@@ -13094,6 +13271,8 @@ def main() -> None:
             result = compose_cover_faces(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-covers":
             result = regenerate_covers(payload if isinstance(payload, dict) else {})
+        elif command == "retry-cover-generation":
+            result = retry_cover_generation(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-cover-with-face":
             result = regenerate_cover_with_face(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-covers-new-prompts":

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -12,7 +13,6 @@ from pathlib import Path
 
 from .config import app_data_root
 from .core import safe_filename
-
 
 API_ROOT = "https://api.fast-gen.ai"
 
@@ -94,9 +94,14 @@ def reference_mime_type(path: Path) -> str:
 
 
 class FastGenError(RuntimeError):
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(self, message: str, status_code: int | None = None, generation_id: str = ""):
         super().__init__(message)
         self.status_code = status_code
+        self.generation_id = str(generation_id or "")
+
+    @property
+    def generation_accepted(self) -> bool:
+        return bool(self.generation_id)
 
     @property
     def quota_exhausted(self):
@@ -128,6 +133,8 @@ class FastGenClient:
         if not api_key.strip():
             raise ValueError("Введите API-ключ FastGen")
         self.api_key = api_key.strip()
+        self._reference_uploads: dict[str, str] = {}
+        self._reference_upload_lock = threading.Lock()
 
     def _json(self, method: str, path: str, payload=None):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -167,6 +174,17 @@ class FastGenClient:
         if path.stat().st_size > _FASTGEN_REFERENCE_MAX_BYTES:
             raise FastGenError(f"Референс {path.name} больше 5 МБ")
         mime_type = reference_mime_type(path)
+        stat = path.stat()
+        cache_key = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+        with self._reference_upload_lock:
+            cached = self._reference_uploads.get(cache_key)
+            if cached:
+                return cached
+            storage_id = self._upload_reference(path, mime_type)
+            self._reference_uploads[cache_key] = storage_id
+            return storage_id
+
+    def _upload_reference(self, path: Path, mime_type: str) -> str:
         boundary = "----Scriptor" + uuid.uuid4().hex
         # The FastGen storage parser does not reliably decode non-ASCII names
         # in a multipart ``filename`` parameter. A valid ``путин3.png`` can
@@ -176,7 +194,7 @@ class FastGenClient:
         body = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{transport_name}\"\r\n"
             f"Content-Type: {mime_type}\r\n\r\n"
-        ).encode("utf-8") + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode("ascii")
+        ).encode() + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode("ascii")
         request = urllib.request.Request(
             "https://storage.fast-gen.ai/v2/upload", data=body, method="POST",
             headers={"X-API-Key": self.api_key, "Content-Type": f"multipart/form-data; boundary={boundary}"},
@@ -312,28 +330,35 @@ class FastGenClient:
             raise FastGenError("FastGen не вернул идентификатор генерации")
         if progress_callback:
             progress_callback(f"FastGen принял запрос {batch_number}/{total_batches}", 25, generation_id)
-        deadline = time.monotonic() + 900
-        while time.monotonic() < deadline:
-            status = self._json("GET", f"/api/v6/generations/{generation_id}")
-            if status.get("status") == "failed":
-                raise FastGenError(status.get("error") or "Генерация обложки завершилась ошибкой")
-            if status.get("status") == "succeeded":
-                results = status.get("results") or []
-                if not results:
-                    raise FastGenError("FastGen завершил задачу без изображения")
+        try:
+            deadline = time.monotonic() + 900
+            while time.monotonic() < deadline:
+                status = self._json("GET", f"/api/v6/generations/{generation_id}")
+                if status.get("status") == "failed":
+                    raise FastGenError(status.get("error") or "Генерация обложки завершилась ошибкой")
+                if status.get("status") == "succeeded":
+                    results = status.get("results") or []
+                    if not results:
+                        raise FastGenError("FastGen завершил задачу без изображения")
+                    if progress_callback:
+                        progress_callback("FastGen готовит файлы", 85, generation_id)
+                    return [self._save_result(result, output_folder, title, start_index + index)
+                            for index, result in enumerate(results)]
                 if progress_callback:
-                    progress_callback("FastGen готовит файлы", 85, generation_id)
-                return [self._save_result(result, output_folder, title, start_index + index)
-                        for index, result in enumerate(results)]
-            if progress_callback:
-                api_progress = status.get("progress")
-                try:
-                    percent = max(30, min(80, int(float(api_progress))))
-                except (TypeError, ValueError):
-                    percent = 45
-                progress_callback("FastGen генерирует", percent, generation_id)
-            time.sleep(3)
-        raise FastGenError("FastGen не завершил обложку за 15 минут")
+                    api_progress = status.get("progress")
+                    try:
+                        percent = max(30, min(80, int(float(api_progress))))
+                    except (TypeError, ValueError):
+                        percent = 45
+                    progress_callback("FastGen генерирует", percent, generation_id)
+                time.sleep(3)
+            raise FastGenError("FastGen не завершил обложку за 15 минут")
+        except FastGenError as exc:
+            if exc.generation_accepted:
+                raise
+            raise FastGenError(str(exc), exc.status_code, generation_id) from exc
+        except Exception as exc:
+            raise FastGenError(str(exc), generation_id=generation_id) from exc
 
     def _save_result(self, result: dict, folder: Path, title: str, index: int = 1) -> Path:
         folder.mkdir(parents=True, exist_ok=True)
@@ -363,6 +388,7 @@ class FastGenPool:
         if not self.entries:
             raise ValueError("Добавьте и включите хотя бы один ключ FastGen")
         self.exhausted: set[int] = set()
+        self.clients = [FastGenClient(item.secret) for item in self.entries]
 
     def validate(self, media_type: str = "image"):
         return FastGenClient(self.entries[0].secret).validate(media_type)
@@ -380,7 +406,7 @@ class FastGenPool:
         for entry in self.entries:
             try:
                 results.append({"label": entry.label, "usage": FastGenClient(entry.secret).usage(), "error": ""})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate one key's provider health failure
                 results.append({"label": entry.label, "usage": {}, "error": str(exc)})
         return results
 
@@ -390,7 +416,7 @@ class FastGenPool:
             if index in self.exhausted:
                 continue
             try:
-                return FastGenClient(entry.secret).generate_cover(*args, **kwargs)
+                return self.clients[index].generate_cover(*args, **kwargs)
             except FastGenError as exc:
                 if exc.quota_exhausted or exc.credential_rejected:
                     self.exhausted.add(index)
@@ -405,7 +431,7 @@ class FastGenPool:
             if index in self.exhausted:
                 continue
             try:
-                return FastGenClient(entry.secret).generate_media(*args, **kwargs)
+                return self.clients[index].generate_media(*args, **kwargs)
             except FastGenError as exc:
                 if exc.quota_exhausted or exc.credential_rejected:
                     self.exhausted.add(index)

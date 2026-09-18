@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Mapping
-
+from collections.abc import Mapping
 
 _LAYOUTS = ("IMPACT", "SPLIT", "DIAGONAL", "STACKED", "ALERT", "CLEAN DRAMA")
 
@@ -163,7 +162,7 @@ def _semantic_scene(value: object, fallback: str) -> str:
     if "SCENE DETAILS:" in text:
         text = text.split("SCENE DETAILS:", 1)[1]
     text = re.sub(r"NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2\..*?(?=SCENE DETAILS:|$)", "", text,
-                  flags=re.I)
+                  flags=re.IGNORECASE)
     candidates = re.split(r"(?<=[.!?])\s+", text)
     semantic = [
         sentence.strip(" .") for sentence in candidates
@@ -198,9 +197,15 @@ def build_final_provider_prompt(
     identity = "; ".join(part for part in (identity_notes, reference_notes) if part.strip()) or "No additional identity or reference instruction."
     composition = "; ".join(part for part in (brief["layout"], composition_notes) if part.strip())
     if brief["headline"] and text_mode == "fastgen":
-        headline = f"{brief['headline']}. Render exactly as supplied; do not translate, rewrite or add words."
+        headline = (
+            f"<exact-text>{brief['headline']}</exact-text>\n"
+            "Render only the characters inside <exact-text>; do not render the tags. "
+            "Do not add punctuation, translate, rewrite or add words."
+        )
         subheadline = (
-            f"{brief['subheadline']}. Render exactly as supplied; do not translate, rewrite or add words."
+            f"<exact-text>{brief['subheadline']}</exact-text>\n"
+            "Render only the characters inside <exact-text>; do not render the tags. "
+            "Do not add punctuation, translate, rewrite or add words."
             if brief["subheadline"] else "None supplied."
         )
         typography = (
@@ -244,4 +249,4 @@ def append_universal_thumbnail_core_v2(scene_prompt: str, item: Mapping[str, obj
 def strip_legacy_thumbnail_phrases(value: str) -> str:
     """Remove legacy category boilerplate before semantic scene extraction."""
     text = " ".join(str(value or "").split())
-    return re.sub(r"\b(?:breaking[ -]?news(?:room)?|political news thumbnail|geopolitical news image)\b", "", text, flags=re.I).replace("  ", " ").strip()
+    return re.sub(r"\b(?:breaking[ -]?news(?:room)?|political news thumbnail|geopolitical news image)\b", "", text, flags=re.IGNORECASE).replace("  ", " ").strip()

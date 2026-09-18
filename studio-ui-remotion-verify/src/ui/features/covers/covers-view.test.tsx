@@ -209,6 +209,70 @@ describe("Covers Light view", () => {
     expect(screen.getByText("Выбрано: 1")).toBeTruthy();
   });
 
+  it("manually retries only an exact eligible durable selection with the current render contract", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:z", title: "A", image_prompt: "same A", status: "Ошибка FastGen", error: "terminal A", paths: [] },
+        { production_item_id: "production:a", title: "B", image_prompt: "same B", status: "Нужен новый промпт", error: "terminal B", paths: [] },
+      ],
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: B" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: A" }), { ctrlKey: true });
+    const retry = screen.getByRole("button", { name: "Повторить генерацию выбранных" });
+    expect(retry.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(retry);
+
+    expect(command).toHaveBeenCalledWith("retry-cover-generation", {
+      indices: [1, 0],
+      productionItemIds: ["production:a", "production:z"],
+    });
+    expect(command).not.toHaveBeenCalledWith("regenerate-covers-new-prompts", expect.anything());
+  });
+
+  it("disables manual retry for an active or mixed selected render without dropping rows", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:error", title: "Error", image_prompt: "same", status: "Ошибка FastGen", error: "terminal", paths: [] },
+        { production_item_id: "production:active", title: "Active", image_prompt: "same", status: "Подготовка запросов", paths: [] },
+        { production_item_id: "production:accepted", title: "Accepted", image_prompt: "same", status: "Ошибка FastGen", error: "polling interrupted", accepted_generation_id: "task-1", paths: [] },
+      ],
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Error" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Active" }), { ctrlKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Accepted" }), { ctrlKey: true });
+
+    expect(screen.getByText("Повтор генерации доступен: 1/3")).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Повторить генерацию выбранных" });
+    expect(retry.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(retry);
+    expect(command).not.toHaveBeenCalledWith("retry-cover-generation", expect.anything());
+  });
+
+  it("keeps new-prompt creation separate and does not start a manual render", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{ production_item_id: "production:error", title: "Error", image_prompt: "rejected", status: "Нужен новый промпт", error: "terminal", paths: [] }],
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Error" }));
+    fireEvent.click(screen.getByRole("button", { name: "Перегенерировать промпты выбранным" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "regenerate-covers-new-prompts",
+      { indices: [0], productionItemIds: ["production:error"], provider: "agent" },
+    ));
+    expect(command).not.toHaveBeenCalledWith("retry-cover-generation", expect.anything());
+    expect(command).not.toHaveBeenCalledWith("regenerate-covers", expect.anything());
+    expect(command).not.toHaveBeenCalledWith("generate-covers", expect.anything());
+  });
+
   it("shows selected new-prompt readiness and blocks bulk render until all selected rows are ready", () => {
     const command = vi.fn(async () => undefined);
     const baseCovers = [
