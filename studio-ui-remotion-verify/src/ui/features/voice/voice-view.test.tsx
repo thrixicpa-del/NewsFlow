@@ -63,9 +63,11 @@ describe("Voice Light views", () => {
     };
     render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
 
-    const start = screen.getByRole("button", { name: "Озвучить все в очереди" });
-    fireEvent.click(start);
-    fireEvent.click(start);
+    const start = screen.getByRole("button", { name: "Озвучить всё" });
+    act(() => {
+      fireEvent.click(start);
+      fireEvent.click(start);
+    });
 
     await Promise.resolve();
     expect(command).toHaveBeenCalledTimes(1);
@@ -74,6 +76,25 @@ describe("Voice Light views", () => {
       releaseCurrentCommand?.();
       await Promise.resolve();
     });
+  });
+
+  it("shares a synchronous voice-generation lock between selected and all queue actions", () => {
+    const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>(() => {}));
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 2, title: "Ормуз", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 2, title: "Ормуз", state: "Ожидает", path: "" }],
+    };
+    render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "3. Ормуз" }));
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Озвучить выбранные" }));
+      fireEvent.click(screen.getByRole("button", { name: "Озвучить всё" }));
+    });
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command).toHaveBeenCalledWith("generate-voice", { indices: [2] });
   });
 
   it("selects a voice item through the table keyboard workflow without starting a job", () => {
@@ -105,8 +126,31 @@ describe("Voice Light views", () => {
     };
     render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Озвучить все в очереди" }));
+    fireEvent.click(screen.getByRole("button", { name: "Озвучить всё" }));
     await waitFor(() => expect(command).toHaveBeenCalledWith("generate-voice-queue", {}));
+  });
+
+  it("saves global queue concurrency together with the active voice profile contract", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      voiceProfiles: [{ id: "voice-1", name: "Новости", provider: "wproject" as const, voice_id: "voice-a" }],
+      voiceRanges: [{ id: "range-1", start: 1, end: 10, profile_id: "voice-1", enabled: true }],
+      voiceDefaultProfileId: "voice-1",
+      voiceQueueConcurrency: 1,
+    };
+    render(<VoiceProfiles data={data} command={command} go={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText("Одновременных TTS-задач"), { target: { value: "10" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить профили и диапазоны" }));
+
+    expect(command).toHaveBeenCalledWith("save-voice-settings", {
+      profiles: data.voiceProfiles,
+      ranges: data.voiceRanges,
+      defaultProfileId: "voice-1",
+      queueConcurrency: 10,
+    });
+    expect(screen.getByText("Фактический параллелизм = минимум из этого значения и доступных потоков API-ключей; Chrome работает в 1 браузерный поток.")).toBeTruthy();
   });
 
   it("keeps ready MP3 removal on the current command", () => {

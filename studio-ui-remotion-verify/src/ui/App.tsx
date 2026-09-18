@@ -11728,6 +11728,7 @@ export function VoiceQueue({
   const [provider, setProvider] = useState(data.voiceProvider);
   const [outputFolder, setOutputFolder] = useState(data.voiceOutputFolder);
   const [generating, setGenerating] = useState(false);
+  const voiceGenerationLock = useRef(false);
   const queued = data.voiceItems.filter((item) =>
     data.scenarios.some((scenario) => scenario.index === item.index),
   );
@@ -11858,34 +11859,41 @@ export function VoiceQueue({
   const saveOutputFolder = () =>
     void command("save-voice-settings", { outputFolder });
   const generateVoice = async () => {
-    if (!selected.length) return;
+    if (!selected.length || voiceGenerationLock.current) return;
+    voiceGenerationLock.current = true;
     setGenerating(true);
     try {
       await command("generate-voice", { indices: selected });
     } finally {
+      voiceGenerationLock.current = false;
       setGenerating(false);
     }
   };
   const generateVoiceQueue = async () => {
-    if (generating) return;
+    if (voiceGenerationLock.current) return;
+    voiceGenerationLock.current = true;
     setGenerating(true);
     try {
       await command("generate-voice-queue", {});
     } finally {
+      voiceGenerationLock.current = false;
       setGenerating(false);
     }
   };
   const restartVoice = async (indices: number[]) => {
-    if (!indices.length || generating) return;
+    if (!indices.length || voiceGenerationLock.current) return;
+    voiceGenerationLock.current = true;
     setGenerating(true);
     try {
       await command("generate-voice", { indices, force: true });
     } finally {
+      voiceGenerationLock.current = false;
       setGenerating(false);
     }
   };
   const resumeVoice = async () => {
-    if (!resumable.length || generating) return;
+    if (!resumable.length || voiceGenerationLock.current) return;
+    voiceGenerationLock.current = true;
     setGenerating(true);
     try {
       await command("generate-voice", {
@@ -11893,6 +11901,7 @@ export function VoiceQueue({
         resume: true,
       });
     } finally {
+      voiceGenerationLock.current = false;
       setGenerating(false);
     }
   };
@@ -11949,10 +11958,11 @@ export function VoiceQueue({
         </Button>
         <Button
           kind="primary"
-          onClick={!generating && queued.length ? () => void generateVoiceQueue() : undefined}
+          disabled={generating || !queued.length}
+          onClick={() => void generateVoiceQueue()}
         >
           <Play size={17} />
-          Озвучить все в очереди
+          {generating ? "Озвучка идёт…" : "Озвучить всё"}
         </Button>
         <Button
           onClick={
@@ -13427,9 +13437,9 @@ export function VoiceProfiles({
           </label>
           <label>
             Одновременных TTS-задач
-            <input type="number" min="1" max="100" value={queueConcurrency}
+            <input aria-label="Одновременных TTS-задач" type="number" min="1" max="100" value={queueConcurrency}
               onChange={(event) => setQueueConcurrency(Math.max(1, Number(event.target.value) || 1))} />
-            <small>Общий лимит очереди; диапазоны не запускаются по очереди.</small>
+            <small>Фактический параллелизм = минимум из этого значения и доступных потоков API-ключей; Chrome работает в 1 браузерный поток.</small>
           </label>
           <label className="voice-fallback">
             <input
