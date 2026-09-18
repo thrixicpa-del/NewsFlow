@@ -6,12 +6,11 @@ network, model or UI dependencies so its editorial decisions are testable.
 
 from __future__ import annotations
 
-import re
 import hashlib
 import math
+import re
 from collections import Counter
 from typing import Any
-
 
 TITLE_MAX_CHARS = 100
 TITLE_TARGET_MIN_CHARS = 55
@@ -323,8 +322,7 @@ def assess_cis_audience(seed: dict, events: list[dict]) -> dict:
         str(seed.get("direction", "")), str(seed.get("topic", "")), str(seed.get("angle", "")),
         *[" ".join((str(event.get("event_core", "")), str(event.get("object", "")))) for event in events],
     ]).casefold()
-    direct_markers = ("россия", "украин", "беларус", "белорус", "снг", "москва", "киев", "путин", "зеленск")
-    cis_hits = sum(marker in text for marker in direct_markers)
+    cis_hits = sum(marker in text for marker in _CIS_SIGNALS)
     stakes_hits = sum(marker in text for marker in _STAKES_SIGNALS)
     entities = [str(entity) for event in events for entity in event.get("primary_entities", []) if str(entity).strip()]
     has_causal_export_link = any(marker in text for marker in ("российск", "экспорт", "санкц", "поставк", "цены", "энергет")) \
@@ -332,7 +330,7 @@ def assess_cis_audience(seed: dict, events: list[dict]) -> dict:
     if cis_hits:
         relevance = min(95, 58 + cis_hits * 8 + min(14, len(set(entities)) * 4) + (8 if events else 0))
         why = "Тема напрямую связана с русскоязычной СНГ-повесткой: " + ", ".join(
-            marker for marker in direct_markers if marker in text
+            marker for marker in _CIS_SIGNALS if marker in text
         ) + "."
     elif has_causal_export_link:
         relevance = min(78, 52 + min(12, len(set(entities)) * 4) + (8 if events else 0))
@@ -379,8 +377,6 @@ def build_production_item(seed: dict, title: object, events: list[dict]) -> dict
     subject = next((str(value) for value in event.get("primary_entities", []) if str(value).strip()), "")
     conflict = str(event.get("object") or topic).strip()
     audience = assess_cis_audience(seed, events)
-    if audience["cis_audience_relevance_score"] < 50:
-        return None
     scriptability = 45 + min(20, len(overlap) * 5) + (15 if events else 5) + (10 if conflict else 0)
     hook = classify_hook_family(quality["title"], seed)
     creative_amplification = min(100, 30 + (24 if framing_type == "EDITORIAL" else 0)
@@ -611,8 +607,6 @@ def _rejection_reason(candidate: dict, events: list[dict]) -> str:
     required_overlap = 2 if _framing_type(candidate) == "FACTUAL" else 1
     if len(_semantic_overlap(title, " ".join(context_words))) < required_overlap:
         return "factual support insufficient"
-    if assess_cis_audience(candidate, events)["cis_audience_relevance_score"] < 50:
-        return "low CIS relevance"
     return "low scriptability"
 
 

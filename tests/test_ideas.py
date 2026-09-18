@@ -1,13 +1,13 @@
-import unittest
+import importlib.util
 import os
 import tempfile
-import importlib.util
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from scriptor import bridge, config, idea_engine
 from scriptor.app import ScriptorApp
 from scriptor.config import NEWS_TOPICS, OpenAIKey, Settings
-from scriptor import bridge, config, idea_engine
 
 
 class IdeaParsingTests(unittest.TestCase):
@@ -513,7 +513,7 @@ class IdeaProductionEngineTests(unittest.TestCase):
         self.assertIn(item["factual_risk_score"], {"LOW", "MEDIUM", "HIGH"})
         self.assertGreater(item["creative_amplification_score"], 0)
 
-    def test_low_cis_relevance_topic_is_rejected_before_production(self):
+    def test_low_cis_relevance_is_metadata_not_a_production_veto(self):
         event = {
             "event_id": "evt_india_tax", "event_core": "Индия изменила технический налоговый индекс",
             "primary_entities": ["Индия"], "action": "изменила", "object": "налоговый индекс",
@@ -524,7 +524,8 @@ class IdeaProductionEngineTests(unittest.TestCase):
             "framing_type": "EDITORIAL",
         }, "Индия изменила налоговый индекс: что происходит с технической реформой", [event])
 
-        self.assertIsNone(item)
+        self.assertIsNotNone(item)
+        self.assertLess(item["cis_audience_relevance_score"], 50)
 
     def test_plain_confirmed_news_cannot_receive_exceptional_click_score(self):
         event = {
@@ -570,7 +571,7 @@ class IdeaProductionEngineTests(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertEqual(item["framing_type"], "HYPOTHETICAL")
 
-    def test_ormuz_without_causal_cis_link_is_not_scored_as_direct_cis_story(self):
+    def test_ormuz_canonical_cis_signals_are_scored_as_direct_relevance(self):
         event = {
             "event_id": "evt_ormuz", "event_core": "Иран усилил контроль над судоходством в Ормузском проливе",
             "primary_entities": ["Иран"], "action": "усилил контроль",
@@ -581,8 +582,8 @@ class IdeaProductionEngineTests(unittest.TestCase):
             "angle": "рост стоимости страховки", "framing_type": "EDITORIAL",
         }, [event])
 
-        self.assertLessEqual(audience["cis_audience_relevance_score"], 65)
-        self.assertIn("миров", audience["why_cis_audience_cares"].casefold())
+        self.assertGreaterEqual(audience["cis_audience_relevance_score"], 50)
+        self.assertIn("снг-повестк", audience["why_cis_audience_cares"].casefold())
 
     def test_hook_family_uses_editorial_concept_not_only_punctuation(self):
         classify = getattr(idea_engine, "classify_hook_family", lambda _title, _seed=None: "")
@@ -774,18 +775,20 @@ class IdeaProductionEngineTests(unittest.TestCase):
         self.assertEqual(summary["diversity"]["macro_events"], {"macro_ormuz": 1})
         self.assertEqual(summary["diversity"]["geographies"], {"Ормузский пролив": 1})
 
-    def test_low_cis_relevance_has_a_explicit_rejection_reason(self):
+    def test_low_cis_relevance_is_not_a_portfolio_rejection_reason(self):
         event = {
             "event_id": "evt_india_tax", "event_core": "Индия изменила технический налоговый индекс",
             "primary_entities": ["Индия"], "action": "изменила", "object": "налоговый индекс",
             "geography": ["Индия"], "source_signal_ids": ["sig_india"],
         }
-        _items, summary = idea_engine.select_production_portfolio([{
+        items, summary = idea_engine.select_production_portfolio([{
             "direction": "Индийская экономика", "topic": "Налоговый индекс Индии", "angle": "техническая реформа",
             "title": "Индия изменила налоговый индекс: что происходит с технической реформой",
         }], [event], requested_count=1)
 
-        self.assertEqual(summary["rejected"][0]["reason"], "low CIS relevance")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(summary["rejected"], [])
+        self.assertLess(items[0]["cis_audience_relevance_score"], 50)
 
 
 class IdeaPersistenceTests(unittest.TestCase):

@@ -26,9 +26,9 @@ A green automated suite is not treated as proof that the whole Ideas workflow is
 - Provider calls, duplicate submission protection, retries, and failure reporting.
 - Safe handoff into Scenarios without legacy fallbacks.
 
-## Confirmed defect IDEA-001 — default Hormuz direction can be rejected as low CIS relevance
+## Confirmed defect IDEA-001 — user-selected topics must bypass hidden thematic filters
 
-Status: **REGRESSION TEST ADDED; FIX PENDING**
+Status: **MVP FIX VERIFIED LOCALLY; PENDING REVIEW**
 
 ### Expected
 
@@ -45,9 +45,25 @@ A grounded story under the built-in direction `Иран — Ормузский �
 - `build_production_item()` rejects items with `cis_audience_relevance_score < 50`.
 - Regression test: `tests/test_ideas_cis_relevance_regression.py`.
 
-### Intended minimal fix
+### Implemented minimal fix
 
-Use the canonical `_CIS_SIGNALS` relevance vocabulary in `assess_cis_audience()` instead of maintaining a second incomplete direct-marker list. Preserve the existing causal-export fallback and score thresholds. Then run the new regression test, the existing Ideas tests, the isolated relevant suite, and frontend/contract checks if the backend snapshot or UI behavior changes.
+`assess_cis_audience()` now uses the canonical `_CIS_SIGNALS` relevance vocabulary for both the relevance hit count and the reviewable reason. The causal-export fallback and all score formulas and thresholds remain unchanged.
+
+The relevance score remains durable ProductionItem metadata, but no longer vetoes an otherwise valid, evidence-backed user-selected direction during ProductionItem creation or portfolio selection. This removes the only discovered downstream thematic veto from the current path:
+
+`selected/custom direction -> generate_ideas -> _generate_for_vectors -> provider -> proposal/result -> ProductionItem -> scenario handoff`.
+
+The audit found no country allow/deny list, CIS gate, hard-coded topic allowlist, or keyword gate before the provider request. Evidence-word matching only selects a bounded context bundle; no match still reaches the provider and becomes `NEEDS_RESEARCH`. Malformed/empty title checks and exact/similar duplicate checks remain active.
+
+### Verification — 18 September 2026
+
+- RED: `python tests/run_isolated.py tests/test_ideas_cis_relevance_regression.py -v` failed as expected before the fix: relevance score `33`, below the required `50`; `PRODUCTION_WRITE_GUARD=PASS`.
+- GREEN: the same isolated regression test passed after the fix; `PRODUCTION_WRITE_GUARD=PASS`.
+- MVP RED: fake-provider regression for an evidence-backed `Китай — рынок электромобилей` direction reached the provider but produced no `idea_results` before the downstream fix because the CIS relevance veto removed its ProductionItem; `PRODUCTION_WRITE_GUARD=PASS`.
+- MVP GREEN: the fake-provider regression proves Hormuz, China EV, and an arbitrary custom direction all reach provider prompts. It also proves the China result survives provider response -> ProductionItem -> scenario handoff while retaining its low CIS score as metadata; `PRODUCTION_WRITE_GUARD=PASS`.
+- Ideas isolated suite: `python tests/run_isolated.py tests/test_ideas.py tests/test_ideas_cis_relevance_regression.py -v` passed: `54` tests, `0` failures; `PRODUCTION_WRITE_GUARD=PASS`.
+- Production integrity guard: `powershell -NoProfile -ExecutionPolicy Bypass -File tests\\infrastructure\\production-integrity-guard.test.ps1` passed. It accepted unchanged disposable storage and rejected its intentional disposable `covers-library.json` mutation.
+- Contract/UI checks: **SKIP (not applicable)**. The change is limited to deterministic Python relevance scoring and does not alter bridge, IPC, snapshot, renderer, or UI contracts.
 
 ## Next checks
 
