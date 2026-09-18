@@ -10778,6 +10778,8 @@ def _montage_process_is_running(pid: object) -> bool:
         return False
     if process_id <= 0:
         return False
+    if process_id == os.getpid():
+        return True
     if os.name == "nt":
         # PIDs are reused on Windows.  Merely finding a process with the old
         # number used to leave the queue locked when an unrelated program got
@@ -11211,7 +11213,64 @@ def _release_batch_footage_reservations(usage: dict, scenario_index: int) -> int
     return released
 
 
+def _montage_queue_lock_path() -> Path:
+    return app_data_root() / "montage-queue.lock"
+
+
+def _claim_montage_queue_lock() -> Path | None:
+    """Claim the one cross-process Montage owner, reclaiming a dead owner."""
+    lock_path = _montage_queue_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            existing = {}
+        if _montage_process_is_running(existing.get("pid")):
+            return None
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return None
+    try:
+        with lock_path.open("x", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
+    except FileExistsError:
+        return None
+    return lock_path
+
+
+def _release_montage_queue_lock(lock_path: Path) -> None:
+    """Release only the Montage owner record created by this process."""
+    try:
+        owner = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        owner = {}
+    if owner.get("pid") != os.getpid():
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def run_montage_queue(payload: dict) -> dict:
+    """Run one process-owned Montage batch and reject overlapping starts."""
+    lock_path = _claim_montage_queue_lock()
+    if lock_path is None:
+        return {**snapshot(), "operationResult": {
+            "kind": "montage-queue", "count": 0,
+            "message": "Очередь монтажа уже выполняется; повторный запуск отклонён.",
+        }}
+    try:
+        return _run_montage_queue_unlocked(payload)
+    finally:
+        _release_montage_queue_lock(lock_path)
+
+
+def _run_montage_queue_unlocked(payload: dict) -> dict:
     """Build and render a batch of approved scripts/MP3 files with saved progress.
 
     It is intentionally one persistent bridge call.  The Electron call itself
@@ -11227,11 +11286,16 @@ def run_montage_queue(payload: dict) -> dict:
         raise ValueError("Очередь монтажа уже выполняется. Дождитесь завершения или поставьте её на паузу.")
     titles, jobs = load_session()
     requested = payload.get("indices")
-    indices = sorted({int(value) for value in requested}) if isinstance(requested, list) and requested else []
-    if not indices:
+    if isinstance(requested, list):
+        if not requested:
+            raise ValueError("Выберите строки явно; пустой selected scope не означает всю очередь.")
+        indices = sorted({int(value) for value in requested})
+    elif payload.get("missingOnly"):
         indices = [index for index, _title in enumerate(titles)
                    if Path(settings.voice_scenario_outputs.get(str(index + 1), "")).is_file()
                    and _montage_task_needs_render(settings, index)]
+    else:
+        raise ValueError("Передайте indices или явный missingOnly=true для незавершённых строк.")
     if not indices:
         raise ValueError("Нет готовых MP3. Передайте сценарии в озвучку или добавьте свой MP3.")
     valid: list[int] = []
@@ -11244,13 +11308,19 @@ def run_montage_queue(payload: dict) -> dict:
             # protects ready videos even if an older interface sends all rows.
             continue
         voice = Path(settings.voice_scenario_outputs.get(str(index + 1), ""))
-        narration = str(getattr(jobs_by_index.get(index), "result", "") or "")
-        if voice.is_file() and narration.strip():
+        job = jobs_by_index.get(index)
+        narration = str(getattr(job, "result", "") or "")
+        job_title = str(getattr(getattr(job, "request", None), "title", "") or "").strip()
+        current_title = str(titles[index]).strip()
+        if voice.is_file() and narration.strip() and job_title == current_title:
             valid.append(index)
         else:
+            error = "Не найден готовый сценарий или MP3"
+            if voice.is_file() and narration.strip() and job_title != current_title:
+                error = "Сохранённый сценарий не соответствует текущей строке; обновите пару сценарий + MP3"
             _montage_task_update(settings, index, status="Ошибка", phase="Проверка входных данных", progress=100,
                                  detail="Нужен готовый сценарий и соответствующий MP3",
-                                 error="Не найден готовый сценарий или MP3")
+                                 error=error)
     if not valid:
         raise ValueError("У выбранных строк нет пары «сценарий + MP3».")
     # A forced repeat replaces its MP4 only after the new render passes.  The
@@ -11259,9 +11329,16 @@ def run_montage_queue(payload: dict) -> dict:
     if str(Path(settings.cutter_output_folder) / "Внешние для монтажа") not in settings.footage_folders:
         settings.footage_folders.append(str(Path(settings.cutter_output_folder) / "Внешние для монтажа"))
     for index in valid:
+        previous = dict(settings.montage_task_statuses.get(str(index)) or {})
+        previous_output = _montage_output_path(settings, previous)
+        retained_output = (
+            str(previous_output)
+            if payload.get("replaceOutput") and _is_valid_montage_output(previous_output)
+            else ""
+        )
         _montage_task_update(settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
                              detail="Сценарий и MP3 готовы", error="", title=titles[index],
-                             voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""), outputPath="",
+                             voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""), outputPath=retained_output,
                              queuePid=os.getpid())
     save_settings(settings)
     download_semaphore = threading.BoundedSemaphore(settings.montage_download_workers)

@@ -54,6 +54,149 @@ describe("Montage Light view", () => {
     releaseSettings?.();
   });
 
+  it("does not submit the montage queue twice while the queue command is pending", async () => {
+    let releaseQueue: (() => void) | undefined;
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Ормуз", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Ормуз", state: "Готово", path: "D:/voice.mp3" }],
+    };
+    const command = vi.fn((name: string) => {
+      if (name === "save-montage-settings") return Promise.resolve(data);
+      return new Promise<NewsFlowSnapshot | undefined>((resolve) => {
+        releaseQueue = () => resolve(data);
+      });
+    });
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Ормуз/ }));
+    const launch = screen.getByRole("button", { name: "Собрать выбранные" });
+    fireEvent.click(launch);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("run-montage-queue", { indices: [1], replaceOutput: false }));
+    fireEvent.click(launch);
+
+    expect(command.mock.calls.filter(([name]) => name === "run-montage-queue")).toHaveLength(1);
+    expect(launch.hasAttribute("disabled")).toBe(true);
+    releaseQueue?.();
+  });
+
+  it("submits exactly the ctrl-selected montage rows", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 1, title: "Первая", state: "Готово", result: "Текст 1", error: "" },
+        { index: 2, title: "Вторая", state: "Готово", result: "Текст 2", error: "" },
+        { index: 3, title: "Третья", state: "Готово", result: "Текст 3", error: "" },
+      ],
+      voiceItems: [
+        { index: 1, title: "Первая", state: "Готово", path: "D:/1.mp3" },
+        { index: 2, title: "Вторая", state: "Готово", path: "D:/2.mp3" },
+        { index: 3, title: "Третья", state: "Готово", path: "D:/3.mp3" },
+      ],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Первая/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Третья/ }), { ctrlKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Собрать выбранные" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "run-montage-queue", { indices: [1, 3], replaceOutput: false },
+    ));
+  });
+
+  it("keeps empty selected actions disabled and normal launch excludes ready rows", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 1, title: "Готовая", state: "Готово", result: "Текст 1", error: "" },
+        { index: 2, title: "Новая", state: "Готово", result: "Текст 2", error: "" },
+      ],
+      voiceItems: [
+        { index: 1, title: "Готовая", state: "Готово", path: "D:/1.mp3" },
+        { index: 2, title: "Новая", state: "Готово", path: "D:/2.mp3" },
+      ],
+      montageTasks: [
+        { index: 1, title: "Готовая", status: "Готово", outputPath: "D:/ready.mp4" },
+        { index: 2, title: "Новая", status: "Готов к монтажу", outputPath: "" },
+      ],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    const selected = screen.getByRole("button", { name: "Собрать выбранные" });
+    expect(selected.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(selected);
+    expect(command).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "run-montage-queue", { indices: [2], replaceOutput: false },
+    ));
+  });
+
+  it("offers explicit selected retry for an error row", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Ошибка", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Ошибка", state: "Готово", path: "D:/voice.mp3" }],
+      montageTasks: [{ index: 1, title: "Ошибка", status: "Ошибка", error: "FFmpeg failed", outputPath: "" }],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Ошибка/ }));
+    const retry = screen.getByRole("button", { name: "Повторить монтаж выбранных" });
+    expect(retry.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "run-montage-queue", { indices: [1], replaceOutput: true },
+    ));
+  });
+
+  it("keeps pause and continue controls truthful", async () => {
+    const running = {
+      ...fallback,
+      montageTasks: [{ index: 1, title: "Тема", status: "Рендер", outputPath: "" }],
+      montageSettings: { ...fallback.montageSettings, queuePaused: false },
+    };
+    const pauseCommand = vi.fn().mockResolvedValue(running);
+    const first = render(<Editor data={running} command={pauseCommand} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Пауза" }));
+    expect(pauseCommand).toHaveBeenCalledWith("save-montage-settings", { queuePaused: true });
+    first.unmount();
+
+    const paused = { ...running, montageSettings: { ...running.montageSettings, queuePaused: true } };
+    const continueCommand = vi.fn().mockResolvedValue(paused);
+    render(<Editor data={paused} command={continueCommand} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
+    expect(continueCommand).toHaveBeenCalledWith("save-montage-settings", { queuePaused: false });
+  });
+
+  it("distinguishes selected MP4 cleanup from explicit all cleanup", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Ормуз", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Ормуз", state: "Готово", path: "D:/voice.mp3" }],
+      montageTasks: [{ index: 1, title: "Ормуз", status: "Готово", outputPath: "D:/result.mp4" }],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    const selectedDelete = screen.getByRole("button", { name: "Удалить выбранные MP4" });
+    expect(selectedDelete.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /Ормуз/ }));
+    fireEvent.click(selectedDelete);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { indices: [1] }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Удалить все MP4" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { all: true }));
+    confirm.mockRestore();
+  });
+
   it("confirms and sends bulk MP4 deletion through the current command", async () => {
     const command = vi.fn().mockResolvedValue(fallback);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);

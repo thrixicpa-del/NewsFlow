@@ -31,7 +31,7 @@ export interface CriticalCommandPayloads {
   "generate-voice-queue": { force?: boolean };
   "generate-voice-range": { rangeId?: string; force?: boolean };
   "generate-covers": { indices?: number[]; provider?: "agent" | "openai"; force?: boolean };
-  "run-montage-queue": { indices?: number[]; replaceOutput?: boolean };
+  "run-montage-queue": { indices?: number[]; missingOnly?: boolean; replaceOutput?: boolean };
   "generate-seo": { indices?: number[]; provider?: "agent" | "openai" };
   "generate-tags": { indices?: number[]; provider?: "agent" | "openai" };
   "preview-publication-v2-distribution": { bulkSchedule?: { date: string; startTime: string; endTime: string; timezone: string; channelIds: string[]; maxPerChannel: number } };

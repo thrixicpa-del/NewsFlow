@@ -10205,7 +10205,7 @@ export function Editor({
             <Button
               kind="primary"
               onClick={
-                selected.length && !running
+                selected.length && !queueActive
                   ? () => void launch(selected)
                   : undefined
               }
@@ -10216,7 +10216,7 @@ export function Editor({
             <Button
               kind="success"
               onClick={
-                unfinished.length && !running
+                unfinished.length && !queueActive
                   ? () => void launch(unfinished.map((item) => item.index))
                   : undefined
               }
@@ -10227,7 +10227,7 @@ export function Editor({
             <Button
               kind="primary"
               onClick={
-                resumable.length && !running
+                resumable.length && !queueActive
                   ? () => void launch(resumable.map((item) => item.index))
                   : undefined
               }
@@ -10237,17 +10237,17 @@ export function Editor({
             </Button>
             <Button
               onClick={
-                running || !selected.length
+                queueActive || !selected.length
                   ? undefined
                   : () => void launch(selected, true)
               }
             >
               <WandSparkles size={17} />
-              Повторить с начала выбранные
+              Повторить монтаж выбранных
             </Button>
             <Button
               onClick={
-                running || !ready.length
+                queueActive || !ready.length
                   ? undefined
                   : () =>
                       void launch(
@@ -10257,7 +10257,7 @@ export function Editor({
               }
             >
               <WandSparkles size={17} />
-              Повторить с начала все: {ready.length}
+              Повторить монтаж всех: {ready.length}
             </Button>
             <Button
               kind={data.montageSettings.queuePaused ? "success" : "secondary"}
@@ -10389,7 +10389,7 @@ export function Editor({
                       }
                     >
                       <Play size={15} />
-                      Повторить с начала
+                      Повторить монтаж
                     </Button>
                   ) : null}
                   {task.outputPath ? (

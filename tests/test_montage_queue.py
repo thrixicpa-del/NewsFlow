@@ -1,16 +1,396 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from scriptor import bridge, config
-from scriptor.config import OpenAIKey, Settings
-from scriptor.footage import FootageItem
-from scriptor.runner import RunState
 from scriptor.ai_index import SearchHit
+from scriptor.config import OpenAIKey, Settings
+from scriptor.core import ScenarioRequest
+from scriptor.footage import FootageItem
+from scriptor.runner import Job, RunState
+from scriptor.timeline import TimelineProject
 
 
 class MontageQueueStateTests(unittest.TestCase):
+    def _queue_settings(self, root: Path, titles: list[str]) -> tuple[Settings, list[Job]]:
+        voices = root / "voices"
+        voices.mkdir()
+        output = root / "output"
+        projects = root / "projects"
+        settings = Settings(
+            montage_output_folder=str(output),
+            montage_project_folder=str(projects),
+            montage_renderer="ffmpeg",
+            montage_planning_workers=3,
+            montage_render_workers=2,
+            montage_export_davinci_xml=False,
+        )
+        jobs = []
+        for index, title in enumerate(titles):
+            voice = voices / f"{index + 1}.mp3"
+            voice.write_bytes(f"voice-{index}".encode())
+            settings.voice_scenario_outputs[str(index + 1)] = str(voice)
+            jobs.append(Job(ScenarioRequest(index, title, ""), RunState.DONE, f"Narration {index}", ""))
+        return settings, jobs
+
+    def _queue_runtime_patches(self, root: Path, settings: Settings, titles: list[str], jobs: list[Job],
+                               *, render_side_effect=None, force_needs_render: bool | None = True,
+                               plan_probe=None, render_probe=None):
+        plan_calls: list[int] = []
+        render_calls: list[str] = []
+
+        def prepare(payload):
+            index = int(payload["scenarioIndex"])
+            plan_calls.append(index)
+            if plan_probe:
+                plan_probe("enter")
+            try:
+                project_path = Path(settings.montage_project_folder) / f"{index}.newsflow"
+                TimelineProject(
+                    title=titles[index],
+                    voiceover_path=settings.voice_scenario_outputs[str(index + 1)],
+                ).save(project_path)
+                return {"preparedProject": {"path": str(project_path), "clips": 1, "duration": 6.0}}
+            finally:
+                if plan_probe:
+                    plan_probe("exit")
+
+        def render(project, output, **_kwargs):
+            render_calls.append(project.title)
+            if render_probe:
+                render_probe("enter")
+            try:
+                if render_side_effect is not None:
+                    raise render_side_effect
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"\x00\x00\x00\x18ftypisom" + b"x" * 2048)
+                return output
+            finally:
+                if render_probe:
+                    render_probe("exit")
+
+        patches = [
+            patch.object(bridge, "load_settings", return_value=settings),
+            patch.object(bridge, "load_session", return_value=(titles, jobs)),
+            patch.object(bridge, "save_settings"),
+            patch.object(bridge, "snapshot", return_value={}),
+            patch.object(bridge, "app_data_root", return_value=root),
+            patch.object(bridge, "prepare_montage", side_effect=prepare),
+            patch.object(bridge, "render_project", side_effect=render),
+            patch.object(bridge, "_montage_project_missing_clips", return_value=[]),
+            patch.object(bridge, "_complete_project_visual_tail", return_value=0),
+            patch.object(bridge, "probe_media_duration", return_value=6.0),
+            patch.object(bridge, "required_video_duration", return_value=6.0),
+            patch.object(bridge, "validate_rendered_montage"),
+            patch.object(bridge, "remotion_payload", return_value={}),
+            patch.object(bridge.ClipIndex, "count", return_value=0),
+        ]
+        if force_needs_render is not None:
+            patches.append(patch.object(bridge, "_montage_task_needs_render", return_value=force_needs_render))
+        return patches, plan_calls, render_calls
+
+    def test_overlapping_queue_starts_have_one_owner_and_one_render(self):
+        """Two bridge calls racing before status persistence must not duplicate work."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Only row"])
+            patches, plan_calls, render_calls = self._queue_runtime_patches(
+                root, settings, ["Only row"], jobs,
+            )
+            entered_session = 0
+            session_lock = threading.Lock()
+            both_entered = threading.Event()
+
+            def overlapping_session():
+                nonlocal entered_session
+                with session_lock:
+                    entered_session += 1
+                    if entered_session == 2:
+                        both_entered.set()
+                both_entered.wait(.3)
+                return ["Only row"], jobs
+
+            results = []
+            errors = []
+            for context in patches:
+                context.start()
+            try:
+                with patch.object(bridge, "load_session", side_effect=overlapping_session):
+                    def launch():
+                        try:
+                            results.append(bridge.run_montage_queue({"indices": [0]}))
+                        except (RuntimeError, ValueError) as exc:
+                            errors.append(str(exc))
+
+                    threads = [threading.Thread(target=launch) for _ in range(2)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(5)
+                        if thread.is_alive():
+                            errors.append("queue thread did not finish")
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(plan_calls, [0])
+        self.assertEqual(render_calls, ["Only row"])
+        self.assertEqual(sorted(result["operationResult"]["count"] for result in results), [0, 1])
+
+    def test_empty_selected_scope_is_not_implicit_missing_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Only row"])
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(["Only row"], jobs)), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "app_data_root", return_value=root), \
+                 patch.object(bridge, "prepare_montage") as prepare, \
+                 self.assertRaisesRegex(ValueError, "Выберите|явный"):
+                bridge.run_montage_queue({"indices": []})
+        prepare.assert_not_called()
+
+    def test_stale_job_title_cannot_pair_another_scenario_with_current_mp3(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, _jobs = self._queue_settings(root, ["Current title"])
+            stale_job = Job(ScenarioRequest(0, "Old title", ""), RunState.DONE, "Old narration", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(["Current title"], [stale_job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "app_data_root", return_value=root), \
+                 patch.object(bridge, "prepare_montage") as prepare, \
+                 self.assertRaisesRegex(ValueError, "пары"):
+                bridge.run_montage_queue({"indices": [0]})
+        prepare.assert_not_called()
+        self.assertEqual(settings.montage_task_statuses["0"]["status"], "Ошибка")
+        self.assertIn("текущ", settings.montage_task_statuses["0"]["error"].casefold())
+
+    def test_failed_explicit_retry_keeps_previous_valid_mp4_current(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Only row"])
+            previous = Path(settings.montage_output_folder) / "Only row.mp4"
+            previous.parent.mkdir()
+            original = b"\x00\x00\x00\x18ftypisom" + b"previous" * 300
+            previous.write_bytes(original)
+            settings.montage_task_statuses = {
+                "0": {"title": "Only row", "status": "Готово", "outputPath": str(previous)},
+            }
+            patches, _plan_calls, _render_calls = self._queue_runtime_patches(
+                root, settings, ["Only row"], jobs, render_side_effect=RuntimeError("permanent render failure"),
+            )
+            for context in patches:
+                context.start()
+            try:
+                result = bridge.run_montage_queue({"indices": [0], "replaceOutput": True})
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+            preserved = previous.read_bytes()
+
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(settings.montage_task_statuses["0"]["status"], "Ошибка")
+        self.assertEqual(settings.montage_task_statuses["0"]["outputPath"], str(previous))
+        self.assertEqual(preserved, original)
+
+    def test_stale_owner_is_reclaimed_and_lock_releases_after_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            lock_path = root / "montage-queue.lock"
+            lock_path.write_text('{"pid": 999999, "startedAt": "old"}', encoding="utf-8")
+            with patch.object(bridge, "app_data_root", return_value=root), \
+                 patch.object(bridge, "_montage_process_is_running", return_value=False), \
+                 patch.object(bridge, "_run_montage_queue_unlocked", side_effect=RuntimeError("boom")), \
+                 self.assertRaisesRegex(RuntimeError, "boom"):
+                bridge.run_montage_queue({"indices": [0]})
+            self.assertFalse(lock_path.exists())
+
+    def test_paused_queue_owner_rejects_a_second_start_before_planning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch.object(bridge, "app_data_root", return_value=root):
+                owner = bridge._claim_montage_queue_lock()
+                self.assertIsNotNone(owner)
+                try:
+                    with patch.object(bridge, "_run_montage_queue_unlocked") as run:
+                        result = bridge.run_montage_queue({"indices": [0]})
+                finally:
+                    bridge._release_montage_queue_lock(owner)
+        run.assert_not_called()
+        self.assertEqual(result["operationResult"]["count"], 0)
+
+    def test_exact_selected_scope_renders_only_requested_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            titles = ["Zero", "One", "Two"]
+            settings, jobs = self._queue_settings(root, titles)
+            patches, plan_calls, render_calls = self._queue_runtime_patches(root, settings, titles, jobs)
+            for context in patches:
+                context.start()
+            try:
+                result = bridge.run_montage_queue({"indices": [2, 0, 2]})
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+        self.assertEqual(result["operationResult"]["count"], 2)
+        self.assertEqual(sorted(plan_calls), [0, 2])
+        self.assertEqual(sorted(render_calls), ["Two", "Zero"])
+
+    def test_explicit_missing_only_keeps_ready_output_and_renders_new_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            titles = ["Ready", "New"]
+            settings, jobs = self._queue_settings(root, titles)
+            ready = Path(settings.montage_output_folder) / "Ready.mp4"
+            ready.parent.mkdir()
+            ready_bytes = b"\x00\x00\x00\x18ftypisom" + b"ready" * 400
+            ready.write_bytes(ready_bytes)
+            settings.montage_task_statuses = {
+                "0": {"title": "Ready", "status": "Готово", "outputPath": str(ready)},
+                "1": {"title": "New", "status": "Готов к монтажу", "outputPath": ""},
+            }
+            patches, plan_calls, render_calls = self._queue_runtime_patches(
+                root, settings, titles, jobs, force_needs_render=None,
+            )
+            for context in patches:
+                context.start()
+            try:
+                result = bridge.run_montage_queue({"missingOnly": True})
+                preserved = ready.read_bytes()
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+        self.assertEqual(result["operationResult"]["count"], 1)
+        self.assertEqual(plan_calls, [1])
+        self.assertEqual(render_calls, ["New"])
+        self.assertEqual(preserved, ready_bytes)
+
+    def test_configured_worker_limits_render_each_row_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            titles = [f"Row {index}" for index in range(10)]
+            settings, jobs = self._queue_settings(root, titles)
+            counters = {"plan": 0, "plan_max": 0, "render": 0, "render_max": 0}
+            counter_lock = threading.Lock()
+            plan_gate = threading.Event()
+            render_gate = threading.Event()
+
+            def probe(kind, limit, gate):
+                def update(stage):
+                    with counter_lock:
+                        if stage == "enter":
+                            counters[kind] += 1
+                            counters[f"{kind}_max"] = max(counters[f"{kind}_max"], counters[kind])
+                            if counters[kind] == limit:
+                                gate.set()
+                        else:
+                            counters[kind] -= 1
+                    if stage == "enter":
+                        gate.wait(.5)
+                return update
+
+            patches, plan_calls, render_calls = self._queue_runtime_patches(
+                root, settings, titles, jobs,
+                plan_probe=probe("plan", 3, plan_gate),
+                render_probe=probe("render", 2, render_gate),
+            )
+            for context in patches:
+                context.start()
+            try:
+                result = bridge.run_montage_queue({"indices": list(range(10))})
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+
+        self.assertEqual(result["operationResult"]["count"], 10)
+        self.assertEqual(counters["plan_max"], 3)
+        self.assertEqual(counters["render_max"], 2)
+        self.assertEqual(sorted(plan_calls), list(range(10)))
+        self.assertEqual(sorted(render_calls), sorted(titles))
+        self.assertEqual(len(plan_calls), len(set(plan_calls)))
+        self.assertEqual(len(render_calls), len(set(render_calls)))
+
+    def test_empty_selected_cleanup_is_not_all_and_outside_project_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "output"
+            projects = root / "projects"
+            output.mkdir(); projects.mkdir()
+            generated = output / "keep.mp4"
+            generated.write_bytes(b"keep")
+            outside_project = root / "outside.newsflow"
+            outside_project.write_text("{}", encoding="utf-8")
+            settings = Settings(montage_output_folder=str(output), montage_project_folder=str(projects))
+            settings.montage_task_statuses = {
+                "0": {"title": "keep", "status": "Готово", "outputPath": str(generated)},
+            }
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                removed = bridge.remove_montage_results({"indices": []})
+                rejected = bridge.remove_montage_projects({"paths": [str(outside_project)]})
+                generated_kept = generated.is_file()
+        self.assertEqual(removed["operationResult"]["count"], 0)
+        self.assertEqual(rejected["operationResult"]["count"], 0)
+        self.assertTrue(generated_kept)
+        self.assertIn("Можно удалить только", rejected["operationResult"]["message"])
+
+    def test_dead_running_row_recovers_then_deliberate_resume_renders_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            titles = ["Interrupted", "Ready"]
+            settings, jobs = self._queue_settings(root, titles)
+            ready = Path(settings.montage_output_folder) / "Ready.mp4"
+            ready.parent.mkdir()
+            ready_bytes = b"\x00\x00\x00\x18ftypisom" + b"ready" * 400
+            ready.write_bytes(ready_bytes)
+            settings.montage_task_statuses = {
+                "0": {"title": "Interrupted", "status": "Рендер", "queuePid": 999999, "outputPath": ""},
+                "1": {"title": "Ready", "status": "Готово", "outputPath": str(ready)},
+            }
+            with patch.object(bridge, "_montage_process_is_running", return_value=False):
+                self.assertTrue(bridge._recover_interrupted_montage_tasks(settings))
+            self.assertEqual(settings.montage_task_statuses["0"]["status"], "Ошибка")
+            self.assertEqual(settings.montage_task_statuses["1"]["status"], "Готово")
+
+            patches, plan_calls, render_calls = self._queue_runtime_patches(root, settings, titles, jobs)
+            for context in patches:
+                context.start()
+            try:
+                result = bridge.run_montage_queue({"indices": [0]})
+                preserved = ready.read_bytes()
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+
+        self.assertEqual(result["operationResult"]["count"], 1)
+        self.assertEqual(plan_calls, [0])
+        self.assertEqual(render_calls, ["Interrupted"])
+        self.assertEqual(preserved, ready_bytes)
+
+    def test_pause_waits_at_safe_stage_and_no_active_pause_persists(self):
+        paused = Settings(montage_queue_paused=True)
+        resumed = Settings(montage_queue_paused=False)
+        updates = []
+        with patch.object(bridge, "load_settings", side_effect=[paused, paused, resumed]), \
+             patch.object(bridge, "_montage_task_update", side_effect=lambda *_args, **kwargs: updates.append(kwargs)), \
+             patch.object(bridge.time, "sleep"):
+            bridge._montage_wait_if_paused(Settings(), 4)
+        self.assertEqual([item["status"] for item in updates], ["Пауза", "Пауза", "В очереди"])
+
+        idle = Settings()
+        with patch.object(bridge, "load_settings", return_value=idle), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_montage_settings({"queuePaused": True})
+        self.assertTrue(idle.montage_queue_paused)
+
     def test_unmarked_legacy_remotion_default_migrates_to_fast_news_ffmpeg(self):
         """An old implicit renderer default must not keep a new queue on the slow route."""
         with tempfile.TemporaryDirectory() as folder:
@@ -728,9 +1108,9 @@ class MontageQueueStateTests(unittest.TestCase):
             protected_video = root / "mp4" / "keep.mp4"
             protected_video.parent.mkdir()
             protected_video.write_bytes(b"keep")
-            with patch("scriptor.bridge.load_settings", return_value=settings):
-                with self.assertRaisesRegex(ValueError, "контрольную фразу"):
-                    bridge.clear_production_queue({"confirmed": True})
+            with patch("scriptor.bridge.load_settings", return_value=settings), \
+                 self.assertRaisesRegex(ValueError, "контрольную фразу"):
+                bridge.clear_production_queue({"confirmed": True})
             self.assertTrue(protected_video.exists())
 
     def test_settings_save_creates_an_independent_recovery_snapshot(self):
