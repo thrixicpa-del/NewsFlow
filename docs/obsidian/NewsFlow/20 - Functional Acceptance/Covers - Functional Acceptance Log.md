@@ -89,3 +89,68 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI**
 - `python -m ruff check tests/test_covers.py tests/test_cover_queue_tombstones.py scriptor/test_cover_library.py` — **PASS**.
 - `git diff --check` — **PASS**.
 - No real or paid provider calls were made; all provider paths used deterministic fakes and temporary files. Production data and production media were not touched.
+
+## COVERS-003 — real image models, face library and visual acceptance
+
+Date: **2026-09-18**
+Status: **REAL IMAGE ACCEPTANCE PARTIAL**
+
+### Live FastGen capabilities
+
+- Live capabilities were refreshed through NewsFlow's `refresh_fastgen` path with two configured active keys. Eight healthy, non-deprecated image operations were returned.
+- Safe text-to-image eligible operations: `nano_banana_pro_image_generate`, `nano_banana_2_image_generate`, `nano_banana_2_lite_image_generate`, `flower_image_generate`, `grok_image_generate`, `openai_image_generate`.
+- `flower_image_edit` and `grok_image_edit` were recorded but not invoked because their live schemas require at least one input image; they are not compatible with the reference-free baseline.
+- User-mentioned families present in live metadata: Flower (`flower_image_generate` / `flower_image_edit`), Nano Banana 2 (`nano_banana_2_image_generate`), Nano Banana Pro (`nano_banana_pro_image_generate`), ChatGPT/OpenAI image (`openai_image_generate`), Flow Banana 2 (`provider=flow`, `model=nano-banana-2`) and Flow Banana Pro (`provider=flow`, `model=nano-banana-pro`).
+- Every eligible model was visible to the selector filter; unavailable/deprecated operations remain ineligible. The isolated settings round-trip preserved the selected operation, switching the selected operation did not relabel an existing result's saved render profile, and ordinary generation returned `count: 0` without replacing a valid existing cover.
+
+### Real model results
+
+| Live operation | Technical | Visual | Elapsed | Bytes / dimensions | Attempts | Evidence |
+|---|---|---|---:|---|---:|---|
+| `nano_banana_pro_image_generate` | PASS | PASS | 34.111 s | 861,891 / 1376×768 JPEG | 1 | Coherent photorealistic meeting; limited clean overlay space. |
+| `nano_banana_2_image_generate` | PASS | FAIL | 30.770 s | 747,987 / 1376×768 JPEG | 1 | Split collage rather than one coherent scene. |
+| `nano_banana_2_lite_image_generate` | PASS | PASS | 13.619 s | 817,579 / 1376×768 JPEG | 1 | Coherent editorial scene; synthetic micro-signage and weak text-safe area. |
+| `flower_image_generate` | PASS | PASS | 20.211 s | 240,557 / 1376×768 JPEG | 1 | Coherent editorial scene; synthetic placard text and busy lower-left area. |
+| `grok_image_generate` | PASS | FAIL | 49.923 s | 397,305 / 1280×720 JPEG | 6 | Natural `try again later` failure recovered through the bounded retry contract, but the final image rendered internal instruction text as an unusable poster. |
+| `openai_image_generate` | PASS | PASS | 46.359 s | 2,025,924 / 1672×941 PNG | 1 | Strong coherent photorealistic energy-policy scene; limited clean overlay space. |
+
+- PASS files are non-empty, decode with Pillow and are the current NewsFlow row result. No result reused another model's output.
+- The first Grok smoke stopped after one natural `Generation failed, please try again later` response because the transient classifier did not recognize that phrase. RED expected 2 calls and observed 1. The minimal classifier fix added only `try again later`; GREEN passed, and the real rerun recovered on attempt 6 without changing provider payload, prompt semantics or safety filters. Including the initial diagnostic request, Grok made seven task attempts and produced one successful paid image.
+- The bounded run produced **7 successful paid images total**: six model baselines plus one stale-replacement rerender. The authorized maximum of eight was not exceeded.
+
+### Face-library acceptance
+
+- Configured: **no**; source folder exists: **no**; source portraits: **0**.
+- Prepared folder configured/existing: **no/no**; prepared portraits: **0**; available person labels: none.
+- Therefore the required two local-face composites, source portrait hash/mtime proof and wrong-person negative check could not be executed. No substitute/private portrait source was invented, copied or modified. This is an explicit acceptance blocker, not a PASS.
+
+### Stale-image and artifacts
+
+- An isolated synthetic row started with a fake previous image. The clean new-prompts workflow removed that owned file and cleared it as current; a real Nano Banana Pro rerender created a different file, and NewsFlow persisted only the new file as current.
+- Review folder: `NewsFlow-COVERS-003-review-20260918` (local ignored `.artifacts` workspace, outside production media).
+- Contact sheet: `COVERS-003-contact-sheet.png`.
+- ZIP: `NewsFlow-COVERS-003-review.zip`.
+- Per-file SHA-256, dimensions, formats, bytes, attempts and sanitized notes are preserved in `COVERS-003-results.json`; the human checklist is in `COVERS-003-visual-review.md`.
+
+### Regression and safety
+
+- RED: `test_provider_try_again_later_failure_uses_bounded_retry_contract` — expected 2 calls, got 1; `PRODUCTION_WRITE_GUARD=PASS`.
+- GREEN targeted classifier regression — **1 PASS, 0 FAIL, 0 SKIP**; `PRODUCTION_WRITE_GUARD=PASS`.
+- `python tests/run_isolated.py tests/test_covers.py -v` — **126 PASS, 0 FAIL, 0 SKIP**.
+- `python tests/run_isolated.py tests/test_cover_queue_tombstones.py -v` — **14 PASS, 0 FAIL, 0 SKIP**.
+- `python tests/run_isolated.py scriptor/test_cover_library.py -v` — **39 PASS, 0 FAIL, 0 SKIP**.
+- `pnpm exec vitest run src/ui/features/covers/covers-view.test.tsx` — **1 file / 19 tests PASS, 0 FAIL, 0 SKIP**.
+- `pnpm test:ui` — **34 files / 186 tests PASS, 0 FAIL, 0 SKIP**.
+- `pnpm typecheck` — **PASS**.
+- `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD` — **PASS** (the guard's intentional mutation probe was detected).
+- `python scripts/secret-scan.py` — **PASS**.
+- `python -m ruff check tests/test_covers.py` — **PASS**.
+- `git diff --check` — **PASS**.
+- Production settings, session, cover library and cover/media tree fingerprints were unchanged before/after the live harness. No production data/media was touched, no source portrait existed to modify, and no publication/upload occurred.
+- Real paid image calls were explicitly user-authorized for COVERS-003. No secret, token, cookie, Authorization header or settings dump is present in tracked files or review artifacts.
+
+### Partial blockers
+
+- Nano Banana 2 baseline is not one coherent scene.
+- Grok baseline is technically valid but visually unusable because it exposes internal prompt structure as large malformed text.
+- Local-face acceptance is blocked by the absence of a configured NewsFlow face library/prepared folder.

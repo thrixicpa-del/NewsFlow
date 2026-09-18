@@ -6895,7 +6895,7 @@ def _is_retryable_cover_error(error: object) -> bool:
     text = str(error or "").casefold()
     return any(marker in text for marker in (
         "winerror 10060", "timeout", "timed out", "connection", "network", "429", " 5",
-        "temporar", "connection reset", "provider safety", "safety filters",
+        "temporar", "try again later", "connection reset", "provider safety", "safety filters",
     ))
 
 

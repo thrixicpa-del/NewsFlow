@@ -2187,6 +2187,34 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         self.assertEqual(row["generation_history"][-1]["totalAttempt"], 7)
         self.assertTrue(row["generation_history"][-1]["rewritten"])
 
+    def test_provider_try_again_later_failure_uses_bounded_retry_contract(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [self._row(0)]
+        calls = []
+
+        def render(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("Generation failed, please try again later")
+            return [Path("fresh-success.png")]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.time, "sleep"), \
+             patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:0"], "_parallel_cover_worker": True,
+            })
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(settings.cover_queue[0]["status"], "Готово")
+        self.assertEqual(settings.cover_queue[0]["paths"], ["fresh-success.png"])
+
     def test_permanent_fastgen_failure_is_terminal_after_one_call(self):
         from scriptor import bridge
 
