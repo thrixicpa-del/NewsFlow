@@ -93,13 +93,14 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI**
 ## COVERS-003 — real image models, face library and visual acceptance
 
 Date: **2026-09-18—2026-09-19**
-Status: **REAL IMAGE ACCEPTANCE PARTIAL**
+Status: **CORRECTED ALL-FASTGEN WORKFLOW VERIFIED LOCALLY; PENDING REVIEW/CI**
 
 ### Live FastGen capabilities
 
 - Live capabilities were refreshed through NewsFlow's `refresh_fastgen` path with two configured active keys. Eight healthy, non-deprecated image operations were returned.
 - Safe text-to-image eligible operations: `nano_banana_pro_image_generate`, `nano_banana_2_image_generate`, `nano_banana_2_lite_image_generate`, `flower_image_generate`, `grok_image_generate`, `openai_image_generate`.
 - `flower_image_edit` and `grok_image_edit` were recorded but not invoked because their live schemas require at least one input image; they are not compatible with the reference-free baseline.
+- The corrected live capability refresh identified the full-face eligible operations by actual reference support: `nano_banana_pro_image_generate`, `nano_banana_2_image_generate`, `nano_banana_2_lite_image_generate`, and `openai_image_generate` accept up to 10 inputs; `flower_image_edit` accepts 1 and `grok_image_edit` accepts up to 5. Text-only `flower_image_generate` / `grok_image_generate` remain scene-only and cannot count as full face/text acceptance.
 - User-mentioned families present in live metadata: Flower (`flower_image_generate` / `flower_image_edit`), Nano Banana 2 (`nano_banana_2_image_generate`), Nano Banana Pro (`nano_banana_pro_image_generate`), ChatGPT/OpenAI image (`openai_image_generate`), Flow Banana 2 (`provider=flow`, `model=nano-banana-2`) and Flow Banana Pro (`provider=flow`, `model=nano-banana-pro`).
 - Every eligible model was visible to the selector filter; unavailable/deprecated operations remain ineligible. The isolated settings round-trip preserved the selected operation, switching the selected operation did not relabel an existing result's saved render profile, and ordinary generation returned `count: 0` without replacing a valid existing cover.
 
@@ -116,7 +117,7 @@ Status: **REAL IMAGE ACCEPTANCE PARTIAL**
 
 - PASS files are non-empty, decode with Pillow and are the current NewsFlow row result. No result reused another model's output.
 - The first Grok smoke stopped after one natural `Generation failed, please try again later` response because the transient classifier did not recognize that phrase. RED expected 2 calls and observed 1. The minimal classifier fix added only `try again later`; GREEN passed, and the real rerun recovered on attempt 6 without changing provider payload, prompt semantics or safety filters. Including the initial diagnostic request, Grok made seven task attempts and produced one successful paid image.
-- The initial bounded run produced **7 successful paid images**: six model baselines plus one stale-replacement rerender. Subsequent user-authored COVERS-003 addenda explicitly required two real face-only images and two new FastGen-text + local-face images, bringing the complete acceptance evidence to **11 successful paid images**. No extra image call was made for the exact local-overlay controls.
+- The initial bounded run produced **7 successful paid images**: six model baselines plus one stale-replacement rerender. Subsequent user-authored COVERS-003 addenda required two real face-only images and two FastGen-text + local-face images, bringing that evidence to **11 successful paid images**. The all-FastGen correction then produced two diagnostic images and two accepted v2 images, for **15 successful paid images total**. No rejection was manufactured and both corrected batches completed one provider generation per row.
 
 ### Face-library and current-text acceptance
 
@@ -128,6 +129,19 @@ Status: **REAL IMAGE ACCEPTANCE PARTIAL**
 - FastGen-text finals are **TECHNICAL PASS / FACE PASS / TEXT VISUAL FAIL**: the correct current Russian headline and subheadline are present, but the later right-side local portrait covers their endings. This is recorded as a failure, not hidden by the controls.
 - Exact local-overlay controls were built without new provider calls from the preserved clean FastGen face scenes and the same current row text. The initial controls exposed a real vertical clipping defect. RED proved the last subheadline word was omitted/outside the canvas; the minimal compositor fix scales the pair until every word and stroke fits. GREEN controls show the complete exact headline and complete two-line subheadline inside the 16:9 canvas without covering the face: **TECHNICAL PASS / FACE PASS / TEXT PASS**.
 - Source and prepared portrait manifests (SHA-256, byte size and mtime) were identical before/after. Production settings, session, cover library and media fingerprints were also unchanged.
+
+### Correction — accepted final composed entirely by FastGen
+
+- The earlier `FastGen scene/text -> NewsFlow local face/text` artifacts are retained only as diagnostic history. They do not count toward the corrected acceptance verdict.
+- `fastgen-full` now fails closed when a selected local face is paired with an operation whose live schema has no image/reference input. It no longer drops the PNG and silently continues as a name-only generation. Scene-only and diagnostic routes retain their existing text-only behavior.
+- Deterministic coverage proves: the selected prepared PNG reaches the provider path; `FastGenClient` uploads it and places the returned storage ID in `inputs`; two ProductionItems retain their own PNG and exact current text; the reference-capable edit path can receive both a base scene and the cropped portrait; no accepted full route calls `compose_cover_faces` or `render_cover_text`; same-prompt retry preserves prompt/text/reference/profile; new-prompt regeneration changes the composition prompt without changing the selected face; and non-reference operations are ineligible.
+- The first real all-FastGen batch was technically correct but is marked **DIAGNOSTIC / TEXT FAIL** because the provider added trailing periods absent from the current text. The cause was the prompt framing itself appending a delimiter period after each value. RED captured this boundary; the minimal fix wraps each value in `<exact-text>` and explicitly forbids added punctuation, translation, rewriting and extra words.
+- Corrected v2 used `nano_banana_pro_image_generate` (`provider=flow`, `model=nano-banana-pro`, live `inputs.max=10`) as a one-step FastGen composition. FastGen itself produced scene/background + supplied PNG identity + current headline + current subheadline. The accepted files are raw provider outputs; local face and text compositors were hard-failed in the isolated harness and recorded **0 calls**.
+- Владимир Путин: `путин/путин3.png` -> FastGen storage ID `cd0a9448fe1bdaa6a95ba27b8664da3e`; exact text `ЭНЕРГИЯ ПОД КОНТРОЛЕМ` / `Форум обсуждает безопасность поставок`; final SHA-256 `184dd1815c4a205a8f2ab18afc902992b9b267a2a68a656250f419109fa59d81`.
+- Дональд Трамп: `трамп/трамп4.png` -> FastGen storage ID `f06858620ef724196025294c3a97f8e1`; exact text `ТРАМП МЕНЯЕТ КУРС` / `Рынок ждёт новую стратегию`; final SHA-256 `5e09390e841da17ed34c28c1cbd90dea2714a4bca1b10f271fe0acde8020157a`.
+- Visual verdict for both accepted v2 files: **PASS**. The supplied identity is recognisable and integrated into a coherent current scene; headline is dominant, subheadline secondary, both strings are exact and readable, no face/text collision is present, and neither row contains the other row's text or portrait.
+- The visual prompts were generated from each row's current headline/subheadline through the NewsFlow prompt path. The stored prompt/text revision provenance matches; final FastGen prompts contain their own exact pair and exclude the other row.
+- Selected cropped PNGs, source portraits, and every production settings/session/library/media fingerprint were unchanged. Reused storage IDs reflect FastGen upload deduplication of the same unchanged PNG bytes, not stale output reuse; v2 output hashes and mtimes are new.
 
 ### Prompt freshness and pre-billing retry addenda
 
@@ -148,13 +162,18 @@ Status: **REAL IMAGE ACCEPTANCE PARTIAL**
 - ZIP: `NewsFlow-COVERS-003-review.zip`.
 - Per-file SHA-256, dimensions, formats, bytes, attempts and sanitized notes are preserved in `COVERS-003-results.json`; the human checklist is in `COVERS-003-visual-review.md`.
 - Face-only provenance is preserved in `COVERS-003-face-results.json`; current-text/prompt/face/final/control provenance is preserved in `COVERS-003-face-text-results.json`.
+- Corrected accepted review folder: `NewsFlow-COVERS-003-all-fastgen-20260919-v2` in ignored `.artifacts`.
+- Corrected contact sheet: `COVERS-003-all-fastgen-contact-sheet.png`; ZIP: `NewsFlow-COVERS-003-all-fastgen-review.zip`; technical/provider provenance: `COVERS-003-all-fastgen-results.json`; human verdict: `COVERS-003-all-fastgen-visual-review.md`.
+- The sibling folder `NewsFlow-COVERS-003-all-fastgen-20260919` is explicitly diagnostic-only and is not mixed into the accepted v2 ZIP.
 
 ### Regression and safety
 
 - RED: `test_provider_try_again_later_failure_uses_bounded_retry_contract` — expected 2 calls, got 1; `PRODUCTION_WRITE_GUARD=PASS`.
 - GREEN targeted classifier regression — **1 PASS, 0 FAIL, 0 SKIP**; `PRODUCTION_WRITE_GUARD=PASS`.
 - Additional RED evidence: stale prompt readiness after text change; one-call 400 pre-billing failure; accepted-ID retry ambiguity; four-attempt terminal-state absence; exact local-overlay dropped the final subheadline word/outgrew the canvas.
-- `python tests/run_isolated.py tests/test_covers.py -v` — **136 PASS, 0 FAIL, 0 SKIP**.
+- Corrected workflow RED: reference-ineligible `flower_image_generate` was called once with an empty reference list instead of being rejected before provider dispatch. Exact-text RED: the provider block contained a delimiter period after each current value, matching the punctuation added by the first live batch.
+- Corrected workflow GREEN targeted: **7 PASS, 0 FAIL, 0 SKIP** (full-face batch, storage IDs, edit inputs, operation eligibility, retry/new-prompt semantics, exact text framing, and existing multi-row prompt isolation).
+- `python tests/run_isolated.py --pytest -q tests/test_covers.py tests/test_cover_queue_tombstones.py` — **156 PASS, 0 FAIL, 0 SKIP** (`142` Covers + `14` tombstones).
 - `python tests/run_isolated.py tests/test_cover_queue_tombstones.py -v` — **14 PASS, 0 FAIL, 0 SKIP**.
 - `python tests/run_isolated.py scriptor/test_cover_library.py -v` — **39 PASS, 0 FAIL, 0 SKIP**.
 - `pnpm exec vitest run src/ui/features/covers/covers-view.test.tsx` — **1 file / 22 tests PASS, 0 FAIL, 0 SKIP**.
@@ -167,8 +186,8 @@ Status: **REAL IMAGE ACCEPTANCE PARTIAL**
 - Production settings, session, cover library and cover/media tree fingerprints were unchanged before/after every live harness. No production data/media was touched, all source/prepared portrait hashes and mtimes were unchanged, and no publication/upload occurred.
 - Real paid image calls were explicitly user-authorized for COVERS-003. No secret, token, cookie, Authorization header or settings dump is present in tracked files or review artifacts.
 
-### Partial blockers
+### Remaining model-specific observations
 
 - Nano Banana 2 baseline is not one coherent scene.
 - Grok baseline is technically valid but visually unusable because it exposes internal prompt structure as large malformed text.
-- Both FastGen-text + local-face samples have their provider-rendered text partly covered by the later local portrait. Exact local-overlay controls pass, but do not replace the failed FastGen-text verdict.
+- Both historical FastGen-text + local-face samples have their provider-rendered text partly covered by the later local portrait. They remain diagnostic only and do not replace or weaken the corrected all-FastGen v2 PASS.

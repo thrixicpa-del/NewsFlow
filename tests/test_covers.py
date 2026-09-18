@@ -430,6 +430,28 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 "NEGATIVE": "Universal V2",
             })
 
+    def test_exact_cover_text_is_delimited_without_adding_punctuation(self):
+        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+        prompt = build_final_provider_prompt(
+            "Current editorial scene",
+            {
+                "title": "Current topic",
+                "cover_headline": "ЭНЕРГИЯ ПОД КОНТРОЛЕМ",
+                "cover_subheadline": "Форум обсуждает безопасность поставок",
+            },
+            text_mode="fastgen",
+        )
+
+        headline = prompt.split("HEADLINE:\n", 1)[1].split("\n\nSUBHEADLINE:", 1)[0]
+        subheadline = prompt.split("SUBHEADLINE:\n", 1)[1].split("\n\nTYPOGRAPHY:", 1)[0]
+        self.assertIn("<exact-text>ЭНЕРГИЯ ПОД КОНТРОЛЕМ</exact-text>", headline)
+        self.assertIn("<exact-text>Форум обсуждает безопасность поставок</exact-text>", subheadline)
+        self.assertNotIn("КОНТРОЛЕМ.", headline)
+        self.assertNotIn("поставок.", subheadline)
+        self.assertIn("Do not add punctuation", headline)
+        self.assertIn("Do not add punctuation", subheadline)
+
     def test_semantic_scene_planner_resolves_concrete_values_for_supported_news_topics(self):
         """V2 receives scene facts, never planner instructions or generic placeholders."""
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
@@ -588,7 +610,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         self.assertEqual(len(payloads), 5)
         for _title, headline, subheadline in rows:
-            matching = [payload for payload in payloads if f"HEADLINE:\n{headline}." in payload]
+            matching = [payload for payload in payloads if f"HEADLINE:\n<exact-text>{headline}</exact-text>" in payload]
             self.assertEqual(len(matching), 1)
             payload = matching[0]
             self.assertEqual(payload.count("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2"), 1)
@@ -596,8 +618,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             self.assertIn("PHOTOREALISM = MAXIMUM.", payload)
             self.assertIn("SELECTED COMPOSITION:\n", payload)
             self.assertIn("Use thin vivid red graphical edge accents", payload)
-            self.assertIn(f"HEADLINE:\n{headline}.", payload)
-            self.assertIn(f"SUBHEADLINE:\n{subheadline}.", payload)
+            self.assertIn(f"HEADLINE:\n<exact-text>{headline}</exact-text>", payload)
+            self.assertIn(f"SUBHEADLINE:\n<exact-text>{subheadline}</exact-text>", payload)
             self.assertNotIn("breaking-news", payload.casefold())
 
 
@@ -649,6 +671,35 @@ class FastGenClientTests(unittest.TestCase):
         self.assertEqual(first, "stored-reference-1")
         self.assertEqual(second, "stored-reference-1")
         upload.assert_called_once()
+
+    def test_reference_files_become_provider_storage_ids_in_generation_payload(self):
+        client = FastGenClient("test-key")
+        capability = {
+            "inputs": {"min": 1, "max": 2},
+            "outputs": {"max_items": 1},
+            "options": {"aspect_ratio": {"enum": ["16:9"]}},
+        }
+        requests = []
+
+        def wait(payload, _folder, _title, _start_index, *_args):
+            requests.append(dict(payload))
+            return [Path("provider-final.png")]
+
+        with patch.object(client, "_operation_capability", return_value=capability), \
+             patch.object(client, "upload_reference", side_effect=["storage-base", "storage-face"]) as upload, \
+             patch.object(client, "_wait_for_generation", side_effect=wait):
+            paths = client.generate_media(
+                "exact composition prompt",
+                Path("out"),
+                "title",
+                "reference_image_edit",
+                references=[Path("base.png"), Path("face.png")],
+            )
+
+        self.assertEqual(paths, [Path("provider-final.png")])
+        self.assertEqual([call.args[0] for call in upload.call_args_list], [Path("base.png"), Path("face.png")])
+        self.assertEqual(requests[0]["inputs"], ["storage-base", "storage-face"])
+        self.assertEqual(requests[0]["prompt"], "exact composition prompt")
 
     def test_error_after_generation_acceptance_carries_remote_id(self):
         client = FastGenClient("test-key")
@@ -2389,6 +2440,306 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
             })
 
         render.assert_not_called()
+
+    def test_fastgen_full_batch_sends_each_rows_face_and_exact_text_without_local_compositors(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            faces = [root / "person-a.png", root / "person-b.png"]
+            for face in faces:
+                face.write_bytes(b"prepared-face")
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=True,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 1, "max": 2},
+            }]}
+            settings.cover_queue = [
+                self._row(
+                    0,
+                    image_prompt="Current scene A",
+                    cover_headline="ТОЧНЫЙ ЗАГОЛОВОК A",
+                    cover_subheadline="Точная вторая строка A",
+                    face_reference_path=str(faces[0]),
+                    face_reference_label="Person A",
+                    face_reference_source="manual",
+                ),
+                self._row(
+                    1,
+                    image_prompt="Current scene B",
+                    cover_headline="ТОЧНЫЙ ЗАГОЛОВОК B",
+                    cover_subheadline="Точная вторая строка B",
+                    face_reference_path=str(faces[1]),
+                    face_reference_label="Person B",
+                    face_reference_source="manual",
+                ),
+            ]
+            calls = []
+
+            def render(prompt, _output, stem, operation, _ratio, **kwargs):
+                calls.append({
+                    "prompt": prompt,
+                    "operation": operation,
+                    "references": tuple(str(path) for path in kwargs.get("references") or []),
+                })
+                return [root / f"{stem}.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render), \
+                 patch.object(bridge, "compose_cover_faces") as compose, \
+                 patch.object(bridge, "render_cover_text") as overlay:
+                bridge.generate_covers({
+                    "indices": [0, 1],
+                    "productionItemIds": ["production:0", "production:1"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "with",
+                    "textMode": "fastgen",
+                    "localFaceOnly": False,
+                    "operation": "reference_image_edit",
+                })
+
+        self.assertEqual(len(calls), 2)
+        for index, call in enumerate(calls):
+            self.assertEqual(call["operation"], "reference_image_edit")
+            self.assertEqual(call["references"], (str(faces[index]),))
+            self.assertIn(f"HEADLINE:\n<exact-text>ТОЧНЫЙ ЗАГОЛОВОК {'AB'[index]}</exact-text>", call["prompt"])
+            self.assertIn(f"SUBHEADLINE:\n<exact-text>Точная вторая строка {'AB'[index]}</exact-text>", call["prompt"])
+            self.assertIn("Do not add punctuation", call["prompt"])
+            self.assertEqual(settings.cover_queue[index]["status"], "Готово")
+        compose.assert_not_called()
+        overlay.assert_not_called()
+
+    def test_fastgen_full_with_selected_face_rejects_operation_without_reference_input(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            face = Path(temporary) / "selected-face.png"
+            face.write_bytes(b"prepared-face")
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_operation="flower_image_generate",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "flower_image_generate", "inputs": {"min": 0, "max": 0},
+            }]}
+            settings.cover_queue = [self._row(
+                0,
+                cover_headline="ТОЧНЫЙ ЗАГОЛОВОК",
+                cover_subheadline="Точная вторая строка",
+                face_reference_path=str(face),
+                face_reference_label="Selected Person",
+                face_reference_source="manual",
+            )]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media") as render:
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:0"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "with",
+                    "textMode": "fastgen",
+                    "localFaceOnly": False,
+                    "operation": "flower_image_generate",
+                })
+
+        render.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["status"], "Операция FastGen без references")
+        self.assertIn("reference", settings.cover_queue[0]["error"].casefold())
+
+    def test_fastgen_full_edit_path_sends_base_scene_and_selected_face_to_provider(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = root / "current-base.png"
+            face = root / "selected-face.png"
+            base.write_bytes(b"base")
+            face.write_bytes(b"face")
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 1, "max": 2},
+            }]}
+            settings.cover_queue = [self._row(
+                0,
+                cover_headline="ТОЧНЫЙ ЗАГОЛОВОК",
+                cover_subheadline="Точная вторая строка",
+                selected_path=str(base),
+                face_reference_path=str(face),
+                face_reference_label="Selected Person",
+                face_reference_source="manual",
+            )]
+            calls = []
+
+            def render(prompt, _output, _stem, _operation, _ratio, **kwargs):
+                calls.append((prompt, tuple(str(path) for path in kwargs.get("references") or [])))
+                return [root / "edited.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_prepare_cover_visual_reference", side_effect=lambda path: path), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render), \
+                 patch.object(bridge, "compose_cover_faces") as compose, \
+                 patch.object(bridge, "render_cover_text") as overlay:
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:0"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "with",
+                    "textMode": "fastgen",
+                    "localFaceOnly": False,
+                    "refineWithFace": True,
+                    "forceRegenerate": True,
+                    "operation": "reference_image_edit",
+                })
+
+        self.assertEqual(calls[0][1], (str(base), str(face)))
+        self.assertIn("existing composition reference", calls[0][0])
+        compose.assert_not_called()
+        overlay.assert_not_called()
+
+    def test_fastgen_full_retry_and_new_prompt_keep_exact_text_and_selected_face(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            face = root / "selected-face.png"
+            face.write_bytes(b"prepared-face")
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=False,
+                cover_prompt_variant_count=1,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 1, "max": 2},
+            }]}
+            settings.cover_queue = [self._row(
+                0,
+                status="Нужен новый промпт",
+                image_prompt="Old rejected visual prompt",
+                image_prompt_options=["Old rejected visual prompt"],
+                cover_headline="ТОЧНЫЙ ЗАГОЛОВОК",
+                cover_subheadline="Точная вторая строка",
+                face_reference_path=str(face),
+                face_reference_label="Selected Person",
+                face_reference_source="manual",
+                render_profile={
+                    "build_mode": "fastgen-full",
+                    "face_mode": "with",
+                    "text_mode": "fastgen",
+                    "local_face_only": False,
+                    "operation": "reference_image_edit",
+                },
+            )]
+            retry_calls = []
+
+            def retry_render(prompt, _output, _stem, operation, _ratio, **kwargs):
+                retry_calls.append((prompt, operation, tuple(str(path) for path in kwargs.get("references") or [])))
+                if len(retry_calls) < 2:
+                    raise FastGenError("FastGen API (400): prompt rejected", 400)
+                return [root / "retried.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.time, "sleep"), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=retry_render):
+                bridge.retry_cover_generation({
+                    "indices": [0], "productionItemIds": ["production:0"],
+                })
+
+            self.assertEqual(len(retry_calls), 2)
+            self.assertEqual(retry_calls[0], retry_calls[1])
+            self.assertEqual(retry_calls[0][1:], ("reference_image_edit", (str(face),)))
+            self.assertIn("HEADLINE:\n<exact-text>ТОЧНЫЙ ЗАГОЛОВОК</exact-text>", retry_calls[0][0])
+            self.assertIn("SUBHEADLINE:\n<exact-text>Точная вторая строка</exact-text>", retry_calls[0][0])
+
+            settings.cover_queue[0].update(
+                status="Нужен новый промпт",
+                error="FastGen отклонил текущий prompt 4 раза",
+            )
+
+            def rewrite(payload):
+                self.assertEqual(payload["productionItemIds"], ["production:0"])
+                settings.cover_queue[0].update(
+                    image_prompt="New current visual prompt",
+                    image_prompt_options=["New current visual prompt"],
+                    error="",
+                )
+                return {}
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "generate_cover_prompts", side_effect=rewrite), \
+                 patch.object(bridge, "generate_covers") as render:
+                bridge.regenerate_covers_new_prompts({
+                    "indices": [0], "productionItemIds": ["production:0"], "provider": "agent",
+                })
+
+            self.assertEqual(settings.cover_queue[0]["image_prompt"], "New current visual prompt")
+            self.assertEqual(settings.cover_queue[0]["face_reference_path"], str(face))
+            self.assertEqual(settings.cover_queue[0]["cover_headline"], "ТОЧНЫЙ ЗАГОЛОВОК")
+            self.assertEqual(settings.cover_queue[0]["cover_subheadline"], "Точная вторая строка")
+            render.assert_not_called()
+
+            rewritten_calls = []
+
+            def rewritten_render(prompt, _output, _stem, operation, _ratio, **kwargs):
+                rewritten_calls.append((prompt, operation, tuple(str(path) for path in kwargs.get("references") or [])))
+                return [root / "rewritten.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=rewritten_render):
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:0"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "with",
+                    "textMode": "fastgen",
+                    "localFaceOnly": False,
+                    "operation": "reference_image_edit",
+                })
+
+            self.assertEqual(len(rewritten_calls), 1)
+            self.assertIn("STORY CONTEXT:\nNew current visual prompt", rewritten_calls[0][0])
+            self.assertIn("HEADLINE:\n<exact-text>ТОЧНЫЙ ЗАГОЛОВОК</exact-text>", rewritten_calls[0][0])
+            self.assertIn("SUBHEADLINE:\n<exact-text>Точная вторая строка</exact-text>", rewritten_calls[0][0])
+            self.assertEqual(rewritten_calls[0][1:], ("reference_image_edit", (str(face),)))
 
     def test_three_prebilling_rejections_then_success_reuse_prompt_and_reference(self):
         from scriptor import bridge

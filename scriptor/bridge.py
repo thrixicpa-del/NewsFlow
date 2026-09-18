@@ -7255,8 +7255,21 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     item.pop("face_reference_path", None)
                     item.pop("face_reference_label", None)
                     item.pop("face_reference_source", None)
-            # Flower/Grok generation endpoints are text-only.  Keep the matched
-            # name below, but never submit a file that their live schema rejects.
+            # A full-FastGen face cover is accepted only when the provider can
+            # receive the selected portrait. Falling back to a name-only prompt
+            # would silently produce a different person and cannot count as the
+            # requested scene + face + text workflow.
+            if build_mode == "fastgen-full" and face_label and not operation_accepts_references:
+                detail = (
+                    f"Операция FastGen {operation} не поддерживает image/reference input; "
+                    "выберите reference-capable operation для режима «Всё через FastGen»."
+                )
+                _cover_step(item, "Операция FastGen без references", 100, detail)
+                item["error"] = detail
+                _save_cover_state(settings)
+                continue
+            # Text-only generation endpoints must not receive files in the
+            # remaining scene-only and diagnostic routes.
             if not operation_accepts_references:
                 references = []
         except ValueError as exc:
