@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { fallback, FinishedScripts, Scenarios } from "../../App";
 
@@ -31,6 +31,51 @@ describe("Scenarios and scripts Light views", () => {
     fireEvent.click(screen.getByRole("button", { name: "Написать все сценарии: 1" }));
 
     expect(command).toHaveBeenCalledWith("generate-scenarios", { provider: "agent" });
+  });
+
+  it("submits selected generation once and disables both generation buttons while pending", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 0, title: "Ожидающий", state: "Ожидает", result: "", error: "" }],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Ожидающий" }));
+    const selected = screen.getByRole("button", { name: "Написать выбранные" });
+    const all = screen.getByRole("button", { name: "Написать все сценарии: 1" });
+    act(() => {
+      fireEvent.click(selected);
+      fireEvent.click(selected);
+    });
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command).toHaveBeenCalledWith("generate-scenarios", { indices: [0], provider: "agent" });
+    expect(selected).toHaveProperty("disabled", true);
+    expect(all).toHaveProperty("disabled", true);
+  });
+
+  it("shares the generation lock between selected and all-scenarios actions", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 0, title: "Первый", state: "Ожидает", result: "", error: "" },
+        { index: 1, title: "Второй", state: "Ожидает", result: "", error: "" },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Первый" }));
+    const selected = screen.getByRole("button", { name: "Написать выбранные" });
+    const all = screen.getByRole("button", { name: "Написать все сценарии: 2" });
+    act(() => {
+      fireEvent.click(selected);
+      fireEvent.click(all);
+    });
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command).toHaveBeenCalledWith("generate-scenarios", { indices: [0], provider: "agent" });
   });
 
   it("keeps add, generate and finished-script navigation contracts", () => {
