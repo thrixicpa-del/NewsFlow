@@ -42,3 +42,9 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI**
 ### Deferred acceptance
 
 - Real image/provider acceptance is deferred to **COVERS-003**.
+
+### Review fix — atomic selected durable scope
+
+- A selected batch is now rejected atomically when any requested index or durable ProductionItem ID is stale, tombstoned, absent, or mismatched.
+- Regression coverage proves a partial stale `[0, 1]` selection and an index-to-ID mismatch both fail before generation; provider calls remain **0**.
+- A selected row can no longer silently disappear from a bulk command. All-scope behavior and ready-scope `count: 0` semantics are unchanged.

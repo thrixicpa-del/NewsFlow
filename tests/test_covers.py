@@ -1697,6 +1697,50 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
                 self.assertEqual(result["operationResult"]["kind"], result_kind)
                 self.assertEqual(result["operationResult"]["count"], 0)
 
+    def test_partial_stale_selected_scope_is_rejected_before_any_generation(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [
+            self._current_row(production_item_id="production:0"),
+            self._current_row(production_item_id="production:1", title="Устаревшая тема"),
+        ]
+        settings.idea_deleted_production_ids = ["production:1"]
+        payload = {
+            "indices": [0, 1],
+            "productionItemIds": ["production:0", "production:1"],
+            "provider": "agent",
+        }
+
+        with self.assertRaisesRegex(ValueError, "устарела"):
+            bridge._current_cover_generation_scope(settings, payload, "Выберите сценарии")
+
+    def test_selected_index_id_mismatch_rejects_prompt_batch_before_provider_call(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [
+            self._current_row(production_item_id="production:0"),
+            self._current_row(production_item_id="production:1", title="Вторая тема"),
+        ]
+        calls = []
+
+        async def generate(*_args, **_kwargs):
+            calls.append(1)
+            raise AssertionError("provider must not be called for stale selected scope")
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)), \
+             self.assertRaisesRegex(ValueError, "устарела"):
+            bridge.generate_cover_prompts({
+                "indices": [0, 1],
+                "productionItemIds": ["production:0", "production:wrong"],
+                "provider": "agent",
+            })
+
+        self.assertEqual(calls, [])
+
     def test_paired_action_continues_when_headlines_need_no_work_and_reports_summary(self):
         from scriptor import bridge
 

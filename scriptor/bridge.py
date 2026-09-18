@@ -247,6 +247,22 @@ def _current_cover_generation_scope(settings: Settings, payload: dict, error_mes
     rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
     if not rows:
         raise ValueError(error_message)
+    requested_indices = [int(index) for index in payload.get("indices", [])]
+    if requested_indices:
+        expected_values = payload.get("productionItemIds", payload.get("production_item_ids", [])) or []
+        expected_ids = [str(value).strip() for value in expected_values if str(value).strip()]
+        resolved_ids = {
+            index: str(item.get("production_item_id", "")).strip()
+            for index, item in rows
+        }
+        if len(rows) != len(set(requested_indices)):
+            raise ValueError("Выбранная задача обложки устарела или больше не существует")
+        if expected_ids:
+            expected_by_index = dict(zip(requested_indices, expected_ids))
+            if (len(expected_ids) != len(requested_indices)
+                    or any(resolved_ids.get(index) != expected_by_index.get(index)
+                           for index in requested_indices)):
+                raise ValueError("Выбранная задача обложки устарела или не соответствует ProductionItem ID")
     return rows
 
 
