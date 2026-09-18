@@ -6966,7 +6966,7 @@ def _cover_retry_plan(title: str, original: str) -> list[dict[str, object]]:
         {"round": 1, "prompt": original, "attempts": 4, "rewritten": False},
         *[
             {"round": round_number, "prompt": _cover_retry_prompt(title, original, round_number),
-             "attempts": 4, "rewritten": False}
+             "attempts": 4, "rewritten": True}
             for round_number in range(2, 5)
         ],
     ]
@@ -7462,12 +7462,60 @@ def _safe_remove_cover_file(path_value: object, output_folder: Path) -> None:
         path.unlink()
 
 
+def _cover_render_paths(item: dict) -> list[str]:
+    values = [
+        *item.get("paths", []),
+        *item.get("raw_paths", []),
+        *item.get("face_composite_paths", []),
+        item.get("text_overlay_path", ""),
+        item.get("path", ""),
+        item.get("selected_path", ""),
+        item.get("selected_base_path", ""),
+    ]
+    for prompt_result in item.get("prompt_image_paths", []):
+        if isinstance(prompt_result, dict):
+            values.extend(prompt_result.get("paths", []))
+    return list(dict.fromkeys(str(value) for value in values if value))
+
+
+def _advance_cover_revision(item: dict) -> None:
+    """Make an explicit cleanup newer than every snapshot it replaces."""
+    previous = str(item.get("updatedAt", "") or "")
+    current = datetime.now().astimezone().isoformat(timespec="microseconds")
+    if previous and current <= previous:
+        try:
+            current = (datetime.fromisoformat(previous) + timedelta(microseconds=1)).isoformat(timespec="microseconds")
+        except ValueError:
+            current = f"{previous}.cleanup"
+    item["updatedAt"] = current
+
+
+def _clear_cover_render_state(item: dict, *, status: str) -> None:
+    """Clear only render-derived state while preserving the topic and prompts."""
+    item.update(
+        paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="",
+        selected_path="", selected_base_path="", face_composite_requested=False,
+        progress=0, status=status, error="", timeline=[],
+    )
+    for key in (
+        "prompt_image_paths", "generation_round", "generation_rounds", "generation_attempt",
+        "generation_attempts_per_round", "generation_total_attempt", "generation_max_attempts",
+        "generation_history", "rate_limit_wait_until", "rate_limit_used",
+    ):
+        item.pop(key, None)
+    _advance_cover_revision(item)
+
+
 def remove_cover_results(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
-    requested = {int(index) for index in payload.get("indices", [])}
     if payload.get("all"):
         requested = set(range(len(settings.cover_queue)))
+    else:
+        selected_rows = _current_cover_generation_scope(
+            settings, payload, "Выберите обложки, картинки которых нужно удалить",
+        ) if payload.get("indices") else []
+        requested = {index for index, _item in selected_rows}
     if not requested:
         raise ValueError("Выберите обложки, картинки которых нужно удалить")
     output = Path(settings.cover_output_folder)
@@ -7475,14 +7523,13 @@ def remove_cover_results(payload: dict) -> dict:
     for index, item in enumerate(settings.cover_queue):
         if index not in requested:
             continue
-        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
-                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
-        for path in dict.fromkeys(str(value) for value in all_paths if value):
+        for path in _cover_render_paths(item):
             if Path(str(path)).is_file():
                 removed += 1
             _safe_remove_cover_file(path, output)
-        item.update(paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="", selected_path="",
-                    selected_base_path="", status="Промпт готов" if item.get("image_prompt") else "Ожидает", error="")
+        _clear_cover_render_state(
+            item, status="Промпт готов" if item.get("image_prompt") else "Ожидает",
+        )
     _save_cover_state(settings)
     return {**snapshot(), "operationResult": {"kind": "cover-remove-results", "count": removed,
                                                  "message": f"Удалено изображений: {removed}."}}
@@ -7515,6 +7562,19 @@ def remove_cover_image(payload: dict) -> dict:
     item.update(paths=remaining, raw_paths=remaining_raw, face_composite_paths=remaining_composite,
                 text_overlay_path=remaining_text, path=next_selected, selected_path=next_selected, selected_base_path=next_selected,
                 status="Готово" if remaining else ("Промпт выбран" if item.get("image_prompt") else "Ожидает"))
+    prompt_image_paths = []
+    for prompt_result in item.get("prompt_image_paths", []):
+        if not isinstance(prompt_result, dict):
+            continue
+        updated = dict(prompt_result)
+        updated["paths"] = [str(value) for value in updated.get("paths", []) if str(value) != path_value]
+        if updated["paths"]:
+            prompt_image_paths.append(updated)
+    if prompt_image_paths:
+        item["prompt_image_paths"] = prompt_image_paths
+    else:
+        item.pop("prompt_image_paths", None)
+    _advance_cover_revision(item)
     _save_cover_state(settings)
     return {**snapshot(), "operationResult": {
         "kind": "cover-remove-image", "count": 1, "message": "Вариант обложки удалён."
@@ -7554,23 +7614,20 @@ def regenerate_covers(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
     selected_rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
-    requested = {index for index, _item in selected_rows}
-    selected_ids = {
-        str(item.get("production_item_id", "")).strip()
-        for _index, item in selected_rows
-    }
-    if not requested:
+    selected_pairs = [
+        (index, str(item.get("production_item_id", "")).strip())
+        for index, item in selected_rows
+    ]
+    requested = {index for index, _identity in selected_pairs}
+    if not selected_pairs:
         raise ValueError("Выберите тему для перегенерации обложки")
     output = Path(settings.cover_output_folder)
     for index, item in enumerate(settings.cover_queue):
         if index not in requested:
             continue
-        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
-                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
-        for path in dict.fromkeys(str(value) for value in all_paths if value):
+        for path in _cover_render_paths(item):
             _safe_remove_cover_file(path, output)
-        item.update(paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="", selected_path="",
-                    selected_base_path="", status="Промпт выбран", error="")
+        _clear_cover_render_state(item, status="Промпт выбран")
     _save_cover_state(settings)
     if payload.get("currentProfile"):
         # Different selected cards may have been made by different modes.
@@ -7600,8 +7657,8 @@ def regenerate_covers(payload: dict) -> dict:
     # Explicit non-current rerender requests keep the route supplied by the
     # caller; old cards without a saved profile retain the configured default.
     return generate_covers({
-        "indices": sorted(requested),
-        "productionItemIds": sorted(selected_ids),
+        "indices": [index for index, _identity in selected_pairs],
+        "productionItemIds": [identity for _index, identity in selected_pairs],
         "operation": payload.get("operation", settings.cover_operation),
         "buildMode": payload.get("buildMode", settings.cover_build_mode),
         "localFaceOnly": bool(payload.get("localFaceOnly")),
@@ -7643,12 +7700,14 @@ def regenerate_covers_new_prompts(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
     selected_rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
-    chosen = [index for index, _item in selected_rows]
-    chosen_ids = {
-        str(item.get("production_item_id", "")).strip()
-        for _index, item in selected_rows
-    }
-    if not chosen:
+    selected_pairs = [
+        (index, str(item.get("production_item_id", "")).strip())
+        for index, item in selected_rows
+    ]
+    chosen = [index for index, _identity in selected_pairs]
+    chosen_ids = [identity for _index, identity in selected_pairs]
+    chosen_id_set = set(chosen_ids)
+    if not selected_pairs:
         raise ValueError("Выберите актуальные темы для новых промптов")
     output = Path(settings.cover_output_folder)
     removed = 0
@@ -7656,25 +7715,22 @@ def regenerate_covers_new_prompts(payload: dict) -> dict:
         if not 0 <= index < len(settings.cover_queue):
             continue
         item = settings.cover_queue[index]
-        all_paths = [*item.get("paths", []), *item.get("raw_paths", []),
-                     *item.get("face_composite_paths", []), item.get("text_overlay_path", "")]
-        for path in dict.fromkeys(str(value) for value in all_paths if value):
+        for path in _cover_render_paths(item):
             if Path(path).is_file():
                 removed += 1
             _safe_remove_cover_file(path, output)
-        item.update(paths=[], raw_paths=[], face_composite_paths=[], text_overlay_path="", path="", selected_path="",
-                    selected_base_path="", progress=0, error="", status="Промпты переписываются")
+        _clear_cover_render_state(item, status="Промпты переписываются")
     _save_cover_state(settings)
     generate_cover_prompts({
         "indices": chosen,
-        "productionItemIds": sorted(chosen_ids),
+        "productionItemIds": chosen_ids,
         "provider": payload.get("provider", "agent"),
         "rewrite": True,
     })
     settings = load_settings()
     _hydrate_cover_library(settings)
     for item in settings.cover_queue:
-        if str(item.get("production_item_id", "")).strip() not in chosen_ids:
+        if str(item.get("production_item_id", "")).strip() not in chosen_id_set:
             continue
         if item.get("error") or not str(item.get("image_prompt", "")).strip():
             # Keep a real provider failure visible; do not turn it into a

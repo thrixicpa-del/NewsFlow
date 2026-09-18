@@ -39,6 +39,7 @@ from scriptor.bridge import (
     regenerate_covers,
     regenerate_covers_new_prompts,
     remove_cover_image,
+    remove_cover_results,
     render_cover_text,
     render_cover_text_fastgen,
     save_cover_settings,
@@ -2097,6 +2098,324 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
 
         self.assertEqual(generated_ids, ["production:missing"])
         self.assertEqual(settings.cover_queue[0]["cover_headline"], "ГОТОВО")
+
+
+class CoverRenderQueueSafetyTests(unittest.TestCase):
+    @staticmethod
+    def _row(index: int, **values):
+        return {
+            "production_item_id": f"production:{index}",
+            "title": f"Тема {index}",
+            "image_prompt": f"Новая сцена {index}",
+            **values,
+        }
+
+    def test_regenerate_preserves_index_to_production_item_order(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_queue=[
+            self._row(0, production_item_id="production:z"),
+            self._row(1, production_item_id="production:a"),
+        ])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "generate_covers", return_value={}) as generate:
+            regenerate_covers({
+                "indices": [0, 1],
+                "productionItemIds": ["production:z", "production:a"],
+            })
+
+        self.assertEqual(generate.call_args.args[0]["indices"], [0, 1])
+        self.assertEqual(generate.call_args.args[0]["productionItemIds"], ["production:z", "production:a"])
+
+    def test_new_prompt_regeneration_preserves_index_to_production_item_order(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_queue=[
+            self._row(0, production_item_id="production:z"),
+            self._row(1, production_item_id="production:a"),
+        ])
+
+        def rewrite(payload):
+            for index in payload["indices"]:
+                settings.cover_queue[index].update(image_prompt=f"Переписанная сцена {index}", error="")
+            return {}
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "generate_cover_prompts", side_effect=rewrite) as generate:
+            regenerate_covers_new_prompts({
+                "indices": [0, 1],
+                "productionItemIds": ["production:z", "production:a"],
+                "provider": "agent",
+            })
+
+        self.assertEqual(generate.call_args.args[0]["indices"], [0, 1])
+        self.assertEqual(generate.call_args.args[0]["productionItemIds"], ["production:z", "production:a"])
+
+    def test_retryable_failure_succeeds_on_call_seven_with_rewritten_round_metadata(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [self._row(0)]
+        calls = []
+
+        def render(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) < 7:
+                raise TimeoutError("temporary timeout")
+            return [Path("fresh-success.png")]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.time, "sleep"), \
+             patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:0"], "_parallel_cover_worker": True,
+            })
+
+        row = settings.cover_queue[0]
+        self.assertEqual(len(calls), 7)
+        self.assertEqual(row["status"], "Готово")
+        self.assertEqual(row["paths"], ["fresh-success.png"])
+        self.assertEqual(row["generation_history"][-1]["totalAttempt"], 7)
+        self.assertTrue(row["generation_history"][-1]["rewritten"])
+
+    def test_permanent_fastgen_failure_is_terminal_after_one_call(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [self._row(0)]
+        calls = []
+
+        def render(*_args, **_kwargs):
+            calls.append(1)
+            raise RuntimeError("invalid provider request")
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.time, "sleep"), \
+             patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:0"], "_parallel_cover_worker": True,
+            })
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка FastGen")
+        self.assertIn("invalid provider request", settings.cover_queue[0]["error"])
+
+    def test_pause_finishes_in_flight_row_and_resume_only_processes_remaining_row(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [self._row(0), self._row(1)]
+        calls = []
+
+        def render(_prompt, output, stem, *_args, **_kwargs):
+            calls.append(stem)
+            if len(calls) == 1:
+                settings.cover_generation_paused = True
+            return [output / f"{stem}.png"]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+            bridge.generate_covers({
+                "indices": [0, 1],
+                "productionItemIds": ["production:0", "production:1"],
+                "_parallel_cover_worker": True,
+            })
+            self.assertEqual(settings.cover_queue[0]["status"], "Готово")
+            self.assertEqual(settings.cover_queue[1]["status"], "Приостановлено")
+            settings.cover_generation_paused = False
+            bridge.generate_covers({"resumeOnly": True, "_parallel_cover_worker": True})
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(settings.cover_queue[0]["status"], "Готово")
+        self.assertEqual(settings.cover_queue[1]["status"], "Готово")
+
+    def test_remove_results_requires_explicit_scope_and_clears_render_metadata(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_queue=[self._row(
+            0,
+            paths=["old.png"], raw_paths=["old.png"], face_composite_paths=["face.png"],
+            text_overlay_path="text.png", path="old.png", selected_path="old.png",
+            selected_base_path="old.png", prompt_image_paths=[{"paths": ["old.png"]}],
+            generation_total_attempt=7, generation_history=[{"status": "success"}],
+        )])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            with self.assertRaisesRegex(ValueError, "Выберите"):
+                remove_cover_results({})
+            remove_cover_results({"indices": [0]})
+
+        row = settings.cover_queue[0]
+        for key in ("paths", "raw_paths", "face_composite_paths"):
+            self.assertEqual(row[key], [])
+        for key in ("text_overlay_path", "path", "selected_path", "selected_base_path"):
+            self.assertEqual(row[key], "")
+        self.assertNotIn("prompt_image_paths", row)
+        self.assertNotIn("generation_history", row)
+        self.assertNotIn("generation_total_attempt", row)
+        self.assertTrue(row["updatedAt"])
+
+    def test_twenty_selected_rewrites_report_nineteen_ready_and_one_failure_truthfully(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_queue=[self._row(index, image_prompt=f"Старая сцена {index}") for index in range(20)])
+
+        def rewrite(payload):
+            for index in payload["indices"]:
+                row = settings.cover_queue[index]
+                if index == 19:
+                    row.update(error="provider rejected prompt", status="Ошибка промпта")
+                else:
+                    row.update(image_prompt=f"Новая сцена {index}", error="", status="Промпты готовы")
+            return {}
+
+        selected_ids = [f"production:{index}" for index in range(20)]
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "generate_cover_prompts", side_effect=rewrite):
+            regenerate_covers_new_prompts({
+                "indices": list(range(20)), "productionItemIds": selected_ids, "provider": "agent",
+            })
+
+        self.assertEqual(sum(row["status"] == "Новые промпты созданы" for row in settings.cover_queue), 19)
+        self.assertEqual(sum(row["status"] == "Ошибка промпта" for row in settings.cover_queue), 1)
+        self.assertEqual(settings.cover_queue[19]["image_prompt"], "Старая сцена 19")
+
+    def test_fifty_topic_render_has_no_omissions_and_stays_within_ten_workers(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_queue=[self._row(index) for index in range(50)],
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            lock = threading.Lock()
+            active = maximum = 0
+
+            def render(_prompt, output, stem, *_args, **_kwargs):
+                nonlocal active, maximum
+                with lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                time.sleep(0.01)
+                path = output / f"{stem}.png"
+                path.write_bytes(b"tiny-image")
+                with lock:
+                    active -= 1
+                return [path]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_claim_cover_generation_lock", return_value=Path(directory) / "batch.lock"), \
+                 patch.object(bridge, "_release_cover_generation_lock"), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": list(range(50)),
+                    "productionItemIds": [f"production:{index}" for index in range(50)],
+                })
+
+            paths = [row.get("path") for row in settings.cover_queue]
+            self.assertEqual(sum(row.get("status") == "Готово" for row in settings.cover_queue), 50)
+            self.assertEqual(len(set(paths)), 50)
+            self.assertTrue(all(path and Path(path).is_file() for path in paths))
+            self.assertEqual(maximum, 10)
+
+    def test_fifty_topic_render_keeps_forty_nine_successes_when_one_row_fails(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_queue=[self._row(index) for index in range(50)],
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+
+            def render(_prompt, output, stem, *_args, **_kwargs):
+                if stem.startswith("018 "):
+                    raise RuntimeError("invalid provider request")
+                path = output / f"{stem}.png"
+                path.write_bytes(b"tiny-image")
+                return [path]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_claim_cover_generation_lock", return_value=Path(directory) / "batch.lock"), \
+                 patch.object(bridge, "_release_cover_generation_lock"), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": list(range(50)),
+                    "productionItemIds": [f"production:{index}" for index in range(50)],
+                })
+
+            self.assertEqual(sum(row.get("status") == "Готово" for row in settings.cover_queue), 49)
+            self.assertEqual(sum(row.get("status") == "Ошибка FastGen" for row in settings.cover_queue), 1)
+            self.assertEqual(settings.cover_queue[17]["status"], "Ошибка FastGen")
+
+    def test_twenty_selected_rewrites_all_finish_in_current_success_state(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_queue=[self._row(index, image_prompt=f"Старая сцена {index}") for index in range(20)])
+
+        def rewrite(payload):
+            for index in payload["indices"]:
+                settings.cover_queue[index].update(image_prompt=f"Новая сцена {index}", error="")
+            return {}
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "generate_cover_prompts", side_effect=rewrite):
+            regenerate_covers_new_prompts({
+                "indices": list(range(20)),
+                "productionItemIds": [f"production:{index}" for index in range(20)],
+                "provider": "agent",
+            })
+
+        self.assertEqual(sum(row["status"] == "Новые промпты созданы" for row in settings.cover_queue), 20)
+        self.assertTrue(all(row["image_prompt"].startswith("Новая сцена") for row in settings.cover_queue))
+
+    def test_duplicate_start_returns_normal_zero_without_provider_call(self):
+        from scriptor import bridge
+
+        with patch.object(bridge, "_claim_cover_generation_lock", return_value=None), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.FastGenPool, "generate_media") as render:
+            result = bridge.generate_covers({"indices": [0], "productionItemIds": ["production:0"]})
+
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertIn("уже выполняется", result["operationResult"]["message"])
+        render.assert_not_called()
 
 
 if __name__ == "__main__":
