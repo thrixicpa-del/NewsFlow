@@ -1,27 +1,59 @@
 import asyncio
 import json
-import unittest
 import threading
 import time
+import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scriptor.covers import FastGenClient, FastGenError, FastGenPool, reference_mime_type
-from scriptor.bridge import (_clean_cover_headline, _cover_lines_repeat_meaningful_words, _cover_text_matches_topic,
-                             _cover_text_prompt, _cover_text_structure, _cover_face_layout, _cover_instruction,
-                             _cover_face_files, _match_cover_face_reference, _cover_local_face_composite,
-                             _cover_face_library_summary, _cover_topic_visual_plan, compose_cover_faces, generate_covers,
-                              generate_cover_prompts, _normalize_cover_photo_prompt, _migrate_legacy_cover_photo_prompts,
-                             render_cover_text, render_cover_text_fastgen, save_cover_settings,
-                             _cover_reference_paths_for_item, _cover_reference_instruction, _cover_ai_reference_paths_for_item, _cover_face_catalog, _cover_references_for_item,
-                             _compress_prepared_face_for_fastgen, prepare_cover_face_library, select_cover_variant, remove_cover_image,
-                             regenerate_covers, regenerate_covers_new_prompts, select_cover_visual_reference, set_cover_visual_reference_target)
-from scriptor.bridge import generate_cover_headlines, generate_cover_subheadlines
+from scriptor.bridge import (
+    _clean_cover_headline,
+    _compress_prepared_face_for_fastgen,
+    _cover_ai_reference_paths_for_item,
+    _cover_face_catalog,
+    _cover_face_files,
+    _cover_face_layout,
+    _cover_face_library_summary,
+    _cover_instruction,
+    _cover_lines_repeat_meaningful_words,
+    _cover_local_face_composite,
+    _cover_reference_instruction,
+    _cover_reference_paths_for_item,
+    _cover_references_for_item,
+    _cover_text_matches_topic,
+    _cover_text_prompt,
+    _cover_text_structure,
+    _cover_topic_visual_plan,
+    _match_cover_face_reference,
+    _migrate_legacy_cover_photo_prompts,
+    _normalize_cover_photo_prompt,
+    compose_cover_faces,
+    generate_cover_headlines,
+    generate_cover_prompts,
+    generate_cover_subheadlines,
+    generate_covers,
+    prepare_cover_face_library,
+    regenerate_covers,
+    regenerate_covers_new_prompts,
+    remove_cover_image,
+    render_cover_text,
+    render_cover_text_fastgen,
+    save_cover_settings,
+    select_cover_variant,
+    select_cover_visual_reference,
+    set_cover_visual_reference_target,
+)
 from scriptor.config import FastGenKey, OpenAIKey, Settings
 from scriptor.cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
+from scriptor.covers import (
+    FastGenClient,
+    FastGenError,
+    FastGenPool,
+    reference_mime_type,
+)
 
 
 class CoverGalleryFileStateTests(unittest.TestCase):
@@ -71,6 +103,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
     def test_gallery_file_state_distinguishes_ready_missing_and_invalid_without_mutating_paths(self):
         from PIL import Image
+
         from scriptor.bridge import cover_file_state
 
         with TemporaryDirectory() as directory:
@@ -104,6 +137,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
     def test_reconciliation_restores_a_valid_file_without_regeneration(self):
         from PIL import Image
+
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
@@ -126,6 +160,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
     def test_valid_existing_cover_is_skipped_by_normal_batch_generation(self):
         from PIL import Image
+
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
@@ -1459,14 +1494,15 @@ class CoverLocalCompositorTests(unittest.TestCase):
         }]
 
         with patch("scriptor.bridge.load_settings", return_value=settings), \
-             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
-             patch("scriptor.bridge.save_settings"), \
-             patch("scriptor.bridge.snapshot", return_value={}), \
-             patch("scriptor.bridge.HybridTextPool") as pool:
-            with self.assertRaisesRegex(ValueError, "сценарий"):
-                generate_cover_prompts({"indices": [0], "provider": "agent"})
+                patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+                patch("scriptor.bridge.save_settings"), \
+                patch("scriptor.bridge.snapshot", return_value={}), \
+                patch("scriptor.bridge.HybridTextPool") as pool:
+            result = generate_cover_prompts({"indices": [0], "provider": "agent"})
 
         pool.assert_not_called()
+        self.assertEqual(result["operationResult"]["kind"], "cover-prompts")
+        self.assertEqual(result["operationResult"]["count"], 0)
 
     def test_prompt_writer_dispatches_missing_topics_through_available_text_pool_slots(self):
         """Multiple active keys must make visual-prompt work concurrent, not serial."""
@@ -1621,6 +1657,402 @@ class CoverLocalCompositorTests(unittest.TestCase):
             self.assertEqual(result["operationResult"]["count"], 1)
             self.assertTrue(final.is_file())
             self.assertFalse(raw.exists())
+
+
+class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
+    @staticmethod
+    def _current_row(**values):
+        return {
+            "production_item_id": "production:0",
+            "title": "Порт закрыт из-за кризиса",
+            "script": "Контейнеры застряли на терминале и ждут решения.",
+            **values,
+        }
+
+    def test_complete_scopes_are_successful_no_ops_for_words_and_prompts(self):
+        from scriptor import bridge
+
+        cases = (
+            (bridge.generate_cover_headlines, self._current_row(
+                cover_headline="ПОРТ ЗАКРЫТ", headline_status="READY", headline_source="AI",
+            ), "cover-headlines"),
+            (bridge.generate_cover_subheadlines, self._current_row(
+                cover_headline="ПОРТ ЗАКРЫТ", headline_status="READY",
+                cover_subheadline="Контейнеры ждут решения", subheadline_status="READY", subheadline_source="AI",
+            ), "cover-subheadlines"),
+            (bridge.generate_cover_prompts, self._current_row(
+                image_prompt="Existing visual brief", image_prompt_options=["Existing visual brief"],
+            ), "cover-prompts"),
+        )
+        for action, row, result_kind in cases:
+            with self.subTest(action=action.__name__):
+                settings = Settings()
+                settings.cover_queue = [row]
+                with patch("scriptor.bridge.load_settings", return_value=settings), \
+                     patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+                     patch("scriptor.bridge.snapshot", return_value={"covers": []}):
+                    result = action({
+                        "indices": [0], "productionItemIds": ["production:0"], "provider": "agent",
+                    })
+                self.assertEqual(result["operationResult"]["kind"], result_kind)
+                self.assertEqual(result["operationResult"]["count"], 0)
+
+    def test_paired_action_continues_when_headlines_need_no_work_and_reports_summary(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            cover_headline="ПОРТ ЗАКРЫТ", headline_status="READY", headline_source="AI",
+        )]
+
+        async def generated(_pool, kind, *_args, **_kwargs):
+            self.assertEqual(kind, "subheadline")
+            return "Контейнеры ждут решения", {"semantic_slots": ["object"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={"covers": []}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            result = bridge.generate_cover_texts({
+                "indices": [0], "productionItemIds": ["production:0"], "provider": "agent",
+            })
+
+        self.assertEqual(settings.cover_queue[0]["subheadline_status"], "READY")
+        self.assertEqual(result["operationResult"], {
+            "kind": "cover-texts", "count": 1, "requested": 1, "current": 1,
+            "headlineReady": 1, "subheadlineReady": 1, "failed": 0,
+            "message": "Тексты обложек: 1/1 готовы, ошибок: 0.",
+        })
+
+    def test_paired_summary_reads_the_state_persisted_by_both_generation_phases(self):
+        from copy import deepcopy
+
+        from scriptor import bridge
+
+        stored = [Settings()]
+        stored[0].cover_queue = [self._current_row()]
+
+        def load():
+            return deepcopy(stored[0])
+
+        def save(settings):
+            stored[0] = deepcopy(settings)
+
+        async def generated(_pool, kind, *_args, **_kwargs):
+            value = "ПОРТ ЗАКРЫТ" if kind == "headline" else "Контейнеры ждут решения"
+            return value, {"semantic_slots": ["object"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", side_effect=load), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state", side_effect=save), \
+             patch("scriptor.bridge._save_cover_text_progress", side_effect=save), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            result = bridge.generate_cover_texts({"provider": "agent"})
+
+        self.assertEqual(result["operationResult"]["headlineReady"], 1)
+        self.assertEqual(result["operationResult"]["subheadlineReady"], 1)
+        self.assertEqual(result["operationResult"]["count"], 1)
+
+    def test_cover_word_transient_failures_retry_twice_then_finish_ready(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row()]
+        calls = []
+
+        async def generate(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                raise RuntimeError("temporary network timeout")
+            return json.dumps({"headline": "ПОРТ ЗАКРЫТ"}, ensure_ascii=False)
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_headlines({"provider": "agent"})
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(settings.cover_queue[0]["headline_status"], "READY")
+        self.assertEqual(settings.cover_queue[0]["headline_provider_attempt_count"], 3)
+
+    def test_cover_word_permanent_failure_is_not_retried(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row()]
+        calls = []
+
+        async def generate(*_args, **_kwargs):
+            calls.append(1)
+            raise RuntimeError("invalid provider request")
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_headlines({"provider": "agent"})
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(settings.cover_queue[0]["headline_status"], "FAILED")
+        self.assertEqual(settings.cover_queue[0]["headline_provider_attempt_count"], 1)
+        self.assertIn("invalid provider request", settings.cover_queue[0]["headline_error"])
+
+    def test_cover_word_four_transient_failures_end_explicitly(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row()]
+        calls = []
+
+        async def generate(*_args, **_kwargs):
+            calls.append(1)
+            raise RuntimeError("503 temporary unavailable")
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_headlines({"provider": "agent"})
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(settings.cover_queue[0]["headline_status"], "FAILED")
+        self.assertEqual(settings.cover_queue[0]["headline_provider_attempt_count"], 4)
+        self.assertTrue(settings.cover_queue[0]["headline_error"])
+
+    def test_prompt_selected_identity_and_transient_retry_finish_ready(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_prompt_variant_count=2)
+        settings.cover_queue = [
+            self._current_row(production_item_id="production:0", title="Не выбранная тема"),
+            self._current_row(production_item_id="production:1", title="Выбранная тема"),
+        ]
+        calls = []
+
+        async def generate(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("429 temporary")
+            return '{"prompts":["Real press scene with documents and reporters"],"recommended":1}'
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_prompts({
+                "indices": [1], "productionItemIds": ["production:1"], "provider": "agent",
+            })
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("image_prompt", settings.cover_queue[0])
+        self.assertEqual(settings.cover_queue[1]["status"], "Промпты готовы")
+        self.assertEqual(len(settings.cover_queue[1]["image_prompt_options"]), 2)
+        self.assertEqual(settings.cover_queue[1]["prompt_provider_attempt_count"], 2)
+
+    def test_prompt_permanent_failure_is_terminal_after_one_attempt(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row()]
+        calls = []
+
+        async def generate(*_args, **_kwargs):
+            calls.append(1)
+            raise RuntimeError("invalid provider request")
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_prompts({"provider": "agent"})
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка промпта")
+        self.assertEqual(settings.cover_queue[0]["prompt_provider_attempt_count"], 1)
+        self.assertTrue(settings.cover_queue[0]["error"])
+
+    def test_fifty_topic_pair_batch_has_no_silent_omissions(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            production_item_id=f"production:{index}", title=f"Тема {index}",
+        ) for index in range(50)]
+
+        async def generated(_pool, kind, *_args, **_kwargs):
+            value = "ГОТОВЫЙ ЗАГОЛОВОК" if kind == "headline" else "Готовый точный подзаголовок"
+            return value, {"semantic_slots": ["subject"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            result = bridge.generate_cover_texts({"provider": "agent"})
+
+        self.assertEqual(result["operationResult"]["headlineReady"], 50)
+        self.assertEqual(result["operationResult"]["subheadlineReady"], 50)
+        self.assertTrue(all(row.get("cover_headline") and row.get("headline_status") == "READY"
+                            for row in settings.cover_queue))
+        self.assertTrue(all(row.get("cover_subheadline") and row.get("subheadline_status") == "READY"
+                            for row in settings.cover_queue))
+
+    def test_fifty_topic_prompt_batch_has_no_silent_omissions(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_prompt_variant_count=2)
+        settings.cover_queue = [self._current_row(
+            production_item_id=f"production:{index}", title=f"Тема {index}",
+        ) for index in range(50)]
+
+        async def generate(*_args, **_kwargs):
+            return '{"prompts":["Real press scene with documents and reporters"],"recommended":1}'
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_prompts({"provider": "agent"})
+
+        self.assertTrue(all(row.get("image_prompt") and len(row.get("image_prompt_options", [])) == 2
+                            and row.get("status") == "Промпты готовы" for row in settings.cover_queue))
+
+    def test_pause_flags_are_persisted_independently(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}):
+            bridge.set_cover_text_pause({"kind": "headline"}, True)
+            self.assertTrue(settings.cover_headlines_paused)
+            self.assertFalse(settings.cover_subheadlines_paused)
+            bridge.set_cover_text_pause({"kind": "subheadline"}, True)
+            bridge.set_cover_text_pause({"kind": "headline"}, False)
+
+        self.assertFalse(settings.cover_headlines_paused)
+        self.assertTrue(settings.cover_subheadlines_paused)
+
+    def test_paired_action_preserves_manual_values_without_force(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            cover_headline="РУЧНОЙ ЗАГОЛОВОК", headline_status="MANUAL", headline_source="MANUAL",
+            cover_subheadline="Ручной подзаголовок", subheadline_status="MANUAL", subheadline_source="MANUAL",
+        )]
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool") as pool:
+            result = bridge.generate_cover_texts({"provider": "agent"})
+
+        pool.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "РУЧНОЙ ЗАГОЛОВОК")
+        self.assertEqual(settings.cover_queue[0]["cover_subheadline"], "Ручной подзаголовок")
+        self.assertEqual(result["operationResult"]["count"], 1)
+
+    def test_mass_pair_batch_marks_one_terminal_failure_instead_of_leaving_a_hole(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            production_item_id=f"production:{index}", title=f"Тема {index}",
+        ) for index in range(50)]
+
+        async def generated(_pool, kind, item, *_args, **_kwargs):
+            if kind == "headline" and item["production_item_id"] == "production:17":
+                raise RuntimeError("503 temporary unavailable after 4 attempts")
+            value = "ГОТОВЫЙ ЗАГОЛОВОК" if kind == "headline" else "Готовый точный подзаголовок"
+            return value, {"semantic_slots": ["subject"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            result = bridge.generate_cover_texts({"provider": "agent"})
+
+        failed = settings.cover_queue[17]
+        self.assertEqual(failed["headline_status"], "FAILED")
+        self.assertTrue(failed["headline_error"])
+        self.assertEqual(failed["subheadline_status"], "FAILED")
+        self.assertIn("Headline unavailable", failed["subheadline_error"])
+        self.assertEqual(result["operationResult"]["failed"], 1)
+
+    def test_paused_word_worker_waits_before_issuing_provider_request(self):
+        from scriptor import bridge
+
+        paused = Settings(cover_headlines_paused=True)
+        resumed = Settings(cover_headlines_paused=False)
+        events = []
+
+        async def no_delay(_seconds):
+            events.append("waited")
+
+        class FakePool:
+            async def generate(self, _prompt, before_request=None):
+                if before_request:
+                    await before_request()
+                events.append("requested")
+                return "ok"
+
+        provider = bridge._BoundedCoverTextProvider(FakePool(), lambda attempt: events.append(attempt))
+        with patch("scriptor.bridge.load_settings", side_effect=[paused, resumed]), \
+             patch("scriptor.bridge.asyncio.sleep", side_effect=no_delay):
+            result = asyncio.run(provider.generate(
+                "prompt", before_request=lambda: bridge._wait_for_cover_text_resume("headline"),
+            ))
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(events, [1, "waited", "requested"])
+
+    def test_resume_only_generates_remaining_headline_rows(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [
+            self._current_row(production_item_id="production:ready", cover_headline="ГОТОВО",
+                              headline_status="READY", headline_source="AI"),
+            self._current_row(production_item_id="production:missing", title="Порт снова закрыт"),
+        ]
+        generated_ids = []
+
+        async def generated(_pool, _kind, item, *_args, **_kwargs):
+            generated_ids.append(item["production_item_id"])
+            return "ПОРТ ЗАКРЫТ", {"semantic_slots": ["object"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            bridge.generate_cover_headlines({"provider": "agent"})
+
+        self.assertEqual(generated_ids, ["production:missing"])
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "ГОТОВО")
 
 
 if __name__ == "__main__":

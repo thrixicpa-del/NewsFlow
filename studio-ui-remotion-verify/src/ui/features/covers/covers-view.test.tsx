@@ -3,11 +3,29 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CoverGallery, Covers, fallback } from "../../App";
+import { coverWordPairGenerationPayload } from "../../thumbnail-word-actions";
 
 const coverStyles = readFileSync(resolve(process.cwd(), "src/ui/covers.css"), "utf8");
 const responsiveStyles = readFileSync(resolve(process.cwd(), "src/ui/layout/app-shell-responsive.css"), "utf8");
 
 describe("Covers Light view", () => {
+  it("preserves durable identities in paired cover-word payloads", () => {
+    expect(coverWordPairGenerationPayload({
+      indices: [7],
+      productionItemIds: ["production:7"],
+      provider: "agent",
+      useStructure: true,
+      avoidRepeats: false,
+    })).toEqual({
+      indices: [7],
+      productionItemIds: ["production:7"],
+      provider: "agent",
+      useDefault: true,
+      useStructure: true,
+      avoidRepeats: false,
+    });
+  });
+
   it("keeps the current cover controls inside the Visual Production Studio", () => {
     render(<Covers data={fallback} command={vi.fn(async () => undefined)} />);
 
@@ -88,11 +106,60 @@ describe("Covers Light view", () => {
       { indices: [0], productionItemIds: ["production:ormuz"], provider: "agent" },
     ));
 
-    fireEvent.click(screen.getByRole("button", { name: "Создать фразы всем" }));
+    fireEvent.click(screen.getByRole("button", { name: "Придумать заголовки и подзаголовки — всем" }));
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "generate-cover-texts",
-      expect.objectContaining({ indices: [], provider: "agent" }),
+      {
+        indices: [],
+        provider: "agent",
+        useDefault: true,
+        useStructure: true,
+        avoidRepeats: true,
+      },
     ));
+
+    command.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Придумать заголовки и подзаголовки — выбранным" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "generate-cover-texts",
+      {
+        indices: [0],
+        productionItemIds: ["production:ormuz"],
+        provider: "agent",
+        useDefault: true,
+        useStructure: true,
+        avoidRepeats: true,
+      },
+    ));
+    expect(command).not.toHaveBeenCalledWith(
+      "generate-cover-texts",
+      expect.objectContaining({ indices: [] }),
+    );
+  });
+
+  it("exposes truthful independent pause and continue controls", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{ production_item_id: "production:ormuz", title: "Ормуз", paths: [] }],
+      coverSettings: {
+        ...fallback.coverSettings,
+        headlinePaused: false,
+        subheadlinePaused: true,
+      },
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(screen.getByRole("button", { name: "Пауза заголовков" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Продолжить заголовки" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Пауза подзаголовков" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Продолжить подзаголовки" }).hasAttribute("disabled")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить подзаголовки" }));
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command).toHaveBeenCalledWith("resume-cover-text-generation", { kind: "subheadline" });
+    expect(command).not.toHaveBeenCalledWith("generate-cover-subheadlines", expect.anything());
   });
 
   it("uses the workstation queue and opens the selected cover in an inspector", () => {
