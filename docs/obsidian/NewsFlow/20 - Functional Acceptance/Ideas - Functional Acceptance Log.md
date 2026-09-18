@@ -65,6 +65,29 @@ The audit found no country allow/deny list, CIS gate, hard-coded topic allowlist
 - Production integrity guard: `powershell -NoProfile -ExecutionPolicy Bypass -File tests\\infrastructure\\production-integrity-guard.test.ps1` passed. It accepted unchanged disposable storage and rejected its intentional disposable `covers-library.json` mutation.
 - Contract/UI checks: **SKIP (not applicable)**. The change is limited to deterministic Python relevance scoring and does not alter bridge, IPC, snapshot, renderer, or UI contracts.
 
+## IDEA-002 — duplicate provider actions from rapid repeated clicks
+
+Status: **FIX VERIFIED LOCALLY; PENDING REVIEW/CI**
+
+### Confirmed RED
+
+- `suggest-topics`: expected `1`, got `2`.
+- `analyze-idea-reference-channels`: expected `1`, got `2`.
+- `research-youtube-topics`: expected `1`, got `2`.
+
+### Implemented fix
+
+Three independent `useRef` locks with pending states protect the actions: `suggestDirectionsLock` / `suggestingDirections`, `referenceAnalysisLock` / `analyzingReferenceChannels`, and `youtubeResearchLock` / `researchingYoutube`. Each lock blocks only a repeated invocation of its own pending action. Provider payloads and command semantics were not changed.
+
+### GREEN — 18 September 2026
+
+- Targeted `ideas-view.test.tsx`: PASS.
+- Full frontend suite: PASS — 34 files / 160 tests.
+- `pnpm typecheck`: PASS.
+- `PRODUCTION_WRITE_GUARD`: PASS.
+- `git diff --check`: PASS.
+- No real or paid provider calls were made.
+
 ## Next checks
 
 1. Provider action double-submit protection (`suggest-topics`, reference analysis, YouTube research).
