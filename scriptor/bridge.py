@@ -1174,6 +1174,21 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
     return state
 
 
+def _recover_interrupted_scenario_jobs(jobs: list[Job]) -> bool:
+    """Make persisted jobs from a lost renderer process explicitly retryable."""
+    changed = False
+    message = (
+        "Предыдущая генерация была прервана или потеряла активный процесс. "
+        "Запустите сценарий повторно."
+    )
+    for job in jobs:
+        if job.state is RunState.RUNNING:
+            job.state = RunState.ERROR
+            job.error = f"{job.error}\n{message}".strip()
+            changed = True
+    return changed
+
+
 def reconcile_runtime_state(payload: dict | None = None) -> dict:
     """Explicitly persist bounded recovery/migration work.
 
@@ -1187,7 +1202,10 @@ def reconcile_runtime_state(payload: dict | None = None) -> dict:
     cover_changed = bool(_recover_legacy_cover_face_blocks(settings))
     publication_recovery = reconcile_publication_executions(settings)
     changed = bool(publication_recovery["interrupted"] or publication_recovery["partial"])
-    current_titles, _current_jobs = load_session()
+    current_titles, current_jobs = load_session()
+    scenario_recovered = _recover_interrupted_scenario_jobs(current_jobs)
+    if scenario_recovered:
+        save_session(current_titles, current_jobs)
     changed = ensure_idea_production_items(settings, active_titles=current_titles) or changed
     changed = _recover_interrupted_montage_tasks(settings) or changed
     cover_changed = _migrate_legacy_cover_texts(settings) or cover_changed

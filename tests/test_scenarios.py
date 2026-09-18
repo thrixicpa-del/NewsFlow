@@ -12,6 +12,58 @@ from scriptor.session import load_session, save_session, session_path
 
 
 class ScenarioGenerationTests(unittest.TestCase):
+    def test_explicit_reconcile_recovers_only_interrupted_scenarios_without_losing_recovery_data(self):
+        """Explicit recovery makes an interrupted row retryable without changing its saved work."""
+        title = "Прерванный сценарий"
+        request = ScenarioRequest(
+            0,
+            title,
+            "Сохранённый запрос",
+            "production-item-42",
+            1200,
+            1000,
+            1400,
+        )
+        interrupted = Job(
+            request,
+            RunState.RUNNING,
+            "Частично готовый текст",
+            "Предыдущий контекст ошибки",
+            actual_chars=321,
+            length_status="REPAIRING",
+            length_repair_attempts=2,
+        )
+        jobs = [
+            interrupted,
+            Job(ScenarioRequest(1, "Готовый", ""), RunState.DONE, "Готовый текст"),
+            Job(ScenarioRequest(2, "Ожидающий", ""), RunState.WAITING),
+            Job(ScenarioRequest(3, "С ошибкой", ""), RunState.ERROR, error="Исходная ошибка"),
+        ]
+        settings = Settings()
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([title, "Готовый", "Ожидающий", "С ошибкой"], jobs)), \
+             patch.object(bridge, "save_session") as save_session_mock, \
+             patch.object(bridge, "save_settings") as save_settings_mock, \
+             patch.object(bridge, "HybridTextPool", side_effect=AssertionError("provider must not start")):
+            bridge.snapshot()
+            self.assertFalse(save_session_mock.called)
+
+            with patch.object(bridge, "snapshot", return_value={"recovered": True}):
+                result = bridge.reconcile_runtime_state({})
+
+        self.assertEqual(result, {"recovered": True})
+        save_session_mock.assert_called_once_with([title, "Готовый", "Ожидающий", "С ошибкой"], jobs)
+        save_settings_mock.assert_not_called()
+        self.assertEqual([job.state for job in jobs], [RunState.ERROR, RunState.DONE, RunState.WAITING, RunState.ERROR])
+        self.assertEqual(interrupted.request, request)
+        self.assertEqual(interrupted.result, "Частично готовый текст")
+        self.assertEqual(interrupted.actual_chars, 321)
+        self.assertEqual(interrupted.length_status, "REPAIRING")
+        self.assertEqual(interrupted.length_repair_attempts, 2)
+        self.assertIn("Предыдущий контекст ошибки", interrupted.error)
+        self.assertIn("прервана", interrupted.error)
+
     def test_save_template_persists_the_operator_template_and_returns_snapshot(self):
         template = "USER_PROMPT_MARKER :: Напиши сценарий именно по моей инструкции для {title}. Не заменяй этот текст."
         settings = Settings()

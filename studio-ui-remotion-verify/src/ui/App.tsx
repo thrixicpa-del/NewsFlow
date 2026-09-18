@@ -2667,6 +2667,11 @@ export function Scenarios({
               <b>{counts.errors}</b> ошибок
             </span>
           ) : null}
+          {counts.active > 0 && !generating ? (
+            <Button onClick={() => void command("reconcile-runtime-state")}>
+              Восстановить прерванные: {counts.active}
+            </Button>
+          ) : null}
         </div>
       </section>
       <section className="panel scenario-add">

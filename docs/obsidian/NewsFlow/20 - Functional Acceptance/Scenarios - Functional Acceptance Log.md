@@ -4,6 +4,8 @@
 
 This log records functional acceptance evidence for the Scenarios workspace: selection, generation, refresh visibility, and safe handoff to later production stages. Production content, credentials, paid provider actions, and destructive production storage operations are out of scope unless explicitly authorized.
 
+SCENARIO-001 through SCENARIO-004 are locally verified. If CI passes, the Scenarios MVP is ready to move to Voice. Speculative/unverified-content mode remains deferred and is not part of Scenarios MVP acceptance.
+
 ## SCENARIO-001 — duplicate scenario generation from rapid repeated clicks
 
 Status: **FIX VERIFIED LOCALLY; PENDING CI**
@@ -70,4 +72,28 @@ The manual ready-script form cleared both fields immediately after dispatching `
 - `pnpm typecheck`: PASS.
 - Production integrity/write guard: `PRODUCTION_WRITE_GUARD=PASS`.
 - Secret scan and `git diff --check`: PASS.
+- No real, network, or paid provider calls were made.
+
+## SCENARIO-004 — explicit recovery of interrupted scenario generation
+
+Status: **FIX VERIFIED LOCALLY; PENDING CI**
+
+### Confirmed RED
+
+A persisted `В обработке` scenario remained active indefinitely after an interrupted generation. It was excluded from the normal retry path, and explicit `reconcile-runtime-state` did not persist a transition to a retryable error.
+
+### Implemented minimal fix
+
+`snapshot()` remains read-only. Only the existing explicit `reconcile-runtime-state` command loads the session and turns stale `RUNNING` scenario jobs into `ERROR`, preserving the title/index, full ScenarioRequest metadata, ProductionItem ID, partial result, character count, length status, and repair-attempt count. Existing error context is retained and retry guidance is added. Scenario-session persistence is separate from settings persistence.
+
+The Scenarios progress area exposes `Восстановить прерванные: N` only when persisted active rows exist and this renderer has not started a local generation. It invokes the existing recovery command; it neither runs automatically nor includes active rows in the normal `Написать все` batch.
+
+### GREEN — 18 September 2026
+
+- Backend Scenarios suite: PASS — 14 tests.
+- Targeted Scenarios UI: PASS — 1 file / 15 tests.
+- Full frontend suite: PASS — 34 files / 172 tests.
+- `pnpm typecheck`: PASS.
+- Production integrity/write guard: `PRODUCTION_WRITE_GUARD=PASS`.
+- Secret scan, `python -m ruff check tests/test_scenarios.py`, and `git diff --check`: PASS.
 - No real, network, or paid provider calls were made.
