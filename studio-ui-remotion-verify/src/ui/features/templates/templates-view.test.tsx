@@ -32,6 +32,41 @@ describe("Template writing desk", () => {
     }));
   });
 
+  it("saves a distinctive operator prompt and returns Prompt Studio to a clean state", async () => {
+    const template = "USER_PROMPT_MARKER :: Напиши сценарий по теме {title}. Сохрани мой стиль.";
+    const command = vi.fn().mockResolvedValue(fallback);
+    const onDirtyChange = vi.fn();
+    render(<TemplateEditor data={fallback} command={command} onDirtyChange={onDirtyChange} />);
+
+    fireEvent.change(screen.getByLabelText("Базовый шаблон сценария"), { target: { value: template } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить шаблон" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
+      template,
+      ranges: fallback.templateSettings.ranges,
+    }));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+    expect(screen.getByText("Все изменения сохранены")).toBeTruthy();
+  });
+
+  it("keeps a failed Prompt Studio save dirty with the operator prompt visible", async () => {
+    const template = "USER_PROMPT_MARKER :: Напиши сценарий по теме {title}. Сохрани мой стиль.";
+    const command = vi.fn().mockResolvedValue(undefined);
+    const onDirtyChange = vi.fn();
+    render(<TemplateEditor data={fallback} command={command} onDirtyChange={onDirtyChange} />);
+
+    fireEvent.change(screen.getByLabelText("Базовый шаблон сценария"), { target: { value: template } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить шаблон" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
+      template,
+      ranges: fallback.templateSettings.ranges,
+    }));
+    expect((screen.getByLabelText("Базовый шаблон сценария") as HTMLTextAreaElement).value).toBe(template);
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByText("Не удалось сохранить изменения")).toBeTruthy();
+  });
+
   it("reports dirty prompt text and returns to clean only after the current save command succeeds", async () => {
     const command = vi.fn(async () => fallback);
     const onDirtyChange = vi.fn();

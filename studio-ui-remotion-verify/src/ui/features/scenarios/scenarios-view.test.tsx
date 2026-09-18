@@ -17,6 +17,24 @@ describe("Scenarios and scripts Light views", () => {
     expect(command).toHaveBeenCalledWith("generate-scenarios", { indices: [0], provider: "agent" });
   });
 
+  it("sends the ChatGPT direct provider in the selected-scenarios command", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 0, title: "Проверочная тема", state: "Ожидает", result: "", error: "" }],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("Исполнитель сценария"), { target: { value: "openai" } });
+    fireEvent.click(screen.getByRole("button", { name: "Проверочная тема" }));
+    fireEvent.click(screen.getByRole("button", { name: "Написать выбранные" }));
+
+    expect(command).toHaveBeenCalledWith("generate-scenarios", {
+      indices: [0],
+      provider: "openai",
+    });
+  });
+
   it("writes every unfinished scenario through the current batch command without resubmitting ready rows", () => {
     const command = vi.fn();
     const data = {

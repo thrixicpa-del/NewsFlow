@@ -1,6 +1,6 @@
-import unittest
 import os
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +12,56 @@ from scriptor.session import load_session, save_session, session_path
 
 
 class ScenarioGenerationTests(unittest.TestCase):
+    def test_save_template_persists_the_operator_template_and_returns_snapshot(self):
+        template = "USER_PROMPT_MARKER :: Напиши сценарий именно по моей инструкции для {title}. Не заменяй этот текст."
+        settings = Settings()
+        expected_snapshot = {"templateSettings": {"template": template}}
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings") as save, \
+             patch.object(bridge, "snapshot", return_value=expected_snapshot):
+            result = bridge.save_template({"template": template})
+
+        self.assertEqual(settings.template, template)
+        save.assert_called_once_with(settings)
+        self.assertIs(result, expected_snapshot)
+
+    def test_openai_generation_preserves_saved_operator_prompt_and_persists_completed_script(self):
+        template = "USER_PROMPT_MARKER :: Напиши сценарий именно по моей инструкции для {title}. Не заменяй этот текст."
+        title = "Проверочная тема"
+        settings = Settings(scenario_provider="openai", template=template, prompt_ranges=[])
+        saved_batches = []
+
+        class FakePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                return "Готовый сценарий по проверочной теме."
+
+        pool = FakePool()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([title], [])), \
+             patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved_batches.append(jobs)), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=pool):
+            bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+
+        prompt = pool.prompts[0]
+        self.assertIn("USER_PROMPT_MARKER", prompt)
+        self.assertIn("Напиши сценарий именно по моей инструкции", prompt)
+        self.assertIn(title, prompt)
+        self.assertNotIn("{title}", prompt)
+        self.assertNotIn("Ты редактор новостных сценариев NewsFlow", prompt)
+        self.assertIn("ФОРМАТ ОТВЕТА ОБЯЗАТЕЛЕН", prompt)
+        self.assertLess(prompt.index("USER_PROMPT_MARKER"), prompt.index("ФОРМАТ ОТВЕТА ОБЯЗАТЕЛЕН"))
+        self.assertEqual(saved_batches[-1][0].state, RunState.DONE)
+        self.assertEqual(saved_batches[-1][0].result, "Готовый сценарий по проверочной теме.")
+
     def test_manual_scenario_persists_current_production_identity_for_covers(self):
         """A manually completed script must enter Covers through a durable current ID."""
         title = "Ручной сценарий для обложки"
