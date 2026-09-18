@@ -2198,7 +2198,7 @@ def research_youtube_topics(payload: dict) -> dict:
         },
     }
     if payload.get("generateTogether"):
-        requested = list(dict.fromkeys([*selected, *added]))
+        requested = list(dict.fromkeys([*selected, *suggested]))
         if not requested:
             raise ValueError("Не удалось получить новые темы для общей генерации")
         generated = generate_ideas({

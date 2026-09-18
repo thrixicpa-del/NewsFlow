@@ -88,6 +88,28 @@ Three independent `useRef` locks with pending states protect the actions: `sugge
 - `git diff --check`: PASS.
 - No real or paid provider calls were made.
 
+## IDEA-003 — YouTube fast mode must generate researched directions
+
+Status: **FIX VERIFIED LOCALLY; PENDING REVIEW/CI**
+
+### Confirmed defect and RED evidence
+
+`research_youtube_topics()` stored researched directions in `suggested`, but its `generateTogether` path built the generation list from `selected + added`. `added` intentionally remains empty so research does not silently persist directions to permanent favourites. Therefore query-only fast mode raised `ValueError` before calling `generate_ideas`; selected fast mode passed only the selected direction and omitted the researched suggestions.
+
+The deterministic regression failed before the fix: query-only fast mode raised `ValueError` because `selected + added` was empty; selected plus researched mode expected the deduplicated union but received only `selected`.
+
+### Implemented minimal fix
+
+The generation source is now the order-preserving deduplicated union `selected + suggested`. `added` remains empty, so researched suggestions stay outside `settings.idea_topics` and do not enter permanent favourites without explicit approval.
+
+### GREEN — 18 September 2026
+
+- Targeted `python tests/run_isolated.py tests/test_ideas_youtube_fast_mode_regression.py -v`: PASS — 2 tests.
+- Relevant Ideas suite: PASS — 56 tests, 0 failures.
+- `PRODUCTION_WRITE_GUARD`: PASS.
+- `git diff --check`: PASS.
+- No real or paid provider calls were made.
+
 ## Next checks
 
 1. Provider action double-submit protection (`suggest-topics`, reference analysis, YouTube research).
