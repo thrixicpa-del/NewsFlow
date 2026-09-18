@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { fallback, FinishedScripts, Scenarios } from "../../App";
 
@@ -96,6 +96,62 @@ describe("Scenarios and scripts Light views", () => {
     expect(command).toHaveBeenCalledWith("add-scenarios", { titles: "Новая тема" });
     expect(command).toHaveBeenCalledWith("generate-scenarios", { indices: [0], provider: "agent" });
     expect(go).toHaveBeenCalledWith("scripts");
+  });
+
+  it("preserves manual import fields when the import command fails", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
+    fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить готовый" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("import-manual-scenario", {
+        title: "Ручной заголовок",
+        text: "Ручной текст",
+      }),
+    );
+    expect((screen.getByLabelText("Название сценария") as HTMLInputElement).value).toBe("Ручной заголовок");
+    expect((screen.getByLabelText("Полный текст сценария") as HTMLTextAreaElement).value).toBe("Ручной текст");
+  });
+
+  it("clears manual import fields only after a successful import", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
+    fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить готовый" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("import-manual-scenario", {
+        title: "Ручной заголовок",
+        text: "Ручной текст",
+      }),
+    );
+    await waitFor(() => expect((screen.getByLabelText("Название сценария") as HTMLInputElement).value).toBe(""));
+    expect((screen.getByLabelText("Полный текст сценария") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("submits manual import once and disables its button while pending", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
+    fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
+    const submit = screen.getByRole("button", { name: "Добавить готовый" });
+    act(() => {
+      fireEvent.click(submit);
+      fireEvent.click(submit);
+    });
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command).toHaveBeenCalledWith("import-manual-scenario", {
+      title: "Ручной заголовок",
+      text: "Ручной текст",
+    });
+    expect(submit).toHaveProperty("disabled", true);
   });
 
   it("keeps transfer of a ready script on the current command", () => {

@@ -2449,6 +2449,8 @@ export function Scenarios({
   const [draft, setDraft] = useState("");
   const [manualTitle, setManualTitle] = useState("");
   const [manualText, setManualText] = useState("");
+  const manualImportLock = useRef(false);
+  const [importingManualScenario, setImportingManualScenario] = useState(false);
   const [generating, setGenerating] = useState(false);
   const scenarioGenerationLock = useRef(false);
   const [provider, setProvider] = useState<"agent" | "openai">(
@@ -2546,14 +2548,24 @@ export function Scenarios({
       setSelected([]);
     }
   };
-  const importReady = () => {
+  const importReady = async () => {
+    if (manualImportLock.current) return;
     if (manualTitle.trim() && manualText.trim()) {
-      void command("import-manual-scenario", {
-        title: manualTitle,
-        text: manualText,
-      });
-      setManualTitle("");
-      setManualText("");
+      manualImportLock.current = true;
+      setImportingManualScenario(true);
+      try {
+        const result = await command("import-manual-scenario", {
+          title: manualTitle,
+          text: manualText,
+        });
+        if (result) {
+          setManualTitle("");
+          setManualText("");
+        }
+      } finally {
+        manualImportLock.current = false;
+        setImportingManualScenario(false);
+      }
     }
   };
   const write = async (indices?: number[]) => {
@@ -2698,9 +2710,13 @@ export function Scenarios({
             onChange={(event) => setManualTitle(event.target.value)}
             placeholder="Название сценария"
           />
-          <Button kind="success" onClick={importReady}>
+          <Button
+            kind="success"
+            disabled={importingManualScenario}
+            onClick={() => void importReady()}
+          >
             <Upload size={17} />
-            Добавить готовый
+            {importingManualScenario ? "Сохранение…" : "Добавить готовый"}
           </Button>
         </div>
         <Textarea

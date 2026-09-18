@@ -26,3 +26,24 @@ The `generate-scenarios` command contract is unchanged: selected generation send
 - Production integrity/write guard: `PRODUCTION_WRITE_GUARD=PASS`.
 - Secret scan and `git diff --check`: PASS.
 - No real, network, or paid provider calls were made.
+
+## SCENARIO-002 — manual ready-script import preserves operator input on failure
+
+Status: **FIX VERIFIED LOCALLY; PENDING CI**
+
+### Confirmed RED
+
+The manual ready-script form cleared both fields immediately after dispatching `import-manual-scenario`, including when the command resolved without a result. Two rapid clicks while the command was unresolved also submitted the same import twice.
+
+### Implemented minimal fix
+
+`Scenarios` now uses a synchronous `manualImportLock` and `importingManualScenario` pending state. The form validates the same non-empty title/text condition, retains the existing command payload `{ title, text }`, clears fields only after a truthy result, and releases the lock in `finally`. The submit button is disabled while pending and displays `Сохранение…`.
+
+### GREEN — 18 September 2026
+
+- Targeted Scenarios UI regression: PASS — 1 file / 12 tests.
+- Full frontend suite: PASS — 34 files / 167 tests.
+- `pnpm typecheck`: PASS.
+- Production integrity/write guard: `PRODUCTION_WRITE_GUARD=PASS`.
+- Secret scan and `git diff --check`: PASS.
+- No real, network, or paid provider calls were made.
