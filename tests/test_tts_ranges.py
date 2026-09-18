@@ -731,6 +731,201 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         self.assertEqual(FakeWProject.created_with, ["persisted-idempotency-key"])
         self.assertEqual(FakeWProject.waited, ["recovered-task"])
 
+    def test_voicegen_failure_reaches_durable_wproject_fallback(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge, tts_ranges
+        from scriptor.config import Settings, VoiceGenKey, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        persisted_contracts = []
+        contract_at_create = []
+
+        class FailingVoiceGen:
+            def __init__(self, _key):
+                pass
+            def synthesize(self, *_args, **_kwargs):
+                raise RuntimeError("503 VoiceGen temporarily unavailable")
+
+        class FakeWProject:
+            created_with: ClassVar[list] = []
+            waited: ClassVar[list] = []
+            def __init__(self, _key):
+                pass
+            def create_task(self, _text, _filename, profile, *, threads, idempotency_key):
+                type(self).created_with.append((profile.voice_id, profile.wproject_latency, idempotency_key))
+                contract_at_create.append(persisted_contracts[-1])
+                return "fallback-task-1"
+            def wait_download(self, task_id, progress=None):
+                type(self).waited.append(task_id)
+                return b"WPROJECT-FALLBACK"
+
+        class FixedUuid:
+            hex = "job-fallback-1"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder, voice_queue_concurrency=1, voice_key_failover=True,
+                voicegen_api_keys=[VoiceGenKey("VG", "voicegen-key")],
+                wproject_api_keys=[WProjectKey("W", "wproject-key")],
+                voice_profiles=[
+                    {"id": "primary", "name": "Primary", "provider": "voicegen", "voice_id": "primary-voice"},
+                    {"id": "fallback-w", "name": "Fallback W", "provider": "wproject",
+                     "voice_id": "fallback-speaker", "wproject_latency": "balanced", "fallback": True},
+                ],
+                voice_default_profile_id="primary",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+
+            def record_save(saved_settings):
+                saved_job = saved_settings.voice_tts_jobs.get("production-1", {})
+                persisted_contracts.append((
+                    saved_job.get("state"),
+                    saved_job.get("active_provider"),
+                    saved_job.get("active_settings", {}).get("voice_id"),
+                    saved_job.get("provider_idempotency_key"),
+                ))
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings", side_effect=record_save), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", FailingVoiceGen), \
+                 patch.object(bridge, "WProjectClient", FakeWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0), \
+                 patch.object(tts_ranges, "uuid4", return_value=FixedUuid()), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        saved = settings.voice_tts_jobs["production-1"]
+        self.assertEqual(FakeWProject.created_with, [(
+            "fallback-speaker", "balanced", "newsflow:voice:job-fallback-1:fallback:fallback-w",
+        )])
+        self.assertEqual(FakeWProject.waited, ["fallback-task-1"])
+        self.assertEqual(contract_at_create, [(
+            "running", "wproject", "fallback-speaker",
+            "newsflow:voice:job-fallback-1:fallback:fallback-w",
+        )])
+        self.assertEqual(saved["active_provider"], "wproject")
+        self.assertEqual(saved["active_settings"]["voice_id"], "fallback-speaker")
+        self.assertEqual(saved["remote_task"]["task_id"], "fallback-task-1")
+        self.assertEqual(saved["state"], "ready")
+
+    def test_resume_reuses_active_wproject_fallback_instead_of_original_provider(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, VoiceGenKey, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class FakeWProject:
+            created_with: ClassVar[list] = []
+            polled_snapshots: ClassVar[list] = []
+            def __init__(self, _key):
+                pass
+            def create_task(self, _text, _filename, profile, *, threads, idempotency_key):
+                type(self).created_with.append((profile.voice_id, profile.wproject_latency, idempotency_key))
+                return "fallback-recovered-1"
+            def wait_download(self, task_id, progress=None):
+                type(self).polled_snapshots.append((
+                    task_id,
+                    settings.voice_tts_jobs["production-1"].get("remote_task", {}).get("task_id"),
+                ))
+                return b"RECOVERED"
+
+        with tempfile.TemporaryDirectory() as folder:
+            active_settings = {
+                "id": "fallback-w", "name": "Fallback W", "provider": "wproject",
+                "voice_id": "fallback-speaker", "wproject_latency": "balanced", "task_threads": 3,
+            }
+            saved = {
+                "id": "production-1", "production_item_id": "production-1", "scenario_index": 0,
+                "state": "running", "provider": "voicegen", "active_provider": "wproject",
+                "settings": {"id": "primary", "name": "Primary", "provider": "voicegen", "voice_id": "primary"},
+                "active_settings": active_settings, "script_hash": "", "fallback_settings": [],
+                "provider_idempotency_key": "stable-fallback-key",
+            }
+            settings = Settings(
+                voicer_output_folder=folder, voice_queue_concurrency=1,
+                voicegen_api_keys=[VoiceGenKey("VG", "voicegen-key")],
+                wproject_api_keys=[WProjectKey("W", "wproject-key")],
+                voice_tts_jobs={"production-1": saved},
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", side_effect=AssertionError("original provider must not run")) as voicegen, \
+                 patch.object(bridge, "WProjectClient", FakeWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.generate_voice({"indices": [0], "resume": True})
+
+        self.assertEqual(voicegen.call_count, 0)
+        self.assertEqual(FakeWProject.created_with, [("fallback-speaker", "balanced", "stable-fallback-key")])
+        self.assertEqual(FakeWProject.polled_snapshots, [("fallback-recovered-1", "fallback-recovered-1")])
+        self.assertEqual(saved["remote_task"]["task_id"], "fallback-recovered-1")
+        self.assertEqual(saved["state"], "ready")
+
+    def test_resume_polls_existing_active_wproject_fallback_without_create(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, VoiceGenKey, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class FakeWProject:
+            created = 0
+            waited: ClassVar[list] = []
+            def __init__(self, _key):
+                pass
+            def create_task(self, *_args, **_kwargs):
+                type(self).created += 1
+                raise AssertionError("existing fallback task must not be recreated")
+            def wait_download(self, task_id, progress=None):
+                type(self).waited.append(task_id)
+                return b"RESUMED-FALLBACK"
+
+        with tempfile.TemporaryDirectory() as folder:
+            saved = {
+                "id": "production-1", "production_item_id": "production-1", "scenario_index": 0,
+                "state": "interrupted", "provider": "voicegen", "active_provider": "wproject",
+                "settings": {"id": "primary", "name": "Primary", "provider": "voicegen", "voice_id": "primary"},
+                "active_settings": {"id": "fallback-w", "name": "Fallback W", "provider": "wproject",
+                                    "voice_id": "fallback-speaker", "task_threads": 3},
+                "script_hash": "", "fallback_settings": [],
+                "remote_task": {"provider": "wproject", "task_id": "fallback-remote-1", "key_label": "W"},
+            }
+            settings = Settings(
+                voicer_output_folder=folder, voice_queue_concurrency=1,
+                voicegen_api_keys=[VoiceGenKey("VG", "voicegen-key")],
+                wproject_api_keys=[WProjectKey("W", "wproject-key")],
+                voice_tts_jobs={"production-1": saved},
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", side_effect=AssertionError("original provider must not run")) as voicegen, \
+                 patch.object(bridge, "WProjectClient", FakeWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.generate_voice({"indices": [0], "resume": True})
+
+        self.assertEqual(voicegen.call_count, 0)
+        self.assertEqual(FakeWProject.created, 0)
+        self.assertEqual(FakeWProject.waited, ["fallback-remote-1"])
+        self.assertEqual(saved["state"], "ready")
+
     def test_generate_one_range_selects_only_its_frozen_items(self):
         from unittest.mock import patch
 

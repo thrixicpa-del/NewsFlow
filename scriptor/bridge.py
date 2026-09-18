@@ -8463,6 +8463,7 @@ def _profile_from_saved(item: dict) -> VoiceProfile:
 
 def generate_voice(payload: dict) -> dict:
     settings = load_settings()
+    resume_requested = bool(payload.get("resume", False))
     selected = {int(index) for index in payload.get("indices", [])}
     if not selected:
         raise ValueError("Отметьте сценарии, которые нужно озвучить. NewsFlow больше не запускает всю старую очередь автоматически.")
@@ -8475,7 +8476,7 @@ def generate_voice(payload: dict) -> dict:
             candidates.append(index)
     if not candidates:
         raise ValueError("Нет готовых сценариев для озвучки")
-    if bool(payload.get("resume", False)):
+    if resume_requested:
         # Resume is intentionally different from a normal start: it consumes
         # the exact immutable contract written before the earlier process was
         # interrupted.  Current range/profile edits cannot retarget it.
@@ -8578,11 +8579,13 @@ def generate_voice(payload: dict) -> dict:
             settings.voice_task_statuses[key] = record
             persist_voice_state()
 
-    def mark_provider_running(index: int, provider: str) -> None:
+    def mark_provider_running(index: int, provider: str, active_settings: dict | None = None) -> None:
         with status_lock:
             job_snapshot = snapshots_by_index[index]
             job_snapshot["state"] = "running"
             job_snapshot["active_provider"] = provider
+            if active_settings is not None:
+                job_snapshot["active_settings"] = dict(active_settings)
             persist_voice_state()
 
     def wait_until_resumed() -> None:
@@ -8762,21 +8765,21 @@ def generate_voice(payload: dict) -> dict:
                     keys = [item for item in api_keys if item.active and item.secret.strip()]
                     if not keys:
                         continue
-                    mark_provider_running(index, provider)
+                    mark_provider_running(index, provider, saved)
                     content = SecretVoicerClient(keys[0].secret).synthesize(job.result, profile,
                         lambda label, percent: set_task_status(index, f"Резерв Secret Voicer: {label}", percent))
                 elif provider == "lumean":
                     keys = [item for item in lumean_keys if item.active and item.secret.strip()]
                     if not keys:
                         continue
-                    mark_provider_running(index, provider)
+                    mark_provider_running(index, provider, saved)
                     content, _template, _signature = LumeanClient(keys[0].secret).synthesize(job.result, profile,
                         lambda label, percent: set_task_status(index, f"Резерв Lumean: {label}", percent))
                 elif provider == "voicegen":
                     keys = [item for item in voicegen_keys if item.active and item.secret.strip()]
                     if not keys:
                         continue
-                    mark_provider_running(index, provider)
+                    mark_provider_running(index, provider, saved)
                     content = VoiceGenClient(keys[0].secret).synthesize(job.result,
                         f"{index + 1:03d} — {safe_filename(job.request.title)}.mp3", profile,
                         threads=max(1, profile.task_threads),
@@ -8785,11 +8788,12 @@ def generate_voice(payload: dict) -> dict:
                     keys = [item for item in wproject_keys if item.active and item.secret.strip()]
                     if not keys:
                         continue
-                        content = WProjectClient(keys[0].secret).synthesize(job.result,
-                            f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
-                            threads=max(1, profile.task_threads),
-                            progress=lambda label, percent: set_task_status(index, f"Резерв WProject: {label}", percent),
-                            idempotency_key=(f"newsflow:voice:{str(job_snapshot.get('id') or uuid.uuid4().hex)}:fallback"[:128]))
+                    fallback_id = str(saved.get("id") or profile.voice_id or "wproject")
+                    job_snapshot["provider_idempotency_key"] = (
+                        f"newsflow:voice:{str(job_snapshot.get('id') or uuid.uuid4().hex)}:fallback:{fallback_id}"[:128]
+                    )
+                    mark_provider_running(index, provider, saved)
+                    return wproject_task(index, keys[0], profile)
                 else:
                     continue
                 output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
@@ -8840,8 +8844,18 @@ def generate_voice(payload: dict) -> dict:
     def render_snapshot(index: int) -> tuple[int, str]:
         """Run one saved job contract; no lookup of the live range editor."""
         snapshot = snapshots_by_index[index]
-        provider = str(snapshot.get("provider", "chrome"))
-        profile = _profile_from_saved(dict(snapshot.get("settings") or {}))
+        state = str(snapshot.get("state", "")).casefold()
+        resume_active_provider = (
+            resume_requested
+            and state in {"running", "interrupted", "retrying"}
+            and _voice_job_resume_safe(snapshot)
+            and str(snapshot.get("active_provider") or "").strip()
+        )
+        provider = str(snapshot.get("active_provider") if resume_active_provider else snapshot.get("provider", "chrome"))
+        saved_settings = snapshot.get("active_settings") if resume_active_provider else None
+        profile = _profile_from_saved(dict(
+            saved_settings if isinstance(saved_settings, dict) else snapshot.get("settings") or {}
+        ))
         job = jobs_by_index[index]
         set_task_status(index, "В очереди", 0)
         if provider in provider_slots:

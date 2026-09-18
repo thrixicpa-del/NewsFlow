@@ -61,3 +61,9 @@ An interrupted Secret Voicer API, Lumean, VoiceGen, or Chrome job could previous
 - `pnpm typecheck`: PASS.
 - Production integrity/write guard, secret scan, Ruff Voice test-file checks, and `git diff --check`: PASS.
 - No real, network, or paid provider calls were made; no production data was touched.
+
+### VOICE-002 review fix — durable WProject fallback resume
+
+Review found a pre-existing unreachable WProject branch in cross-service fallback. WProject fallback now executes through the same durable boundary as primary WProject: the exact fallback profile, stable idempotency key, `running` state, and `active_provider` are persisted before POST; the returned remote task identity is persisted before polling.
+
+After interruption, safe resume now runs the actual saved `active_provider` with its exact persisted `active_settings`, rather than returning to the original provider or reconstructing a profile from current UI settings. Deterministic tests cover initial fallback, lost-response recovery with the persisted idempotency key, and poll-only recovery of an existing fallback task. Backend Voice: PASS — 61 tests; targeted Voice UI: PASS — 16 tests; full frontend: PASS — 178 tests; typecheck and all safety gates: PASS. No real provider calls or production data were used.
