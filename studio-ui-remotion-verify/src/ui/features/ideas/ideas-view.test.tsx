@@ -56,6 +56,47 @@ describe("Ideas Light view", () => {
     expect(screen.getByText(/Сгенерировано: 1/)).not.toBeNull();
   });
 
+  it("does not submit suggest-topics twice while the current command is running", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    render(<Ideas data={fallback} go={vi.fn()} command={command} />);
+
+    const suggest = screen.getByRole("button", { name: "Агент предложит направления" });
+    fireEvent.click(suggest);
+    fireEvent.click(suggest);
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(suggest).toHaveProperty("disabled", true);
+  });
+
+  it("does not submit reference-channel analysis twice while the current command is running", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    render(<Ideas data={fallback} go={vi.fn()} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Каналы-референсы" }));
+    const analyze = screen.getByRole("button", { name: "Найти залетевшие и проанализировать" });
+    fireEvent.click(analyze);
+    fireEvent.click(analyze);
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(analyze).toHaveProperty("disabled", true);
+  });
+
+  it("does not submit YouTube research twice while the current command is running", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    render(<Ideas data={fallback} go={vi.fn()} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "YouTube-темы" }));
+    fireEvent.change(screen.getByLabelText("Ключевые слова для YouTube"), {
+      target: { value: "Ормуз нефть танкеры" },
+    });
+    const research = screen.getByRole("button", { name: "Найти темы" });
+    fireEvent.click(research);
+    fireEvent.click(research);
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(research).toHaveProperty("disabled", true);
+  });
+
   it("adds a manually entered topic through the current add-topic command", () => {
     const command = vi.fn().mockResolvedValue(fallback);
     render(<Ideas data={fallback} go={vi.fn()} command={command} />);

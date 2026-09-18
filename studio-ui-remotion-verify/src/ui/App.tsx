@@ -1253,6 +1253,12 @@ export function Ideas({
   const [deletingProduction, setDeletingProduction] = useState(false);
   const generationLock = useRef(false);
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
+  const suggestDirectionsLock = useRef(false);
+  const [suggestingDirections, setSuggestingDirections] = useState(false);
+  const referenceAnalysisLock = useRef(false);
+  const [analyzingReferenceChannels, setAnalyzingReferenceChannels] = useState(false);
+  const youtubeResearchLock = useRef(false);
+  const [researchingYoutube, setResearchingYoutube] = useState(false);
   useEffect(
     () => setReferenceRules(data.ideaReferenceRules),
     [data.ideaReferenceRules],
@@ -1382,12 +1388,20 @@ export function Ideas({
     }
   };
   const suggestDirections = async () => {
-    const result = await command("suggest-topics", {
-      provider,
-      count: 6,
-      planCount: Number(vectors),
-    });
-    if (result) setSuggestedSelected([]);
+    if (suggestDirectionsLock.current) return;
+    suggestDirectionsLock.current = true;
+    setSuggestingDirections(true);
+    try {
+      const result = await command("suggest-topics", {
+        provider,
+        count: 6,
+        planCount: Number(vectors),
+      });
+      if (result) setSuggestedSelected([]);
+    } finally {
+      suggestDirectionsLock.current = false;
+      setSuggestingDirections(false);
+    }
   };
   const saveSuggestedToFavorites = async () => {
     if (!suggestedSelected.length) {
@@ -1430,14 +1444,22 @@ export function Ideas({
     }
   };
   const analyzeReferenceChannels = async () => {
-    const result = await command("analyze-idea-reference-channels", {
-      count: Number(referenceCount),
-      planCount: Number(vectors),
-    });
-    if (!result)
-      setGenerationError(
-        "Анализ каналов не выполнился. Проверьте уведомление сверху.",
-      );
+    if (referenceAnalysisLock.current) return;
+    referenceAnalysisLock.current = true;
+    setAnalyzingReferenceChannels(true);
+    try {
+      const result = await command("analyze-idea-reference-channels", {
+        count: Number(referenceCount),
+        planCount: Number(vectors),
+      });
+      if (!result)
+        setGenerationError(
+          "Анализ каналов не выполнился. Проверьте уведомление сверху.",
+        );
+    } finally {
+      referenceAnalysisLock.current = false;
+      setAnalyzingReferenceChannels(false);
+    }
   };
   const saveReferenceRules = async () => {
     const result = await command("save-idea-reference-rules", {
@@ -1624,6 +1646,7 @@ export function Ideas({
       );
   };
   const researchYoutube = async () => {
+    if (youtubeResearchLock.current) return;
     if (!youtubeQuery.trim() && !selected.length) {
       setYoutubeError(
         "Введите запрос для YouTube или выделите направления в сетке.",
@@ -1631,21 +1654,28 @@ export function Ideas({
       return;
     }
     setYoutubeError("");
-    const result = await command("research-youtube-topics", {
-      query: youtubeQuery,
-      topics: selected,
-      count: Number(youtubeCount),
-      generateTogether: youtubeGenerateTogether,
-      vectors: Number(vectors),
-      provider,
-      requirements,
-    });
-    if (!result)
-      setYoutubeError(
-        "Поиск не выполнился. Проверьте уведомление сверху: там указана точная причина.",
-      );
-    else if (!youtubeGenerateTogether)
-      setYoutubeSelected(result.youtubeSuggestedTopics || []);
+    youtubeResearchLock.current = true;
+    setResearchingYoutube(true);
+    try {
+      const result = await command("research-youtube-topics", {
+        query: youtubeQuery,
+        topics: selected,
+        count: Number(youtubeCount),
+        generateTogether: youtubeGenerateTogether,
+        vectors: Number(vectors),
+        provider,
+        requirements,
+      });
+      if (!result)
+        setYoutubeError(
+          "Поиск не выполнился. Проверьте уведомление сверху: там указана точная причина.",
+        );
+      else if (!youtubeGenerateTogether)
+        setYoutubeSelected(result.youtubeSuggestedTopics || []);
+    } finally {
+      youtubeResearchLock.current = false;
+      setResearchingYoutube(false);
+    }
   };
   const toggleYoutubeTopic = (topic: string) =>
     setYoutubeSelected((current) =>
@@ -1762,9 +1792,12 @@ export function Ideas({
             Добавить тему
           </Button>
         </div>
-        <Button onClick={() => void suggestDirections()}>
+        <Button
+          disabled={suggestingDirections}
+          onClick={() => void suggestDirections()}
+        >
           <WandSparkles size={17} />
-          Агент предложит направления
+          {suggestingDirections ? "Агент подбирает направления…" : "Агент предложит направления"}
         </Button>
         <Button onClick={() => setReferenceOpen((value) => !value)}>
           <Video size={17} />
@@ -1881,10 +1914,11 @@ export function Ideas({
             </Button>
             <Button
               kind="success"
+              disabled={analyzingReferenceChannels}
               onClick={() => void analyzeReferenceChannels()}
             >
               <WandSparkles size={17} />
-              Найти залетевшие и проанализировать
+              {analyzingReferenceChannels ? "Анализ каналов…" : "Найти залетевшие и проанализировать"}
             </Button>
           </div>
           <div className="youtube-source-sample">
@@ -1980,9 +2014,15 @@ export function Ideas({
           <div className="youtube-research-controls">
             <Input label="Ключевые слова для YouTube" value={youtubeQuery} onChange={(event) => setYoutubeQuery(event.target.value)} placeholder="Например: Ормуз нефть танкеры" />
             <Input label="Сколько тем" value={youtubeCount} onChange={(event) => setYoutubeCount(event.target.value)} type="number" min="1" max="30" />
-            <Button kind="primary" onClick={() => void researchYoutube()}>
+            <Button
+              kind="primary"
+              disabled={researchingYoutube}
+              onClick={() => void researchYoutube()}
+            >
               <Search size={17} />
-              {youtubeGenerateTogether ? "Найти и сгенерировать" : "Найти темы"}
+              {researchingYoutube
+                ? "Поиск YouTube…"
+                : youtubeGenerateTogether ? "Найти и сгенерировать" : "Найти темы"}
             </Button>
           </div>
           <div className="youtube-research-options">
@@ -2012,7 +2052,10 @@ export function Ideas({
                   </small>
                 </div>
                 <div className="toolbar compact">
-                  <Button onClick={() => void researchYoutube()}>
+                  <Button
+                    disabled={researchingYoutube}
+                    onClick={() => void researchYoutube()}
+                  >
                     <WandSparkles size={16} />
                     Перегенерировать
                   </Button>
