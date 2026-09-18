@@ -3846,6 +3846,7 @@ export function Covers({
           const { cover } = row.original;
           return (
             cover.error ||
+            cover.timeline?.at(-1)?.detail ||
             (cover.paths?.length
               ? `${cover.paths.length} картинок`
               : "Промпты ещё не созданы")
@@ -3858,6 +3859,18 @@ export function Covers({
   const newPromptsReadyCount = activeCoverRows.filter(
     (cover) => cover.status === "Новые промпты созданы",
   ).length;
+  const selectedPromptRows = selected.map((index) => data.covers[index]).filter(Boolean);
+  const selectedNewPromptsReadyCount = selectedPromptRows.filter(
+    (cover) => cover.status === "Новые промпты созданы",
+  ).length;
+  const selectedPromptErrorCount = selectedPromptRows.filter(
+    (cover) => cover.status === "Ошибка промпта",
+  ).length;
+  const allSelectedNewPromptsReady =
+    selected.length > 0 && selectedNewPromptsReadyCount === selected.length;
+  const selectedPromptSummary = selectedPromptErrorCount
+    ? `Новые промпты: ${selectedNewPromptsReadyCount}/${selected.length} готовы · ошибок: ${selectedPromptErrorCount}`
+    : `Новые промпты готовы: ${selectedNewPromptsReadyCount}/${selected.length}`;
   // Older projects kept a single selected prompt in image_prompt without a
   // prompt-options array. Both representations are valid and renderable.
   const promptsReady = activeCoverRows.some((cover) =>
@@ -4340,7 +4353,14 @@ export function Covers({
       selected.length &&
       window.confirm(`Удалить картинки у ${selected.length} выбранных тем?`)
     )
-      void command("remove-cover-results", { indices: selected });
+      void command("remove-cover-results", coverSelectionPayload());
+  };
+  const removeAllImages = () => {
+    if (
+      data.covers.length &&
+      window.confirm(`Удалить картинки у всех ${data.covers.length} тем?`)
+    )
+      void command("remove-cover-results", { all: true });
   };
   const removeRows = () => {
     if (
@@ -4358,13 +4378,7 @@ export function Covers({
   // The default route for normal work: scene is rendered by FastGen and
   // NewsFlow finishes the portrait, headline, panel, outline and shadow.
   const generateAutomatically = () => void generate(coverBuildMode);
-  const resumeOrGenerate = () => {
-    if (data.coverSettings.generationPaused) {
-      void command("resume-cover-generation");
-      return;
-    }
-    generateAutomatically();
-  };
+  const resumeGeneration = () => void command("resume-cover-generation");
   const applyPreset = (name: string) => {
     setSelectedPreset(name);
     const preset = data.coverSettings.presets.find(
@@ -4792,11 +4806,23 @@ export function Covers({
               <Pause size={16} />
               Пауза
             </Button>
-            <Button kind="primary" onClick={resumeOrGenerate}>
+            <Button
+              kind="primary"
+              onClick={data.coverSettings.generationPaused ? resumeGeneration : undefined}
+            >
               <Play size={16} />
-              {data.coverSettings.generationPaused
-                ? "Продолжить"
-                : "Запустить готовые"}
+              Продолжить
+            </Button>
+            <Button
+              kind="success"
+              onClick={
+                !data.coverSettings.generationPaused && promptsReady && !coverGenerationStarting
+                  ? generateAutomatically
+                  : undefined
+              }
+            >
+              <Sparkles size={16} />
+              Запустить
             </Button>
           </article>
         </div>
@@ -6391,7 +6417,11 @@ export function Covers({
           </Button>
           <Button
             kind="success"
-            onClick={promptsReady && !coverGenerationStarting ? generateAutomatically : undefined}
+            onClick={
+              !data.coverSettings.generationPaused && promptsReady && !coverGenerationStarting
+                ? generateAutomatically
+                : undefined
+            }
           >
             <Sparkles size={17} />
             Сгенерировать выбранный режим
@@ -6407,11 +6437,38 @@ export function Covers({
             <Pause size={16} />
             Пауза генерации
           </Button>
-          <Button kind="primary" onClick={resumeOrGenerate}>
+          <Button
+            kind="primary"
+            onClick={data.coverSettings.generationPaused ? resumeGeneration : undefined}
+          >
             <Play size={16} />
-            {data.coverSettings.generationPaused
-              ? "Продолжить"
-              : "Запустить готовые"}
+            Продолжить генерацию
+          </Button>
+          <Button
+            kind="success"
+            onClick={
+              !data.coverSettings.generationPaused && promptsReady && !coverGenerationStarting
+                ? generateAutomatically
+                : undefined
+            }
+          >
+            <Sparkles size={16} />
+            Запустить готовые
+          </Button>
+          <Button
+            kind="primary"
+            onClick={selected.length ? rewritePrompts : undefined}
+          >
+            <WandSparkles size={16} />
+            Перегенерировать промпты выбранным
+          </Button>
+          <span className="status">{selectedPromptSummary}</span>
+          <Button
+            kind="success"
+            onClick={allSelectedNewPromptsReady ? regenerate : undefined}
+          >
+            <Sparkles size={16} />
+            Перегенерировать обложки выбранным
           </Button>
           <Button onClick={selected.length ? refineFaces : undefined}>
             <WandSparkles size={16} />
@@ -6426,7 +6483,14 @@ export function Covers({
             onClick={selected.length ? removeImages : undefined}
           >
             <Trash2 size={16} />
-            Удалить картинки
+            Удалить картинки — выбранные
+          </Button>
+          <Button
+            kind="danger"
+            onClick={data.covers.length ? removeAllImages : undefined}
+          >
+            <Trash2 size={16} />
+            Удалить картинки — все
           </Button>
           <Button
             kind="danger"

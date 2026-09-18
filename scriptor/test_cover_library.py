@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from .cover_library import CoverLibrary
-from .config import Settings
-from .covers import FastGenClient
 from . import bridge
+from .config import Settings
+from .cover_library import CoverLibrary
+from .covers import FastGenClient
 
 
 class CoverLibraryTests(unittest.TestCase):
@@ -489,6 +489,8 @@ class CoverLibraryTests(unittest.TestCase):
         # prompt authority after Universal V2 assembly.
         self.assertEqual(len({item["prompt"] for item in plan}), 1)
         self.assertTrue(all(item["prompt"] == "Исходный конкретный промпт" for item in plan))
+        self.assertFalse(plan[0]["rewritten"])
+        self.assertTrue(all(item["rewritten"] for item in plan[1:]))
 
     def test_retryable_fastgen_failure_records_all_sixteen_attempts(self):
         """The final error must prove every prompt round was actually sent."""
@@ -552,6 +554,50 @@ class CoverLibraryTests(unittest.TestCase):
             self.assertEqual(restored[0]["path"], completed["path"])
             self.assertEqual(restored[0]["attempts"], 2)
             self.assertEqual(capabilities["image"][0]["id"], "model-1")
+
+    def test_remove_results_revision_wins_over_stale_worker_and_old_paths_do_not_hydrate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "covers"
+            output.mkdir()
+            old = output / "old.png"
+            raw = output / "raw.png"
+            face = output / "face.png"
+            text = output / "text.png"
+            for path in (old, raw, face, text):
+                path.write_bytes(b"old")
+            library_path = Path(temporary) / "covers-library.json"
+            stale = {
+                "production_item_id": "production:cleanup", "title": "Тема",
+                "paths": [str(old)], "raw_paths": [str(raw)], "face_composite_paths": [str(face)],
+                "text_overlay_path": str(text), "path": str(old), "selected_path": str(old),
+                "selected_base_path": str(raw), "prompt_image_paths": [{"paths": [str(old)]}],
+                "updatedAt": "2099-01-01T00:00:00.000000",
+            }
+            CoverLibrary(library_path).persist([stale], {"image": [], "video": []}, {})
+            settings = Settings(cover_output_folder=str(output), cover_queue=[dict(stale)])
+
+            with patch.object(bridge, "_cover_library_path", return_value=library_path), \
+                 patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                bridge.remove_cover_results({"all": True})
+                cleaned_revision = settings.cover_queue[0]["updatedAt"]
+                CoverLibrary(library_path).persist([stale], {"image": [], "video": []}, {})
+                restored, _capabilities, _usage = CoverLibrary(library_path).hydrate(
+                    [settings.cover_queue[0]], {"image": [], "video": []}, {},
+                )
+
+            self.assertGreater(cleaned_revision, stale["updatedAt"])
+            self.assertFalse(any(path.exists() for path in (old, raw, face, text)))
+            row = restored[0]
+            self.assertEqual(row["paths"], [])
+            self.assertEqual(row["raw_paths"], [])
+            self.assertEqual(row["face_composite_paths"], [])
+            self.assertEqual(row["text_overlay_path"], "")
+            self.assertEqual(row["path"], "")
+            self.assertEqual(row["selected_path"], "")
+            self.assertEqual(row["selected_base_path"], "")
+            self.assertNotIn("prompt_image_paths", row)
 
     def test_persisted_items_receive_stable_fallback_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

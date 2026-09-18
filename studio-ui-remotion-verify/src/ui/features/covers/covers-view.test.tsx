@@ -162,6 +162,149 @@ describe("Covers Light view", () => {
     expect(command).not.toHaveBeenCalledWith("generate-cover-subheadlines", expect.anything());
   });
 
+  it("keeps pause, continue, and start as three explicit cover-render controls", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{ production_item_id: "production:ormuz", title: "Ормуз", image_prompt: "scene", paths: [] }],
+      coverSettings: { ...fallback.coverSettings, generationPaused: false },
+    };
+    const { rerender } = render(<Covers data={data} command={command} />);
+
+    expect(screen.getByRole("button", { name: "Пауза генерации" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Продолжить генерацию" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Запустить готовые" })).toBeTruthy();
+
+    rerender(<Covers data={{ ...data, coverSettings: { ...data.coverSettings, generationPaused: true } }} command={command} />);
+    expect(screen.getByRole("button", { name: "Пауза генерации" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Продолжить генерацию" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("supports Ctrl multi-select and sends exact ordered durable scope for new prompts", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:z", title: "A", image_prompt: "old A", paths: [] },
+        { production_item_id: "production:a", title: "B", image_prompt: "old B", paths: [] },
+        { production_item_id: "production:c", title: "C", image_prompt: "old C", paths: [] },
+      ],
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: B" }), { ctrlKey: true });
+    expect(screen.getByText("Выбрано: 2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Снять выбор: A" }), { ctrlKey: true });
+    expect(screen.getByText("Выбрано: 1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: A" }), { ctrlKey: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Перегенерировать промпты выбранным" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "regenerate-covers-new-prompts",
+      { indices: [1, 0], productionItemIds: ["production:a", "production:z"], provider: "agent" },
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: C" }));
+    expect(screen.getByText("Выбрано: 1")).toBeTruthy();
+  });
+
+  it("shows selected new-prompt readiness and blocks bulk render until all selected rows are ready", () => {
+    const command = vi.fn(async () => undefined);
+    const baseCovers = [
+      { production_item_id: "production:a", title: "A", image_prompt: "new A", paths: [] },
+      { production_item_id: "production:b", title: "B", image_prompt: "new B", paths: [] },
+    ];
+    const data = { ...fallback, covers: baseCovers };
+    const { rerender } = render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: B" }), { ctrlKey: true });
+
+    expect(screen.getByText("Новые промпты готовы: 0/2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Перегенерировать обложки выбранным" }).hasAttribute("disabled")).toBe(true);
+
+    rerender(<Covers data={{ ...data, covers: [
+      { ...baseCovers[0], status: "Новые промпты созданы" }, baseCovers[1],
+    ] }} command={command} />);
+    expect(screen.getByText("Новые промпты готовы: 1/2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Перегенерировать обложки выбранным" }).hasAttribute("disabled")).toBe(true);
+
+    rerender(<Covers data={{ ...data, covers: baseCovers.map((cover) => ({ ...cover, status: "Новые промпты созданы" })) }} command={command} />);
+    expect(screen.getByText("Новые промпты готовы: 2/2")).toBeTruthy();
+    const renderSelected = screen.getByRole("button", { name: "Перегенерировать обложки выбранным" });
+    expect(renderSelected.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(renderSelected);
+    expect(command).toHaveBeenCalledWith("regenerate-covers", expect.objectContaining({
+      indices: [0, 1], productionItemIds: ["production:a", "production:b"], currentProfile: true,
+    }));
+  });
+
+  it("shows a partial prompt rewrite failure without a false all-ready state", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:a", title: "A", image_prompt: "new A", status: "Новые промпты созданы", paths: [] },
+        { production_item_id: "production:b", title: "B", image_prompt: "old B", status: "Ошибка промпта", error: "provider rejected", paths: [] },
+      ],
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: B" }), { ctrlKey: true });
+
+    expect(screen.getByText("Новые промпты: 1/2 готовы · ошибок: 1")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Перегенерировать обложки выбранным" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("offers confirmed selected and all image cleanup without treating empty selection as all", () => {
+    const command = vi.fn(async () => undefined);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const data = {
+      ...fallback,
+      covers: [{ production_item_id: "production:a", title: "A", image_prompt: "scene", paths: ["a.png"] }],
+    };
+    render(<Covers data={data} command={command} />);
+
+    const selectedCleanup = screen.getByRole("button", { name: "Удалить картинки — выбранные" });
+    expect(selectedCleanup.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: A" }));
+    fireEvent.click(selectedCleanup);
+    expect(command).toHaveBeenCalledWith("remove-cover-results", { indices: [0], productionItemIds: ["production:a"] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Удалить картинки — все" }));
+    expect(command).toHaveBeenCalledWith("remove-cover-results", { all: true });
+  });
+
+  it("shows truthful queue statuses and retry attempt detail per cover", () => {
+    const statuses = [
+      "Ожидает",
+      "Подготовка запросов",
+      "Круг 2/4 · попытка 1/4",
+      "Приостановлено",
+      "Ожидает лимит FastGen",
+      "Готово",
+      "Ошибка FastGen",
+      "Новые промпты созданы",
+    ];
+    const data = {
+      ...fallback,
+      covers: statuses.map((status, index) => ({
+        production_item_id: `production:${index}`,
+        title: `Тема ${index}`,
+        image_prompt: `scene ${index}`,
+        status,
+        paths: [],
+        timeline: status.startsWith("Круг")
+          ? [{ at: "12:00:00", label: status, progress: 25, detail: "всего попытка 7/16" }]
+          : [],
+      })),
+    };
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+
+    for (const status of statuses) expect(screen.getAllByText(status).length).toBeGreaterThan(0);
+    expect(screen.getByText("всего попытка 7/16")).toBeTruthy();
+  });
+
   it("uses the workstation queue and opens the selected cover in an inspector", () => {
     const data = {
       ...fallback,

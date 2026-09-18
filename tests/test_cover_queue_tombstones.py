@@ -3,11 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scriptor import config
-from scriptor import bridge
+from scriptor import bridge, config
 from scriptor.config import Settings
-from scriptor.cover_library import CoverLibrary
 from scriptor.core import ScenarioRequest
+from scriptor.cover_library import CoverLibrary
 from scriptor.runner import Job, RunState
 
 
@@ -55,11 +54,11 @@ class CoverQueueTombstoneTests(unittest.TestCase):
         before = dict(current)
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
-             patch.object(bridge, "load_session", return_value=(["Текущая тема"], [])):
-            with self.assertRaisesRegex(ValueError, "Выберите сценарии"):
-                bridge.generate_cover_headlines({
-                    "indices": [0], "productionItemIds": ["legacy-cover:0"], "provider": "agent",
-                })
+             patch.object(bridge, "load_session", return_value=(["Текущая тема"], [])), \
+             self.assertRaisesRegex(ValueError, "Выберите сценарии"):
+            bridge.generate_cover_headlines({
+                "indices": [0], "productionItemIds": ["legacy-cover:0"], "provider": "agent",
+            })
 
         self.assertEqual(current, before)
 
