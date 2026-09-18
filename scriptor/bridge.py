@@ -715,8 +715,9 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
 
 
 def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
-                               face_mode: str = "auto", position: int = 0) -> tuple[list[str], str]:
-    """Keep references within FastGen's common ten-file limit and show match state."""
+                               face_mode: str = "auto", position: int = 0,
+                               max_references: int = 10) -> tuple[list[str], str]:
+    """Keep references within the operation limit and reserve a selected face slot."""
     manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
     if face_mode == "without" or item.get("face_reference_disabled"):
         face_path, face_label, face_source = "", "", ""
@@ -747,10 +748,8 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
         scene_references.append(str(scene_path))
     scene_references.extend(_cover_reference_paths_for_item(item, position, settings))
     scene_references.extend(_cover_ai_reference_paths_for_fastgen(item, position, settings))
-    references = [_prepare_cover_visual_reference(Path(reference)) for reference in scene_references]
-    references = [str(reference) for reference in references]
+    references = [str(_prepare_cover_visual_reference(Path(reference))) for reference in scene_references]
     if face_path:
-        references.append(face_path)
         item.update(face_reference_path=face_path, face_reference_label=face_label, face_reference_source=face_source)
     else:
         item.pop("face_reference_path", None)
@@ -758,9 +757,14 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
         item.pop("face_reference_source", None)
     unique: list[str] = []
     for reference in references:
-        if reference not in unique:
+        if reference != face_path and reference not in unique:
             unique.append(reference)
-    return unique[:10], face_label
+    limit = max(0, int(max_references))
+    if face_path and limit:
+        # The identity reference is mandatory for the all-FastGen face route.
+        # Keep scene/style order stable, but reserve its provider input slot.
+        return [*unique[:limit - 1], face_path], face_label
+    return unique[:limit], face_label
 
 
 def _cover_face_layout(item: dict, settings: Settings, face_path: str, face_label: str) -> str:
@@ -6980,8 +6984,8 @@ def _cover_fastgen_identity_instruction(face_label: str, *, has_remote_reference
     )
 
 
-def _cover_operation_accepts_references(settings: Settings, operation: str) -> bool:
-    """Read the cached FastGen schema before attaching files to a generation prompt."""
+def _cover_operation_reference_limit(settings: Settings, operation: str) -> int | None:
+    """Return the live/cached provider input limit, or None without schema evidence."""
     for capability in (settings.fastgen_capabilities_cache.get("image") or []):
         if not isinstance(capability, dict):
             continue
@@ -6989,7 +6993,18 @@ def _cover_operation_accepts_references(settings: Settings, operation: str) -> b
         if identifier != operation:
             continue
         inputs = capability.get("inputs") if isinstance(capability.get("inputs"), dict) else {}
-        return int(inputs.get("max") or 0) > 0
+        try:
+            return max(0, int(inputs.get("max") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return None
+
+
+def _cover_operation_accepts_references(settings: Settings, operation: str) -> bool:
+    """Keep compatibility behavior for scene-only routes without cached schemas."""
+    limit = _cover_operation_reference_limit(settings, operation)
+    if limit is not None:
+        return limit > 0
     # These two operations are documented in FastGen's live schema as text-only
     # image generation.  An unavailable capabilities refresh must not make us
     # send them a portrait they explicitly reject.
@@ -7188,6 +7203,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
     if build_mode not in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
         build_mode = settings.cover_build_mode
     operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
+    operation_reference_limit = _cover_operation_reference_limit(settings, operation)
     operation_accepts_references = _cover_operation_accepts_references(settings, operation)
     render_profile = {
         "build_mode": build_mode,
@@ -7243,6 +7259,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             references, face_label = _cover_references_for_item(
                 item, settings, refine=refine_with_face,
                 face_mode="without" if local_face_only else face_mode, position=index,
+                max_references=operation_reference_limit if operation_reference_limit is not None else 10,
             )
             if local_face_only and face_mode != "without":
                 face_path, face_label, face_source = _match_cover_face_reference(
@@ -7259,6 +7276,15 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             # receive the selected portrait. Falling back to a name-only prompt
             # would silently produce a different person and cannot count as the
             # requested scene + face + text workflow.
+            if build_mode == "fastgen-full" and face_label and operation_reference_limit is None:
+                detail = (
+                    "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
+                    "обновите список моделей или выберите reference-capable operation."
+                )
+                _cover_step(item, "Операция FastGen без references", 100, detail)
+                item["error"] = detail
+                _save_cover_state(settings)
+                continue
             if build_mode == "fastgen-full" and face_label and not operation_accepts_references:
                 detail = (
                     f"Операция FastGen {operation} не поддерживает image/reference input; "

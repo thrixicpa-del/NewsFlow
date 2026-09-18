@@ -2563,6 +2563,113 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         self.assertEqual(settings.cover_queue[0]["status"], "Операция FastGen без references")
         self.assertIn("reference", settings.cover_queue[0]["error"].casefold())
 
+    def test_fastgen_full_with_selected_face_rejects_unknown_operation_without_capability_schema(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            face = Path(temporary) / "selected-face.png"
+            face.write_bytes(b"prepared-face")
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_operation="unknown_reference_operation",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": []}
+            settings.cover_queue = [self._row(
+                0,
+                cover_headline="ТОЧНЫЙ ЗАГОЛОВОК",
+                cover_subheadline="Точная вторая строка",
+                face_reference_path=str(face),
+                face_reference_label="Selected Person",
+                face_reference_source="manual",
+            )]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media") as render:
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:0"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "with",
+                    "textMode": "fastgen",
+                    "localFaceOnly": False,
+                    "operation": "unknown_reference_operation",
+                })
+
+        render.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["status"], "Операция FastGen без references")
+        self.assertIn("не подтверждена поддержка image/reference input", settings.cover_queue[0]["error"].casefold())
+
+    def test_fastgen_full_reserves_max_ten_reference_slot_for_selected_face(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            face = root / "selected-face.png"
+            face.write_bytes(b"prepared-face")
+            scene_references = []
+            for index in range(10):
+                path = root / f"scene-{index}.png"
+                path.write_bytes(f"scene-{index}".encode())
+                scene_references.append(path)
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_operation="max-ten-reference-operation",
+                cover_reference_mode="all",
+                cover_reference_paths=[str(path) for path in scene_references],
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "max-ten-reference-operation", "inputs": {"min": 0, "max": 10},
+            }]}
+            settings.cover_queue = [self._row(
+                0,
+                cover_headline="ТОЧНЫЙ ЗАГОЛОВОК",
+                cover_subheadline="Точная вторая строка",
+                face_reference_path=str(face),
+                face_reference_label="Selected Person",
+                face_reference_source="manual",
+            )]
+            calls = []
+
+            def render(_prompt, _output, _stem, _operation, _ratio, **kwargs):
+                calls.append(tuple(str(path) for path in kwargs.get("references") or []))
+                return [root / "provider-final.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_prepare_cover_visual_reference", side_effect=lambda path: path), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render), \
+                 patch.object(bridge, "compose_cover_faces") as compose, \
+                 patch.object(bridge, "render_cover_text") as overlay:
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:0"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "with",
+                    "textMode": "fastgen",
+                    "localFaceOnly": False,
+                    "operation": "max-ten-reference-operation",
+                })
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0]), 10)
+        self.assertEqual(calls[0][-1], str(face))
+        self.assertEqual(calls[0][:-1], tuple(str(path) for path in scene_references[:9]))
+        compose.assert_not_called()
+        overlay.assert_not_called()
+
     def test_fastgen_full_edit_path_sends_base_scene_and_selected_face_to_provider(self):
         from scriptor import bridge
 
