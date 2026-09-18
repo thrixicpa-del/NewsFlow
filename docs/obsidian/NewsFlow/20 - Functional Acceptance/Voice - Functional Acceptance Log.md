@@ -67,3 +67,40 @@ An interrupted Secret Voicer API, Lumean, VoiceGen, or Chrome job could previous
 Review found a pre-existing unreachable WProject branch in cross-service fallback. WProject fallback now executes through the same durable boundary as primary WProject: the exact fallback profile, stable idempotency key, `running` state, and `active_provider` are persisted before POST; the returned remote task identity is persisted before polling.
 
 After interruption, safe resume now runs the actual saved `active_provider` with its exact persisted `active_settings`, rather than returning to the original provider or reconstructing a profile from current UI settings. Deterministic tests cover initial fallback, lost-response recovery with the persisted idempotency key, and poll-only recovery of an existing fallback task. Backend Voice: PASS — 61 tests; targeted Voice UI: PASS — 16 tests; full frontend: PASS — 178 tests; typecheck and all safety gates: PASS. No real provider calls or production data were used.
+
+## VOICE-003 — real paid-provider smoke acceptance
+
+Status: **REAL PROVIDER SMOKE PASS**
+
+Date: 18 September 2026. Configured paid TTS keys were used with explicit user authorization through an isolated in-memory NewsFlow runtime harness.
+
+### Provider acceptance
+
+- Secret Voicer API: **SKIP — no active key**.
+- Lumean: **SKIP — no active key**.
+- VoiceGen: **SKIP — no active key**.
+- WProject: **PASS** — one active key, configured stream capacity 10, existing profile `Девушка 2`; one real NewsFlow generation completed in 11.125 seconds and produced a validated 86,573-byte MP3 with duration 5.72 seconds. The final Voice job state was `ready` with task label `Готово`.
+- Chrome: **SKIP — existing NewsFlow Chrome session is not unattended-ready**; no login flow was opened.
+
+NewsFlow performed the real WProject create, remote wait/download, candidate save, promotion, and FFmpeg-backed `validate_voiceover_artifact` validation. No provider client was replaced by a fake for the network operation.
+
+### Real concurrency evidence
+
+WProject was selected according to the provider preference order. With configured stream capacity 10 and in-memory `voice_queue_concurrency = 3`, one `generate_voice({indices:[0,1,2]})` call measured `max_active = 3` across the real create/wait/download interval.
+
+- Output 1: 69,676 bytes; 4.55 seconds; final state `ready`.
+- Output 2: 56,590 bytes; 3.63 seconds; final state `ready`.
+- Output 3: 69,364 bytes; 4.47 seconds; final state `ready`.
+- Total concurrency run elapsed time: 20.156 seconds.
+
+### Isolation and regression evidence
+
+- Real settings content hash and modification timestamp were unchanged before/after the paid calls.
+- Real scenario/session/Voice queue and existing production media were not used or modified; persistence and session access were replaced with in-memory synthetic state before the first provider call.
+- All temporary MP3 files, harness code, result data, bytecode, and the dedicated temporary directory were removed.
+- Backend Voice regression: **PASS — 61 tests**.
+- Targeted Voice UI: **PASS — 1 file / 16 tests**.
+- `pnpm typecheck`: **PASS**.
+- Production integrity/write guard: **PASS**.
+- Secret scan: **PASS**.
+- `git diff --check`: **PASS**.
