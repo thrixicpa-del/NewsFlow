@@ -6010,16 +6010,19 @@ export function Covers({
             </small>
           </div>
           <div className="toolbar compact">
-            <Button kind="primary" onClick={() => generateAutoCoverTextPair(false, [])}>
+            <Button
+              kind="primary"
+              onClick={data.covers.length ? () => generateAutoCoverTextPair(false, []) : undefined}
+            >
               <Sparkles size={16} />
-              Создать фразы всем
+              Придумать заголовки и подзаголовки — всем
             </Button>
             <Button
               kind="primary"
               onClick={selected.length ? () => generateAutoCoverTextPair(false, selected) : undefined}
             >
               <Sparkles size={16} />
-              Создать фразы выбранным
+              Придумать заголовки и подзаголовки — выбранным
             </Button>
             <Button kind="primary" onClick={generateAutoHeadlines}>
               <Sparkles size={16} />
@@ -6374,17 +6377,17 @@ export function Covers({
           </Button>
           <Button
             kind="primary"
-            onClick={() => generateAutoCoverTextPair(false, [])}
+            onClick={data.covers.length ? () => generateAutoCoverTextPair(false, []) : undefined}
           >
             <Sparkles size={17} />
-            Создать фразы всем
+            Придумать заголовки и подзаголовки — всем
           </Button>
           <Button
             kind="primary"
             onClick={selected.length ? () => generateAutoCoverTextPair(false, selected) : undefined}
           >
             <Sparkles size={17} />
-            Создать фразы выбранным
+            Придумать заголовки и подзаголовки — выбранным
           </Button>
           <Button
             kind="success"

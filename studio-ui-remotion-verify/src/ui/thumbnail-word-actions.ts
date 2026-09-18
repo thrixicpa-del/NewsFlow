@@ -29,6 +29,9 @@ export function coverWordPairGenerationPayload(
 ) {
   return {
     indices: input.indices,
+    ...(input.productionItemIds === undefined
+      ? {}
+      : { productionItemIds: input.productionItemIds }),
     provider: input.provider,
     useDefault: true,
     useStructure: input.useStructure,

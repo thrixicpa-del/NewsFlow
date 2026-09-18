@@ -242,6 +242,34 @@ def _select_current_cover_generation_rows(
     ]
 
 
+def _current_cover_generation_scope(settings: Settings, payload: dict, error_message: str) -> list[tuple[int, dict]]:
+    """Resolve and validate the durable scope before filtering completed work."""
+    rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if not rows:
+        raise ValueError(error_message)
+    requested_indices = [int(index) for index in payload.get("indices", [])]
+    if requested_indices:
+        expected_values = payload.get("productionItemIds", payload.get("production_item_ids", [])) or []
+        expected_ids = [str(value).strip() for value in expected_values if str(value).strip()]
+        resolved_ids = {
+            index: str(item.get("production_item_id", "")).strip()
+            for index, item in rows
+        }
+        if len(rows) != len(set(requested_indices)):
+            raise ValueError("Выбранная задача обложки устарела или больше не существует")
+        if expected_ids:
+            expected_by_index = dict(zip(requested_indices, expected_ids))
+            if (len(expected_ids) != len(requested_indices)
+                    or any(resolved_ids.get(index) != expected_by_index.get(index)
+                           for index in requested_indices)):
+                raise ValueError("Выбранная задача обложки устарела или не соответствует ProductionItem ID")
+    return rows
+
+
+def _cover_noop_result(kind: str, message: str) -> dict:
+    return {**snapshot(), "operationResult": {"kind": kind, "count": 0, "message": message}}
+
+
 def _hydrate_cover_library(settings: Settings) -> bool:
     """Restore current cover state, never a prior release's unrelated rows."""
     _assign_cover_production_ids(settings)
@@ -5624,6 +5652,45 @@ def _fallback_cover_prompt(item: dict, variant: int = 0) -> str:
     )
 
 
+def _cover_provider_error_message(error: object) -> str:
+    """Keep operator-visible provider failures useful without persisting credentials."""
+    message = " ".join(str(error or "Provider request failed").split())
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[REDACTED]", message)
+    return message[:500]
+
+
+def _cover_text_provider_error_is_transient(error: object) -> bool:
+    status_code = getattr(error, "status_code", None)
+    if status_code == 429 or (isinstance(status_code, int) and 500 <= status_code <= 599):
+        return True
+    text = str(error or "").casefold()
+    return any(marker in text for marker in (
+        "winerror 10060", "timeout", "timed out", "connection", "network", "429",
+        "500", "502", "503", "504", "temporar", "connection reset", "service unavailable",
+    ))
+
+
+class _BoundedCoverTextProvider:
+    """Limit all real provider calls for one row/stage, including semantic repairs."""
+
+    def __init__(self, pool: HybridTextPool, on_attempt) -> None:
+        self.pool = pool
+        self.on_attempt = on_attempt
+        self.attempts = 0
+
+    async def generate(self, prompt: str, **kwargs) -> str:
+        while self.attempts < 4:
+            self.attempts += 1
+            self.on_attempt(self.attempts)
+            try:
+                return await self.pool.generate(prompt, **kwargs)
+            except Exception as exc:
+                if not _cover_text_provider_error_is_transient(exc) or self.attempts >= 4:
+                    raise
+                await asyncio.sleep(0)
+        raise RuntimeError("Provider retry limit exhausted")
+
+
 def generate_cover_prompts(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
@@ -5631,11 +5698,14 @@ def generate_cover_prompts(payload: dict) -> dict:
     if provider not in {"agent", "openai"}:
         raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
     force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual") or payload.get("rewrite"))
-    selected = _select_current_cover_generation_rows(
-        settings, payload, lambda item: _cover_prompt_should_generate(item, force=force),
+    scope = _current_cover_generation_scope(
+        settings, payload, "Выберите хотя бы один сценарий для промптов обложек",
     )
+    selected = [(index, item) for index, item in scope if _cover_prompt_should_generate(item, force=force)]
     if not selected:
-        raise ValueError("Выберите хотя бы один сценарий для промптов обложек")
+        return _cover_noop_result(
+            "cover-prompts", "Все выбранные промпты уже готовы; генерация не требуется.",
+        )
     # Prompt rewriting should remain usable even when a text provider rejects a
     # violent-sounding phrase or no key is temporarily available. The fallback
     # is local and deterministic; it never starts image rendering.
@@ -5654,6 +5724,15 @@ def generate_cover_prompts(payload: dict) -> dict:
     _save_cover_state(settings)
 
     async def build_one(index: int, item: dict) -> None:
+        provider_call = _BoundedCoverTextProvider(
+            pool,
+            lambda attempt: (
+                item.update(prompt_provider_attempt_count=attempt),
+                _cover_step(item, "Повтор промпта" if attempt > 1 else "ИИ готовит промпт", 5,
+                            f"Попытка провайдера: {attempt}/4"),
+                _save_cover_state(settings),
+            ),
+        )
         try:
             prompt = _cover_instruction(item, index, settings)
             if rewrite and item.get("image_prompt_options"):
@@ -5666,7 +5745,7 @@ def generate_cover_prompts(payload: dict) -> dict:
                 raise pool_error
             reference_paths = _cover_ai_reference_paths_for_item(item, index, settings)
             options, chosen = _clean_cover_prompts(
-                await pool.generate(prompt, image_paths=reference_paths[:6]), settings.cover_prompt_variant_count,
+                await provider_call.generate(prompt, image_paths=reference_paths[:6]), settings.cover_prompt_variant_count,
             )
             options = [_normalize_cover_photo_prompt(value, item) for value in options]
             if not options:
@@ -5696,8 +5775,9 @@ def generate_cover_prompts(payload: dict) -> dict:
                 item.update(image_prompt_options=options, selected_prompt_index=0,
                             image_prompt=options[0], prompt_provider="local-fallback", error="")
             else:
-                _cover_step(item, "Ошибка промпта", 100, str(exc))
-                item.update(error=str(exc))
+                reason = _cover_provider_error_message(exc)
+                _cover_step(item, "Ошибка промпта", 100, reason)
+                item.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
         _save_cover_state(settings)
 
     async def run_batch() -> None:
@@ -6274,11 +6354,15 @@ def generate_cover_headlines(payload: dict) -> dict:
     use_structure = bool(payload.get("useStructure", settings.cover_text_use_structure))
     avoid_repeats = bool(payload.get("avoidRepeats", settings.cover_text_avoid_repeats))
     force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
-    selected = _select_current_cover_generation_rows(
-        settings, payload, lambda item: _cover_word_should_generate(item, "headline", force=force),
+    scope = _current_cover_generation_scope(
+        settings, payload, "Выберите сценарии для фраз на обложку",
     )
+    selected = [(index, item) for index, item in scope
+                if _cover_word_should_generate(item, "headline", force=force)]
     if not selected:
-        raise ValueError("Выберите сценарии для фраз на обложку")
+        return _cover_noop_result(
+            "cover-headlines", "Все выбранные заголовки уже готовы; генерация не требуется.",
+        )
     pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
     settings.cover_headline_provider = provider
     for _index, item in selected:
@@ -6292,12 +6376,20 @@ def generate_cover_headlines(payload: dict) -> dict:
             settings.cover_queue[index].update(headline_status="Ошибка заголовка", headline_error="У сценария нет названия")
             _save_cover_text_progress(settings)
             return
+        provider_call = _BoundedCoverTextProvider(
+            pool,
+            lambda attempt: (
+                item.update(headline_provider_attempt_count=attempt,
+                            headline_status="RETRYING" if attempt > 1 else "GENERATING"),
+                _save_cover_text_progress(settings),
+            ),
+        )
         try:
             variation = int(item.get("headline_variation_index", 0) or 0) + (1 if force else 0)
             structure = _cover_word_structure_pair(item, variation)
             recent = [row for row in settings.cover_queue if str(row.get("headline_status", "")).upper() == "READY"]
             headline, validation, attempts = await _generate_cover_word_v2(
-                pool, "headline", item, active_template, structure,
+                provider_call, "headline", item, active_template, structure,
                 pause_waiter=lambda: _wait_for_cover_text_resume("headline"), recent=recent,
             )
             current = settings.cover_queue[index]
@@ -6306,9 +6398,13 @@ def generate_cover_headlines(payload: dict) -> dict:
                            headline_attempt_count=len(attempts), headline_semantic_slots=validation["semantic_slots"],
                            headline_repair_history=attempts, headline_pattern_signature=_cover_word_pattern_signature(headline),
                            headline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+            current["headline_provider_attempt_count"] = provider_call.attempts
             current.pop("cover_headline_suggestion", None)
         except Exception as exc:
-            settings.cover_queue[index].update(headline_status="FAILED", headline_error=str(exc))
+            settings.cover_queue[index].update(
+                headline_status="FAILED", headline_error=_cover_provider_error_message(exc),
+                headline_provider_attempt_count=provider_call.attempts,
+            )
         # Each finished item is written immediately. Snapshot runs in a
         # separate bridge process every 900 ms, so the UI sees partial batch
         # progress rather than blank inputs until the slowest request finishes.
@@ -6358,11 +6454,15 @@ def generate_cover_subheadlines(payload: dict) -> dict:
     use_structure = bool(payload.get("useStructure", settings.cover_text_use_structure))
     avoid_repeats = bool(payload.get("avoidRepeats", settings.cover_text_avoid_repeats))
     force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
-    selected = _select_current_cover_generation_rows(
-        settings, payload, lambda item: _cover_word_should_generate(item, "subheadline", force=force),
+    scope = _current_cover_generation_scope(
+        settings, payload, "Выберите сценарии для подзаголовков",
     )
+    selected = [(index, item) for index, item in scope
+                if _cover_word_should_generate(item, "subheadline", force=force)]
     if not selected:
-        raise ValueError("Выберите сценарии для подзаголовков")
+        return _cover_noop_result(
+            "cover-subheadlines", "Все выбранные подзаголовки уже готовы; генерация не требуется.",
+        )
     pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
     settings.cover_headline_provider = provider
     for _index, item in selected:
@@ -6376,15 +6476,23 @@ def generate_cover_subheadlines(payload: dict) -> dict:
             settings.cover_queue[index].update(subheadline_status="Ошибка подзаголовка", subheadline_error="У сценария нет названия")
             _save_cover_text_progress(settings)
             return
+        provider_call = _BoundedCoverTextProvider(
+            pool,
+            lambda attempt: (
+                item.update(subheadline_provider_attempt_count=attempt,
+                            subheadline_status="RETRYING" if attempt > 1 else "GENERATING"),
+                _save_cover_text_progress(settings),
+            ),
+        )
         try:
             headline = str(item.get("cover_headline", "")).strip()
             if not headline:
-                raise ValueError("Сначала нужен утверждённый headline")
+                raise ValueError("Headline unavailable after retries; подзаголовок не создан")
             variation = int(item.get("headline_variation_index", 0) or 0)
             structure = _cover_word_structure_pair(item, variation)
             recent = [row for row in settings.cover_queue if str(row.get("subheadline_status", "")).upper() == "READY"]
             subheadline, validation, attempts = await _generate_cover_word_v2(
-                pool, "subheadline", item, active_template, structure, headline=headline,
+                provider_call, "subheadline", item, active_template, structure, headline=headline,
                 pause_waiter=lambda: _wait_for_cover_text_resume("subheadline"), recent=recent,
             )
             current = settings.cover_queue[index]
@@ -6394,9 +6502,13 @@ def generate_cover_subheadlines(payload: dict) -> dict:
                            subheadline_semantic_slots=validation["semantic_slots"], subheadline_repair_history=attempts,
                            subheadline_pattern_signature=_cover_word_pattern_signature(subheadline),
                            subheadline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+            current["subheadline_provider_attempt_count"] = provider_call.attempts
             current.pop("cover_subheadline_suggestion", None)
         except Exception as exc:
-            settings.cover_queue[index].update(subheadline_status="FAILED", subheadline_error=str(exc))
+            settings.cover_queue[index].update(
+                subheadline_status="FAILED", subheadline_error=_cover_provider_error_message(exc),
+                subheadline_provider_attempt_count=provider_call.attempts,
+            )
         _save_cover_text_progress(settings)
 
     async def build_all():
@@ -6488,12 +6600,51 @@ def _restore_missing_cover_subheadlines(settings: Settings, interrupted_queue: l
 
 def generate_cover_texts(payload: dict) -> dict:
     """Generate the two thumbnail text lines independently in one user action."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    scope = _current_cover_generation_scope(
+        settings, payload, "Выберите сценарии для текстов обложки",
+    )
+    durable_payload = dict(payload)
+    durable_payload["indices"] = [index for index, _item in scope]
+    durable_payload["productionItemIds"] = [
+        str(item.get("production_item_id", "")).strip() for _index, item in scope
+    ]
     headline_payload = dict(payload)
+    headline_payload.update(durable_payload)
     headline_payload["template"] = str(payload.get("headlineTemplate", payload.get("template", "")))
     subheadline_payload = dict(payload)
+    subheadline_payload.update(durable_payload)
     subheadline_payload["template"] = str(payload.get("subheadlineTemplate", ""))
     generate_cover_headlines(headline_payload)
-    return generate_cover_subheadlines(subheadline_payload)
+    generate_cover_subheadlines(subheadline_payload)
+
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    current = _select_current_cover_generation_rows(settings, durable_payload, lambda _item: True)
+    headline_ready = sum(bool(str(item.get("cover_headline", "")).strip())
+                         and str(item.get("headline_status", "")).upper() != "FAILED"
+                         for _index, item in current)
+    subheadline_ready = sum(bool(str(item.get("cover_subheadline", "")).strip())
+                            and str(item.get("subheadline_status", "")).upper() != "FAILED"
+                            for _index, item in current)
+    failed = sum(any(str(item.get(key, "")).upper() == "FAILED"
+                     for key in ("headline_status", "subheadline_status"))
+                 for _index, item in current)
+    ready = sum(bool(str(item.get("cover_headline", "")).strip())
+                and bool(str(item.get("cover_subheadline", "")).strip())
+                and not any(str(item.get(key, "")).upper() == "FAILED"
+                            for key in ("headline_status", "subheadline_status"))
+                for _index, item in current)
+    requested = len(payload.get("indices", [])) or len(scope)
+    return {
+        **snapshot(),
+        "operationResult": {
+            "kind": "cover-texts", "count": ready, "requested": requested, "current": len(current),
+            "headlineReady": headline_ready, "subheadlineReady": subheadline_ready, "failed": failed,
+            "message": f"Тексты обложек: {ready}/{len(current)} готовы, ошибок: {failed}.",
+        },
+    }
 
 
 def remove_cover_headline_suggestions(payload: dict) -> dict:
