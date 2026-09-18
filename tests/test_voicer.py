@@ -1,17 +1,135 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from scriptor import bridge
-from scriptor.config import LumeanKey, SecretVoicerKey, Settings, VoiceGenKey, WProjectKey
+from scriptor.config import (
+    LumeanKey,
+    SecretVoicerKey,
+    Settings,
+    VoiceGenKey,
+    WProjectKey,
+)
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
-from scriptor.voicer import ChromeSecretVoicer, LumeanClient, SecretVoicerClient, VoiceGenClient, WProjectClient, VoiceProfile, safe_audio_name, split_text
+from scriptor.voicer import (
+    ChromeSecretVoicer,
+    LumeanClient,
+    SecretVoicerClient,
+    VoiceGenClient,
+    VoiceProfile,
+    WProjectClient,
+    safe_audio_name,
+    split_text,
+)
 
 
 class VoicerTests(unittest.TestCase):
+    def _assert_wproject_concurrency(self, *, jobs_count: int, streams: int, expected_active: int):
+        """Measure running provider work, not only an executor configuration."""
+        class BlockingWProject:
+            lock = threading.Lock()
+            active = 0
+            max_active = 0
+            reached = threading.Event()
+            release = threading.Event()
+
+            def __init__(self, _secret):
+                pass
+
+            def create_task(self, _text, title, _profile, *, threads, idempotency_key):
+                self.title = title
+                self.asserted_threads = threads
+                self.idempotency_key = idempotency_key
+                return title
+
+            def wait_download(self, _task_id, progress=None):
+                with self.lock:
+                    self.__class__.active += 1
+                    self.__class__.max_active = max(self.__class__.max_active, self.__class__.active)
+                    if self.__class__.active >= expected_active:
+                        self.__class__.reached.set()
+                try:
+                    if progress:
+                        progress("WProject: тестовая блокировка", 50)
+                    if not self.__class__.release.wait(3):
+                        raise TimeoutError("test provider was not released")
+                    return b"MP3"
+                finally:
+                    with self.lock:
+                        self.__class__.active -= 1
+
+        titles = [f"Сценарий {index}" for index in range(jobs_count)]
+        jobs = [
+            Job(ScenarioRequest(index, title, "", f"production-{index}"), RunState.DONE, f"Текст {index}")
+            for index, title in enumerate(titles)
+        ]
+        errors = []
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voice_provider="wproject",
+                voicer_output_folder=folder,
+                voice_queue_concurrency=10,
+                wproject_api_keys=[WProjectKey("WProject", "test-key", streams=streams)],
+                voice_profiles=[{"id": "wproject-profile", "name": "WProject", "provider": "wproject", "voice_id": "voice-1"}],
+                voice_default_profile_id="wproject-profile",
+                voice_scenario_outputs={str(index + 1): "" for index in range(jobs_count)},
+            )
+
+            def run():
+                try:
+                    bridge.generate_voice({"indices": list(range(jobs_count))})
+                except Exception as error:  # noqa: BLE001 - surface every worker failure after joining
+                    errors.append(error)
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(titles, jobs)), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", BlockingWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                worker = threading.Thread(target=run)
+                worker.start()
+                self.assertTrue(BlockingWProject.reached.wait(2), "provider did not reach expected concurrency")
+                self.assertEqual(BlockingWProject.max_active, expected_active)
+                if streams < jobs_count:
+                    self.assertEqual(BlockingWProject.active, expected_active)
+                BlockingWProject.release.set()
+                worker.join(5)
+
+        self.assertFalse(worker.is_alive(), "voice generation thread did not finish")
+        self.assertEqual(errors, [])
+        self.assertEqual(BlockingWProject.max_active, expected_active)
+
+    def test_global_voice_concurrency_reaches_ten_when_wproject_has_ten_streams(self):
+        self._assert_wproject_concurrency(jobs_count=10, streams=10, expected_active=10)
+
+    def test_voice_concurrency_does_not_exceed_wproject_stream_capacity(self):
+        self._assert_wproject_concurrency(jobs_count=6, streams=3, expected_active=3)
+
+    def test_voice_queue_submits_only_current_ready_scenarios_and_marks_unfinished_rows_skipped(self):
+        settings = Settings()
+        jobs = [
+            Job(ScenarioRequest(0, "Готовый", ""), RunState.DONE, "Текст"),
+            Job(ScenarioRequest(1, "Не готов", ""), RunState.WAITING, ""),
+        ]
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=(["Готовый", "Не готов"], jobs)), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "generate_voice", return_value={"ok": True}) as generate:
+            result = bridge.generate_voice_queue({})
+
+        generate.assert_called_once_with({"indices": [0], "force": False})
+        self.assertEqual(result["operationResult"], {
+            "kind": "voice-queue", "eligible": 1, "skipped": 1,
+            "message": "В очередь озвучки добавлено: 1.",
+        })
+        self.assertEqual(settings.voice_task_statuses["2"]["label"], "Пропущено: сценарий не готов")
+
     def test_manual_import_rejects_unreadable_audio_without_attaching_it(self):
         """A file extension alone must never turn a broken MP3 into READY."""
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as output:
@@ -20,9 +138,9 @@ class VoicerTests(unittest.TestCase):
             settings = Settings(voicer_output_folder=output)
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
-                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [])):
-                with self.assertRaisesRegex(ValueError, "длительность озвучки"):
-                    bridge.import_voiceover({"scenarioIndex": 0, "path": str(source)})
+                 patch.object(bridge, "load_session", return_value=(["Сценарий"], [])), \
+                 self.assertRaisesRegex(ValueError, "длительность озвучки"):
+                bridge.import_voiceover({"scenarioIndex": 0, "path": str(source)})
 
             self.assertEqual(settings.voice_scenario_outputs, {})
             self.assertEqual(settings.voice_task_statuses, {})
@@ -56,9 +174,9 @@ class VoicerTests(unittest.TestCase):
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "load_session", return_value=(["Сценарий"], [job])), \
                  patch.object(bridge, "snapshot", return_value={"ok": True}), \
-                 patch.object(bridge, "SecretVoicerClient", FakeClient):
-                with self.assertRaisesRegex(RuntimeError, "длительность озвучки"):
-                    bridge.generate_voice({"indices": [0]})
+                 patch.object(bridge, "SecretVoicerClient", FakeClient), \
+                 self.assertRaisesRegex(RuntimeError, "длительность озвучки"):
+                bridge.generate_voice({"indices": [0]})
 
         self.assertEqual(settings.voice_scenario_outputs["1"], "")
         self.assertEqual(settings.voice_task_statuses["1"]["label"], "Ошибка озвучки")
@@ -232,7 +350,7 @@ class VoicerTests(unittest.TestCase):
 
     def test_voicegen_task_uses_profile_preset_and_key_streams(self):
         class FakeVoiceGen:
-            calls = []
+            calls: ClassVar[list] = []
             def __init__(self, _key):
                 pass
             def synthesize(self, text, filename, profile, *, threads, progress=None):
