@@ -11729,7 +11729,11 @@ export function VoiceQueue({
   const [outputFolder, setOutputFolder] = useState(data.voiceOutputFolder);
   const [generating, setGenerating] = useState(false);
   const voiceGenerationLock = useRef(false);
-  const queued = data.voiceItems.filter((item) =>
+  type VoiceQueueItem = (typeof data.voiceItems)[number] & {
+    jobProvider?: string;
+    resumeSafe?: boolean;
+  };
+  const queued: VoiceQueueItem[] = data.voiceItems.filter((item) =>
     data.scenarios.some((scenario) => scenario.index === item.index),
   );
   const montageTasksByIndex = useMemo(
@@ -11740,8 +11744,16 @@ export function VoiceQueue({
     (item) =>
       item.path && montageTasksByIndex.get(item.index)?.status === "Новый MP3",
   );
-  const resumable = queued.filter((item) =>
-    ["queued", "running", "interrupted", "retrying"].includes(item.jobState || ""),
+  const resumable = queued.filter(
+    (item) =>
+      item.jobState === "queued" ||
+      (["running", "interrupted", "retrying"].includes(item.jobState || "") &&
+        item.resumeSafe === true),
+  );
+  const unsafeInterrupted = queued.filter(
+    (item) =>
+      ["running", "interrupted", "retrying"].includes(item.jobState || "") &&
+      item.resumeSafe !== true,
   );
   const voiceQueueColumns = useMemo<ColumnDef<(typeof queued)[number]>[]>(
     () => [
@@ -11790,7 +11802,12 @@ export function VoiceQueue({
       {
         id: "status",
         header: "Статус",
-        cell: ({ row }) => row.original.voiceStatus || row.original.state,
+        cell: ({ row }) =>
+          ["running", "interrupted", "retrying"].includes(
+            row.original.jobState || "",
+          ) && row.original.resumeSafe !== true
+            ? "Автопродолжение заблокировано — требуется явная переозвучка"
+            : row.original.voiceStatus || row.original.state,
       },
       {
         id: "progress",
@@ -11991,6 +12008,11 @@ export function VoiceQueue({
           <Play size={17} />
           Продолжить очередь: {resumable.length}
         </Button>
+        {unsafeInterrupted.length ? (
+          <span className="status">
+            Требуют явной переозвучки: {unsafeInterrupted.length}
+          </span>
+        ) : null}
         <Button
           kind="success"
           onClick={
