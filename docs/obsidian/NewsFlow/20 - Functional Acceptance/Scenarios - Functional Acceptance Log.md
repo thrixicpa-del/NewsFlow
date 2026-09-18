@@ -27,6 +27,30 @@ The `generate-scenarios` command contract is unchanged: selected generation send
 - Secret scan and `git diff --check`: PASS.
 - No real, network, or paid provider calls were made.
 
+## SCENARIO-003 — operator prompt contract in ChatGPT direct mode
+
+Status: **CONTRACT VERIFIED LOCALLY; PENDING CI**
+
+### Verified path
+
+`Prompt Studio -> save-template -> settings.template / build_requests -> Scenarios ChatGPT direct -> provider prompt -> completed script`.
+
+Prompt Studio saves a distinctive operator template with the existing `save-template` contract and returns to a clean state after success. A failed save retains the full operator text, remains dirty, and visibly reports the failure; navigation protection remains covered by existing tests.
+
+The Scenarios selector sends `provider: "openai"` for `ChatGPT — прямой режим`. Deterministic backend capture verifies that the direct provider prompt preserves the operator marker and instruction, substitutes `{title}` with `Проверочная тема`, does not include the agent-only `Ты редактор новостных сценариев NewsFlow` prefix, and persists the fake response as a completed scenario through the normal session path.
+
+Bounded NewsFlow additions, including ProductionItem context and the narration-only output contract, may accompany the user prompt but do not replace it. No production fix was required.
+
+### GREEN — 18 September 2026
+
+- Backend Scenarios suite: PASS — 13 tests.
+- Targeted Prompt Studio + Scenarios UI: PASS — 2 files / 24 tests.
+- Full frontend suite: PASS — 34 files / 170 tests.
+- `pnpm typecheck`: PASS.
+- Production integrity/write guard: `PRODUCTION_WRITE_GUARD=PASS`.
+- Secret scan and `git diff --check`: PASS.
+- No real, network, or paid provider calls were made.
+
 ## SCENARIO-002 — manual ready-script import preserves operator input on failure
 
 Status: **FIX VERIFIED LOCALLY; PENDING CI**
