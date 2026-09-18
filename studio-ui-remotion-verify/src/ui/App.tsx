@@ -3548,6 +3548,25 @@ function CoverPreviewImage({
   );
 }
 
+const coverManualRetryStatuses = new Set([
+  "Ошибка FastGen",
+  "Нужен новый промпт",
+  "Ошибка рендера",
+]);
+
+const isCoverManualRetryEligible = (
+  cover: NewsFlowSnapshot["covers"][number],
+) => coverManualRetryStatuses.has(String(cover.status || "")) &&
+  !String((cover as typeof cover & { accepted_generation_id?: string }).accepted_generation_id || "").trim();
+
+const isCoverRenderActive = (cover: NewsFlowSnapshot["covers"][number]) => {
+  const status = String(cover.status || "");
+  return ["Подготовка запросов", "Подготовка варианта"].includes(status) ||
+    status.startsWith("Повтор того же промпта") ||
+    status.startsWith("FastGen принял") ||
+    status.startsWith("FastGen генерирует");
+};
+
 export function Covers({
   data: rawData,
   command,
@@ -3860,6 +3879,10 @@ export function Covers({
     (cover) => cover.status === "Новые промпты созданы",
   ).length;
   const selectedPromptRows = selected.map((index) => data.covers[index]).filter(Boolean);
+  const selectedManualRetryCount = selectedPromptRows.filter(isCoverManualRetryEligible).length;
+  const allSelectedManualRetryEligible =
+    selected.length > 0 && selectedManualRetryCount === selected.length;
+  const selectedHasActiveRender = selectedPromptRows.some(isCoverRenderActive);
   const selectedNewPromptsReadyCount = selectedPromptRows.filter(
     (cover) => cover.status === "Новые промпты созданы",
   ).length;
@@ -4326,6 +4349,8 @@ export function Covers({
       ...coverSelectionPayload(),
       ...rendererPayload(),
     });
+  const retrySelectedGeneration = () =>
+    void command("retry-cover-generation", coverSelectionPayload());
   const regenerateNewPrompts = () =>
     void command("regenerate-covers-new-prompts", {
       ...coverSelectionPayload(),
@@ -5049,15 +5074,12 @@ export function Covers({
                       {cover.scenario_index || index + 1}. {cover.title}
                     </span>
                     <Button
-                      onClick={() =>
-                        void command("regenerate-covers", {
-                          ...coverSelectionPayload([index]),
-                          ...rendererPayload(),
-                        })
-                      }
+                      onClick={isCoverManualRetryEligible(cover)
+                        ? () => void command("retry-cover-generation", coverSelectionPayload([index]))
+                        : undefined}
                     >
                       <Play size={14} />
-                      Ещё раз
+                      Повторить генерацию
                     </Button>
                     <Button
                       kind="primary"
@@ -5069,7 +5091,7 @@ export function Covers({
                       }
                     >
                       <WandSparkles size={14} />
-                      Новые промпты
+                      Создать новый промпт
                     </Button>
                   </div>
                 ) : null,
@@ -6350,7 +6372,9 @@ export function Covers({
           </Button>
           <Button
             onClick={
-              selectedTopicCount && promptsReady ? regenerate : undefined
+              selectedTopicCount && promptsReady && !selectedHasActiveRender
+                ? regenerate
+                : undefined
             }
           >
             <Play size={16} />
@@ -6463,6 +6487,15 @@ export function Covers({
             Перегенерировать промпты выбранным
           </Button>
           <span className="status">{selectedPromptSummary}</span>
+          <Button
+            onClick={allSelectedManualRetryEligible ? retrySelectedGeneration : undefined}
+          >
+            <Play size={16} />
+            Повторить генерацию выбранных
+          </Button>
+          <span className="status">
+            Повтор генерации доступен: {selectedManualRetryCount}/{selected.length}
+          </span>
           <Button
             kind="success"
             onClick={allSelectedNewPromptsReady ? regenerate : undefined}
@@ -6658,15 +6691,12 @@ export function Covers({
                     <div className="cover-error-actions">
                       <b>FastGen не принял этот запрос.</b>
                       <Button
-                        onClick={() =>
-                          void command("regenerate-covers", {
-                            ...coverSelectionPayload([index]),
-                            ...rendererPayload(),
-                          })
-                        }
+                        onClick={isCoverManualRetryEligible(cover)
+                          ? () => void command("retry-cover-generation", coverSelectionPayload([index]))
+                          : undefined}
                       >
                         <Play size={14} />
-                        Попробовать ещё раз
+                        Повторить генерацию
                       </Button>
                       <Button
                         kind="primary"
@@ -6678,7 +6708,7 @@ export function Covers({
                         }
                       >
                         <WandSparkles size={14} />
-                        Новые промпты
+                        Создать новый промпт
                       </Button>
                     </div>
                   ) : null}
@@ -7278,16 +7308,20 @@ export function CoverGallery({
                 </div>
                 <div className="toolbar compact">
                   <Button
-                    onClick={() =>
-                      void command("regenerate-covers", {
-                        ...coverSelectionPayload([index]),
-                        currentProfile: true,
-                        operation,
-                      })
-                    }
+                    onClick={isCoverManualRetryEligible(cover)
+                      ? () => void command("retry-cover-generation", coverSelectionPayload([index]))
+                      : isCoverRenderActive(cover)
+                        ? undefined
+                        : () => void command("regenerate-covers", {
+                            ...coverSelectionPayload([index]),
+                            currentProfile: true,
+                            operation,
+                          })}
                   >
                     <Play size={15} />
-                    {cover.status === "Новые промпты созданы"
+                    {isCoverManualRetryEligible(cover)
+                      ? "Повторить генерацию"
+                      : cover.status === "Новые промпты созданы"
                       ? "Повторить с новыми"
                       : "Повторить текущий"}
                   </Button>

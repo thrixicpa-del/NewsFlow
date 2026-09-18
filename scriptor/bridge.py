@@ -7580,6 +7580,9 @@ def _clear_cover_render_state(item: dict, *, status: str) -> None:
         "prompt_image_paths", "generation_round", "generation_rounds", "generation_attempt",
         "generation_attempts_per_round", "generation_total_attempt", "generation_max_attempts",
         "generation_history", "rate_limit_wait_until", "rate_limit_used",
+        "generation_prebilling_attempt_count", "generation_last_rejection",
+        "generation_rejected_before_acceptance", "generation_prompt_revision_id",
+        "generation_text_revision_id", "accepted_generation_id",
     ):
         item.pop(key, None)
     _advance_cover_revision(item)
@@ -7743,6 +7746,34 @@ def regenerate_covers(payload: dict) -> dict:
         "localFaceOnly": bool(payload.get("localFaceOnly")),
         "faceMode": payload.get("faceMode", "with"),
         "textMode": payload.get("textMode", "fastgen"),
+    })
+
+
+_COVER_MANUAL_RETRY_STATUSES = {"Ошибка FastGen", "Нужен новый промпт", "Ошибка рендера"}
+
+
+def retry_cover_generation(payload: dict) -> dict:
+    """Start a deliberate new render cycle without changing its current contract."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if not selected:
+        raise ValueError("Выберите обложки для повторной генерации")
+    blocked = [
+        str(item.get("title", "") or index + 1)
+        for index, item in selected
+        if item.get("status") not in _COVER_MANUAL_RETRY_STATUSES
+        or bool(str(item.get("accepted_generation_id", "")).strip())
+    ]
+    if blocked:
+        raise ValueError(
+            "Ручной повтор недоступен для выбранных тем: " + ", ".join(blocked)
+            + ". Дождитесь завершения активной/принятой задачи или выберите только terminal errors."
+        )
+    return regenerate_covers({
+        "indices": [index for index, _item in selected],
+        "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
+        "currentProfile": True,
     })
 
 
@@ -13201,6 +13232,8 @@ def main() -> None:
             result = compose_cover_faces(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-covers":
             result = regenerate_covers(payload if isinstance(payload, dict) else {})
+        elif command == "retry-cover-generation":
+            result = retry_cover_generation(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-cover-with-face":
             result = regenerate_cover_with_face(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-covers-new-prompts":

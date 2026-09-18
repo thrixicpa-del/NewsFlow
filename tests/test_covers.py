@@ -2312,6 +2312,84 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         self.assertEqual(generate.call_args.args[0]["indices"], [0, 1])
         self.assertEqual(generate.call_args.args[0]["productionItemIds"], ["production:z", "production:a"])
 
+    def test_manual_retry_preserves_current_prompt_text_face_and_render_profile(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            old_path = Path(temporary) / "old.png"
+            old_path.write_bytes(b"old")
+            settings = Settings(cover_output_folder=temporary, cover_queue=[self._row(
+                0,
+                status="Нужен новый промпт",
+                error="FastGen отклонил текущий prompt 4 раза",
+                image_prompt="Keep this exact visual prompt",
+                image_prompt_options=["Keep this exact visual prompt"],
+                cover_headline="ТЕКУЩИЙ ЗАГОЛОВОК",
+                cover_subheadline="Текущая вторая строка",
+                face_reference_path="same-face.png",
+                face_reference_label="Текущий человек",
+                render_profile={
+                    "build_mode": "fastgen-text-local-face",
+                    "face_mode": "with",
+                    "text_mode": "fastgen",
+                    "local_face_only": True,
+                    "operation": "nano_banana_pro_image_generate",
+                },
+                path=str(old_path),
+                paths=[str(old_path)],
+                selected_path=str(old_path),
+                generation_prebilling_attempt_count=4,
+                generation_history=[{"status": "failed"}],
+            )])
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "generate_covers", return_value={}) as render:
+                bridge.retry_cover_generation({
+                    "indices": [0], "productionItemIds": ["production:0"],
+                })
+                self.assertFalse(old_path.exists())
+
+        render.assert_called_once_with({
+            "indices": [0],
+            "productionItemIds": ["production:0"],
+            "buildMode": "fastgen-text-local-face",
+            "faceMode": "with",
+            "textMode": "fastgen",
+            "localFaceOnly": True,
+            "operation": "nano_banana_pro_image_generate",
+        })
+        row = settings.cover_queue[0]
+        self.assertEqual(row["image_prompt"], "Keep this exact visual prompt")
+        self.assertEqual(row["cover_headline"], "ТЕКУЩИЙ ЗАГОЛОВОК")
+        self.assertEqual(row["cover_subheadline"], "Текущая вторая строка")
+        self.assertEqual(row["face_reference_path"], "same-face.png")
+        self.assertEqual(row["render_profile"]["operation"], "nano_banana_pro_image_generate")
+        self.assertEqual(row["paths"], [])
+        self.assertNotIn("generation_prebilling_attempt_count", row)
+        self.assertNotIn("generation_history", row)
+
+    def test_manual_retry_rejects_active_or_mixed_selection_without_partial_render(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_queue=[
+            self._row(0, status="Ошибка FastGen", error="terminal"),
+            self._row(1, status="Подготовка запросов", error=""),
+            self._row(2, status="Ошибка FastGen", error="polling interrupted",
+                      accepted_generation_id="task-1"),
+        ])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "regenerate_covers") as render, \
+             self.assertRaisesRegex(ValueError, "недоступен"):
+            bridge.retry_cover_generation({
+                    "indices": [0, 1, 2],
+                    "productionItemIds": ["production:0", "production:1", "production:2"],
+            })
+
+        render.assert_not_called()
+
     def test_three_prebilling_rejections_then_success_reuse_prompt_and_reference(self):
         from scriptor import bridge
 

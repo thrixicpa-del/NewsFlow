@@ -136,6 +136,9 @@ Status: **REAL IMAGE ACCEPTANCE PARTIAL**
 - Deterministic evidence: three pre-billing rejects then success made exactly 4 identical creates and ended ready; four rejects made exactly 4 creates, no fifth request, cleared stale current-image pointers and ended `Нужен новый промпт` with a sanitized reason and revision provenance.
 - If FastGen has already returned a generation ID, the error carries that accepted ID across polling/download boundaries. NewsFlow stops the create loop after the first request and exposes `Требуется восстановление FastGen` instead of blindly creating another possibly billed task.
 - Both live face+text images succeeded on the first create, so no expensive rejection was manufactured; deterministic tests cover the full failure contract.
+- Terminal render errors now expose a separate deliberate operator action: `Повторить генерацию` for one row and `Повторить генерацию выбранных` for an exact durable bulk selection. It preserves the current visual prompt, headline, subheadline, selected face/reference, model and saved render profile, clears the prior terminal render state/counters and starts a fresh bounded same-prompt cycle without reusing an old image.
+- Manual retry is available only for `Ошибка FastGen`, `Нужен новый промпт` and `Ошибка рендера` rows with no accepted generation ID. A mixed selection is rejected as one scope and the UI reports the eligible count; queued/running/accepted work cannot be silently dropped or duplicated.
+- `Создать новый промпт` / `Перегенерировать промпты выбранным` remains a separate action: it rewrites from the current topic/headline/subheadline and does **not** start image rendering automatically.
 
 ### Stale-image and artifacts
 
@@ -151,11 +154,11 @@ Status: **REAL IMAGE ACCEPTANCE PARTIAL**
 - RED: `test_provider_try_again_later_failure_uses_bounded_retry_contract` — expected 2 calls, got 1; `PRODUCTION_WRITE_GUARD=PASS`.
 - GREEN targeted classifier regression — **1 PASS, 0 FAIL, 0 SKIP**; `PRODUCTION_WRITE_GUARD=PASS`.
 - Additional RED evidence: stale prompt readiness after text change; one-call 400 pre-billing failure; accepted-ID retry ambiguity; four-attempt terminal-state absence; exact local-overlay dropped the final subheadline word/outgrew the canvas.
-- `python tests/run_isolated.py tests/test_covers.py -v` — **134 PASS, 0 FAIL, 0 SKIP**.
+- `python tests/run_isolated.py tests/test_covers.py -v` — **136 PASS, 0 FAIL, 0 SKIP**.
 - `python tests/run_isolated.py tests/test_cover_queue_tombstones.py -v` — **14 PASS, 0 FAIL, 0 SKIP**.
 - `python tests/run_isolated.py scriptor/test_cover_library.py -v` — **39 PASS, 0 FAIL, 0 SKIP**.
-- `pnpm exec vitest run src/ui/features/covers/covers-view.test.tsx` — **1 file / 19 tests PASS, 0 FAIL, 0 SKIP**.
-- `pnpm test:ui` — **34 files / 186 tests PASS, 0 FAIL, 0 SKIP**.
+- `pnpm exec vitest run src/ui/features/covers/covers-view.test.tsx` — **1 file / 22 tests PASS, 0 FAIL, 0 SKIP**.
+- `pnpm test:ui` — **34 files / 189 tests PASS, 0 FAIL, 0 SKIP**.
 - `pnpm typecheck` — **PASS**.
 - `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD` — **PASS** (the guard's intentional mutation probe was detected).
 - `python scripts/secret-scan.py` — **PASS**.
