@@ -2450,6 +2450,7 @@ export function Scenarios({
   const [manualTitle, setManualTitle] = useState("");
   const [manualText, setManualText] = useState("");
   const [generating, setGenerating] = useState(false);
+  const scenarioGenerationLock = useRef(false);
   const [provider, setProvider] = useState<"agent" | "openai">(
     data.templateSettings.scenarioProvider || "agent",
   );
@@ -2556,6 +2557,8 @@ export function Scenarios({
     }
   };
   const write = async (indices?: number[]) => {
+    if (scenarioGenerationLock.current) return;
+    scenarioGenerationLock.current = true;
     setGenerating(true);
     try {
       await command("generate-scenarios", {
@@ -2563,6 +2566,7 @@ export function Scenarios({
         provider,
       });
     } finally {
+      scenarioGenerationLock.current = false;
       setGenerating(false);
     }
   };
@@ -2600,22 +2604,16 @@ export function Scenarios({
         />
         <Button
           kind="success"
-          onClick={
-            generating || !selected.length
-              ? undefined
-              : () => void write(selected)
-          }
+          disabled={generating || !selected.length}
+          onClick={() => void write(selected)}
         >
           <Sparkles size={17} />
           Написать выбранные
         </Button>
         <Button
           kind="primary"
-          onClick={
-            generating || !unfinishedScenarioCount
-              ? undefined
-              : () => void write()
-          }
+          disabled={generating || !unfinishedScenarioCount}
+          onClick={() => void write()}
         >
           <Sparkles size={17} />
           {generating
