@@ -637,6 +637,33 @@ class CoverRateLimitTests(unittest.TestCase):
 
 
 class FastGenClientTests(unittest.TestCase):
+    def test_same_reference_upload_id_is_reused_across_create_retries(self):
+        with TemporaryDirectory() as directory:
+            reference = Path(directory) / "face.png"
+            reference.write_bytes(b"same-reference")
+            client = FastGenClient("test-key")
+            with patch.object(client, "_upload_reference", return_value="stored-reference-1") as upload:
+                first = client.upload_reference(reference)
+                second = client.upload_reference(reference)
+
+        self.assertEqual(first, "stored-reference-1")
+        self.assertEqual(second, "stored-reference-1")
+        upload.assert_called_once()
+
+    def test_error_after_generation_acceptance_carries_remote_id(self):
+        client = FastGenClient("test-key")
+        with TemporaryDirectory() as directory, \
+             patch.object(client, "_json", side_effect=[
+                 {"id": "accepted-generation-1"},
+                 FastGenError("polling interrupted"),
+             ]), self.assertRaises(FastGenError) as raised:
+            client._wait_for_generation(
+                {"operation": "test", "prompt": "same"}, Path(directory), "cover", 1,
+            )
+
+        self.assertTrue(raised.exception.generation_accepted)
+        self.assertEqual(raised.exception.generation_id, "accepted-generation-1")
+
     def test_selected_fastgen_keys_filter_the_generation_pool(self):
         from scriptor.bridge import _selected_fastgen_keys
         settings = Settings(cover_api_keys=[FastGenKey("A", "a"), FastGenKey("B", "b")])
@@ -1261,6 +1288,47 @@ class CoverLocalCompositorTests(unittest.TestCase):
             self.assertIn(str(final_path), settings.cover_queue[0]["paths"])
             self.assertIsNotNone(ImageChops.difference(Image.open(source).convert("RGB"), Image.open(final_path).convert("RGB")).getbbox())
 
+    def test_face_text_overlay_keeps_all_current_words_inside_the_canvas(self):
+        from PIL import Image, ImageDraw
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "face-scene.png"
+            Image.new("RGB", (1376, 768), (25, 54, 86)).save(source)
+            headline = "ЭНЕРГИЯ ПОД КОНТРОЛЕМ"
+            subheadline = "Форум обсуждает безопасность поставок"
+            settings = Settings(cover_output_folder=str(root))
+            settings.cover_queue = [{
+                "title": "Владимир Путин обсуждает энергетическую безопасность",
+                "cover_headline": headline,
+                "cover_subheadline": subheadline,
+                "paths": [str(source)],
+                "selected_path": str(source),
+                "selected_base_path": str(source),
+                "face_composite_paths": [str(source)],
+            }]
+            drawn = []
+            original_text = ImageDraw.ImageDraw.text
+
+            def capture_text(draw, xy, text, *args, **kwargs):
+                box = draw.textbbox(
+                    xy, text, font=kwargs.get("font"),
+                    stroke_width=kwargs.get("stroke_width", 0),
+                )
+                drawn.append((str(text), box))
+                return original_text(draw, xy, text, *args, **kwargs)
+
+            with patch("scriptor.bridge.load_settings", return_value=settings), \
+                 patch("scriptor.bridge.save_settings"), \
+                 patch("scriptor.bridge.snapshot", return_value={}), \
+                 patch.object(ImageDraw.ImageDraw, "text", new=capture_text):
+                render_cover_text({"indices": [0]})
+
+        rendered_words = " ".join(text for text, _box in drawn).casefold().split()
+        self.assertEqual(rendered_words, f"{headline} {subheadline}".casefold().split())
+        self.assertTrue(all(0 <= box[0] and box[2] <= 1376 and 0 <= box[1] and box[3] <= 768
+                            for _text, box in drawn))
+
     def test_face_root_is_saved_as_an_absolute_path(self):
         with TemporaryDirectory() as directory:
             settings = Settings()
@@ -1550,7 +1618,9 @@ class CoverLocalCompositorTests(unittest.TestCase):
              patch("scriptor.bridge.FastGenPool.generate_media", side_effect=RuntimeError("timeout")), \
              patch("scriptor.bridge.compose_cover_faces") as compose:
             generate_covers({"indices": [0], "textMode": "fastgen"})
-        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка FastGen")
+        self.assertEqual(settings.cover_queue[0]["status"], "Нужен новый промпт")
+        self.assertEqual(settings.cover_queue[0]["generation_prebilling_attempt_count"], 4)
+        self.assertIn("FastGen отклонил текущий prompt 4 раза", settings.cover_queue[0]["error"])
         self.assertFalse(settings.cover_queue[0]["face_composite_requested"])
         compose.assert_not_called()
 
@@ -1907,6 +1977,92 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
         self.assertEqual(len(settings.cover_queue[1]["image_prompt_options"]), 2)
         self.assertEqual(settings.cover_queue[1]["prompt_provider_attempt_count"], 2)
 
+    def test_prompt_batch_uses_each_rows_current_headline_and_subheadline(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_prompt_variant_count=1)
+        settings.cover_queue = [
+            self._current_row(
+                production_item_id="production:putin",
+                title="Владимир Путин обсуждает энергетику",
+                cover_headline="ЭНЕРГИЯ ПОД КОНТРОЛЕМ",
+                cover_subheadline="Новые решения для рынка",
+            ),
+            self._current_row(
+                production_item_id="production:trump",
+                title="Дональд Трамп выступает на форуме",
+                cover_headline="ТРАМП МЕНЯЕТ КУРС",
+                cover_subheadline="Форум обсуждает новую стратегию",
+            ),
+        ]
+        prompts = []
+
+        async def generate(prompt, **_kwargs):
+            prompts.append(prompt)
+            return '{"prompts":["Real conference scene with cameras and policy documents"],"recommended":1}'
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.generate_cover_prompts({
+                "indices": [0, 1],
+                "productionItemIds": ["production:putin", "production:trump"],
+                "provider": "agent",
+            })
+
+        self.assertEqual(len(prompts), 2)
+        putin_prompt = next(prompt for prompt in prompts if "ЭНЕРГИЯ ПОД КОНТРОЛЕМ" in prompt)
+        trump_prompt = next(prompt for prompt in prompts if "ТРАМП МЕНЯЕТ КУРС" in prompt)
+        self.assertIn("Новые решения для рынка", putin_prompt)
+        self.assertNotIn("ТРАМП МЕНЯЕТ КУРС", putin_prompt)
+        self.assertNotIn("Форум обсуждает новую стратегию", putin_prompt)
+        self.assertIn("Форум обсуждает новую стратегию", trump_prompt)
+        self.assertNotIn("ЭНЕРГИЯ ПОД КОНТРОЛЕМ", trump_prompt)
+        self.assertNotIn("Новые решения для рынка", trump_prompt)
+
+    def test_changed_cover_text_makes_old_new_prompt_status_stale_until_rewrite(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_prompt_variant_count=1)
+        settings.cover_queue = [self._current_row(
+            cover_headline="СТАРЫЙ ЗАГОЛОВОК",
+            cover_subheadline="Старая вторая строка",
+            image_prompt="Old visual brief",
+            image_prompt_options=["Old visual brief"],
+            status="Новые промпты созданы",
+        )]
+        prompts = []
+
+        async def generate(prompt, **_kwargs):
+            prompts.append(prompt)
+            return '{"prompts":["New press scene with documents and cameras"],"recommended":1}'
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=generate)):
+            bridge.save_cover_headline({"index": 0, "headline": "НОВЫЙ ЗАГОЛОВОК"})
+            bridge.save_cover_subheadline({"index": 0, "subheadline": "Текущая вторая строка"})
+
+            self.assertEqual(settings.cover_queue[0]["status"], "Промпты устарели")
+
+            bridge.generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:0"],
+                "provider": "agent",
+                "rewrite": True,
+            })
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("НОВЫЙ ЗАГОЛОВОК", prompts[0])
+        self.assertIn("Текущая вторая строка", prompts[0])
+        self.assertNotIn("СТАРЫЙ ЗАГОЛОВОК", prompts[0])
+        self.assertNotIn("Старая вторая строка", prompts[0])
+        self.assertTrue(settings.cover_queue[0]["prompt_text_signature"])
+
     def test_prompt_permanent_failure_is_terminal_after_one_attempt(self):
         from scriptor import bridge
 
@@ -2156,19 +2312,106 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         self.assertEqual(generate.call_args.args[0]["indices"], [0, 1])
         self.assertEqual(generate.call_args.args[0]["productionItemIds"], ["production:z", "production:a"])
 
-    def test_retryable_failure_succeeds_on_call_seven_with_rewritten_round_metadata(self):
+    def test_three_prebilling_rejections_then_success_reuse_prompt_and_reference(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [self._row(
+            0,
+            cover_headline="ТЕКУЩИЙ ЗАГОЛОВОК",
+            cover_subheadline="Текущая вторая строка",
+        )]
+        calls = []
+
+        def render(prompt, _output, _stem, operation, _ratio, **kwargs):
+            calls.append((prompt, operation, tuple(kwargs.get("references") or [])))
+            if len(calls) < 4:
+                raise FastGenError("FastGen API (400): prompt rejected", 400)
+            return [Path("fresh-success.png")]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_cover_references_for_item", return_value=([Path("same-face.png")], "")), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.time, "sleep"), \
+             patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:0"], "_parallel_cover_worker": True,
+            })
+
+        row = settings.cover_queue[0]
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len({call[0] for call in calls}), 1)
+        self.assertEqual(len({call[1] for call in calls}), 1)
+        self.assertEqual(len({call[2] for call in calls}), 1)
+        self.assertEqual(row["status"], "Готово")
+        self.assertEqual(row["paths"], ["fresh-success.png"])
+        self.assertEqual(row["generation_prebilling_attempt_count"], 4)
+        self.assertEqual(row["generation_history"][-1]["totalAttempt"], 4)
+        self.assertTrue(all(not event["rewritten"] for event in row["generation_history"]))
+
+    def test_four_prebilling_rejections_require_new_prompt_without_reusing_old_image(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [self._row(
+            0,
+            cover_headline="ТЕКУЩИЙ ЗАГОЛОВОК",
+            cover_subheadline="Текущая вторая строка",
+            path="old.png",
+            paths=["old.png"],
+            raw_paths=["old.png"],
+            selected_path="old.png",
+        )]
+        calls = []
+
+        def render(prompt, _output, _stem, _operation, _ratio, **kwargs):
+            calls.append((prompt, tuple(kwargs.get("references") or [])))
+            raise FastGenError("FastGen API (400): unsafe token=secret-value", 400)
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_cover_references_for_item", return_value=([Path("same-face.png")], "")), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.time, "sleep"), \
+             patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:0"],
+                "_parallel_cover_worker": True, "forceRegenerate": True,
+            })
+
+        row = settings.cover_queue[0]
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len({call[0] for call in calls}), 1)
+        self.assertEqual(len({call[1] for call in calls}), 1)
+        self.assertEqual(row["status"], "Нужен новый промпт")
+        self.assertEqual(row["generation_prebilling_attempt_count"], 4)
+        self.assertTrue(row["generation_rejected_before_acceptance"])
+        self.assertIn("FastGen отклонил текущий prompt 4 раза", row["error"])
+        self.assertNotIn("secret-value", row["error"])
+        self.assertEqual(row["cover_headline"], "ТЕКУЩИЙ ЗАГОЛОВОК")
+        self.assertEqual(row["cover_subheadline"], "Текущая вторая строка")
+        self.assertEqual(row["paths"], [])
+        self.assertEqual(row["raw_paths"], [])
+        self.assertEqual(row["selected_path"], "")
+
+    def test_accepted_generation_id_stops_same_prompt_create_retry(self):
         from scriptor import bridge
 
         settings = Settings(cover_auto_overlay_text=False, cover_variant_count=1)
         settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
         settings.cover_queue = [self._row(0)]
         calls = []
+        accepted_error = FastGenError("polling interrupted after acceptance")
+        accepted_error.generation_id = "generation-accepted-1"
 
         def render(*_args, **_kwargs):
             calls.append(1)
-            if len(calls) < 7:
-                raise TimeoutError("temporary timeout")
-            return [Path("fresh-success.png")]
+            raise accepted_error
 
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
@@ -2180,12 +2423,46 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                 "indices": [0], "productionItemIds": ["production:0"], "_parallel_cover_worker": True,
             })
 
-        row = settings.cover_queue[0]
-        self.assertEqual(len(calls), 7)
-        self.assertEqual(row["status"], "Готово")
-        self.assertEqual(row["paths"], ["fresh-success.png"])
-        self.assertEqual(row["generation_history"][-1]["totalAttempt"], 7)
-        self.assertTrue(row["generation_history"][-1]["rewritten"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(settings.cover_queue[0]["status"], "Требуется восстановление FastGen")
+        self.assertEqual(settings.cover_queue[0]["accepted_generation_id"], "generation-accepted-1")
+
+    def test_new_prompt_action_after_exhaustion_uses_current_text_without_rendering(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_prompt_variant_count=1)
+        settings.cover_queue = [self._row(
+            0,
+            cover_headline="НОВЫЙ КУРС",
+            cover_subheadline="Рынок ждёт решений",
+            image_prompt="Old rejected visual prompt",
+            image_prompt_options=["Old rejected visual prompt"],
+            status="Нужен новый промпт",
+            error="FastGen отклонил текущий prompt 4 раза",
+        )]
+        provider_prompts = []
+
+        async def rewrite(prompt, **_kwargs):
+            provider_prompts.append(prompt)
+            return '{"prompts":["Different current scene with market screens and press cameras"],"recommended":1}'
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=rewrite)), \
+             patch.object(bridge, "generate_covers") as render:
+            regenerate_covers_new_prompts({
+                "indices": [0], "productionItemIds": ["production:0"], "provider": "agent",
+            })
+
+        self.assertEqual(len(provider_prompts), 1)
+        self.assertIn("НОВЫЙ КУРС", provider_prompts[0])
+        self.assertIn("Рынок ждёт решений", provider_prompts[0])
+        self.assertNotEqual(settings.cover_queue[0]["image_prompt"], "Old rejected visual prompt")
+        self.assertEqual(settings.cover_queue[0]["status"], "Новые промпты созданы")
+        self.assertEqual(settings.cover_queue[0]["error"], "")
+        render.assert_not_called()
 
     def test_provider_try_again_later_failure_uses_bounded_retry_contract(self):
         from scriptor import bridge

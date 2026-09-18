@@ -476,24 +476,23 @@ class CoverLibraryTests(unittest.TestCase):
         self.assertEqual(result[0]["state"], "ready")
         file_state.assert_called_once_with("cover.png", verify=False)
 
-    def test_retry_plan_uses_four_prompt_rounds_with_four_attempts_each(self):
-        """A recoverable provider failure gets 16 transparent chances per prompt."""
+    def test_retry_plan_uses_one_immutable_prompt_with_four_prebilling_attempts(self):
+        """A rejected create request gets four chances without a prompt rewrite."""
         plan = bridge._cover_retry_plan("Трамп и переговоры", "Исходный конкретный промпт")
 
-        self.assertEqual(len(plan), 4)
+        self.assertEqual(len(plan), 1)
         self.assertEqual(plan[0]["round"], 1)
         self.assertEqual(plan[0]["prompt"], "Исходный конкретный промпт")
-        self.assertTrue(all(item["attempts"] == 4 for item in plan))
+        self.assertEqual(plan[0]["attempts"], 4)
         # A transport retry must preserve the builder-owned final provider
         # prompt byte-for-byte: rewriting it here would reintroduce a second
         # prompt authority after Universal V2 assembly.
         self.assertEqual(len({item["prompt"] for item in plan}), 1)
         self.assertTrue(all(item["prompt"] == "Исходный конкретный промпт" for item in plan))
         self.assertFalse(plan[0]["rewritten"])
-        self.assertTrue(all(item["rewritten"] for item in plan[1:]))
 
-    def test_retryable_fastgen_failure_records_all_sixteen_attempts(self):
-        """The final error must prove every prompt round was actually sent."""
+    def test_retryable_fastgen_failure_stops_after_four_identical_prebilling_attempts(self):
+        """The final state must prove four creates happened without a fifth request."""
         class FailingPool:
             calls = 0
 
@@ -523,11 +522,12 @@ class CoverLibraryTests(unittest.TestCase):
                 bridge.generate_covers({"indices": [0], "productionItemIds": ["retry-fastgen-1"], "_parallel_cover_worker": True})
 
             item = settings.cover_queue[0]
-            self.assertEqual(FailingPool.calls, 16)
-            self.assertEqual(item["generation_total_attempt"], 16)
-            self.assertEqual(len(item["generation_history"]), 16)
-            self.assertEqual(item["status"], "Ошибка FastGen")
-            self.assertIn("4 кругов × 4 попытки", item["error"])
+            self.assertEqual(FailingPool.calls, 4)
+            self.assertEqual(item["generation_prebilling_attempt_count"], 4)
+            self.assertEqual(len(item["generation_history"]), 4)
+            self.assertTrue(all(not event["rewritten"] for event in item["generation_history"]))
+            self.assertEqual(item["status"], "Нужен новый промпт")
+            self.assertIn("FastGen отклонил текущий prompt 4 раза", item["error"])
 
     def test_newer_persistent_cover_restores_stale_release_queue(self):
         """A stale settings writer must not erase a completed cover record."""
