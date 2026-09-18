@@ -130,6 +130,69 @@ describe("Voice Light views", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("generate-voice-queue", {}));
   });
 
+  it("blocks automatic resume for unsafe interrupted VoiceGen work", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 2, title: "Прерванный VoiceGen", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{
+        index: 2, title: "Прерванный VoiceGen", state: "Ошибка", path: "",
+        jobState: "running", jobProvider: "voicegen", resumeSafe: false,
+      }],
+    };
+    render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    expect(screen.getByRole("button", { name: "Продолжить очередь: 0" })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Требуют явной переозвучки: 1")).toBeTruthy();
+    expect(screen.getByText("Автопродолжение заблокировано — требуется явная переозвучка")).toBeTruthy();
+  });
+
+  it("continues a safe in-flight WProject job", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 4, title: "WProject", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 4, title: "WProject", state: "В обработке", path: "", jobState: "running", jobProvider: "wproject", resumeSafe: true }],
+    };
+    render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить очередь: 1" }));
+
+    expect(command).toHaveBeenCalledWith("generate-voice", { indices: [4], resume: true });
+  });
+
+  it("continues queued non-idempotent work", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 5, title: "Queued VoiceGen", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 5, title: "Queued VoiceGen", state: "Ожидает", path: "", jobState: "queued", jobProvider: "voicegen", resumeSafe: true }],
+    };
+    render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Продолжить очередь: 1" }));
+
+    expect(command).toHaveBeenCalledWith("generate-voice", { indices: [5], resume: true });
+  });
+
+  it("keeps explicit revoice available for unsafe interrupted work", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 2, title: "Прерванный VoiceGen", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{
+        index: 2, title: "Прерванный VoiceGen", state: "Ошибка", path: "",
+        jobState: "interrupted", jobProvider: "voicegen", resumeSafe: false,
+      }],
+    };
+    render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "3. Прерванный VoiceGen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Переозвучить выбранные" }));
+
+    expect(command).toHaveBeenCalledWith("generate-voice", { indices: [2], force: true });
+  });
+
   it("saves global queue concurrency together with the active voice profile contract", () => {
     const command = vi.fn();
     const data = {

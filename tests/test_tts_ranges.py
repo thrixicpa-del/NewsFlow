@@ -1,10 +1,12 @@
 import unittest
+from typing import ClassVar
 
 
 class TtsRangeOrchestrationTests(unittest.TestCase):
     def test_voice_queue_command_selects_only_ready_scenarios_and_keeps_skip_reasons(self):
         """Queue-all must not submit empty scripts or duplicate a ready MP3."""
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings
         from scriptor.core import ScenarioRequest
@@ -71,22 +73,24 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
 
     def test_saving_overlapping_voice_ranges_is_blocked_before_persistence(self):
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings
 
         settings = Settings(voice_profiles=[{"id": "voice-a", "name": "A"}, {"id": "voice-b", "name": "B"}],
                             voice_default_profile_id="voice-a")
         with patch.object(bridge, "load_settings", return_value=settings), \
-             patch.object(bridge, "save_settings") as save:
-            with self.assertRaisesRegex(ValueError, "10–15"):
-                bridge.save_voice_settings({"ranges": [
-                    {"id": "one", "start": 1, "end": 15, "profile_id": "voice-a", "enabled": True},
-                    {"id": "two", "start": 10, "end": 20, "profile_id": "voice-b", "enabled": True},
-                ]})
+             patch.object(bridge, "save_settings") as save, \
+             self.assertRaisesRegex(ValueError, "10–15"):
+            bridge.save_voice_settings({"ranges": [
+                {"id": "one", "start": 1, "end": 15, "profile_id": "voice-a", "enabled": True},
+                {"id": "two", "start": 10, "end": 20, "profile_id": "voice-b", "enabled": True},
+            ]})
         save.assert_not_called()
 
     def test_user_can_save_global_tts_concurrency_independently_of_ranges(self):
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings
 
@@ -100,9 +104,10 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
 
     def test_wproject_uses_all_ten_authorised_queue_slots_when_ten_jobs_are_ready(self):
         """The UI value 10 must not silently serialize otherwise independent jobs."""
-        import threading
         import tempfile
+        import threading
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, WProjectKey
         from scriptor.core import ScenarioRequest
@@ -184,6 +189,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
     def test_normal_start_keeps_ready_audio_but_explicit_revoice_creates_snapshot(self):
         import tempfile
         from pathlib import Path
+
         from scriptor import bridge
         from scriptor.config import Settings
         from scriptor.core import ScenarioRequest
@@ -214,15 +220,15 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
 
     def test_one_batch_dispatches_different_range_snapshots_to_their_providers(self):
         import tempfile
-        from pathlib import Path
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import LumeanKey, Settings, VoiceGenKey
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job, RunState
 
         class FakeVoiceGen:
-            calls = []
+            calls: ClassVar[list] = []
             def __init__(self, _key):
                 pass
             def synthesize(self, _text, _filename, profile, *, threads, progress=None):
@@ -230,7 +236,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
                 return b"VOICEGEN"
 
         class FakeLumean:
-            calls = []
+            calls: ClassVar[list] = []
             def __init__(self, _key):
                 pass
             def synthesize(self, _text, profile, progress=None):
@@ -268,16 +274,17 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         self.assertEqual(FakeVoiceGen.calls, ["vg-voice"])
         self.assertEqual(FakeLumean.calls, ["lu-voice"])
 
-    def test_resume_uses_the_persisted_snapshot_not_a_later_range_edit(self):
+    def test_queued_resume_uses_the_persisted_snapshot_not_a_later_range_edit(self):
         import tempfile
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, VoiceGenKey
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job, RunState
 
         class FakeVoiceGen:
-            calls = []
+            calls: ClassVar[list] = []
             def __init__(self, _key):
                 pass
             def synthesize(self, _text, _filename, profile, *, threads, progress=None):
@@ -289,7 +296,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
                 "id": "saved-job", "batch_id": "saved-batch", "production_item_id": "production-1",
                 "batch_position": 1, "scenario_index": 0, "range_id": "old-range", "provider": "voicegen",
                 "settings": {"id": "old", "name": "Old", "provider": "voicegen", "voice_id": "old-voice", "task_threads": 1},
-                "fallback_settings": [], "script_hash": "", "script_revision": "", "output_folder": folder, "state": "interrupted",
+                "fallback_settings": [], "script_hash": "", "script_revision": "", "output_folder": folder, "state": "queued",
             }
             settings = Settings(
                 voicer_output_folder=folder, voice_queue_concurrency=5,
@@ -309,9 +316,103 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(FakeVoiceGen.calls, ["old-voice"])
 
+    def test_unsafe_inflight_non_idempotent_provider_requires_explicit_revoice(self):
+        import hashlib
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import LumeanKey, SecretVoicerKey, Settings, VoiceGenKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        text = "Текст сценария"
+        for provider in ("api", "lumean", "voicegen", "chrome"):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as folder:
+                saved_job = {
+                    "id": "saved-job", "batch_id": "saved-batch", "production_item_id": "production-1",
+                    "batch_position": 1, "scenario_index": 0, "range_id": "saved-range", "provider": provider,
+                    "settings": {"id": "saved", "name": "Saved", "provider": provider, "voice_id": "saved-voice"},
+                    "fallback_settings": [], "script_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "script_revision": "revision-1", "output_folder": folder, "state": "running",
+                }
+                settings = Settings(
+                    voicer_output_folder=folder,
+                    secret_voicer_keys=[SecretVoicerKey("API", "key")],
+                    lumean_api_keys=[LumeanKey("Lumean", "key")],
+                    voicegen_api_keys=[VoiceGenKey("VoiceGen", "key")],
+                    voice_tts_jobs={"production-1": saved_job},
+                    idea_production_items=[{"id": "production-1", "title": "Тема"}],
+                )
+                job = Job(ScenarioRequest(0, "Тема", "", "production-1"), RunState.DONE, text, "")
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "save_settings") as save_settings, \
+                     patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                     patch.object(bridge, "SecretVoicerClient", side_effect=AssertionError("provider must not be called")), \
+                     patch.object(bridge, "LumeanClient", side_effect=AssertionError("provider must not be called")), \
+                     patch.object(bridge, "VoiceGenClient", side_effect=AssertionError("provider must not be called")), \
+                     patch.object(bridge, "ChromeSecretVoicer", side_effect=AssertionError("provider must not be called")):
+                    result = bridge.generate_voice({"indices": [0], "resume": True})
+
+                self.assertEqual(result, {"ok": True})
+                self.assertEqual(saved_job["state"], "interrupted")
+                self.assertEqual(saved_job["production_item_id"], "production-1")
+                self.assertEqual(saved_job["script_revision"], "revision-1")
+                self.assertIn("Автопродолжение отключено", settings.voice_task_statuses["1"]["label"])
+                self.assertTrue(save_settings.called)
+
+    def test_non_idempotent_provider_persists_running_before_invocation(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, VoiceGenKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        persisted_states = []
+        invocation_states = []
+
+        class FakeVoiceGen:
+            calls = 0
+            def __init__(self, _key):
+                pass
+            def synthesize(self, _text, _filename, _profile, *, threads, progress=None):
+                type(self).calls += 1
+                self_snapshot = settings.voice_tts_jobs["production-1"]
+                invocation_states.append((self_snapshot["state"], self_snapshot["active_provider"]))
+                return b"VOICEGEN"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder, voice_queue_concurrency=1,
+                voicegen_api_keys=[VoiceGenKey("VG", "key")],
+                voice_profiles=[{"id": "voice", "name": "Voice", "provider": "voicegen", "voice_id": "voice-id"}],
+                voice_default_profile_id="voice", idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+
+            def record_save(saved_settings):
+                saved = saved_settings.voice_tts_jobs.get("production-1", {})
+                persisted_states.append((saved.get("state"), saved.get("active_provider")))
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings", side_effect=record_save), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", FakeVoiceGen), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.generate_voice({"indices": [0]})
+
+        self.assertEqual(FakeVoiceGen.calls, 1)
+        self.assertEqual(invocation_states, [("running", "voicegen")])
+        self.assertIn(("running", "voicegen"), persisted_states)
+
     def test_retryable_provider_limit_retries_same_snapshot_with_backoff(self):
         import tempfile
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, VoiceGenKey
         from scriptor.core import ScenarioRequest
@@ -349,13 +450,14 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
     def test_one_range_can_dispatch_to_wproject_with_its_saved_controls(self):
         import tempfile
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, WProjectKey
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job, RunState
 
         class FakeWProject:
-            calls = []
+            calls: ClassVar[list] = []
             def __init__(self, _key):
                 pass
             def create_task(self, _text, _filename, profile, *, threads, idempotency_key=None):
@@ -391,14 +493,15 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         """A transient submit failure may retry; once an ID exists it is the sole remote task."""
         import tempfile
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, WProjectKey
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job, RunState
 
         class FakeWProject:
-            submitted_texts = []
-            waited = []
+            submitted_texts: ClassVar[list] = []
+            waited: ClassVar[list] = []
 
             def __init__(self, _key):
                 pass
@@ -442,13 +545,14 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         """A lost submit response must be retried with the same provider key."""
         import tempfile
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, WProjectKey
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job, RunState
 
         class TemporarilyUnavailableWProject:
-            idempotency_keys = []
+            idempotency_keys: ClassVar[list] = []
 
             def __init__(self, _key):
                 pass
@@ -470,9 +574,9 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
                  patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
                  patch.object(bridge, "snapshot", return_value={"ok": True}), \
                  patch.object(bridge, "WProjectClient", TemporarilyUnavailableWProject), \
-                 patch.object(bridge.time, "sleep"):
-                with self.assertRaisesRegex(RuntimeError, "503 WProject"):
-                    bridge.generate_voice({"indices": [0]})
+                 patch.object(bridge.time, "sleep"), \
+                 self.assertRaisesRegex(RuntimeError, "503 WProject"):
+                bridge.generate_voice({"indices": [0]})
 
         self.assertGreaterEqual(len(TemporarilyUnavailableWProject.idempotency_keys), 2)
         self.assertEqual(len(set(TemporarilyUnavailableWProject.idempotency_keys)), 1)
@@ -484,15 +588,15 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
     def test_wproject_one_failed_task_does_not_cancel_its_neighbor(self):
         """Queue completion is isolated per ProductionItem, including WProject failures."""
         import tempfile
-        from pathlib import Path
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, WProjectKey
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job, RunState
 
         class FakeWProject:
-            submitted = []
+            submitted: ClassVar[list] = []
 
             def __init__(self, _key):
                 pass
@@ -523,9 +627,9 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
                  patch.object(bridge, "load_session", return_value=(["Первый", "Второй"], jobs)), \
                  patch.object(bridge, "snapshot", return_value={"ok": True}), \
                  patch.object(bridge, "WProjectClient", FakeWProject), \
-                 patch.object(bridge, "validate_voiceover_artifact", return_value=24.0):
-                with self.assertRaisesRegex(RuntimeError, "неверный голос"):
-                    bridge.generate_voice({"indices": [0, 1]})
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=24.0), \
+                 self.assertRaisesRegex(RuntimeError, "неверный голос"):
+                bridge.generate_voice({"indices": [0, 1]})
 
         self.assertEqual(set(FakeWProject.submitted), {"Первый сценарий", "Второй сценарий"})
         self.assertEqual(settings.voice_tts_jobs["first"]["state"], "ready")
@@ -537,6 +641,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings, WProjectKey
         from scriptor.core import ScenarioRequest
@@ -544,7 +649,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
 
         class FakeWProject:
             created = 0
-            waited = []
+            waited: ClassVar[list] = []
             def __init__(self, _key):
                 pass
             def create_task(self, *_args, **_kwargs):
@@ -580,8 +685,55 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
             self.assertEqual(FakeWProject.waited, ["remote-task-1"])
             self.assertTrue(Path(settings.voice_scenario_outputs["1"]).is_file())
 
+    def test_wproject_resume_reuses_persisted_idempotency_key_when_task_id_was_lost(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class FakeWProject:
+            created_with: ClassVar[list] = []
+            waited: ClassVar[list] = []
+            def __init__(self, _key):
+                pass
+            def create_task(self, *_args, idempotency_key=None, **_kwargs):
+                type(self).created_with.append(idempotency_key)
+                return "recovered-task"
+            def wait_download(self, task_id, progress=None):
+                type(self).waited.append(task_id)
+                return b"RESUMED"
+
+        with tempfile.TemporaryDirectory() as folder:
+            saved = {
+                "id": "job-1", "production_item_id": "production-1", "scenario_index": 0,
+                "state": "interrupted", "provider": "wproject", "script_hash": "",
+                "settings": {"provider": "wproject", "voice_id": "speaker", "task_threads": 10},
+                "provider_idempotency_key": "persisted-idempotency-key",
+            }
+            settings = Settings(
+                voicer_output_folder=folder, voice_queue_concurrency=1,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_tts_jobs={"production-1": saved},
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", FakeWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                bridge.generate_voice({"indices": [0], "resume": True})
+
+        self.assertEqual(FakeWProject.created_with, ["persisted-idempotency-key"])
+        self.assertEqual(FakeWProject.waited, ["recovered-task"])
+
     def test_generate_one_range_selects_only_its_frozen_items(self):
         from unittest.mock import patch
+
         from scriptor import bridge
         from scriptor.config import Settings
 
@@ -644,7 +796,11 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         self.assertEqual(assignments[20]["profile"]["id"], "default")
 
     def test_overlap_blocks_resolution_with_the_intersection(self):
-        from scriptor.tts_ranges import RangeValidationError, freeze_batch, resolve_assignments
+        from scriptor.tts_ranges import (
+            RangeValidationError,
+            freeze_batch,
+            resolve_assignments,
+        )
 
         batch = freeze_batch([{"id": "item-1", "title": "Тема"}])
         with self.assertRaisesRegex(RangeValidationError, "10–15"):
@@ -654,7 +810,11 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
             ])
 
     def test_job_snapshot_remains_unchanged_after_range_profile_changes(self):
-        from scriptor.tts_ranges import freeze_batch, resolve_assignments, snapshot_tts_job
+        from scriptor.tts_ranges import (
+            freeze_batch,
+            resolve_assignments,
+            snapshot_tts_job,
+        )
 
         batch = freeze_batch([{"id": "item-7", "title": "Тема", "scenario_index": 6}])
         profile = {"id": "voice-old", "name": "Old", "provider": "voicegen", "voice_id": "old", "model_id": "v3"}
