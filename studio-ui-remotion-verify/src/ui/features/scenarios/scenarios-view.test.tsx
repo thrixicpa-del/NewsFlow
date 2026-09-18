@@ -3,6 +3,39 @@ import { describe, expect, it, vi } from "vitest";
 import { fallback, FinishedScripts, Scenarios } from "../../App";
 
 describe("Scenarios and scripts Light views", () => {
+  it("offers explicit recovery for persisted active scenarios and keeps recovered errors in the normal retry count", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 0, title: "Прерванный", state: "В обработке", result: "Частичный текст", error: "" },
+        { index: 1, title: "Восстановленный", state: "Ошибка", result: "Частичный текст", error: "Прервана" },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Восстановить прерванные: 1" }));
+
+    expect(command).toHaveBeenCalledWith("reconcile-runtime-state");
+    expect(screen.getByRole("button", { name: "Написать все сценарии: 1" })).not.toBeNull();
+  });
+
+  it("does not offer persisted-active recovery while this renderer is generating", () => {
+    const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 0, title: "Прерванный", state: "В обработке", result: "Частичный текст", error: "" },
+        { index: 1, title: "Ожидающий", state: "Ожидает", result: "", error: "" },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Написать все сценарии: 1" }));
+
+    expect(screen.queryByRole("button", { name: "Восстановить прерванные: 1" })).toBeNull();
+  });
+
   it("uses the workstation scenario queue table without changing the selected-write command", () => {
     const command = vi.fn();
     const data = {
