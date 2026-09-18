@@ -109,6 +109,50 @@ describe("Ideas Light view", () => {
     expect(command).toHaveBeenCalledWith("add-topic", { topic: "Проверочная тема" });
   });
 
+  it("keeps the main suggestion approval command contract", async () => {
+    const suggestion = "Предложение агента";
+    const command = vi.fn().mockResolvedValue(fallback);
+    render(
+      <Ideas
+        data={{ ...fallback, ideaSuggestedTopics: [suggestion] }}
+        go={vi.fn()}
+        command={command}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: `Выбрать предложение ${suggestion}` }));
+    fireEvent.click(screen.getByRole("button", { name: "В избранные (1)" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("add-suggested-topics-to-favorites", {
+        topics: [suggestion],
+      }),
+    );
+  });
+
+  it("marks YouTube suggestion approval with its staging source", async () => {
+    const suggestion = "YouTube предложение";
+    const command = vi.fn().mockResolvedValue(fallback);
+    render(
+      <Ideas
+        data={{ ...fallback, youtubeSuggestedTopics: [suggestion] }}
+        go={vi.fn()}
+        command={command}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "YouTube-темы" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: `Выбрать YouTube-предложение ${suggestion}` }));
+    fireEvent.click(screen.getByRole("button", { name: "В избранные" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("add-suggested-topics-to-favorites", {
+        topics: [suggestion],
+        source: "youtube",
+      }),
+    );
+  });
+
   it("deletes only the checked topics through the current command after confirmation", () => {
     const command = vi.fn().mockResolvedValue(fallback);
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);

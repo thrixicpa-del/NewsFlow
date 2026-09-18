@@ -1741,6 +1741,7 @@ export function Ideas({
     }
     const result = await command("add-suggested-topics-to-favorites", {
       topics: youtubeSelected,
+      source: "youtube",
     });
     if (result) setYoutubeSelected([]);
   };

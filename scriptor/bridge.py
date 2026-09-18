@@ -1776,6 +1776,9 @@ def suggest_topics(payload: dict) -> dict:
 def add_suggested_topics_to_favorites(payload: dict) -> dict:
     """Persist only the agent ideas the operator explicitly approves."""
     settings = load_settings()
+    source = str(payload.get("source", "idea")).strip().casefold()
+    if source not in {"idea", "youtube"}:
+        raise ValueError("Неизвестный источник предложенных направлений")
     requested = [" ".join(str(item).split()) for item in payload.get("topics", []) if str(item).strip()]
     if not requested:
         raise ValueError("Отметьте предложенные направления для избранного")
@@ -1786,6 +1789,17 @@ def add_suggested_topics_to_favorites(payload: dict) -> dict:
             settings.idea_topics.append(topic)
             existing.add(topic.casefold())
             added.append(topic)
+    requested_keys = {topic.casefold() for topic in requested}
+    if source == "idea":
+        settings.idea_suggested_topics = [
+            topic for topic in settings.idea_suggested_topics
+            if " ".join(str(topic).split()).casefold() not in requested_keys
+        ]
+    else:
+        settings.youtube_suggested_topics = [
+            topic for topic in settings.youtube_suggested_topics
+            if " ".join(str(topic).split()).casefold() not in requested_keys
+        ]
     save_settings(settings)
     return {**snapshot(), "operationResult": {
         "kind": "idea-favorites", "count": len(added),

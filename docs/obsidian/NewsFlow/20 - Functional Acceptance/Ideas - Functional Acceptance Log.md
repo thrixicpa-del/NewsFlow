@@ -110,11 +110,33 @@ The generation source is now the order-preserving deduplicated union `selected +
 - `git diff --check`: PASS.
 - No real or paid provider calls were made.
 
-## Next checks
+## IDEA-004 — approved suggestions must leave their source staging list
 
-1. Provider action double-submit protection (`suggest-topics`, reference analysis, YouTube research).
-2. Generated suggestion -> favorite -> plan -> generation state transitions.
-3. Per-direction count/provider/requirements preservation.
-4. Evidence state (`READY` / `NEEDS_RESEARCH`) and handoff eligibility.
-5. Restart persistence and stale selection handling.
-6. Ideas -> Scenarios ProductionItem context preservation.
+Status: **FIX VERIFIED LOCALLY; PENDING CI**
+
+### Confirmed RED
+
+Approving a main suggestion added it to `idea_topics` but left it in `idea_suggested_topics`. The same command did not distinguish YouTube staging, so an approved YouTube suggestion also remained in `youtube_suggested_topics` and the UI did not identify its source.
+
+### State-transition semantics
+
+An explicit approval now moves only the selected topic from its source staging list to permanent favourites. Main approvals consume entries from `idea_suggested_topics`; YouTube approvals send `source: "youtube"` and consume entries from `youtube_suggested_topics`. Unrelated pending suggestions and `idea_plan` remain unchanged. Invalid sources are rejected. Existing favourite deduplication and the single existing save path remain unchanged.
+
+### GREEN — 18 September 2026
+
+- Backend targeted `tests/test_ideas_suggestion_approval_regression.py`: PASS — 2 tests.
+- Relevant Ideas suite: PASS — 58 tests, 0 failures.
+- Targeted UI `ideas-view.test.tsx`: PASS — 1 file / 20 tests.
+- Full frontend suite: PASS — 34 files / 162 tests.
+- `pnpm typecheck`: PASS.
+- Production integrity guard: `PRODUCTION_WRITE_GUARD=PASS`.
+- Secret scan, Ruff for the new backend regression test, and `git diff --check`: PASS.
+- No real or paid provider calls were made.
+
+## MVP transition
+
+The bounded Ideas MVP functional block is ready to move to Scenarios after CI. Later work on speculative or unverified-mode behavior remains explicitly deferred; it is not part of IDEA-004.
+
+## Deferred checks
+
+1. Speculative or unverified-mode behavior, including its product and factual-safety contract.
