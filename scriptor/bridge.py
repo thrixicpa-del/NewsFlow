@@ -10747,28 +10747,49 @@ def prepare_montage(payload: dict) -> dict:
                 for key in claims
                 if isinstance(key, tuple) and len(key) == 2 and key[0] == position_bucket
             } if isinstance(claims, dict) else set()
-            return (set(), reserved_families,
-                    {key: list(value) for key, value in batch_family_buckets.items()},
-                    {key: list(value) for key, value in batch_source_windows.items()})
+            return (
+                set(),
+                reserved_families,
+                {
+                    key: [
+                        str(entry[1]) if isinstance(entry, tuple) and len(entry) == 2 else str(entry)
+                        for entry in value
+                    ]
+                    for key, value in batch_family_buckets.items()
+                },
+                {
+                    key: [
+                        float(entry[1]) if isinstance(entry, tuple) and len(entry) == 2 else float(entry)
+                        for entry in value
+                    ]
+                    for key, value in batch_source_windows.items()
+                },
+            )
 
     def allocate_batch_source_start(family: str, bucket: str, source_duration: float,
                                     beat_duration: float, seed: str) -> tuple[float, bool]:
         """Choose and record one source window atomically for parallel planners."""
+        def starts() -> list[float]:
+            return [
+                float(entry[1]) if isinstance(entry, tuple) and len(entry) == 2 else float(entry)
+                for entry in batch_source_windows.get(family, [])
+            ]
+
         if batch_lock is None:
-            previous_starts = list(batch_source_windows.get(family, []))
+            previous_starts = starts()
             source_start = _montage_source_start(
                 source_duration, beat_duration, previous_starts, bucket, family, seed,
             )
-            batch_family_buckets.setdefault(family, []).append(bucket)
-            batch_source_windows.setdefault(family, []).append(source_start)
+            batch_family_buckets.setdefault(family, []).append((scenario_index, bucket))
+            batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
             return source_start, bool(previous_starts)
         with batch_lock:
-            previous_starts = list(batch_source_windows.get(family, []))
+            previous_starts = starts()
             source_start = _montage_source_start(
                 source_duration, beat_duration, previous_starts, bucket, family, seed,
             )
-            batch_family_buckets.setdefault(family, []).append(bucket)
-            batch_source_windows.setdefault(family, []).append(source_start)
+            batch_family_buckets.setdefault(family, []).append((scenario_index, bucket))
+            batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
             return source_start, bool(previous_starts)
 
     # item, verified source duration, relevance score, source label, family
@@ -11731,6 +11752,22 @@ def _release_batch_footage_reservations(usage: dict, scenario_index: int) -> int
             for key in owned:
                 values.pop(key, None)
                 released += 1
+        for name in ("placements", "windows"):
+            values = usage.get(name)
+            if not isinstance(values, dict):
+                continue
+            for key, entries in list(values.items()):
+                if not isinstance(entries, list):
+                    continue
+                kept = [
+                    entry for entry in entries
+                    if not (isinstance(entry, tuple) and len(entry) == 2 and entry[0] == scenario_index)
+                ]
+                released += len(entries) - len(kept)
+                if kept:
+                    values[key] = kept
+                else:
+                    values.pop(key, None)
     return released
 
 
