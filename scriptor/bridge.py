@@ -10780,8 +10780,8 @@ def prepare_montage(payload: dict) -> dict:
             source_start = _montage_source_start(
                 source_duration, beat_duration, previous_starts, bucket, family, seed,
             )
-            batch_family_buckets.setdefault(family, []).append((scenario_index, bucket))
-            batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
+            batch_family_buckets.setdefault(family, []).append(bucket)
+            batch_source_windows.setdefault(family, []).append(source_start)
             return source_start, bool(previous_starts)
         with batch_lock:
             previous_starts = starts()
