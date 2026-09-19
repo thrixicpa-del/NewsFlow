@@ -10751,14 +10751,25 @@ def prepare_montage(payload: dict) -> dict:
                     {key: list(value) for key, value in batch_family_buckets.items()},
                     {key: list(value) for key, value in batch_source_windows.items()})
 
-    def record_batch_placement(family: str, bucket: str, source_start: float) -> None:
+    def allocate_batch_source_start(family: str, bucket: str, source_duration: float,
+                                    beat_duration: float, seed: str) -> float:
+        """Choose and record one source window atomically for parallel planners."""
         if batch_lock is None:
+            previous_starts = list(batch_source_windows.get(family, []))
+            source_start = _montage_source_start(
+                source_duration, beat_duration, previous_starts, bucket, family, seed,
+            )
             batch_family_buckets.setdefault(family, []).append(bucket)
             batch_source_windows.setdefault(family, []).append(source_start)
-            return
+            return source_start
         with batch_lock:
+            previous_starts = list(batch_source_windows.get(family, []))
+            source_start = _montage_source_start(
+                source_duration, beat_duration, previous_starts, bucket, family, seed,
+            )
             batch_family_buckets.setdefault(family, []).append(bucket)
             batch_source_windows.setdefault(family, []).append(source_start)
+            return source_start
 
     # item, verified source duration, relevance score, source label, family
     reuse_pool: list[tuple[FootageItem, float, float, str, str]] = []
@@ -10778,13 +10789,10 @@ def prepare_montage(payload: dict) -> dict:
                 raise ValueError("Быстрый режим не получил ни одного пригодного уникального футажа")
             selected, source_duration, score, original_source, source_family = eligible[reuse_cursor % len(eligible)]
             reuse_cursor += 1
-            _, _, family_buckets, source_windows = reservation_snapshot(position_bucket)
-            previous_starts = list(source_windows.get(source_family, []))
-            source_start = _montage_source_start(
-                source_duration, float(scene["duration"]), previous_starts,
-                position_bucket, source_family, titles[scenario_index],
+            source_start = allocate_batch_source_start(
+                source_family, position_bucket, source_duration,
+                float(scene["duration"]), titles[scenario_index],
             )
-            record_batch_placement(source_family, position_bucket, source_start)
             clips.append(TimelineClip(path=selected.path, narration=scene["narration"],
                                       visual_query_en=scene["visual_query_en"], duration=scene["duration"],
                                       source_start=source_start, score=score,
@@ -10930,15 +10938,13 @@ def prepare_montage(payload: dict) -> dict:
         if selected_duration <= 0.05:
             raise ValueError(f"Подобранный футаж не проходит проверку видео: {selected.path}")
         source_family = selection.source_family or _montage_clip_family_key(selected.path)
-        _, _, _family_buckets, source_windows = reservation_snapshot(position_bucket)
-        previous_starts = list(source_windows.get(source_family, []))
-        source_start = _montage_source_start(
-            selected_duration, float(scene["duration"]), previous_starts,
-            position_bucket, source_family, titles[scenario_index],
+        previous_starts = list(batch_source_windows.get(source_family, []))
+        source_start = allocate_batch_source_start(
+            source_family, position_bucket, selected_duration,
+            float(scene["duration"]), titles[scenario_index],
         )
         reused = bool(selection.reused or previous_starts or source_family in project_used_families)
         selection = replace(selection, source_family=source_family, source_start=source_start, reused=reused)
-        record_batch_placement(source_family, position_bucket, source_start)
         used.add(_montage_clip_key(selected.path))
         used_families.add(source_family)
         project_used.add(_montage_clip_key(selected.path))
