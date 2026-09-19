@@ -10752,7 +10752,7 @@ def prepare_montage(payload: dict) -> dict:
                     {key: list(value) for key, value in batch_source_windows.items()})
 
     def allocate_batch_source_start(family: str, bucket: str, source_duration: float,
-                                    beat_duration: float, seed: str) -> float:
+                                    beat_duration: float, seed: str) -> tuple[float, bool]:
         """Choose and record one source window atomically for parallel planners."""
         if batch_lock is None:
             previous_starts = list(batch_source_windows.get(family, []))
@@ -10761,7 +10761,7 @@ def prepare_montage(payload: dict) -> dict:
             )
             batch_family_buckets.setdefault(family, []).append(bucket)
             batch_source_windows.setdefault(family, []).append(source_start)
-            return source_start
+            return source_start, bool(previous_starts)
         with batch_lock:
             previous_starts = list(batch_source_windows.get(family, []))
             source_start = _montage_source_start(
@@ -10769,7 +10769,7 @@ def prepare_montage(payload: dict) -> dict:
             )
             batch_family_buckets.setdefault(family, []).append(bucket)
             batch_source_windows.setdefault(family, []).append(source_start)
-            return source_start
+            return source_start, bool(previous_starts)
 
     # item, verified source duration, relevance score, source label, family
     reuse_pool: list[tuple[FootageItem, float, float, str, str]] = []
@@ -10789,7 +10789,7 @@ def prepare_montage(payload: dict) -> dict:
                 raise ValueError("Быстрый режим не получил ни одного пригодного уникального футажа")
             selected, source_duration, score, original_source, source_family = eligible[reuse_cursor % len(eligible)]
             reuse_cursor += 1
-            source_start = allocate_batch_source_start(
+            source_start, _family_reused = allocate_batch_source_start(
                 source_family, position_bucket, source_duration,
                 float(scene["duration"]), titles[scenario_index],
             )
@@ -10938,12 +10938,11 @@ def prepare_montage(payload: dict) -> dict:
         if selected_duration <= 0.05:
             raise ValueError(f"Подобранный футаж не проходит проверку видео: {selected.path}")
         source_family = selection.source_family or _montage_clip_family_key(selected.path)
-        previous_starts = list(batch_source_windows.get(source_family, []))
-        source_start = allocate_batch_source_start(
+        source_start, family_reused = allocate_batch_source_start(
             source_family, position_bucket, selected_duration,
             float(scene["duration"]), titles[scenario_index],
         )
-        reused = bool(selection.reused or previous_starts or source_family in project_used_families)
+        reused = bool(selection.reused or family_reused or source_family in project_used_families)
         selection = replace(selection, source_family=source_family, source_start=source_start, reused=reused)
         used.add(_montage_clip_key(selected.path))
         used_families.add(source_family)
