@@ -10849,7 +10849,15 @@ def prepare_montage(payload: dict) -> dict:
         selection_started = time.perf_counter()
         # First exhaust unique local choices. EXTERNAL is intentionally tried
         # before SAFE_REUSE so the persisted level order remains truthful.
-        for _attempt in range(3):
+        # Parallel planners may collide on the same top family several times;
+        # retry against the refreshed claim snapshot while distinct bounded
+        # candidate families still exist.
+        claim_attempt_limit = max(3, min(64, len({
+            _montage_hit_family(hit)
+            for level in _MONTAGE_FALLBACK_LEVELS
+            for hit in hits_by_level[level]
+        })))
+        for _attempt in range(claim_attempt_limit):
             reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
             try:
                 selection = _select_montage_candidate(
