@@ -269,6 +269,9 @@ export const fallback: NewsFlowSnapshot = {
     englishBlocked: 0,
     englishSafe: 0,
     englishUnchecked: 0,
+    semanticCurrent: 0,
+    semanticOutdated: 0,
+    semanticVersion: 0,
     databasePath: "",
   },
   cutterSources: [],
@@ -8540,6 +8543,7 @@ export function Footage({
   // The indexing command is intentionally long-running.  Start polling as
   // soon as the user presses the button instead of waiting for that command
   // to return its final snapshot.
+  const indexLock = useRef(false);
   const [indexRequested, setIndexRequested] = useState(false);
   const [liveIndexStatus, setLiveIndexStatus] = useState<
     NonNullable<NewsFlowSnapshot["footageIndex"]["status"]>
@@ -8597,6 +8601,9 @@ export function Footage({
   const progress = indexTotal
     ? Math.min(100, Math.round((processed / indexTotal) * 100))
     : 0;
+  const semanticCurrent = Number(data.footageIndex.semanticCurrent || 0);
+  const semanticOutdated = Number(data.footageIndex.semanticOutdated || 0);
+  const semanticVersion = Number(data.footageIndex.semanticVersion || 0);
   useEffect(() => {
     let disposed = false;
     const pollLiveStatus = async () => {
@@ -8635,6 +8642,8 @@ export function Footage({
     }
   }, [indexRequested, indexStatus.active, indexStatus.stage]);
   const indexLibrary = async (enhance = false) => {
+    if (indexLock.current) return;
+    indexLock.current = true;
     const mode = enhance ? "semantic" : "scan";
     const startedAt = Date.now();
     setIndexRequested(true);
@@ -8680,9 +8689,14 @@ export function Footage({
         indexed: Number(result?.indexed || 0),
         skipped: Number(result?.skipped || 0),
         failed: Number(result?.failed || 0),
-        error: status?.error,
+        error:
+          status?.error ||
+          (Number(result?.failed || 0) > 0
+            ? `Не обработано файлов: ${Number(result?.failed || 0)}. Проверьте повреждённые или недоступные видео.`
+            : undefined),
       });
     } finally {
+      indexLock.current = false;
       setIndexRequested(false);
     }
   };
@@ -8760,11 +8774,16 @@ export function Footage({
             </small>
           </div>
         ) : (
-          <small className="index-hint">
-            Улучшение запускается только вручную. Сейчас индекс полностью
-            построен; если новых клипов нет, проверка завершится сразу и покажет
-            это здесь.
-          </small>
+          <div className="index-hint">
+            <small>Базовый индекс готов: {indexed.toLocaleString("ru-RU")} клипов.</small>
+            <small>
+              {semanticOutdated
+                ? `Требуется глубокое обновление: ${semanticOutdated.toLocaleString("ru-RU")} клипа (версия ${semanticVersion}).`
+                : semanticCurrent
+                  ? `Глубокий семантический индекс актуален: ${semanticCurrent.toLocaleString("ru-RU")} клипов (версия ${semanticVersion}).`
+                  : "Глубокое семантическое улучшение ещё не запускалось."}
+            </small>
+          </div>
         )}
       </section>
       <section className="panel footage-folders">

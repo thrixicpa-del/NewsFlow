@@ -53,3 +53,60 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
 - `python scripts/secret-scan.py` — **PASS**.
 - `git diff --check` — **PASS**.
 - Total SKIP: **0**. No publication/YouTube/provider calls were made; no generated media is tracked by Git.
+
+## MONTAGE-002 — footage indexing, freshness and retrieval integrity
+
+Date: **2026-09-19**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
+
+### Confirmed RED
+
+- A deleted indexed file remained visible through both `search_many` and `all_items` until a separate cleanup happened.
+- The index had no persisted FPS or source-family identity, and a changed physical file could retain stale screen-text/deep-semantic state.
+- A persisted active status whose owner had died remained `active`; two same-process starts could both claim the file lock; the bridge returned deep-pass counters instead of the base media scan's failed/skipped/indexed truth.
+- Rapid repeated Footage indexing clicks dispatched the command twice before React state committed.
+- The deep taxonomy did not cover the required broad news families, stored no compact semantic confidence, exposed no current/outdated version counts, and the default base command still ran deep enrichment instead of keeping the two tiers distinct.
+
+### Minimal lifecycle and retrieval fix
+
+- The fast base tier remains incremental and samples/embeds only new or changed files. Freshness is keyed by canonical path + size + nanosecond mtime; unchanged files are neither decoded nor embedded again. Reindex atomically removes missing rows, refreshes duration/width/height/FPS, resets stale English/deep labels after replacement, and reports failed/corrupt files without counting them as indexed.
+- `search_many` validates physical existence once per query batch, never once per scene; stale paths cannot be returned as healthy hits. The shared SQLite/vector corpus is loaded once, duplicate queries are embedded once, ties are deterministic, and `all_items` also filters missing paths.
+- Stable `source_family` is persisted independently of row IDs and returned in metadata/SearchHit. Two generated cuts under one `_slices` source share identity; unrelated sources do not collapse; identity survives restart/reindex.
+- Screen-text states remain truthful (`blocked=1`, `safe=-1`, `unchecked=0`); replacement invalidates the old classification, and English exclusion removes only blocked current files.
+- The bridge now has one same-process owner plus the existing atomic process file. A live duplicate is rejected, a dead owner is reclaimable, `finally` releases ownership, and a dead persisted run becomes `paused`/resumable with preserved counts and an updated timestamp. Partial/failed transactions leave no half rows and the next run resumes from committed freshness identities.
+- UI uses a synchronous ref lock for the long-running index command, exposes partial-file failures, and distinguishes base ready, deep running/current, and semantic-version update required states.
+
+### Two-tier smart/deep semantic index
+
+- Tier 1 (`index_folders`) is the default fast base index: deterministic representative frames, one current visual CLIP embedding, physical freshness, media metadata and source-family identity. It does not automatically pay for deep enrichment.
+- Tier 2 (`enrich_semantic_tags`, operator action `Улучшить ИИ-индекс`) works only from stored vectors and never reopens source videos. Semantic version is **5**; current rows are skipped, version changes re-enrich stored vectors, physical replacement resets both base/deep currency, and an interrupted batch resumes only outdated rows.
+- The conservative taxonomy now covers combat, emergencies, protests, diplomacy/government, energy, economy/industry, logistics, aviation, rail/transit, urban B-roll, migration, agriculture, healthcare, weather/disasters, technology and neutral documentary context. Only compact top-3 labels/confidences are persisted.
+- Search keeps CLIP similarity primary, then applies a bounded semantic/path metadata bonus plus existing rating/usage penalties. Semantic embeddings bridge English visual queries to neutral/Russian filenames; metadata overlap remains a fallback. Source-family identity is exposed for MONTAGE-003 but no diversity/rotation algorithm was added here.
+- Deterministic neutral-filename coverage proves `clip001.mp4`, `clip002.mp4`, `clip003.mp4` rank first for `oil tanker at port`, `street protest crowd`, and `diplomatic negotiations` respectively after deep enrichment.
+
+### Metadata, concurrency, counts and recovery evidence
+
+- Real synthetic media regression: **426×240**, **29.97 FPS**, **1.6 s**; indexed resolution is exact, FPS tolerance is **±0.05**, duration tolerance **±0.12 s**, and size/mtime match filesystem truth.
+- Lifecycle coverage includes add/repeat/modify/rename/delete, nested Unicode paths, overlapping roots/deduplication, unsupported files, zero-byte/corrupt media, one permission/read failure, cached-duration freshness, and no stale/duplicate healthy rows.
+- Concurrent writers converge to one row per physical path; a reader sees the last committed WAL snapshot during an incremental probe; one-batch embedding failure leaves zero partial rows and a subsequent run recovers all rows.
+- UI/bridge count coverage verifies truthful `total`, `processed`, `indexed`, `skipped`, `failed`, `removed`, plus blocked/safe/unchecked and current/outdated deep counts. A partial file failure is visible rather than presented as whole-index success.
+
+### Isolated real index smoke
+
+- Reproducible command: `python -m tests.run_montage_index_smoke --output .artifacts\NewsFlow-MONTAGE-002-index-review-20260919`.
+- Ignored evidence: `.artifacts/NewsFlow-MONTAGE-002-index-review-20260919/manifest.json`; no production path/media/settings/index was read or written.
+- Dataset: **8 valid synthetic clips + 1 intentional zero-byte corrupt file**, multiple durations/resolutions/FPS, two cuts from one family and three neutral filenames with distinct visual families.
+- Cold base: **0.2759 s** (`8 indexed / 1 failed`); deep enrichment: **0.0077 s** (`8 current`); unchanged base reindex: **0.0054 s** (`0 indexed / 8 skipped / 1 corrupt failed`); lifecycle reindex: **0.1120 s** (`2 refreshed / 5 skipped / 2 stale removed / 1 corrupt failed`); 4-query `search_many`: **0.001401 s**.
+- Structural counters: **3 filesystem scans** for three base runs, **13 media probe calls**, **0 ffprobe calls**, **2 image-embedding batches / 30 frames**, **4 text-embedding calls**. Deep passes decoded zero videos; search performed no discovery/rebuild.
+- Rename old path absent/new path current; deleted path absent; in-place replacement refreshed from 640×360/30 FPS/1.2 s to **854×480/25 FPS/1.8 s**; all untouched SHA-256 hashes remained identical; corrupt media remained unindexed; all post-lifecycle hits existed.
+
+### Verification
+
+- `python tests/run_isolated.py tests/test_ai_index.py tests/test_montage_index_integrity.py tests/test_footage.py -v` — **31 PASS, 0 FAIL, 0 SKIP**.
+- `python tests/run_isolated.py tests/test_montage_queue.py -v` — **68 PASS, 0 FAIL, 0 SKIP**.
+- `python tests/run_isolated.py tests/test_montage_benchmark.py -v` — **2 PASS, 0 FAIL, 0 SKIP**.
+- `python tests/run_isolated.py scriptor/test_montage_render.py -v` — **19 PASS, 0 FAIL, 0 SKIP**.
+- `pnpm exec vitest run src/ui/features/footage/footage-view.test.tsx` — **1 file / 5 tests PASS, 0 FAIL, 0 SKIP**.
+- `pnpm test:ui` — **34 files / 198 tests PASS, 0 FAIL, 0 SKIP**; `pnpm typecheck` — **PASS**.
+- Ruff scoped checks — **PASS**; `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD` — **PASS**; `python scripts/secret-scan.py` — **PASS**; `git diff --check` — **PASS**.
+- Total SKIP: **0**. No paid/external provider, publication or YouTube calls were made. Generated smoke media/index artifacts are ignored and not committed.
