@@ -178,6 +178,31 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         self.assertTrue(selection.reused)
         self.assertIn("единственный", selection.position_rotation_reason)
 
+    def test_labor_strike_does_not_expand_into_military_fallback(self):
+        ladder = bridge._montage_query_ladder("workers labor strike at factory gate picket line")
+        expanded = " ".join([
+            *ladder["CATEGORY_MATCH"],
+            *ladder["SAFE_CONTEXT"],
+        ]).casefold()
+
+        self.assertNotIn("military", expanded)
+        self.assertNotIn("battle", expanded)
+        self.assertNotIn("damaged buildings", expanded)
+
+        military = FootageItem(
+            "D:/unsafe/frontline.mp4", "frontline.mp4", tags=["frontline-combat"]
+        )
+        workers = FootageItem(
+            "D:/safe/workers.mp4", "workers picket.mp4", tags=["workers-strike"]
+        )
+        selection = self._select(
+            query="workers labor strike at factory gate picket line",
+            strict=[SearchHit(military, .95, 30.0, source_family="military")],
+            category=[SearchHit(workers, .20, 30.0, source_family="workers")],
+        )
+        self.assertEqual(selection.item.path, workers.path)
+        self.assertEqual(selection.fallback_level, "CATEGORY_MATCH")
+
     def test_specific_semantic_tag_mismatch_cannot_beat_safe_reuse(self):
         safe = FootageItem("D:/safe/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"])
         wrong = FootageItem(

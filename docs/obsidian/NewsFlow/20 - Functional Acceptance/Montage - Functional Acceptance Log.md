@@ -216,3 +216,15 @@ Codex verification of `f499a181d7f5313a4fa9a8a10a3f80a3750d1484` stopped at back
 The correction restores `same_bucket` only for diagnostics/reason text and updates those four regressions to the real Cutter naming contract. Production family behavior remains the MONTAGE-002 canonical `source_family_identity()`.
 
 No production data/media/settings were touched. Re-verification is required before any GREEN status.
+
+
+## MONTAGE-003 review follow-up — strike disambiguation
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING RE-VERIFICATION**
+
+During the RED follow-up review, ChatGPT found one adjacent semantic ambiguity before restarting the full suite: English `strike` can mean a military strike or a labor strike. The previous military-action detector treated both identically, allowing a workers/picket query to inherit military category/context fallback.
+
+The fix keeps military `strike` behavior for attack/war queries but suppresses military expansion when the query explicitly contains labor/workers/union/picket context. A deterministic regression proves a workers strike does not expand to military categories and rejects a `frontline-combat` candidate in favor of `workers-strike`.
+
+No production paths or provider calls are involved.

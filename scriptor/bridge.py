@@ -9790,6 +9790,13 @@ _WAR_ACTION_TERMS = (
     "damaged building", "firefighter", "destroyed", "военн", "удар", "ракет", "обстрел",
     "взрыв", "фронт", "войск", "солдат", "арм", "наступлен", "разруш", "эвакуац", "пожар",
 )
+_LABOR_STRIKE_QUERY_TERMS = (
+    "workers strike", "worker strike", "labor strike", "labour strike", "union strike",
+    "picket line", "trade union", "забастов", "стачк",
+)
+_WAR_ACTION_TERMS_WITHOUT_AMBIGUOUS_STRIKE = tuple(
+    term for term in _WAR_ACTION_TERMS if term != "strike"
+)
 _POLITICAL_OFFICE_TERMS = (
     "kremlin", "moscow government", "putin", "press conference", "government office",
     "political-office", "кремл", "москва", "путин", "кабинет", "совещан", "пресс-конференц",
@@ -9843,6 +9850,13 @@ def _has_any(value: str, terms: tuple[str, ...]) -> bool:
     return any(term in value for term in terms)
 
 
+def _montage_has_war_action(value: str) -> bool:
+    lowered = str(value or "").casefold()
+    if _has_any(lowered, _WAR_ACTION_TERMS_WITHOUT_AMBIGUOUS_STRIKE):
+        return True
+    return "strike" in lowered and not _has_any(lowered, _LABOR_STRIKE_QUERY_TERMS)
+
+
 def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     """Prefer concrete enriched footage for every supported news cluster."""
     query = str(scene_query or "").casefold()
@@ -9864,13 +9878,13 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     # concrete military action.  The exception keeps legitimate scenes such
     # as "Putin comments on strikes" usable when the political subject was
     # explicitly asked for by the planner.
-    if (_has_any(query, _WAR_ACTION_TERMS) and _has_any(haystack, _POLITICAL_OFFICE_TERMS)
+    if (_montage_has_war_action(query) and _has_any(haystack, _POLITICAL_OFFICE_TERMS)
             and not _has_any(query, _POLITICAL_SCENE_TERMS)):
         return False
     # Fields, potato harvests and farm machinery are legitimate only for an
     # explicitly agricultural report. A visually green tractor shot must not
     # become a substitute for drones, artillery, missiles or frontline news.
-    if (_has_any(query, _WAR_ACTION_TERMS) and _has_any(haystack, _AGRICULTURE_TERMS)
+    if (_montage_has_war_action(query) and _has_any(haystack, _AGRICULTURE_TERMS)
             and not _has_any(query, _AGRICULTURE_QUERY_TERMS)):
         return False
     if (_has_any(query, _ENERGY_PORT_QUERY_TERMS) and _has_any(haystack, _AGRICULTURE_TERMS)
@@ -9936,7 +9950,7 @@ def _montage_query_variants(value: str) -> list[str]:
     category_terms: list[str] = []
     if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
         category_terms.extend(["oil tanker port", "oil refinery industrial infrastructure", "cargo port cranes ships"])
-    if _has_any(joined, _WAR_ACTION_TERMS):
+    if _montage_has_war_action(joined):
         category_terms.extend(["explosion aftermath damaged buildings emergency services", "military equipment smoke city aerial"])
     if _has_any(joined, ("negotiation", "diplomatic", "summit", "government", "parliament", "переговор", "дипломат", "саммит")):
         category_terms.extend(["government building parliament flags diplomatic meeting", "city government exterior"])
@@ -9957,7 +9971,7 @@ def _montage_query_ladder(value: str) -> dict[str, list[str]]:
     if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
         categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
         contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
-    if _has_any(joined, _WAR_ACTION_TERMS):
+    if _montage_has_war_action(joined):
         categories.extend(["military equipment smoke city aerial", "emergency aftermath damaged buildings"])
         contexts.extend(["civilian evacuation emergency services", "damaged city documentary aerial"])
     if _has_any(joined, ("negotiation", "diplomatic", "summit", "government", "parliament",
