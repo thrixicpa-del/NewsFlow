@@ -9,6 +9,36 @@ describe("Montage Light view", () => {
     expect(screen.getByLabelText("Fast Editing workspace")).toBeTruthy();
   });
 
+  it("shows persisted semantic fallback and reuse diagnostics in the timeline", () => {
+    const data = {
+      ...fallback,
+      montageProjects: [{
+        title: "Ормуз — похожая тема",
+        path: "D:/projects/hormuz.newsflow",
+        duration: 12,
+        selectionSummaryText: "2 сцен · strict 1 · semantic 0 · reuse 1",
+        clips: [{
+          path: "D:/footage/tanker.mp4",
+          duration: 6,
+          narration: "Танкер проходит пролив",
+          source: "local · SAFE_REUSE",
+          sourceStart: 8,
+          fallbackLevel: "SAFE_REUSE",
+          sourceFamily: "tanker-family",
+          reused: true,
+          positionBucket: "MIDDLE",
+          positionRotationReason: "другой сегмент длинного источника",
+        }],
+      }],
+    } as NewsFlowSnapshot;
+
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+
+    expect(screen.getByText("2 сцен · strict 1 · semantic 0 · reuse 1")).toBeTruthy();
+    expect(screen.getByText(/SAFE_REUSE · MIDDLE · start 8\.0 c/)).toBeTruthy();
+    expect(screen.queryByText(/Не найдено ни одного допустимого футажа/)).toBeNull();
+  });
+
   it("keeps advanced montage configuration in a focused workspace drawer", () => {
     render(<Editor data={fallback} command={vi.fn()} refresh={async () => undefined} />);
 

@@ -486,7 +486,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda item: True, source_duration=lambda item: 6.0,
         )
         self.assertEqual(result.item.path, reserved.path)
-        self.assertEqual(result.fallback_level, "RESERVED_REUSE")
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
         self.assertTrue(result.reused_reserved_candidate)
 
     def test_reservation_race_converts_valid_selection_to_safe_reuse(self):
@@ -512,7 +512,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda item: True, source_duration=lambda item: 6.0,
         )
         self.assertEqual(result.item.path, same.path)
-        self.assertEqual(result.fallback_level, "LAST_RESORT")
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
 
     def test_safe_reuse_avoids_the_immediately_previous_clip_when_an_older_valid_clip_exists(self):
         """A B A is acceptable after quality exhaustion; A A is not."""
@@ -568,7 +568,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda _: True, source_duration=lambda _: 6.0,
         )
         self.assertEqual(result.item.path, alternative.path)
-        self.assertEqual(result.fallback_level, "LAST_RESORT")
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
 
     def test_failed_planner_releases_only_its_own_batch_reservations(self):
         usage = {
@@ -590,7 +590,7 @@ class MontageQueueStateTests(unittest.TestCase):
             project_used_paths=set(), project_used_families=set(), reserved_paths=set(), reserved_families=set(),
             source_exists=lambda _: True, source_duration=lambda _: 6.0,
         )
-        self.assertEqual(result.fallback_level, "RELAXED_MATCH")
+        self.assertEqual(result.fallback_level, "RELAXED_SEMANTIC")
         self.assertEqual(result.diagnostics["rejected_threshold"], 1)
 
     def test_selection_skips_missing_strict_candidate_for_valid_category_candidate(self):
@@ -604,7 +604,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda item: item.path != missing.path, source_duration=lambda _: 6.0,
         )
         self.assertEqual(result.item.path, category.path)
-        self.assertEqual(result.fallback_level, "CATEGORY_CONTEXT_FALLBACK")
+        self.assertEqual(result.fallback_level, "CATEGORY_MATCH")
         self.assertGreaterEqual(result.diagnostics["rejected_missing"], 2)
 
     def test_snapshot_sync_never_replaces_a_render_error_with_new_mp3(self):

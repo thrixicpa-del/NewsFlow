@@ -116,6 +116,13 @@ class TimelineClip:
     source_start: float = 0.0
     score: float = 0.0
     source: str = "local"
+    fallback_level: str = "STRICT_MATCH"
+    source_family: str = ""
+    reused: bool = False
+    position_bucket: str = ""
+    position_rotation_penalty: float = 0.0
+    position_rotation_reason: str = ""
+    strict_rejection_reason: str = ""
 
 
 @dataclass
@@ -131,6 +138,8 @@ class TimelineProject:
     overlay_path: str = ""
     transition_style: str = "crossfade"
     transition_frames: int = 7
+    selection_summary: dict = field(default_factory=dict)
+    preparation_metrics_ms: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:

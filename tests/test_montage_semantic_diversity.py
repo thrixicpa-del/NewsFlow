@@ -1,0 +1,294 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from scriptor import bridge
+from scriptor.ai_index import SearchHit
+from scriptor.footage import FootageItem
+from scriptor.timeline import TimelineClip, TimelineProject
+
+
+class MontageSemanticDiversityTests(unittest.TestCase):
+    @staticmethod
+    def _select(*, query="oil tanker port", strict=(), relaxed=(), category=(), context=(),
+                used_paths=None, used_families=None, project_paths=None, project_families=None,
+                reserved_paths=None, reserved_families=None, bucket="EARLY", family_buckets=None,
+                seed="seed", allow_safe_reuse=True):
+        try:
+            return bridge._select_montage_candidate(
+                query,
+                strict_hits=list(strict),
+                relaxed_hits=list(relaxed),
+                category_hits=list(category),
+                safe_context_hits=list(context),
+                fallback_hits=[],
+                required_duration=6.0,
+                match_threshold=.22,
+                used_paths=set(used_paths or ()),
+                used_families=set(used_families or ()),
+                project_used_paths=set(project_paths or ()),
+                project_used_families=set(project_families or ()),
+                reserved_paths=set(reserved_paths or ()),
+                reserved_families=set(reserved_families or ()),
+                source_exists=lambda item: "missing" not in item.path,
+                source_duration=lambda item: 4.0 if "short" in item.path else 30.0,
+                position_bucket=bucket,
+                batch_family_buckets=family_buckets or {},
+                diversity_seed=seed,
+                allow_safe_reuse=allow_safe_reuse,
+            )
+        except TypeError as error:
+            raise AssertionError(f"selector does not expose MONTAGE-003 contract: {error}") from error
+
+    def test_fallback_ladder_skips_missing_and_short_exact_candidates(self):
+        missing = FootageItem("D:/oil/missing.mp4", "missing.mp4", tags=["oil-tanker-port"])
+        short = FootageItem("D:/oil/short.mp4", "short.mp4", tags=["oil-tanker-port"])
+        context = FootageItem("D:/oil/port-wide.mp4", "port-wide.mp4", tags=["port-logistics"])
+
+        selection = self._select(
+            strict=[SearchHit(missing, .95, 6.0), SearchHit(short, .90, 6.0)],
+            context=[SearchHit(context, .18, 30.0, source_family="port-family")],
+        )
+
+        self.assertEqual(selection.item.path, context.path)
+        self.assertEqual(selection.fallback_level, "SAFE_CONTEXT")
+        self.assertGreaterEqual(selection.diagnostics["rejected_missing"], 1)
+        self.assertGreaterEqual(selection.diagnostics["rejected_duration"], 1)
+
+    def test_ladder_reports_relaxed_and_category_levels_explicitly(self):
+        relaxed = FootageItem("D:/oil/relaxed.mp4", "relaxed.mp4", tags=["oil-tanker-port"])
+        category = FootageItem("D:/oil/category.mp4", "category.mp4", tags=["port-logistics"])
+
+        relaxed_result = self._select(relaxed=[SearchHit(relaxed, .17, 30.0)])
+        category_result = self._select(category=[SearchHit(category, .16, 30.0)])
+
+        self.assertEqual(relaxed_result.fallback_level, "RELAXED_SEMANTIC")
+        self.assertEqual(category_result.fallback_level, "CATEGORY_MATCH")
+
+    def test_semantic_safety_remains_authoritative_at_every_level(self):
+        agriculture = FootageItem(
+            "D:/unsafe/tractor.mp4", "tractor harvest.mp4", tags=["agriculture-farming"]
+        )
+        office = FootageItem(
+            "D:/unsafe/podium.mp4", "government podium.mp4", tags=["political-office"]
+        )
+        safe = FootageItem(
+            "D:/safe/emergency.mp4", "damaged city.mp4", tags=["emergency-aftermath"]
+        )
+
+        selection = self._select(
+            query="frontline missile strike damaged buildings",
+            strict=[SearchHit(agriculture, .99, 30.0), SearchHit(office, .98, 30.0)],
+            context=[SearchHit(safe, .12, 30.0, source_family="safe-family")],
+        )
+
+        self.assertEqual(selection.item.path, safe.path)
+        self.assertEqual(selection.fallback_level, "SAFE_CONTEXT")
+        self.assertEqual(selection.diagnostics["unique_rejected_safety"], 2)
+
+    def test_oil_context_rejects_unrelated_agriculture_even_with_higher_score(self):
+        agriculture = FootageItem(
+            "D:/unsafe/tractor.mp4", "tractor harvest.mp4", tags=["agriculture-farming"]
+        )
+        port = FootageItem(
+            "D:/safe/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"]
+        )
+
+        selection = self._select(
+            query="oil tanker traffic through the Strait of Hormuz",
+            strict=[SearchHit(agriculture, .99, 30.0)],
+            context=[SearchHit(port, .14, 30.0, source_family="port-family")],
+        )
+
+        self.assertEqual(selection.item.path, port.path)
+        self.assertEqual(selection.fallback_level, "SAFE_CONTEXT")
+
+    def test_hormuz_context_rejects_english_ukraine_metadata(self):
+        wrong_country = FootageItem(
+            "D:/unsafe/ukraine_oil_tanker.mp4", "ukraine oil tanker.mp4"
+        )
+        safe = FootageItem("D:/safe/hormuz.mp4", "Persian Gulf tanker.mp4")
+
+        selection = self._select(
+            query="Strait of Hormuz oil tankers Persian Gulf",
+            strict=[SearchHit(wrong_country, .99, 30.0)],
+            context=[SearchHit(safe, .14, 30.0, source_family="hormuz-family")],
+        )
+
+        self.assertEqual(selection.item.path, safe.path)
+        self.assertEqual(selection.diagnostics["unique_rejected_safety"], 1)
+
+    def test_named_person_context_never_substitutes_another_named_politician(self):
+        wrong_person = FootageItem("D:/unsafe/trump.mp4", "Donald Trump press conference.mp4")
+        requested_person = FootageItem("D:/safe/putin.mp4", "Vladimir Putin meeting.mp4")
+
+        selection = self._select(
+            query="Vladimir Putin comments at a press conference",
+            strict=[SearchHit(wrong_person, .99, 30.0)],
+            context=[SearchHit(requested_person, .14, 30.0, source_family="putin-family")],
+        )
+
+        self.assertEqual(selection.item.path, requested_person.path)
+        self.assertEqual(selection.diagnostics["unique_rejected_safety"], 1)
+
+    def test_all_ladder_queries_use_one_batched_index_request(self):
+        ladders = [
+            bridge._montage_query_ladder("oil tanker traffic"),
+            bridge._montage_query_ladder("oil tanker insurance rates"),
+        ]
+
+        class FakeIndex:
+            def __init__(self):
+                self.calls = []
+
+            def search_many(self, queries, limit=20):
+                self.calls.append((list(queries), limit))
+                return {query: [] for query in queries}
+
+        index = FakeIndex()
+        try:
+            result = bridge._montage_search_ladders(index, ladders, limit=256)
+        except AttributeError as error:
+            self.fail(f"batched ladder retrieval is missing: {error}")
+
+        self.assertEqual(len(index.calls), 1)
+        self.assertEqual(index.calls[0][1], 256)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(set(bridge._MONTAGE_FALLBACK_LEVELS) <= set(row) for row in result))
+
+    def test_scarce_library_completes_with_truthful_safe_reuse(self):
+        only = FootageItem("D:/safe/only.mp4", "only.mp4", tags=["oil-tanker-port"])
+        hit = SearchHit(only, .30, 30.0, source_family="only-family")
+
+        selection = self._select(
+            strict=[hit],
+            used_paths={bridge._montage_clip_key(only.path)},
+            used_families={"only-family"},
+            project_paths={bridge._montage_clip_key(only.path)},
+            project_families={"only-family"},
+            reserved_paths={bridge._montage_clip_key(only.path)},
+            reserved_families={"only-family"},
+            family_buckets={"only-family": ["EARLY", "MIDDLE"]},
+            bucket="LATE",
+        )
+
+        self.assertEqual(selection.item.path, only.path)
+        self.assertEqual(selection.fallback_level, "SAFE_REUSE")
+        self.assertTrue(selection.reused)
+        self.assertIn("единственный", selection.position_rotation_reason)
+
+    def test_position_rotation_prefers_family_unused_in_current_bucket(self):
+        repeated_early = FootageItem("D:/a/shot.mp4", "a.mp4", tags=["oil-tanker-port"])
+        rotated = FootageItem("D:/b/shot.mp4", "b.mp4", tags=["oil-tanker-port"])
+
+        selection = self._select(
+            strict=[
+                SearchHit(repeated_early, .40, 30.0, source_family="family-a"),
+                SearchHit(rotated, .40, 30.0, source_family="family-b"),
+            ],
+            family_buckets={"family-a": ["EARLY"], "family-b": ["MIDDLE"]},
+            bucket="EARLY",
+        )
+
+        self.assertEqual(selection.source_family, "family-b")
+        self.assertEqual(selection.position_bucket, "EARLY")
+
+    def test_ten_similar_projects_do_not_repeat_the_same_opening_family(self):
+        hits = [
+            SearchHit(
+                FootageItem(f"D:/safe/family-{number}/shot.mp4", f"shot-{number}.mp4",
+                            tags=["oil-tanker-port"]),
+                .50 - number * .001,
+                30.0,
+                source_family=f"family-{number}",
+            )
+            for number in range(24)
+        ]
+        used_paths: set[str] = set()
+        used_families: set[str] = set()
+        family_buckets: dict[str, list[str]] = {}
+        openings = []
+
+        for project in range(10):
+            selection = self._select(
+                strict=hits,
+                used_paths=used_paths,
+                used_families=used_families,
+                reserved_paths=used_paths,
+                reserved_families=used_families,
+                family_buckets=family_buckets,
+                bucket="EARLY",
+                seed=f"project-{project}",
+            )
+            openings.append(selection.source_family)
+            used_paths.add(bridge._montage_clip_key(selection.item.path))
+            used_families.add(selection.source_family)
+            family_buckets.setdefault(selection.source_family, []).append("EARLY")
+
+        self.assertEqual(len(set(openings)), 10)
+
+    def test_weighted_variation_is_reproducible_for_the_same_project_seed(self):
+        hits = [
+            SearchHit(
+                FootageItem(f"D:/safe/family-{number}.mp4", f"family-{number}.mp4",
+                            tags=["oil-tanker-port"]),
+                .4,
+                30.0,
+                source_family=f"family-{number}",
+            )
+            for number in range(12)
+        ]
+
+        first = self._select(strict=hits, seed="stable-project")
+        repeated = self._select(strict=hits, seed="stable-project")
+        another_project = self._select(strict=hits, seed="another-project")
+
+        self.assertEqual(first.source_family, repeated.source_family)
+        self.assertNotEqual(first.source_family, another_project.source_family)
+
+    def test_reused_long_source_gets_a_different_nonzero_window(self):
+        try:
+            first = bridge._montage_source_start(30.0, 6.0, [], "EARLY", "family-a", "seed")
+            second = bridge._montage_source_start(30.0, 6.0, [first], "MIDDLE", "family-a", "seed")
+        except AttributeError as error:
+            self.fail(f"source-window rotation is missing: {error}")
+
+        self.assertEqual(first, 0.0)
+        self.assertGreater(second, 0.0)
+        self.assertLessEqual(second + 6.0, 30.0)
+        self.assertNotEqual(first, second)
+
+    def test_timeline_persists_selection_diagnostics(self):
+        try:
+            clip = TimelineClip(
+                "D:/safe/shot.mp4", "voice", "oil tanker", duration=6.0,
+                source_start=8.0, fallback_level="SAFE_REUSE", source_family="family-a",
+                reused=True, position_bucket="MIDDLE", position_rotation_reason="другой сегмент",
+            )
+        except TypeError as error:
+            self.fail(f"timeline diagnostics are not persisted: {error}")
+
+        self.assertEqual(clip.fallback_level, "SAFE_REUSE")
+        self.assertEqual(clip.source_start, 8.0)
+        self.assertTrue(clip.reused)
+
+    def test_project_persists_summary_and_preparation_metrics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "project.newsflow"
+            try:
+                project = TimelineProject(
+                    "Тема",
+                    selection_summary={"scenes": 12, "strict": 7, "semantic": 3, "reuse": 2},
+                    preparation_metrics_ms={"retrieval": 4.2, "selection": 1.8, "total": 9.1},
+                )
+            except TypeError as error:
+                self.fail(f"project summary is not persisted: {error}")
+            project.save(path)
+            reopened = TimelineProject.load(path)
+
+        self.assertEqual(reopened.selection_summary["reuse"], 2)
+        self.assertEqual(reopened.preparation_metrics_ms["retrieval"], 4.2)
+
+
+if __name__ == "__main__":
+    unittest.main()

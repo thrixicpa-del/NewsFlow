@@ -126,3 +126,51 @@ Review verification:
 - Targeted Footage UI: **1 file / 5 PASS**; full UI: **34 files / 198 PASS**; `pnpm typecheck`: **PASS**.
 - `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD`: **PASS**; secret scan: **PASS**; scoped Ruff: **PASS**; `git diff --check`: **PASS**.
 - Total SKIP: **0**. Production footage/settings and provider/network paths were not touched. Status remains **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**.
+
+## MONTAGE-003 — semantic fallback, diversity rotation and ultra-fast selection
+
+Date: **2026-09-19**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
+
+### Confirmed RED
+
+- The deterministic regression initially failed because the selector exposed neither the full named fallback ladder nor one batched ladder retrieval; a high-score agriculture clip could also beat a safe oil/port context candidate.
+- Legacy fallback labels were ambiguous (`RELAXED_MATCH`, `CATEGORY_CONTEXT_FALLBACK`, `RESERVED_REUSE`, `LAST_RESORT`) and local reuse could happen before an external fallback opportunity.
+- The first isolated multi-video run proved that the old tail normalizer discarded the selected scene plan: four prepared beats became two full-source clips and every alternate `source_start` was reset to `0.0`.
+- The real smoke also exposed an English-metadata safety hole: `ukraine_oil_tanker_wrong_country.mp4` was not rejected for a Hormuz scene because the country guard contained Russian Ukraine terms but not `ukraine/kyiv/odesa/donbas`.
+- UI RED: the saved project summary and per-clip fallback/bucket/window diagnostics were present in the backend contract but invisible in the Montage timeline.
+
+### Minimal architecture fix
+
+- The bounded selector now records the exact order `STRICT_MATCH → RELAXED_SEMANTIC → CATEGORY_MATCH → SAFE_CONTEXT → EXTERNAL_FALLBACK → SAFE_REUSE`. Empty/missing/short/stale candidates remain invalid; reuse is permitted only after unique local levels and optional external fallback are exhausted.
+- Every scene's bounded query ladder is flattened into one `ClipIndex.search_many(..., limit=256)` call. Results are regrouped in memory by scene and level; no folder discovery, media decode, embedding rebuild or full-corpus filesystem pass was added. The MONTAGE-002 bounded candidate-pool search remains authoritative.
+- Ranking combines semantic score, the existing bounded topic bonus, a position-family penalty and a tiny stable hash variation. The same project seed is reproducible; different similar projects can choose different equally safe families. A 10-project/24-family regression produces 10 distinct opening families.
+- Shared batch state now tracks path/family reservations plus `EARLY/MIDDLE/LATE` placements and source windows. Reusing a long source selects a deterministic different valid `source_start`; immediate A→A is avoided while another safe candidate exists. A one-family library completes through truthful `SAFE_REUSE` instead of failing.
+- Semantic safety remains fail-closed at every level: frontline vs political office/agriculture, oil/port vs agriculture, Hormuz vs English/Russian Ukraine metadata and named-person contradictions are rejected even when their vector score is higher. No unrelated clip is accepted merely to complete a timeline.
+- A valid prepared beat sequence is no longer collapsed by tail completion. Existing `source_start` and scene durations are preserved; only the final beat receives the tiny MP3/30 FPS margin when the source has enough material. Legacy incomplete-project recovery remains available.
+- `.newsflow` clips persist fallback level, source family, reuse flag, bucket, rotation penalty/reason, strict rejection reason and source start. Projects persist selection totals and planning/retrieval/selection/fallback/external/total timings. UI shows summaries such as `4 сцен · strict 2 · semantic 0 · reuse 2` and per-clip level/bucket/start.
+
+### Deterministic and performance coverage
+
+- New `tests/test_montage_semantic_diversity.py`: **14 PASS, 0 FAIL, 0 SKIP**. Coverage includes every local fallback level, missing/short candidates, safety contradictions, scarce-library reuse, deterministic variation, 10 similar projects, position buckets, alternate windows, one batched index request and persistence round-trips.
+- Combined isolated backend command (`test_ai_index`, index integrity, queue, benchmark, montage render, timeline and MONTAGE-003 regressions): **144 PASS, 0 FAIL, 0 SKIP** after the final safety/tail fixes.
+- Large-library protection inherited and reverified: the 20,000-row fake corpus validates only the bounded candidate pool; `search_many` performs no discovery or repeated source decoding.
+- Real smoke persisted per-project timings. Retrieval was **1.768 / 0.714 / 0.736 ms**; selection was **3.185 / 6.535 / 5.882 ms**; fallback expansion was **0 / 1.418 / 2.496 ms**. Total isolated preparation was **626.152 / 628.907 / 647.092 ms**.
+
+### Isolated real multi-video smoke
+
+- Reproducible command: `python tests/run_montage_diversity_smoke.py --output .artifacts/NewsFlow-MONTAGE-003-review-20260919`.
+- Runtime path: real `ClipIndex.index_folders → prepare_montage → render_montage → render_project(renderer="ffmpeg")` with isolated app-data, settings, session, footage, MP3, project and output roots.
+- Review manifest: `.artifacts/NewsFlow-MONTAGE-003-review-20260919/manifest.json` (ignored, not committed). Three related Hormuz scenarios produced three **18.000 s** MP4 files in **26.239 s** total.
+- Opening families were distinct: `oil_tanker_family_1`, `oil_tanker_family_6`, `oil_tanker_family_4`. Safe repeated long-source windows included `0.0 → 3.0 → 9.0`, `0.0 → 4.487 → 8.975`, `0.0 → 9.0` and `0.0 → 6.0` seconds.
+- Output SHA-256: `0bb10d395282c062ebd9e0ccc6fcddc9f672c2e2d9bdfb001156755613fd6c4f`, `218f4ef4497372b10c0fab3c785fd9b0e5a558e3e528852b723850a188a2c333`, `be4581949ad62d1811d8a316d6477374333f1c488b1f9880b12f89f25b7eb968`.
+- The explicit wrong-country source was rejected; all seven synthetic source hashes were unchanged before/after. Production footage/settings/session/index were not read or modified; no external/provider call was made.
+
+### Verification
+
+- Targeted Montage UI: **1 file / 15 tests PASS**; full UI: **34 files / 199 tests PASS**; `pnpm typecheck`: **PASS**.
+- `tests/test_build_montage_runtime_guard.py`: **1 PASS**.
+- `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD`: **PASS** (including the guard's expected intentional mutation detection).
+- `python scripts/secret-scan.py`: **PASS**; scoped Ruff for the new/changed test files: **PASS**; `git diff --check`: **PASS**.
+- Whole-file Ruff for legacy `scriptor/bridge.py` / `scriptor/timeline.py` still reports pre-existing repository-wide import/style debt unrelated to MONTAGE-003; no bypass or broad cleanup was made.
+- Total SKIP: **0**. No production media/settings and no paid/external provider paths were touched.

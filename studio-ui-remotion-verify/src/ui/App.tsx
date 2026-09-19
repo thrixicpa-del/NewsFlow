@@ -10689,6 +10689,11 @@ export function Editor({
           {selectedProject.error ? (
             <p className="task-error">{selectedProject.error}</p>
           ) : null}
+          {selectedProject.selectionSummaryText ? (
+            <p className="project-duration">
+              {selectedProject.selectionSummaryText}
+            </p>
+          ) : null}
           {selectedProject.outputPath ? (
             <video
               className="project-video"
@@ -10719,6 +10724,12 @@ export function Editor({
                   <small>
                     {clip.duration?.toFixed(1)} c · {clip.source || "local"}
                   </small>
+                  {clip.fallbackLevel ? (
+                    <small title={clip.positionRotationReason || undefined}>
+                      {clip.fallbackLevel} · {clip.positionBucket || "—"} · start{" "}
+                      {Number(clip.sourceStart || 0).toFixed(1)} c
+                    </small>
+                  ) : null}
                 </div>
               ))
             ) : (
