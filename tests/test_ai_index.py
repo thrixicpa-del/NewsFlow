@@ -13,8 +13,11 @@ from scriptor.ai_index import (
     SEMANTIC_INDEX_VERSION,
     SEMANTIC_TAG_LABELS,
     ClipIndex,
+    _SearchCorpus,
     discover_video_paths,
+    source_family_identity,
 )
+from scriptor.footage import FootageItem
 from scriptor.timeline import ffmpeg_executable
 
 
@@ -299,6 +302,75 @@ class ClipIndexTests(unittest.TestCase):
             self.assertNotEqual(families[neutral_one.name], families[neutral_two.name])
             self.assertEqual(families, reopened_families)
             self.assertTrue(all(families.values()))
+
+    def test_cutter_numbered_outputs_share_family_without_collapsing_plain_year_names(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "evening_report"
+            source.mkdir()
+            first = source / "evening_report_0001.mp4"
+            second = source / "evening_report_0002.mp4"
+            plain_report = root / "report_2024.mp4"
+            another_report = root / "report_2025.mp4"
+            for path in (first, second, plain_report, another_report):
+                path.write_bytes(path.name.encode("utf-8"))
+            database = root / "index.sqlite3"
+            index = FakeClipIndex(
+                database, embedder_factory=lambda: (FakeImageEmbedding(), FakeTextEmbedding())
+            )
+            index.index_folders([str(root)])
+            families = {Path(item.path).name: index.metadata(item.path).source_family
+                        for item in index.all_items()}
+            reopened = ClipIndex(database)
+            reopened_families = {Path(item.path).name: reopened.metadata(item.path).source_family
+                                 for item in reopened.all_items()}
+
+            self.assertEqual(families[first.name], families[second.name])
+            self.assertNotEqual(families[plain_report.name], families[another_report.name])
+            self.assertEqual(families, reopened_families)
+            self.assertEqual(
+                source_family_identity(first, "https://example.test/watch?v=Original"),
+                "url::https://example.test/watch?v=original",
+            )
+
+    def test_large_corpus_search_validates_only_shared_bounded_candidates(self):
+        total = 20_000
+        items = tuple(
+            FootageItem(f"C:/fake/clip_{number:05d}.mp4", f"clip_{number:05d}.mp4", tags=[])
+            for number in range(total)
+        )
+        corpus = _SearchCorpus(
+            fingerprint=((1, 1),),
+            items=items,
+            vectors=np.column_stack((np.linspace(1.0, 0.0, total), np.zeros(total))).astype(np.float32),
+            path_keys=tuple(item.path.casefold() for item in items),
+            durations=(6.0,) * total,
+            widths=(1920,) * total,
+            heights=(1080,) * total,
+            semantic_confidences=(0.0,) * total,
+            source_families=tuple(f"family-{number}" for number in range(total)),
+            used_counts=np.zeros(total, dtype=np.float32),
+            ratings=np.zeros(total, dtype=np.float32),
+        )
+        checks: list[str] = []
+
+        def fake_is_file(candidate: Path) -> bool:
+            checks.append(str(candidate))
+            return candidate.name not in {"clip_00000.mp4", "clip_00001.mp4"}
+
+        with tempfile.TemporaryDirectory() as folder:
+            index = ClipIndex(
+                Path(folder) / "index.sqlite3",
+                embedder_factory=lambda: (FakeImageEmbedding(), FakeTextEmbedding()),
+            )
+            with patch.object(index, "_search_corpus", return_value=corpus), \
+                 patch("pathlib.Path.is_file", autospec=True, side_effect=fake_is_file):
+                results = index.search_many(["red first", "red second"], limit=3)
+
+        expected = ["clip_00002.mp4", "clip_00003.mp4", "clip_00004.mp4"]
+        self.assertEqual([[Path(hit.item.path).name for hit in hits] for hits in results], [expected, expected])
+        self.assertEqual(len(checks), len(set(checks)))
+        self.assertLessEqual(len(checks), 8)
 
     def test_concurrent_indexing_and_search_keep_one_row_per_physical_path(self):
         with tempfile.TemporaryDirectory() as folder:

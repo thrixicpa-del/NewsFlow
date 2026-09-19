@@ -110,3 +110,19 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
 - `pnpm test:ui` — **34 files / 198 tests PASS, 0 FAIL, 0 SKIP**; `pnpm typecheck` — **PASS**.
 - Ruff scoped checks — **PASS**; `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD` — **PASS**; `python scripts/secret-scan.py` — **PASS**; `git diff --check` — **PASS**.
 - Total SKIP: **0**. No paid/external provider, publication or YouTube calls were made. Generated smoke media/index artifacts are ignored and not committed.
+
+### Review follow-up — Cutter family identity and bounded large-library search
+
+- Confirmed RED against the reviewed code: real Cutter names `evening_report/evening_report_0001.mp4` and `_0002.mp4` produced different `source_family` values; a two-query, 20,000-row fake corpus performed **20,000** `Path.is_file` calls before ranking.
+- Cutter recognition now matches only the deterministic production convention `<parent>/<parent>_NNNN.mp4` used by `cutter.py`. Those numbered cuts share the parent family; ordinary siblings such as `report_2024.mp4` and `report_2025.mp4` remain distinct. External `source_url` identity remains authoritative and restart/reindex determinism is unchanged.
+- `search_many` now ranks the in-memory corpus first. It starts with a bounded candidate pool of `max(4 × limit, 32)`, validates paths only until top-K is full, doubles the pool only when stale/excluded candidates consume it, and exhausts the full ranking only when required to find enough valid rows.
+- Physical existence results are cached once across every scene query in the same batch. The 20,000-row regression has two stale top-ranked rows, returns the next three valid rows for both queries, and performs only **5 unique filesystem checks** instead of 20,000. No folder discovery, media decode, embedding rebuild or SQLite corpus reload is introduced.
+- New real-media smoke was intentionally not repeated because this follow-up changes only deterministic family classification and retrieval candidate validation; the prior isolated smoke evidence remains unchanged.
+
+Review verification:
+
+- AI index/integrity: **29 PASS, 0 FAIL, 0 SKIP**; Footage: **4 PASS, 0 FAIL, 0 SKIP**.
+- Montage queue: **68 PASS, 0 FAIL, 0 SKIP**; Montage benchmark: **2 PASS, 0 FAIL, 0 SKIP**.
+- Targeted Footage UI: **1 file / 5 PASS**; full UI: **34 files / 198 PASS**; `pnpm typecheck`: **PASS**.
+- `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD`: **PASS**; secret scan: **PASS**; scoped Ruff: **PASS**; `git diff --check`: **PASS**.
+- Total SKIP: **0**. Production footage/settings and provider/network paths were not touched. Status remains **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**.

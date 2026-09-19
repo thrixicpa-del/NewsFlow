@@ -156,6 +156,8 @@ def source_family_identity(path: str | Path, source_url: str = "") -> str:
     parent_name = candidate.parent.name.casefold()
     if parent_name.endswith("_slices"):
         return f"path::{parent}"
+    if re.fullmatch(rf"{re.escape(parent_name)}_\d{{4}}", stem):
+        return f"path::{parent}"
     stem = re.sub(r"(?:[_\-\s]+(?:clip|slice|cut|part|segment)[_\-\s]*\d+)$", "", stem)
     return f"path::{parent}::{stem}"
 
@@ -409,7 +411,8 @@ class ClipIndex:
         ))))
 
     def _search_many_metadata(self, queries: list[str], corpus: _SearchCorpus,
-                              limit: int, excluded: set[str]) -> list[list[SearchHit]]:
+                              limit: int, excluded: set[str],
+                              existence_cache: dict[str, bool]) -> list[list[SearchHit]]:
         """Fast local fallback used only until the text model is available."""
         item_tokens = [self._metadata_tokens(item) for item in corpus.items]
         result: list[list[SearchHit]] = []
@@ -429,14 +432,43 @@ class ClipIndex:
                              - min(0.12, float(corpus.used_counts[position]) * 0.008)
                              + max(-0.12, min(0.12, float(corpus.ratings[position]) * 0.025)))
                     yield -score, corpus.path_keys[position], position
-            ranked = heapq.nsmallest(take, scores())
+            candidate_count = min(len(corpus.items), max(32, take * 4))
+            while True:
+                ranked = heapq.nsmallest(candidate_count, scores())
+                positions = self._valid_ranked_positions(
+                    (position for _score, _path_key, position in ranked),
+                    corpus, take, excluded, existence_cache,
+                )
+                if len(positions) >= take or candidate_count >= len(corpus.items):
+                    break
+                candidate_count = min(len(corpus.items), candidate_count * 2)
+            score_by_position = {position: -negative_score
+                                 for negative_score, _path_key, position in ranked}
             result.append([
-                SearchHit(corpus.items[position], -negative_score, corpus.durations[position],
+                SearchHit(corpus.items[position], score_by_position[position], corpus.durations[position],
                           corpus.widths[position], corpus.heights[position],
                           corpus.semantic_confidences[position], corpus.source_families[position])
-                for negative_score, _path_key, position in ranked
+                for position in positions
             ])
         return result
+
+    @staticmethod
+    def _valid_ranked_positions(ranked_positions: Iterable[int], corpus: _SearchCorpus, limit: int,
+                                excluded: set[str], existence_cache: dict[str, bool]) -> list[int]:
+        """Validate only ranked candidates needed to fill top-K results."""
+        valid: list[int] = []
+        for position in ranked_positions:
+            path_key = corpus.path_keys[position]
+            if path_key in excluded:
+                continue
+            if path_key not in existence_cache:
+                existence_cache[path_key] = Path(corpus.items[position].path).is_file()
+            if not existence_cache[path_key]:
+                continue
+            valid.append(position)
+            if len(valid) >= limit:
+                break
+        return valid
 
     @staticmethod
     def _signature(path: Path) -> tuple[int, int]:
@@ -767,15 +799,9 @@ class ClipIndex:
         corpus = self._search_corpus()
         if not corpus.items:
             return [[] for _ in queries]
-        # Validate physical existence once for the whole scene batch. This is
-        # bounded by the corpus, never repeated once per scene/query.
-        excluded.update(
-            corpus.path_keys[position]
-            for position, item in enumerate(corpus.items)
-            if not Path(item.path).is_file()
-        )
+        existence_cache: dict[str, bool] = {}
         if not self._text_model_is_cached():
-            return self._search_many_metadata(queries, corpus, limit, excluded)
+            return self._search_many_metadata(queries, corpus, limit, excluded, existence_cache)
         query_vectors = self._query_vectors(unique_queries)
         if query_vectors.shape[1] != corpus.vectors.shape[1]:
             return [[] for _ in queries]
@@ -793,23 +819,24 @@ class ClipIndex:
                 overlap = len(query_tokens & tokens)
                 if overlap:
                     scores[query_index, item_index] += min(0.08, 0.025 * overlap)
-        valid_positions = np.asarray([
-            position for position, path_key in enumerate(corpus.path_keys) if path_key not in excluded
-        ], dtype=np.int64)
-        if not valid_positions.size:
-            return [[] for _ in queries]
-        take = min(len(valid_positions), max(1, int(limit)))
+        take = min(len(corpus.items), max(1, int(limit)))
         by_query: dict[str, list[SearchHit]] = {}
         for query, row_scores in zip(unique_queries, scores):
-            valid_scores = row_scores[valid_positions]
-            if take == len(valid_positions):
-                ordered = valid_positions[np.argsort(valid_scores, kind="stable")[::-1]]
-            else:
-                partition = np.argpartition(valid_scores, -take)[-take:]
-                ordered = valid_positions[partition[np.argsort(valid_scores[partition], kind="stable")[::-1]]]
+            candidate_count = min(len(corpus.items), max(32, take * 4))
+            while True:
+                if candidate_count >= len(corpus.items):
+                    ordered = np.argsort(row_scores, kind="stable")[::-1]
+                else:
+                    partition = np.argpartition(row_scores, -candidate_count)[-candidate_count:]
+                    ordered = partition[np.argsort(row_scores[partition], kind="stable")[::-1]]
+                valid_positions = self._valid_ranked_positions(
+                    (int(position) for position in ordered), corpus, take, excluded, existence_cache,
+                )
+                if len(valid_positions) >= take or candidate_count >= len(corpus.items):
+                    break
+                candidate_count = min(len(corpus.items), candidate_count * 2)
             hits = []
-            for position in ordered:
-                index = int(position)
+            for index in valid_positions:
                 hits.append(SearchHit(corpus.items[index], float(row_scores[index]), corpus.durations[index],
                                       corpus.widths[index], corpus.heights[index],
                                       corpus.semantic_confidences[index], corpus.source_families[index]))
