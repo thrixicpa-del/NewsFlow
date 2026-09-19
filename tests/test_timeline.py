@@ -64,6 +64,25 @@ class TimelineTests(unittest.TestCase):
         self.assertIn("Iran", plan[0]["visual_query_en"])
         self.assertIn("oil tanker", plan[0]["visual_query_en"])
 
+    def test_geopolitical_and_cyber_queries_are_concrete(self):
+        query = fallback_visual_query(
+            "Вашингтон и Киев обсуждают санкции НАТО после гибридной кибератаки в Европе"
+        )
+        self.assertIn("Washington DC White House", query)
+        self.assertIn("Kyiv Ukraine government", query)
+        self.assertIn("economic sanctions", query)
+        self.assertIn("NATO headquarters", query)
+        self.assertIn("cybersecurity", query)
+
+    def test_topic_context_is_not_diluted_by_generic_sentence_query(self):
+        plan = fallback_scene_plan(
+            "Это решение меняет прежний подход.",
+            "НАТО усиливает защиту Европы от кибератак",
+        )
+        self.assertNotIn("international news, documentary footage", plan[0]["visual_query_en"])
+        self.assertIn("NATO headquarters", plan[0]["visual_query_en"])
+        self.assertIn("cybersecurity", plan[0]["visual_query_en"])
+
     def test_frontline_and_offensive_get_concrete_military_visual_terms(self):
         query = fallback_visual_query("На фронте началось наступление, задействованы танки и артиллерия")
         self.assertIn("frontline battlefield", query)

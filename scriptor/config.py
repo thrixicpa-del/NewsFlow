@@ -1075,7 +1075,9 @@ def load_settings() -> Settings:
             montage_auto_youtube=False,
             montage_external_only=bool(data.get("montage_external_only", False)),
             montage_use_script_text=bool(data.get("montage_use_script_text", True)),
-            montage_exclude_english_text=bool(data.get("montage_exclude_english_text", True)),
+            # Core Montage policy: English/Latin on-screen text is never accepted.
+            # Ignore stale legacy false values from older settings files.
+            montage_exclude_english_text=True,
             montage_scene_planner=(data.get("montage_scene_planner", "local")
                                    if data.get("montage_scene_planner", "local") in {"local", "agent"} else "local"),
             montage_match_threshold=float(data.get("montage_match_threshold", 0.22)),

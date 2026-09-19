@@ -265,3 +265,26 @@ Correction:
 - persist bucket-claim evidence in the deterministic smoke manifest.
 
 This is a diversity-coordination fix only; UI, IPC, rendering, provider and production-storage behavior are unchanged.
+
+
+## MONTAGE-003 human review — quality follow-up
+
+Date: **2026-09-19**
+Status: **HUMAN REVIEW RED; QUALITY PATCH PENDING VERIFICATION**
+
+The automated gate and three isolated real-news renders were technically GREEN, but human review found three product-quality defects that automation did not measure:
+
+- footage repeats were still visually obvious across different review videos even when per-project diagnostics reported zero local reuse;
+- footage containing English/Latin on-screen text appeared despite the product rule that Montage must not use it;
+- several selected shots were only broadly topical and did not match the narration beat closely enough.
+
+The quality correction treats human review as authoritative acceptance evidence:
+
+- English/Latin screen text is a hard exclusion. Unchecked or stale classifier state is not considered safe; ranked candidates are lazily screened on multiple source frames and only a current verified-safe state can pass.
+- Screen-text labels are versioned so prior coarse safe decisions are revalidated under the stricter frame-level classifier.
+- Local scene planning uses available narration even when title-only fallback is allowed; title-only remains only for genuinely missing scenario text.
+- The local visual vocabulary and semantic index add concrete Washington/US government, Kyiv/Ukraine government, EU/Brussels, NATO, cybersecurity/hybrid-attack and sanctions/economy visual families.
+- Generic fallback wording no longer dilutes a concrete topic query.
+- Cross-video source-family reuse receives a stronger but bounded rotation penalty: near-equal matches rotate, while materially better semantic matches remain authoritative.
+
+Technical GREEN is therefore not sufficient to close MONTAGE-003 until a fresh human-review render demonstrates the quality criteria above.

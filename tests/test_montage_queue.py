@@ -414,6 +414,21 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(restored.montage_renderer, "remotion")
         self.assertTrue(restored.montage_renderer_explicit)
 
+    def test_english_screen_text_filter_is_a_core_non_optional_policy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings_path = Path(folder) / "settings.json"
+            settings_path.write_text('{"montage_exclude_english_text":false}', encoding="utf-8")
+            with patch.object(config, "config_path", return_value=settings_path):
+                restored = config.load_settings()
+            self.assertTrue(restored.montage_exclude_english_text)
+
+        settings = Settings(montage_exclude_english_text=True)
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_montage_settings({"excludeEnglishText": False})
+        self.assertTrue(settings.montage_exclude_english_text)
+
     def test_normalized_montage_query_deduplicates_and_removes_generic_phrases(self):
         normalized = bridge._normalized_montage_visual_query(
             "international news, documentary footage, oil tanker refinery oil terminal, "
@@ -447,9 +462,42 @@ class MontageQueueStateTests(unittest.TestCase):
                  patch.object(bridge, "load_session", return_value=(["Iran oil tanker Hormuz"], [job])), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_montage_screen_text_safe", return_value=True), \
                  patch.object(bridge.ClipIndex, "count", return_value=0), \
                  patch.object(bridge, "probe_media_duration", return_value=6.0), \
                  patch.object(bridge, "probe_video_duration", return_value=8.0):
+                result = bridge.prepare_montage({"scenarioIndex": 0})
+
+        self.assertEqual(result["preparedProject"]["clips"], 1)
+
+    def test_available_narration_is_used_even_when_title_only_fallback_is_allowed(self):
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            footage = root / "footage"
+            footage.mkdir()
+            (footage / "NATO cyber security.mp4").write_bytes(b"source")
+            voice = root / "voice.mp3"
+            voice.write_bytes(b"voice")
+            settings = Settings(
+                footage_folders=[str(footage)], voicer_output_folder=str(root),
+                montage_project_folder=str(root / "projects"), montage_output_folder=str(root / "output"),
+                montage_use_script_text=False, montage_auto_web=False,
+            )
+            narration = "НАТО усиливает защиту Европы после гибридной кибератаки."
+            job = Job(ScenarioRequest(0, "НАТО и киберугрозы", ""), RunState.DONE, narration, "")
+            settings.voice_scenario_outputs = {"1": str(voice)}
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(["НАТО и киберугрозы"], [job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_montage_screen_text_safe", return_value=True), \
+                 patch.object(bridge.ClipIndex, "count", return_value=0), \
+                 patch.object(bridge, "probe_media_duration", return_value=6.0), \
+                 patch.object(bridge, "probe_video_duration", return_value=8.0), \
+                 patch.object(bridge, "title_only_scene_plan", side_effect=AssertionError("title-only must not run")):
                 result = bridge.prepare_montage({"scenarioIndex": 0})
 
         self.assertEqual(result["preparedProject"]["clips"], 1)

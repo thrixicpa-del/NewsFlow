@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from scriptor.ai_index import (
+    SCREEN_TEXT_CLASSIFIER_VERSION,
     SEMANTIC_INDEX_VERSION,
     SEMANTIC_TAG_LABELS,
     ClipIndex,
@@ -49,6 +50,8 @@ class ClipIndexTests(unittest.TestCase):
             "aviation-airport", "rail-metro", "city-urban", "migrant-border",
             "agriculture-farming", "healthcare-hospital", "weather-disaster",
             "technology-datacenter", "documentary-neutral",
+            "us-government-washington", "ukraine-government-kyiv", "eu-institutions",
+            "nato-alliance", "cybersecurity-network", "economic-sanctions",
         }
         self.assertTrue(required <= SEMANTIC_TAG_LABELS)
 
@@ -471,16 +474,69 @@ class ClipIndexTests(unittest.TestCase):
                                   embedder_factory=lambda: (FakeImageEmbedding(), FakeTextEmbedding()))
             index.index_folders([str(root)])
             with index._connect() as connection:
-                connection.execute("UPDATE clips SET english_text=1 WHERE path=?", (str(blocked.resolve()),))
-                connection.execute("UPDATE clips SET english_text=-1 WHERE path=?", (str(safe.resolve()),))
+                connection.execute(
+                    "UPDATE clips SET english_text=1,english_text_version=? WHERE path=?",
+                    (SCREEN_TEXT_CLASSIFIER_VERSION, str(blocked.resolve())),
+                )
+                connection.execute(
+                    "UPDATE clips SET english_text=-1,english_text_version=? WHERE path=?",
+                    (SCREEN_TEXT_CLASSIFIER_VERSION, str(safe.resolve())),
+                )
 
             self.assertEqual(index.screen_text_stats(), {"blocked": 1, "safe": 1, "unchecked": 1})
             self.assertEqual({item.name for item in index.all_items(exclude_english_text=True)},
-                             {safe.name, unchecked.name})
+                             {safe.name})
             time.sleep(0.002)
             blocked.write_bytes(b"changed blocked media")
             index.index_folders([str(root)])
             self.assertEqual(index.metadata(blocked).english_text, 0)
+
+    def test_frame_level_screen_text_blocks_one_text_frame_and_caches_safe_result(self):
+        class TextImageEmbedding:
+            def embed(self, images, **_):
+                for image in images:
+                    yield (np.asarray([1.0, 0.0], dtype=np.float32)
+                           if image == "text" else np.asarray([0.0, 1.0], dtype=np.float32))
+
+        class TextQueryEmbedding:
+            def query_embed(self, queries, **_):
+                values = queries if isinstance(queries, list) else [queries]
+                for query in values:
+                    value = str(query).casefold()
+                    if "without readable" in value or "no readable text" in value:
+                        yield np.asarray([0.0, 1.0], dtype=np.float32)
+                    else:
+                        yield np.asarray([1.0, 0.0], dtype=np.float32)
+
+        class TextFrameIndex(ClipIndex):
+            @staticmethod
+            def _sample_frames(path, samples=3):
+                frames = ["clean", "text", "clean", "clean", "clean"] if "blocked" in path.name else ["clean"] * 5
+                return frames[:samples], 6.0, 1920, 1080, 30.0
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            blocked = root / "blocked.mp4"
+            safe = root / "safe.mp4"
+            blocked.write_bytes(b"blocked")
+            safe.write_bytes(b"safe")
+            index = TextFrameIndex(
+                root / "index.sqlite3",
+                embedder_factory=lambda: (TextImageEmbedding(), TextQueryEmbedding()),
+            )
+            index.index_folders([str(root)])
+
+            self.assertFalse(index.screen_text_safe(blocked))
+            self.assertTrue(index.screen_text_safe(safe))
+            with index._connect() as connection:
+                rows = {
+                    Path(row["path"]).name: (int(row["english_text"]), int(row["english_text_version"]))
+                    for row in connection.execute(
+                        "SELECT path,english_text,english_text_version FROM clips"
+                    )
+                }
+            self.assertEqual(rows["blocked.mp4"], (1, SCREEN_TEXT_CLASSIFIER_VERSION))
+            self.assertEqual(rows["safe.mp4"], (-1, SCREEN_TEXT_CLASSIFIER_VERSION))
 
     def test_failed_embedding_transaction_is_recoverable_without_partial_rows(self):
         class FailingImageEmbedding:

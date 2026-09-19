@@ -9681,7 +9681,9 @@ def save_montage_settings(payload: dict) -> dict:
     if "useScriptText" in payload:
         settings.montage_use_script_text = bool(payload.get("useScriptText"))
     if "excludeEnglishText" in payload:
-        settings.montage_exclude_english_text = bool(payload.get("excludeEnglishText"))
+        # Core safety contract: English/Latin on-screen text is never allowed
+        # in Montage, regardless of a stale legacy UI setting.
+        settings.montage_exclude_english_text = True
     if "scenePlanner" in payload:
         planner = str(payload.get("scenePlanner", "local")).casefold()
         settings.montage_scene_planner = planner if planner in {"local", "agent"} else "local"
@@ -9838,6 +9840,18 @@ _MONTAGE_SEMANTIC_RULES = (
      ("migrant-border", "refugee-transport", "civilian-evacuation")),
     (("negotiation", "diplomatic", "summit", "переговор", "дипломат", "саммит"),
      ("negotiations", "diplomatic-negotiations", "parliament-government", "press-conference", "political-office")),
+    (("washington", "white house", "united states", "us government", "вашингтон", "сша", "америк"),
+     ("us-government-washington", "press-conference", "parliament-government")),
+    (("kyiv", "ukraine government", "ukrainian government", "киев", "украин"),
+     ("ukraine-government-kyiv", "parliament-government", "press-conference")),
+    (("european union", "brussels", "eu parliament", "евросоюз", "брюссел", "европ"),
+     ("eu-institutions", "parliament-government", "press-conference")),
+    (("nato", "north atlantic", "military alliance", "нато", "альянс"),
+     ("nato-alliance", "parliament-government", "military-logistics")),
+    (("cyber", "cybersecurity", "hybrid attack", "network attack", "кибер", "гибрид", "хакер"),
+     ("cybersecurity-network", "technology-datacenter")),
+    (("sanction", "trade restriction", "banking", "financial market", "санкц", "эконом", "рынк", "банк", "торгов"),
+     ("economic-sanctions", "markets-trading", "factory-industry", "cargo-warehouse")),
     (("tanker", "port", "seaport", "refinery", "energy", "танкер", "порт", "нефт", "энерг"),
      ("oil-tanker-port", "oil-pipeline-refinery", "port-logistics", "energy-infrastructure")),
     (_AGRICULTURE_QUERY_TERMS, ("agriculture-farming",)),
@@ -10187,8 +10201,12 @@ def _montage_position_bucket(position: int, total: int) -> str:
 
 def _montage_rotation_penalty(placements: list[str], position_bucket: str) -> float:
     """Rotate near-equal safe families, never materially weaker footage."""
+    if not placements:
+        return 0.0
     same_bucket = sum(bucket == position_bucket for bucket in placements)
-    return min(.025, same_bucket * .010 + len(placements) * .003)
+    # A family seen in another review video gets a meaningful but bounded
+    # penalty. Stronger semantic evidence can still win; near-ties rotate.
+    return min(.030, .015 + same_bucket * .008 + max(0, len(placements) - 1) * .002)
 
 
 def _montage_stable_variation(seed: str, query: str, family: str) -> float:
@@ -10217,7 +10235,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                               used_paths: set[str], used_families: set[str],
                               project_used_paths: set[str], project_used_families: set[str],
                               reserved_paths, reserved_families,
-                              source_exists, source_duration,
+                              source_exists, source_duration, source_allowed=None,
                               recent_project_paths: set[str] | None = None,
                               immediately_previous_path: str = "",
                               relaxed_hits=None, category_hits=None, safe_context_hits=None,
@@ -10301,6 +10319,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                 reject("duration", key)
                 continue
             if not _semantic_clip_ok(scene_query, hit.item):
+                reject("safety", key)
+                continue
+            if source_allowed is not None and not source_allowed(hit.item):
                 reject("safety", key)
                 continue
             if not source_exists(hit.item):
@@ -10450,6 +10471,17 @@ def _montage_item_is_excluded(item: FootageItem, excluded_paths: set[str] | None
             or family in (excluded_families or set()))
 
 
+def _montage_screen_text_safe(index, item: FootageItem) -> bool:
+    """English/Latin on-screen text is a hard Montage exclusion."""
+    checker = getattr(index, "screen_text_safe", None)
+    if not callable(checker):
+        return True
+    try:
+        return bool(checker(item.path))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                              semaphore: threading.BoundedSemaphore | None = None,
                              progress=None, excluded: set[str] | None = None,
@@ -10512,6 +10544,8 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 with _EXTERNAL_FOOTAGE_CACHE_LOCK:
                     _EXTERNAL_FOOTAGE_CACHE[cache_key] = normalized
             index.add_item(normalized)
+            if not _montage_screen_text_safe(index, normalized):
+                continue
             return normalized
         except Exception:
             # A weak or restricted external source must never prevent the
@@ -10555,16 +10589,13 @@ def prepare_montage(payload: dict) -> dict:
     progress_candidate = payload.get("_progress") or payload.get("progress")
     progress = progress_candidate if callable(progress_candidate) else None
     index = ClipIndex(app_data_root() / "footage-index.sqlite3")
-    if settings.montage_exclude_english_text and not settings.montage_external_only:
-        try:
-            labeled = index.classify_english_screen_text()
-            if progress and labeled["checked"]:
-                progress("Проверка текста", f"Помечено клипов с английскими надписями: {labeled['blocked']}; безопасных: {labeled['safe']}")
-        except Exception as exc:
-            # A missing local embedding model must not stop an already usable
-            # montage library. The state is visible in the timeline instead.
-            if progress:
-                progress("Проверка текста", f"Проверка английских надписей недоступна: {str(exc)[:120]}")
+    if progress and not settings.montage_external_only:
+        stats = index.screen_text_stats()
+        progress(
+            "Проверка текста",
+            f"Без английских надписей: проверено {stats['safe']}; "
+            f"заблокировано {stats['blocked']}; кандидаты без проверки валидируются перед выбором",
+        )
     # Do not walk every footage root for each scenario.  The incremental AI
     # index is the source of truth after indexing; scanning 20–30k files here
     # made parallel montage planning mostly disk-bound.  We only fall back to
@@ -10611,8 +10642,11 @@ def prepare_montage(payload: dict) -> dict:
         return _claim_batch_family(batch_usage, family, position_bucket, scenario_index)
     clips = []
     voice_duration = probe_media_duration(Path(voice_path))
+    # If a finished narration exists, use it for scene semantics even when
+    # the optional-text switch allows title-only fallback. Title-only is now
+    # reserved for genuinely missing scenario text.
     scenes = (fallback_scene_plan(narration, titles[scenario_index])
-              if settings.montage_use_script_text else title_only_scene_plan(titles[scenario_index], voice_duration))
+              if narration.strip() else title_only_scene_plan(titles[scenario_index], voice_duration))
     if settings.montage_use_script_text and settings.montage_scene_planner == "agent" and settings.openai_api_keys:
         try:
             if progress:
@@ -10869,6 +10903,7 @@ def prepare_montage(payload: dict) -> dict:
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
                     source_exists=source_exists, source_duration=verified_duration,
+                    source_allowed=lambda item: _montage_screen_text_safe(index, item),
                     recent_project_paths=recent_project_paths,
                     immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
                     position_bucket=position_bucket, batch_family_buckets=family_buckets,
@@ -10903,6 +10938,7 @@ def prepare_montage(payload: dict) -> dict:
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
             if (selected and _semantic_clip_ok(scene["visual_query_en"], selected)
+                    and _montage_screen_text_safe(index, selected)
                     and not batch_is_reserved(selected, external_family, position_bucket)
                     and claim_batch_source(selected, external_family, position_bucket)):
                 score, source = 1.0, selected.source or "external"
@@ -10928,6 +10964,7 @@ def prepare_montage(payload: dict) -> dict:
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
                     source_exists=source_exists, source_duration=verified_duration,
+                    source_allowed=lambda item: _montage_screen_text_safe(index, item),
                     recent_project_paths=recent_project_paths,
                     immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
                     position_bucket=position_bucket, batch_family_buckets=family_buckets,
@@ -11624,7 +11661,8 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
     minimum = _montage_level_score_floor("SAFE_CONTEXT", settings.montage_match_threshold)
     candidates = [
         hit.item for hit in ranked
-        if float(hit.score) >= minimum and _semantic_clip_ok(query, hit.item)
+        if (float(hit.score) >= minimum and _semantic_clip_ok(query, hit.item)
+            and _montage_screen_text_safe(index, hit.item))
     ]
     if candidates or not settings.montage_auto_web:
         return candidates

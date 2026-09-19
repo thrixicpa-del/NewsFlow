@@ -14,7 +14,7 @@ class MontageSemanticDiversityTests(unittest.TestCase):
     def _select(*, query="oil tanker port", strict=(), relaxed=(), category=(), context=(),
                 used_paths=None, used_families=None, project_paths=None, project_families=None,
                 reserved_paths=None, reserved_families=None, bucket="EARLY", family_buckets=None,
-                seed="seed", allow_safe_reuse=True):
+                seed="seed", allow_safe_reuse=True, source_allowed=None):
         try:
             return bridge._select_montage_candidate(
                 query,
@@ -33,6 +33,7 @@ class MontageSemanticDiversityTests(unittest.TestCase):
                 reserved_families=set(reserved_families or ()),
                 source_exists=lambda item: "missing" not in item.path,
                 source_duration=lambda item: 4.0 if "short" in item.path else 30.0,
+                source_allowed=source_allowed,
                 position_bucket=bucket,
                 batch_family_buckets=family_buckets or {},
                 diversity_seed=seed,
@@ -243,6 +244,52 @@ class MontageSemanticDiversityTests(unittest.TestCase):
 
         self.assertEqual(selection.item.path, safe.path)
         self.assertEqual(selection.fallback_level, "SAFE_REUSE")
+
+    def test_nato_cyber_scene_rejects_unrelated_specific_semantic_family(self):
+        wrong = FootageItem(
+            "D:/wrong/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port", "port-logistics"]
+        )
+        right = FootageItem(
+            "D:/right/cyber.mp4", "network security operations.mp4",
+            tags=["cybersecurity-network", "nato-alliance"],
+        )
+        query = "NATO hybrid cyber attack Europe network security"
+
+        self.assertFalse(bridge._semantic_clip_ok(query, wrong))
+        self.assertTrue(bridge._semantic_clip_ok(query, right))
+
+    def test_screen_text_safety_rejects_high_score_candidate(self):
+        blocked = FootageItem("D:/unsafe/english.mp4", "english lower third.mp4", tags=["political-office"])
+        safe = FootageItem("D:/safe/clean.mp4", "clean government.mp4", tags=["political-office"])
+
+        selection = self._select(
+            query="government press conference",
+            strict=[
+                SearchHit(blocked, .60, 30.0, source_family="blocked-family"),
+                SearchHit(safe, .35, 30.0, source_family="safe-family"),
+            ],
+            source_allowed=lambda item: item.path != blocked.path,
+        )
+
+        self.assertEqual(selection.item.path, safe.path)
+        self.assertGreaterEqual(selection.diagnostics["unique_rejected_safety"], 1)
+
+    def test_cross_video_family_rotation_penalizes_near_equal_reuse(self):
+        reused = FootageItem("D:/old/shot.mp4", "government.mp4", tags=["parliament-government"])
+        fresh = FootageItem("D:/fresh/shot.mp4", "government.mp4", tags=["parliament-government"])
+
+        selection = self._select(
+            query="government parliament officials",
+            strict=[
+                SearchHit(reused, .400, 30.0, source_family="old-family"),
+                SearchHit(fresh, .395, 30.0, source_family="fresh-family"),
+            ],
+            family_buckets={"old-family": ["MIDDLE"]},
+            bucket="EARLY",
+            seed="cross-video-diversity",
+        )
+
+        self.assertEqual(selection.source_family, "fresh-family")
 
     def test_rotation_never_overrides_a_materially_better_same_level_match(self):
         strong = FootageItem("D:/safe/strong.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"])
