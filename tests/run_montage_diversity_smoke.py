@@ -48,6 +48,11 @@ class _SmokeIndex(ClipIndex):
     def __init__(self, db_path):
         super().__init__(db_path, embedder_factory=lambda: (_ImageEmbedding(), _TextEmbedding()))
 
+    def screen_text_safe(self, _path):
+        # Synthetic color clips contain no lettering; this smoke's tiny fake
+        # embedding space is not a text classifier.
+        return True
+
 
 def _run(command: list[str]) -> None:
     result = subprocess.run(

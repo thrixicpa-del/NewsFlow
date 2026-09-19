@@ -47,6 +47,20 @@ describe("Montage Light view", () => {
     expect(screen.queryByText("Как собрать и передать монтаж")).toBeNull();
   });
 
+  it("shows the no-English-text rule as mandatory", () => {
+    render(<Editor data={fallback} command={vi.fn()} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+
+    const guard = screen.getByRole("checkbox", {
+      name: /Не использовать футажи с английскими\/латинскими надписями/,
+    }) as HTMLInputElement;
+    expect(guard.checked).toBe(true);
+    expect(guard.disabled).toBe(true);
+    expect(
+      screen.getByText(/Если готовый сценарий есть, NewsFlow всегда использует смысл каждой реплики/),
+    ).toBeTruthy();
+  });
+
   it("keeps the current fast montage queue contract", async () => {
     const data = {
       ...fallback,

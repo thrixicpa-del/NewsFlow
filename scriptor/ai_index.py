@@ -567,6 +567,14 @@ class ClipIndex:
                 progress(state)
             return state
         image_model, _ = self._models()
+        screen_query_vectors = None
+        if self.embedder_factory is None and self._text_model_is_cached():
+            try:
+                screen_query_vectors = self._query_vectors([
+                    *_SCREEN_TEXT_POSITIVE_QUERIES, *_SCREEN_TEXT_NEGATIVE_QUERIES,
+                ])
+            except (OSError, RuntimeError, ValueError):
+                screen_query_vectors = None
         for offset in range(0, len(pending), max(1, batch_clips)):
             if cancel and cancel.is_set():
                 state.stage = "cancelled"
@@ -590,7 +598,21 @@ class ClipIndex:
                 embeddings = list(image_model.embed(flat_images, batch_size=min(32, len(flat_images))))
                 rows = []
                 for group_index, (path, start, length) in enumerate(groups):
-                    vector = self._normalize(np.mean(embeddings[start:start + length], axis=0))
+                    frame_vectors = [
+                        self._normalize(value) for value in embeddings[start:start + length]
+                    ]
+                    vector = self._normalize(np.mean(frame_vectors, axis=0))
+                    screen_state = (
+                        self._screen_text_state_from_vectors(frame_vectors, screen_query_vectors)
+                        if screen_query_vectors is not None else 0
+                    )
+                    # Three indexing frames may block obvious text for free,
+                    # but a clean-looking clip remains unchecked until the
+                    # strict five-frame selection gate verifies it.
+                    indexed_english = 1 if screen_state == 1 else 0
+                    indexed_english_version = (
+                        SCREEN_TEXT_CLASSIFIER_VERSION if screen_state == 1 else 0
+                    )
                     try:
                         size, mtime_ns = self._signature(path)
                     except OSError:
@@ -599,21 +621,25 @@ class ClipIndex:
                         continue
                     duration, width, height, fps = metadata[group_index]
                     tags = sorted(tokenize(" ".join(path.parts[-4:])))
-                    rows.append((str(path), path.name, size, mtime_ns, duration, width, height, fps,
-                                 source_family_identity(path), json.dumps(tags, ensure_ascii=False),
-                                 vector.tobytes(), IMAGE_MODEL, time.time()))
+                    rows.append((
+                        str(path), path.name, size, mtime_ns, duration, width, height, fps,
+                        source_family_identity(path), json.dumps(tags, ensure_ascii=False),
+                        vector.tobytes(), IMAGE_MODEL, time.time(),
+                        indexed_english, indexed_english_version,
+                    ))
                 with self._lock, self._connect() as connection:
                     connection.executemany(
                         """
                         INSERT INTO clips(path,name,size,mtime_ns,duration,width,height,fps,source_family,
-                                          tags,embedding,model,indexed_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                          tags,embedding,model,indexed_at,english_text,english_text_version)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(path) DO UPDATE SET name=excluded.name,size=excluded.size,
                         mtime_ns=excluded.mtime_ns,duration=excluded.duration,width=excluded.width,
                         height=excluded.height,fps=excluded.fps,
                         source_family=CASE WHEN clips.source_url<>'' THEN clips.source_family ELSE excluded.source_family END,
                         tags=excluded.tags,embedding=excluded.embedding,model=excluded.model,
-                        indexed_at=excluded.indexed_at,english_text=0,english_text_version=0,
+                        indexed_at=excluded.indexed_at,english_text=excluded.english_text,
+                        english_text_version=excluded.english_text_version,
                         semantic_version=0,semantic_scores='{}'
                         """, rows)
                 self._invalidate_search_cache()
@@ -903,17 +929,11 @@ class ClipIndex:
             )
         self._invalidate_search_cache()
 
-    def _screen_text_state(self, path: Path) -> int:
-        """Return -1 only when every sampled frame is clearly text-free."""
+    @staticmethod
+    def _screen_text_state_from_vectors(frame_vectors, query_vectors) -> int:
+        """Classify sampled frame vectors without reopening the source media."""
         import numpy as np
 
-        if not self._text_model_is_cached():
-            return 0
-        images = self._sample_frames(path, samples=5)[0]
-        image_model, _text_model = self._models()
-        frame_vectors = [self._normalize(value) for value in image_model.embed(images, batch_size=len(images))]
-        prompts = [*_SCREEN_TEXT_POSITIVE_QUERIES, *_SCREEN_TEXT_NEGATIVE_QUERIES]
-        query_vectors = self._query_vectors(prompts)
         positive_count = len(_SCREEN_TEXT_POSITIVE_QUERIES)
         positive_vectors = query_vectors[:positive_count]
         negative_vectors = query_vectors[positive_count:]
@@ -924,6 +944,20 @@ class ClipIndex:
             if negative < positive + _SCREEN_TEXT_SAFE_MARGIN:
                 return 1
         return -1
+
+    def _screen_text_state(self, path: Path) -> int:
+        """Return -1 only when every sampled frame is clearly text-free."""
+        if not self._text_model_is_cached():
+            return 0
+        images = self._sample_frames(path, samples=5)[0]
+        image_model, _text_model = self._models()
+        frame_vectors = [
+            self._normalize(value) for value in image_model.embed(images, batch_size=len(images))
+        ]
+        query_vectors = self._query_vectors([
+            *_SCREEN_TEXT_POSITIVE_QUERIES, *_SCREEN_TEXT_NEGATIVE_QUERIES,
+        ])
+        return self._screen_text_state_from_vectors(frame_vectors, query_vectors)
 
     def screen_text_safe(self, path: str | Path) -> bool:
         """Lazily verify one ranked candidate; unchecked is never treated as safe."""

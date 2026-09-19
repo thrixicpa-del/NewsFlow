@@ -10321,8 +10321,8 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if not _semantic_clip_ok(scene_query, hit.item):
                 reject("safety", key)
                 continue
-            if source_allowed is not None and not source_allowed(hit.item):
-                reject("safety", key)
+            if minimum_score is not None and float(hit.score) < minimum_score:
+                reject("threshold", key)
                 continue
             if not source_exists(hit.item):
                 reject("missing", key)
@@ -10331,12 +10331,12 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if actual_duration + .05 < required_duration:
                 reject("duration", key)
                 continue
+            if source_allowed is not None and not source_allowed(hit.item):
+                reject("safety", key)
+                continue
             if key not in hard_valid_paths:
                 hard_valid_paths.add(key)
                 diagnostics["hard_valid"] += 1
-            if minimum_score is not None and float(hit.score) < minimum_score:
-                reject("threshold", key)
-                continue
             if avoid_recent and key in recent_paths:
                 reject("diversity", key)
                 continue
