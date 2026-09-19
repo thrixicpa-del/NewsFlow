@@ -957,9 +957,18 @@ def _read_footage_index_status() -> dict:
     path = _footage_index_status_path()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
+        status = raw if isinstance(raw, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+    if status.get("active") and status.get("ownerPid") and not _index_process_is_running(status["ownerPid"]):
+        status.update({
+            "stage": "paused",
+            "active": False,
+            "message": "Индексация прервана. Продолжите её: готовые неизменённые клипы будут пропущены.",
+            "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        _write_footage_index_status(status)
+    return status
 
 
 def _write_footage_index_status(payload: dict) -> None:
@@ -978,6 +987,24 @@ def _write_footage_index_status(payload: dict) -> None:
 
 def _footage_index_lock_path() -> Path:
     return app_data_root() / "footage-index-run.lock"
+
+
+_FOOTAGE_INDEX_THREAD_LOCK = threading.Lock()
+
+
+class _FootageIndexLease:
+    def __init__(self, path: Path):
+        self.path = path
+        self.released = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        try:
+            self.path.unlink(missing_ok=True)
+        finally:
+            self.released = True
+            _FOOTAGE_INDEX_THREAD_LOCK.release()
 
 
 def _index_process_is_running(pid: object) -> bool:
@@ -1015,25 +1042,31 @@ def _index_process_is_running(pid: object) -> bool:
         return False
 
 
-def _claim_footage_index_lock() -> Path:
-    lock_path = _footage_index_lock_path()
-    if lock_path.exists():
-        try:
-            current = json.loads(lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            current = {}
-        if _index_process_is_running(current.get("pid")):
-            raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
-        try:
-            lock_path.unlink()
-        except OSError:
-            raise RuntimeError("Не удалось снять старую блокировку ИИ-индексации")
-    try:
-        with lock_path.open("x", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "startedAt": datetime.now().isoformat(timespec="seconds")}, stream)
-    except FileExistsError:
+def _claim_footage_index_lock() -> _FootageIndexLease:
+    if not _FOOTAGE_INDEX_THREAD_LOCK.acquire(blocking=False):
         raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
-    return lock_path
+    lock_path = _footage_index_lock_path()
+    try:
+        if lock_path.exists():
+            try:
+                current = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                current = {}
+            if _index_process_is_running(current.get("pid")):
+                raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
+            try:
+                lock_path.unlink()
+            except OSError:
+                raise RuntimeError("Не удалось снять старую блокировку ИИ-индексации")
+        try:
+            with lock_path.open("x", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "startedAt": datetime.now().isoformat(timespec="seconds")}, stream)
+        except FileExistsError:
+            raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
+        return _FootageIndexLease(lock_path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _FOOTAGE_INDEX_THREAD_LOCK.release()
+        raise
 
 
 def _publication_allocation_profiles(settings: Settings) -> list[dict]:
@@ -1375,11 +1408,15 @@ def snapshot() -> dict:
     footage_total = 0
     footage_indexed = 0
     footage_text_stats = {"blocked": 0, "safe": 0, "unchecked": 0}
+    footage_semantic_status = {"version": 0, "current": 0, "outdated": 0}
     if footage_index:
         try:
             footage_total = footage_index.count()
             footage_indexed = footage_index.count(True)
             footage_text_stats = footage_index.screen_text_stats()
+            semantic_status = getattr(footage_index, "semantic_status", None)
+            if callable(semantic_status):
+                footage_semantic_status = semantic_status()
         except (OSError, sqlite3.Error) as error:
             # SQLite can become busy *after* the schema check when an indexer
             # has just begun a transaction. Keep the renderer usable and
@@ -1464,6 +1501,9 @@ def snapshot() -> dict:
             "englishBlocked": footage_text_stats["blocked"],
             "englishSafe": footage_text_stats["safe"],
             "englishUnchecked": footage_text_stats["unchecked"],
+            "semanticCurrent": footage_semantic_status["current"],
+            "semanticOutdated": footage_semantic_status["outdated"],
+            "semanticVersion": footage_semantic_status["version"],
             "databasePath": str(footage_db_path),
             "error": footage_index_error,
             "status": footage_status,
@@ -9524,7 +9564,7 @@ def index_footage(payload: dict) -> dict:
                if isinstance(item, str) and Path(item).is_dir()]
     if not folders:
         raise ValueError("Добавьте хотя бы одну папку с футажами")
-    lock_path = _claim_footage_index_lock()
+    lock = _claim_footage_index_lock()
     progress = payload.get("_progress") if callable(payload.get("_progress")) else None
     download_semaphore = payload.get("_downloadSemaphore")
     index = ClipIndex(app_data_root() / "footage-index.sqlite3")
@@ -9539,9 +9579,13 @@ def index_footage(payload: dict) -> dict:
             "indexed": state.indexed,
             "skipped": state.skipped,
             "failed": state.failed,
+            "removed": state.removed,
             "current": state.current,
+            "ownerPid": os.getpid(),
             "startedAt": started_at,
             "updatedAt": datetime.now().isoformat(timespec="seconds"),
+            "message": (f"Завершено с ошибками: {state.failed}. Проверьте повреждённые или недоступные файлы."
+                        if state.stage == "complete" and state.failed else ""),
         })
 
     try:
@@ -9549,18 +9593,14 @@ def index_footage(payload: dict) -> dict:
             # Uses already stored CLIP vectors; source files are not decoded again.
             progress = index.enrich_semantic_tags(progress=report)
         else:
-            index.remove_missing()
             media_progress = index.index_folders(folders, progress=report)
-            # Future footage receives the same semantic rules automatically.
-            # After the one deliberate upgrade to a new rules version, this
-            # pass touches only newly indexed clips and never reopens video.
-            progress = index.enrich_semantic_tags(progress=report)
+            progress = media_progress
         report(progress)
         return {**snapshot(), "operationResult": {"kind": "semantic-index" if enhance else "index", "count": progress.indexed,
                                                     "folder": str(index.db_path)},
                 "indexResult": {"total": progress.total, "processed": progress.processed,
                                 "indexed": progress.indexed, "skipped": progress.skipped,
-                                "failed": progress.failed}}
+                                "failed": progress.failed, "removed": progress.removed}}
     except Exception as exc:
         current = _read_footage_index_status()
         current.update({"stage": "error", "active": False, "error": str(exc),
@@ -9569,7 +9609,7 @@ def index_footage(payload: dict) -> dict:
         raise
     finally:
         try:
-            lock_path.unlink(missing_ok=True)
+            lock.release()
         except OSError:
             pass
 

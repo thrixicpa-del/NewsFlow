@@ -6,12 +6,15 @@ audio stream.  It is intentionally independent from API keys and the UI.
 """
 from __future__ import annotations
 
+# Existing media smoke commands intentionally inspect return codes/output.
+# Keep that established style while this file is touched for stale-path truth.
+# ruff: noqa: PLW1510, SIM117
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,9 +28,18 @@ from .bridge import _semantic_clip_ok
 from .config import Settings, _exclusive_settings_write
 from .cutter import cut_single_clip
 from .footage import FootageItem
-from .timeline import (TimelineClip, TimelineProject, _proxy_lock, align_timeline_to_audio,
-                       fallback_scene_plan, title_only_scene_plan, ffmpeg_executable,
-                       probe_media_duration, render_project, validate_rendered_montage)
+from .timeline import (
+    TimelineClip,
+    TimelineProject,
+    _proxy_lock,
+    align_timeline_to_audio,
+    fallback_scene_plan,
+    ffmpeg_executable,
+    probe_media_duration,
+    render_project,
+    title_only_scene_plan,
+    validate_rendered_montage,
+)
 
 
 class MontageRenderTests(unittest.TestCase):
@@ -307,12 +319,17 @@ class MontageRenderTests(unittest.TestCase):
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
 
         with tempfile.TemporaryDirectory(prefix="newsflow-text-label-") as temporary:
-            index = ClipIndex(Path(temporary) / "clips.sqlite3",
+            root = Path(temporary)
+            english_path = root / "english-caption.mp4"
+            safe_path = root / "safe-footage.mp4"
+            english_path.touch()
+            safe_path.touch()
+            index = ClipIndex(root / "clips.sqlite3",
                               embedder_factory=lambda: (object(), DummyTextEmbedder()))
             with index._connect() as connection:
                 rows = [
-                    ("english-caption.mp4", "english-caption.mp4", b"", np.asarray([1.0, 0.0], dtype=np.float32).tobytes()),
-                    ("safe-footage.mp4", "safe-footage.mp4", b"", np.asarray([0.0, 1.0], dtype=np.float32).tobytes()),
+                    (str(english_path), english_path.name, b"", np.asarray([1.0, 0.0], dtype=np.float32).tobytes()),
+                    (str(safe_path), safe_path.name, b"", np.asarray([0.0, 1.0], dtype=np.float32).tobytes()),
                 ]
                 connection.executemany(
                     "INSERT INTO clips(path,name,size,mtime_ns,tags,embedding,model) VALUES(?,?,0,0,?, ?, 'test')",
