@@ -10256,6 +10256,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if level == "STRICT_MATCH":
                 diagnostics["strict_accepted"] += 1
             placements = list(family_buckets.get(family, []))
+            same_bucket = sum(bucket == position_bucket for bucket in placements)
             rotation_penalty = _montage_rotation_penalty(placements, position_bucket)
             reused = reserved or historical or key in project_used_paths or family in project_used_families
             if reused and len({_montage_hit_family(value) for value in all_candidates}) <= 1:

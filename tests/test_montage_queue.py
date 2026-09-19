@@ -806,23 +806,23 @@ class MontageQueueStateTests(unittest.TestCase):
     def test_candidate_identity_does_not_resolve_each_library_path(self):
         """Ranking thousands of candidates must not call Windows path resolution."""
         with patch("scriptor.bridge.Path.resolve", side_effect=AssertionError("filesystem resolve")):
-            key = bridge._montage_clip_key("D:/library/one/clip_001.mp4")
-            family = bridge._montage_clip_family_key("D:/library/one/clip_001.mp4")
-        self.assertEqual(key, "d:\\library\\one\\clip_001.mp4")
-        self.assertEqual(family, "d:\\library\\one")
+            key = bridge._montage_clip_key("D:/library/one/one_0001.mp4")
+            family = bridge._montage_clip_family_key("D:/library/one/one_0001.mp4")
+        self.assertEqual(key, "d:\\library\\one\\one_0001.mp4")
+        self.assertEqual(family, "path::d:/library/one")
 
     def test_candidate_family_identity_does_not_construct_path_objects(self):
         with patch("scriptor.bridge.Path", side_effect=AssertionError("Path must not be used in ranking")):
-            family = bridge._montage_clip_family_key("D:/library/one/clip_001.mp4")
-        self.assertEqual(family, "d:\\library\\one")
+            family = bridge._montage_clip_family_key("D:/library/one/one_0001.mp4")
+        self.assertEqual(family, "path::d:/library/one")
 
     def test_generated_cuts_from_one_original_are_one_source_family(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "Зеленский" / "Исходный ролик"
             source.mkdir(parents=True)
-            first = source / "clip_a9hd_001.mp4"
-            second = source / "clip_z22p_945.mp4"
-            other = Path(folder) / "Зеленский" / "Другой исходник" / "clip_z22p_945.mp4"
+            first = source / "Исходный ролик_0001.mp4"
+            second = source / "Исходный ролик_0002.mp4"
+            other = Path(folder) / "Зеленский" / "Другой исходник" / "Другой исходник_0001.mp4"
             other.parent.mkdir(parents=True)
             for path in (first, second, other):
                 path.write_bytes(b"x")
@@ -833,8 +833,8 @@ class MontageQueueStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "one-source"
             source.mkdir()
-            used = source / "clip_a_001.mp4"
-            alternate_cut = source / "clip_b_002.mp4"
+            used = source / "one-source_0001.mp4"
+            alternate_cut = source / "one-source_0002.mp4"
             for path in (used, alternate_cut):
                 path.write_bytes(b"x")
             item = FootageItem(str(alternate_cut), alternate_cut.name)

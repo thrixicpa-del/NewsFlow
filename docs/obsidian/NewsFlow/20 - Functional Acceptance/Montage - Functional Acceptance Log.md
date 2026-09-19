@@ -200,3 +200,19 @@ The bounded follow-up:
 - adds deterministic regressions and expands the isolated MONTAGE-003 smoke from 3 to 5 related videos with two explicit contradiction sources.
 
 No PASS claim is recorded for this follow-up until Codex completes the isolated backend/frontend/safety verification and fresh 5-video smoke.
+
+
+## MONTAGE-003 verification RED — follow-up 1
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING RE-VERIFICATION**
+
+Codex verification of `f499a181d7f5313a4fa9a8a10a3f80a3750d1484` stopped at backend RED:
+
+- 152 tests: **130 PASS / 4 FAIL / 18 ERROR / 0 SKIP**;
+- all 18 errors shared one ChatGPT patch regression: `same_bucket` was referenced after its inline calculation had been moved into the bounded rotation helper;
+- four family tests still encoded the older broad `clip_*` grouping assumption, while the actual NewsFlow Cutter contract is `<source-folder>/<source-folder>_NNNN.mp4` and MONTAGE-002 intentionally keeps unrelated generic `clip_001.mp4` / `clip_002.mp4` distinct.
+
+The correction restores `same_bucket` only for diagnostics/reason text and updates those four regressions to the real Cutter naming contract. Production family behavior remains the MONTAGE-002 canonical `source_family_identity()`.
+
+No production data/media/settings were touched. Re-verification is required before any GREEN status.
