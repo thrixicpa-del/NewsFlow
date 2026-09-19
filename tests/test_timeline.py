@@ -3,10 +3,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scriptor.timeline import (TimelineClip, TimelineProject, fallback_scene_plan,
+from scriptor.timeline import (TimelineClip, TimelineProject, align_timeline_to_audio, fallback_scene_plan,
                                fit_scene_plan_to_voice_duration,
                                fallback_visual_query, parse_agent_scene_plan, split_narration, remotion_payload,
-                               required_video_duration, _proxy_lock, _replace_with_retry)
+                               required_video_duration, _remaining_source_duration,
+                               _proxy_lock, _replace_with_retry)
 
 
 class TimelineTests(unittest.TestCase):
@@ -24,6 +25,20 @@ class TimelineTests(unittest.TestCase):
 
     def test_voice_duration_includes_intro_before_final_export(self):
         self.assertEqual(required_video_duration(64.5, 2.0), 66.5)
+
+    def test_remaining_source_duration_respects_source_start(self):
+        self.assertEqual(_remaining_source_duration(30.0, 24.0), 6.0)
+        self.assertEqual(_remaining_source_duration(30.0, -2.0), 30.0)
+        self.assertEqual(_remaining_source_duration(5.0, 9.0), 0.0)
+
+    def test_audio_alignment_preserves_existing_source_window(self):
+        project = TimelineProject(
+            "windowed",
+            clips=[TimelineClip("long.mp4", "voice", "query", duration=4.0, source_start=6.0)],
+        )
+        align_timeline_to_audio(project, 4.0, [], duration_probe=lambda _path: 10.0)
+        self.assertEqual(project.clips[0].source_start, 6.0)
+        self.assertEqual(project.clips[0].duration, 4.0)
 
     def test_visual_plan_uses_full_six_second_clips_except_final_tail(self):
         scenes = [

@@ -99,24 +99,28 @@ def main() -> int:
         folder.mkdir(parents=True, exist_ok=True)
     os.environ["NEWSFLOW_TEST_ROOT"] = str(review / "test-storage")
 
-    colors = ["blue", "navy", "cyan", "royalblue", "steelblue", "deepskyblue"]
+    colors = ["blue", "navy", "cyan", "royalblue", "steelblue", "deepskyblue", "dodgerblue", "slateblue"]
     sources = []
     for number, color in enumerate(colors, 1):
         path = footage / f"oil_tanker_family_{number}.mp4"
         _make_video(path, color)
         sources.append(path)
     unsafe = footage / "ukraine_oil_tanker_wrong_country.mp4"
+    agriculture = footage / "tractor_harvest_agriculture.mp4"
     _make_video(unsafe, "red")
-    all_sources = [*sources, unsafe]
+    _make_video(agriculture, "orange")
+    all_sources = [*sources, unsafe, agriculture]
     source_hashes_before = {path.name: _sha256(path) for path in all_sources}
 
     titles = [
         "Иран и Ормузский пролив: движение нефтяных танкеров",
         "Ормузский пролив: риски для нефтяных танкеров",
         "Танкеры в Ормузском проливе и мировая нефть",
+        "Страхование танкеров и риски прохода через Ормузский пролив",
+        "Нефтяные поставки через Ормузский пролив и танкерный флот",
     ]
     voice_paths = []
-    for index, frequency in enumerate((430, 510, 590), 1):
+    for index, frequency in enumerate((430, 510, 590, 670, 750), 1):
         path = voices / f"voice-{index}.mp3"
         _make_voice(path, frequency)
         voice_paths.append(path)
@@ -205,8 +209,8 @@ def main() -> int:
         if len(starts) > 1
     }
     assertions = {
-        "threeProjectsRendered": len(rendered) == 3 and all(Path(row["path"]).is_file() for row in rendered),
-        "threeDistinctOpeningFamilies": len(set(openings)) == 3,
+        "fiveProjectsRendered": len(rendered) == 5 and all(Path(row["path"]).is_file() for row in rendered),
+        "fiveDistinctOpeningFamilies": len(set(openings)) == 5,
         "safeReuseOccurred": any(
             clip["fallbackLevel"] == "SAFE_REUSE"
             for project in project_rows for clip in project["clips"]
@@ -214,8 +218,9 @@ def main() -> int:
         "reusedLongSourcesUseDifferentWindows": bool(reused_windows) and all(
             len(set(starts)) > 1 for starts in reused_windows.values()
         ),
-        "wrongCountrySourceRejected": all(
-            clip["file"] != unsafe.name for project in project_rows for clip in project["clips"]
+        "unsafeContradictionSourcesRejected": all(
+            clip["file"] not in {unsafe.name, agriculture.name}
+            for project in project_rows for clip in project["clips"]
         ),
         "sourceMediaUnchanged": source_hashes_before == source_hashes_after,
         "renderDurationsMatchVoice": all(abs(row["duration"] - 18.0) <= 0.35 for row in rendered),

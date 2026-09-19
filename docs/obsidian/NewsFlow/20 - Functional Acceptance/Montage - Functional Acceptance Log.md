@@ -174,3 +174,29 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
 - `python scripts/secret-scan.py`: **PASS**; scoped Ruff for the new/changed test files: **PASS**; `git diff --check`: **PASS**.
 - Whole-file Ruff for legacy `scriptor/bridge.py` / `scriptor/timeline.py` still reports pre-existing repository-wide import/style debt unrelated to MONTAGE-003; no bypass or broad cleanup was made.
 - Total SKIP: **0**. No production media/settings and no paid/external provider paths were touched.
+
+
+## MONTAGE-003 independent ChatGPT review follow-up — semantic safety and family identity
+
+Date: **2026-09-19**
+Status: **PATCH COMMITTED BY CHATGPT; PENDING CODEX VERIFICATION**
+
+Independent review of commit `127f5c47384e66734663ffeaf7e96c4c2e194280` found bounded correctness gaps:
+
+- Montage-local source-family identity diverged from the MONTAGE-002 index contract, so recent/batch diversity could fail to recognize the same source family.
+- `CATEGORY_MATCH` / `SAFE_CONTEXT` and terminal reuse could accept weak unrelated candidates that were not covered by a hard contradiction guard.
+- Position rotation could penalize a relevant family strongly enough to promote materially weaker footage.
+- The no-index bootstrap and broken-clip recovery paths could bypass the intended semantic/performance guarantees; recovery could call `index.all_items()`.
+- Timeline fallback/final render margin did not consistently preserve/subtract `source_start`.
+
+The bounded follow-up:
+
+- reuses `ai_index.source_family_identity()` as the family source of truth;
+- rejects contradictory versioned semantic tags and applies score floors to broad fallback/reuse;
+- makes diversity a small near-match preference rather than a relevance override;
+- requires actual metadata overlap when CLIP search is unavailable;
+- keeps broken-clip recovery on bounded `search_many` only and records recovery/tail fallback diagnostics;
+- preserves `source_start` through timeline alignment and makes remaining-source checks offset-aware;
+- adds deterministic regressions and expands the isolated MONTAGE-003 smoke from 3 to 5 related videos with two explicit contradiction sources.
+
+No PASS claim is recorded for this follow-up until Codex completes the isolated backend/frontend/safety verification and fresh 5-video smoke.

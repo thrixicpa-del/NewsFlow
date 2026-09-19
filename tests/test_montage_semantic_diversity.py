@@ -1,9 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from scriptor import bridge
-from scriptor.ai_index import SearchHit
+from scriptor.ai_index import SearchHit, source_family_identity
 from scriptor.footage import FootageItem
 from scriptor.timeline import TimelineClip, TimelineProject
 
@@ -176,6 +177,118 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         self.assertEqual(selection.fallback_level, "SAFE_REUSE")
         self.assertTrue(selection.reused)
         self.assertIn("единственный", selection.position_rotation_reason)
+
+    def test_specific_semantic_tag_mismatch_cannot_beat_safe_reuse(self):
+        safe = FootageItem("D:/safe/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"])
+        wrong = FootageItem(
+            "D:/unsafe/hospital.mp4", "hospital doctors surgery.mp4", tags=["healthcare-hospital"]
+        )
+        safe_key = bridge._montage_clip_key(safe.path)
+
+        selection = self._select(
+            strict=[SearchHit(safe, .45, 30.0, source_family="oil-family")],
+            context=[SearchHit(wrong, .95, 30.0, source_family="hospital-family")],
+            used_paths={safe_key},
+            used_families={"oil-family"},
+            project_paths={safe_key},
+            project_families={"oil-family"},
+            reserved_paths={safe_key},
+            reserved_families={"oil-family"},
+        )
+
+        self.assertEqual(selection.item.path, safe.path)
+        self.assertEqual(selection.fallback_level, "SAFE_REUSE")
+        self.assertTrue(selection.reused)
+
+    def test_near_zero_unknown_context_cannot_beat_safe_reuse(self):
+        safe = FootageItem("D:/safe/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"])
+        unknown = FootageItem("D:/unknown/random.mp4", "random scene.mp4", tags=[])
+        safe_key = bridge._montage_clip_key(safe.path)
+
+        selection = self._select(
+            strict=[SearchHit(safe, .45, 30.0, source_family="oil-family")],
+            context=[SearchHit(unknown, .01, 30.0, source_family="unknown-family")],
+            used_paths={safe_key},
+            used_families={"oil-family"},
+            project_paths={safe_key},
+            project_families={"oil-family"},
+            reserved_paths={safe_key},
+            reserved_families={"oil-family"},
+        )
+
+        self.assertEqual(selection.item.path, safe.path)
+        self.assertEqual(selection.fallback_level, "SAFE_REUSE")
+
+    def test_rotation_never_overrides_a_materially_better_same_level_match(self):
+        strong = FootageItem("D:/safe/strong.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"])
+        weak = FootageItem("D:/safe/weak.mp4", "generic port.mp4", tags=["port-logistics"])
+
+        selection = self._select(
+            strict=[
+                SearchHit(strong, .50, 30.0, source_family="family-a"),
+                SearchHit(weak, .46, 30.0, source_family="family-b"),
+            ],
+            family_buckets={"family-a": ["EARLY", "EARLY", "EARLY"]},
+            bucket="EARLY",
+            seed="quality-first",
+        )
+
+        self.assertEqual(selection.item.path, strong.path)
+
+    def test_bridge_family_identity_matches_index_contract(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cutter = root / "evening_report"
+            first = cutter / "evening_report_0001.mp4"
+            second = cutter / "evening_report_0002.mp4"
+            generic_one = root / "clip_001.mp4"
+            generic_two = root / "clip_002.mp4"
+
+            self.assertEqual(bridge._montage_clip_family_key(str(first)), source_family_identity(first))
+            self.assertEqual(bridge._montage_clip_family_key(str(second)), source_family_identity(second))
+            self.assertEqual(
+                bridge._montage_clip_family_key(str(first)),
+                bridge._montage_clip_family_key(str(second)),
+            )
+            self.assertNotEqual(
+                bridge._montage_clip_family_key(str(generic_one)),
+                bridge._montage_clip_family_key(str(generic_two)),
+            )
+
+    def test_no_index_metadata_relevance_requires_actual_overlap(self):
+        relevant = FootageItem("D:/oil_tanker_port.mp4", "oil_tanker_port.mp4", tags=[])
+        unrelated = FootageItem("D:/hospital_doctors.mp4", "hospital_doctors.mp4", tags=[])
+
+        self.assertGreater(bridge._montage_metadata_relevance("oil tanker port", relevant), 0.0)
+        self.assertEqual(bridge._montage_metadata_relevance("oil tanker port", unrelated), 0.0)
+
+    def test_broken_clip_recovery_stays_bounded_and_rejects_weak_context(self):
+        weak = FootageItem(
+            "D:/unsafe/hospital.mp4", "hospital doctors.mp4", tags=["healthcare-hospital"]
+        )
+
+        class WeakIndex:
+            def search_many(self, queries, limit=20):
+                self.queries = list(queries)
+                self.limit = limit
+                return [[SearchHit(weak, .95, 30.0, source_family="hospital-family")]]
+
+            def all_items(self, *args, **kwargs):
+                raise AssertionError("full-library fallback is forbidden")
+
+        settings = SimpleNamespace(
+            montage_match_threshold=.22,
+            montage_auto_web=False,
+            montage_exclude_english_text=False,
+        )
+        clip = TimelineClip("D:/missing.mp4", "voice", "oil tanker port", duration=6.0)
+        self.assertEqual(bridge._replacement_candidates_for_clip(WeakIndex(), clip, settings), [])
+
+        class EmptyIndex(WeakIndex):
+            def search_many(self, queries, limit=20):
+                return [[]]
+
+        self.assertEqual(bridge._replacement_candidates_for_clip(EmptyIndex(), clip, settings), [])
 
     def test_position_rotation_prefers_family_unused_in_current_bucket(self):
         repeated_early = FootageItem("D:/a/shot.mp4", "a.mp4", tags=["oil-tanker-port"])
