@@ -200,6 +200,7 @@ class ClipIndex:
         self.embedder_factory = embedder_factory
         self._image_embedder = None
         self._text_embedder = None
+        self._screen_text_safe_cache: dict[str, bool] = {}
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
@@ -319,6 +320,7 @@ class ClipIndex:
         return tuple(fingerprint)
 
     def _invalidate_search_cache(self) -> None:
+        self._screen_text_safe_cache.clear()
         with _SEARCH_CORPORA_LOCK:
             _SEARCH_CORPORA.pop(self._cache_key(), None)
 
@@ -966,17 +968,23 @@ class ClipIndex:
             resolved = str(candidate.resolve())
         except OSError:
             resolved = str(candidate)
+        cached = self._screen_text_safe_cache.get(resolved)
+        if cached is not None:
+            return cached
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT english_text,english_text_version FROM clips WHERE path=?", (resolved,)
             ).fetchone()
         if row is not None and int(row["english_text_version"] or 0) >= SCREEN_TEXT_CLASSIFIER_VERSION:
-            return int(row["english_text"]) == -1
+            safe = int(row["english_text"]) == -1
+            self._screen_text_safe_cache[resolved] = safe
+            return safe
         try:
             state = self._screen_text_state(candidate)
         except (OSError, ValueError):
             state = 0
         if state == 0:
+            self._screen_text_safe_cache[resolved] = False
             return False
         if row is not None:
             with self._lock, self._connect() as connection:
@@ -985,7 +993,9 @@ class ClipIndex:
                     (state, SCREEN_TEXT_CLASSIFIER_VERSION, resolved),
                 )
             self._invalidate_search_cache()
-        return state == -1
+        safe = state == -1
+        self._screen_text_safe_cache[resolved] = safe
+        return safe
 
     def classify_english_screen_text(self) -> dict[str, int]:
         """Explicit maintenance pass using frame-level, fail-closed screening."""
