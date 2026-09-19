@@ -331,6 +331,24 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         self.assertEqual(selection.source_family, "family-b")
         self.assertEqual(selection.position_bucket, "EARLY")
 
+    def test_batch_history_is_frozen_and_family_claims_are_position_scoped(self):
+        usage = {"lock": __import__("threading").RLock(), "claims": {}}
+
+        self.assertEqual(
+            bridge._batch_history_paths(usage, ["D:/old/a.mp4"]),
+            ("D:/old/a.mp4",),
+        )
+        self.assertEqual(
+            bridge._batch_history_paths(usage, ["D:/old/a.mp4", "D:/new/in-batch.mp4"]),
+            ("D:/old/a.mp4",),
+        )
+
+        self.assertTrue(bridge._claim_batch_family(usage, "family-a", "EARLY", 0))
+        self.assertFalse(bridge._claim_batch_family(usage, "family-a", "EARLY", 1))
+        self.assertTrue(bridge._claim_batch_family(usage, "family-a", "MIDDLE", 1))
+        self.assertEqual(bridge._batch_reserved_families(usage, "EARLY"), {"family-a"})
+        self.assertEqual(bridge._batch_reserved_families(usage, "LATE"), set())
+
     def test_ten_similar_projects_do_not_repeat_the_same_opening_family(self):
         hits = [
             SearchHit(

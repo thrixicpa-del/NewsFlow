@@ -575,12 +575,15 @@ class MontageQueueStateTests(unittest.TestCase):
             "lock": __import__("threading").RLock(),
             "paths": {"path-82": 81, "path-83": 82},
             "families": {"family-82": 81, "family-83": 82},
+            "claims": {("EARLY", "family-82"): 81, ("EARLY", "family-83"): 82},
         }
         bridge._release_batch_footage_reservations(usage, 81)
         self.assertNotIn("path-82", usage["paths"])
         self.assertNotIn("family-82", usage["families"])
+        self.assertNotIn(("EARLY", "family-82"), usage["claims"])
         self.assertEqual(usage["paths"]["path-83"], 82)
         self.assertEqual(usage["families"]["family-83"], 82)
+        self.assertEqual(usage["claims"][("EARLY", "family-83")], 82)
 
     def test_selection_uses_relaxed_match_below_ideal_threshold(self):
         item = FootageItem("D:/oil/clip_001.mp4", "oil.mp4", tags=["oil-tanker-port"])

@@ -146,7 +146,8 @@ def main() -> int:
     }
     batch_usage = {
         "lock": threading.RLock(), "paths": {}, "families": {},
-        "placements": {}, "windows": {},
+        "claims": {}, "placements": {}, "windows": {},
+        "historyPaths": tuple(settings.montage_recent_clip_paths),
     }
 
     prepared = []
@@ -233,6 +234,10 @@ def main() -> int:
         "projects": project_rows,
         "rendered": rendered,
         "openingFamilies": openings,
+        "batchPositionClaims": [
+            {"bucket": key[0], "family": key[1], "scenarioIndex": owner}
+            for key, owner in sorted(batch_usage["claims"].items())
+        ],
         "reusedSourceWindows": reused_windows,
         "sourceHashesBefore": source_hashes_before,
         "sourceHashesAfter": source_hashes_after,

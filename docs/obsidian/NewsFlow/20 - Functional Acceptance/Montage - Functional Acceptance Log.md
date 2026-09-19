@@ -245,3 +245,23 @@ Confirmed root causes:
 The same follow-up also moves the canonical source-family algorithm into `ai_index.source_family_identity_text()`, so both the index and Montage use one string-only contract without constructing `Path` objects in the candidate-ranking hot path.
 
 No production data/media/settings and no provider/network path were touched.
+
+
+## MONTAGE-003 verification RED — follow-up 3
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING SINGLE FULL RE-VERIFICATION**
+
+The full gate on `5e2287367158e5ef96d61fbdf1cee87fd763de82` passed backend (158), full UI (206), typecheck/builds and Electron DEV E2E (2/2), then stopped at the deterministic five-video smoke because only two distinct opening source families were produced.
+
+Root cause: current-batch selections were being treated twice as global history. Every selected family was hard-reserved across the entire batch, and each completed project also appended all of its middle/late clips to `montage_recent_clip_paths`. With eight safe source families, early projects exhausted the library before later openings were selected.
+
+Correction:
+- freeze the persisted recent-history baseline once at batch start;
+- coordinate new in-batch claims atomically by `(source_family, position_bucket)` rather than banning a family globally;
+- preserve project-local no-repeat rules and semantic score/safety floors;
+- keep placement history and alternate `source_start` rotation, so cross-video reuse in a different timeline region remains explicit and truthful;
+- release failed planners' bucket claims along with legacy reservations;
+- persist bucket-claim evidence in the deterministic smoke manifest.
+
+This is a diversity-coordination fix only; UI, IPC, rendering, provider and production-storage behavior are unchanged.
