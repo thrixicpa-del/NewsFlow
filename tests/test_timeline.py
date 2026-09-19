@@ -3,11 +3,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scriptor.timeline import (TimelineClip, TimelineProject, align_timeline_to_audio, fallback_scene_plan,
-                               fit_scene_plan_to_voice_duration,
-                               fallback_visual_query, parse_agent_scene_plan, split_narration, remotion_payload,
-                               required_video_duration, _remaining_source_duration,
-                               _proxy_lock, _replace_with_retry)
+from scriptor.timeline import (
+    TimelineClip,
+    TimelineProject,
+    _proxy_lock,
+    _remaining_source_duration,
+    _replace_with_retry,
+    align_timeline_to_audio,
+    fallback_scene_plan,
+    fallback_visual_query,
+    fit_scene_plan_to_voice_duration,
+    parse_agent_scene_plan,
+    remotion_payload,
+    required_video_duration,
+    split_narration,
+)
 
 
 class TimelineTests(unittest.TestCase):
