@@ -576,6 +576,8 @@ class MontageQueueStateTests(unittest.TestCase):
             "paths": {"path-82": 81, "path-83": 82},
             "families": {"family-82": 81, "family-83": 82},
             "claims": {("EARLY", "family-82"): 81, ("EARLY", "family-83"): 82},
+            "placements": {"shared": [(81, "EARLY"), (82, "MIDDLE")]},
+            "windows": {"shared": [(81, 0.0), (82, 6.0)]},
         }
         bridge._release_batch_footage_reservations(usage, 81)
         self.assertNotIn("path-82", usage["paths"])
@@ -584,6 +586,8 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(usage["paths"]["path-83"], 82)
         self.assertEqual(usage["families"]["family-83"], 82)
         self.assertEqual(usage["claims"][("EARLY", "family-83")], 82)
+        self.assertEqual(usage["placements"]["shared"], [(82, "MIDDLE")])
+        self.assertEqual(usage["windows"]["shared"], [(82, 6.0)])
 
     def test_selection_uses_relaxed_match_below_ideal_threshold(self):
         item = FootageItem("D:/oil/clip_001.mp4", "oil.mp4", tags=["oil-tanker-port"])
