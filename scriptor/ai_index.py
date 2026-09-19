@@ -84,6 +84,7 @@ _SCREEN_TEXT_NEGATIVE_QUERIES = (
     "natural news b roll with people buildings vehicles and no readable text",
 )
 _SCREEN_TEXT_SAFE_MARGIN = 0.015
+_SCREEN_TEXT_OBVIOUS_MARGIN = 0.060
 
 
 # A montage batch creates several ClipIndex instances (one per worker).  The
@@ -604,14 +605,14 @@ class ClipIndex:
                         self._normalize(value) for value in embeddings[start:start + length]
                     ]
                     vector = self._normalize(np.mean(frame_vectors, axis=0))
-                    screen_state = (
-                        self._screen_text_state_from_vectors(frame_vectors, screen_query_vectors)
-                        if screen_query_vectors is not None else 0
+                    obvious_text = (
+                        self._screen_text_obvious_from_vectors(frame_vectors, screen_query_vectors)
+                        if screen_query_vectors is not None else False
                     )
-                    # Three indexing frames may block obvious text for free,
-                    # but a clean-looking clip remains unchecked until the
-                    # strict five-frame selection gate verifies it.
-                    indexed_english = 1 if screen_state == 1 else 0
+                    # Three indexing frames block only high-confidence text
+                    # for free. Ambiguous/clean-looking clips remain unchecked
+                    # until the strict five-frame selection gate verifies them.
+                    indexed_english = 1 if obvious_text else 0
                     indexed_english_version = (
                         SCREEN_TEXT_CLASSIFIER_VERSION if screen_state == 1 else 0
                     )
@@ -932,16 +933,31 @@ class ClipIndex:
         self._invalidate_search_cache()
 
     @staticmethod
-    def _screen_text_state_from_vectors(frame_vectors, query_vectors) -> int:
-        """Classify sampled frame vectors without reopening the source media."""
+    def _screen_text_scores(frame, query_vectors) -> tuple[float, float]:
         import numpy as np
 
         positive_count = len(_SCREEN_TEXT_POSITIVE_QUERIES)
         positive_vectors = query_vectors[:positive_count]
         negative_vectors = query_vectors[positive_count:]
+        positive = max(float(np.dot(frame, vector)) for vector in positive_vectors)
+        negative = max(float(np.dot(frame, vector)) for vector in negative_vectors)
+        return positive, negative
+
+    @classmethod
+    def _screen_text_obvious_from_vectors(cls, frame_vectors, query_vectors) -> bool:
+        """Cheap indexing gate: block only unmistakable text evidence."""
+        return any(
+            positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN
+            for positive, negative in (
+                cls._screen_text_scores(frame, query_vectors) for frame in frame_vectors
+            )
+        )
+
+    @classmethod
+    def _screen_text_state_from_vectors(cls, frame_vectors, query_vectors) -> int:
+        """Strict selection gate: every frame must be clearly text-free."""
         for frame in frame_vectors:
-            positive = max(float(np.dot(frame, vector)) for vector in positive_vectors)
-            negative = max(float(np.dot(frame, vector)) for vector in negative_vectors)
+            positive, negative = cls._screen_text_scores(frame, query_vectors)
             # Fail closed: ambiguous frames are not safe enough for Montage.
             if negative < positive + _SCREEN_TEXT_SAFE_MARGIN:
                 return 1
