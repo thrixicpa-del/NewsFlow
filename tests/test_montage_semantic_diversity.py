@@ -249,13 +249,18 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         wrong = FootageItem(
             "D:/wrong/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port", "port-logistics"]
         )
+        frontline = FootageItem(
+            "D:/wrong/frontline.mp4", "frontline soldiers.mp4", tags=["frontline-combat"]
+        )
         right = FootageItem(
             "D:/right/cyber.mp4", "network security operations.mp4",
             tags=["cybersecurity-network", "nato-alliance"],
         )
         query = "NATO hybrid cyber attack Europe network security"
 
+        self.assertFalse(bridge._montage_has_war_action(query))
         self.assertFalse(bridge._semantic_clip_ok(query, wrong))
+        self.assertFalse(bridge._semantic_clip_ok(query, frontline))
         self.assertTrue(bridge._semantic_clip_ok(query, right))
 
     def test_screen_text_safety_rejects_high_score_candidate(self):

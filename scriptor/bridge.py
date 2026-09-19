@@ -9795,8 +9795,12 @@ _LABOR_STRIKE_QUERY_TERMS = (
     "workers strike", "worker strike", "labor strike", "labour strike", "union strike",
     "picket line", "trade union", "забастов", "стачк",
 )
-_WAR_ACTION_TERMS_WITHOUT_AMBIGUOUS_STRIKE = tuple(
-    term for term in _WAR_ACTION_TERMS if term != "strike"
+_NON_KINETIC_ATTACK_QUERY_TERMS = (
+    "cyber", "cybersecurity", "hybrid attack", "network attack",
+    "кибер", "гибрид", "хакер",
+)
+_KINETIC_WAR_ACTION_TERMS = tuple(
+    term for term in _WAR_ACTION_TERMS if term not in {"attack", "strike"}
 )
 _POLITICAL_OFFICE_TERMS = (
     "kremlin", "moscow government", "putin", "press conference", "government office",
@@ -9865,7 +9869,9 @@ def _has_any(value: str, terms: tuple[str, ...]) -> bool:
 
 def _montage_has_war_action(value: str) -> bool:
     lowered = str(value or "").casefold()
-    if _has_any(lowered, _WAR_ACTION_TERMS_WITHOUT_AMBIGUOUS_STRIKE):
+    if _has_any(lowered, _KINETIC_WAR_ACTION_TERMS):
+        return True
+    if "attack" in lowered and not _has_any(lowered, _NON_KINETIC_ATTACK_QUERY_TERMS):
         return True
     return "strike" in lowered and not _has_any(lowered, _LABOR_STRIKE_QUERY_TERMS)
 
