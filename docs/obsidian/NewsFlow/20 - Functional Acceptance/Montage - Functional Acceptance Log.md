@@ -228,3 +228,20 @@ During the RED follow-up review, ChatGPT found one adjacent semantic ambiguity b
 The fix keeps military `strike` behavior for attack/war queries but suppresses military expansion when the query explicitly contains labor/workers/union/picket context. A deterministic regression proves a workers strike does not expand to military categories and rejects a `frontline-combat` candidate in favor of `workers-strike`.
 
 No production paths or provider calls are involved.
+
+
+## MONTAGE-003 verification RED — follow-up 2
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING FULL RE-VERIFICATION**
+
+Verification of `ecaeb00cd4bf64bcd4c6579cafb5e7ca34ea7453` reached 153 backend tests with **151 PASS / 2 FAIL / 0 ERROR / 0 SKIP**.
+
+Confirmed root causes:
+
+- SAFE_REUSE reordered the immediate previous source to the end of one candidate pool, but then allowed it at the strict floor before checking a non-adjacent candidate that qualified at the relaxed floor. The corrected reuse search now traverses the full semantic ladder with the previous source forbidden first; A→A is allowed only if no safe non-adjacent alternative survives any allowed fallback level.
+- Labor-strike disambiguation had been applied to military query expansion, but the semantic tag rule still matched the ambiguous token `strike` and therefore allowed `frontline-combat` as an expected tag. The shared semantic-rule matcher now suppresses the military rule for explicit workers/labor/union/picket strike queries in both bonus and safety logic.
+
+The same follow-up also moves the canonical source-family algorithm into `ai_index.source_family_identity_text()`, so both the index and Montage use one string-only contract without constructing `Path` objects in the candidate-ranking hot path.
+
+No production data/media/settings and no provider/network path were touched.

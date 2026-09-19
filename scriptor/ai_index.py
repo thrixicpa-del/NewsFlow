@@ -146,20 +146,31 @@ def discover_video_paths(folders: Iterable[str]) -> list[Path]:
     return sorted(found.values(), key=lambda value: str(value).casefold())
 
 
-def source_family_identity(path: str | Path, source_url: str = "") -> str:
-    """Return deterministic original-source identity without filesystem I/O."""
-    candidate = Path(path)
+def source_family_identity_text(path_text: str, source_url: str = "") -> str:
+    """Return canonical family identity with pure string operations."""
     if source_url.strip():
         return f"url::{source_url.strip().casefold()}"
-    parent = str(candidate.parent).replace("\\", "/").casefold()
-    stem = candidate.stem.casefold()
-    parent_name = candidate.parent.name.casefold()
+    candidate = str(path_text).replace("\\", "/").casefold()
+    if "/" in candidate:
+        parent, name = candidate.rsplit("/", 1)
+        parent = parent or "/"
+    else:
+        parent, name = ".", candidate
+    stem_base, separator, _suffix = name.rpartition(".")
+    stem = stem_base if separator and stem_base else name
+    trimmed_parent = parent.rstrip("/")
+    parent_name = trimmed_parent.rsplit("/", 1)[-1] if trimmed_parent else "/"
     if parent_name.endswith("_slices"):
         return f"path::{parent}"
-    if re.fullmatch(rf"{re.escape(parent_name)}_\d{{4}}", stem):
+    if parent_name and re.fullmatch(rf"{re.escape(parent_name)}_\d{{4}}", stem):
         return f"path::{parent}"
     stem = re.sub(r"(?:[_\-\s]+(?:clip|slice|cut|part|segment)[_\-\s]*\d+)$", "", stem)
     return f"path::{parent}::{stem}"
+
+
+def source_family_identity(path: str | Path, source_url: str = "") -> str:
+    """Return deterministic original-source identity without filesystem I/O."""
+    return source_family_identity_text(str(path), source_url)
 
 
 class ClipIndex:

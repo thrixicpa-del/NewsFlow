@@ -16,6 +16,7 @@ from scriptor.ai_index import (
     _SearchCorpus,
     discover_video_paths,
     source_family_identity,
+    source_family_identity_text,
 )
 from scriptor.footage import FootageItem
 from scriptor.timeline import ffmpeg_executable
@@ -275,6 +276,17 @@ class ClipIndexTests(unittest.TestCase):
             results = index.search_many(["red scene", "red scene"], limit=2)
             self.assertTrue(all([Path(hit.item.path).name for hit in hits] == [healthy.name] for hits in results))
             self.assertEqual([item.name for item in index.all_items(limit=1)], [healthy.name])
+
+    def test_source_family_identity_hot_path_is_string_only(self):
+        with patch("scriptor.ai_index.Path", side_effect=AssertionError("Path must not be used")):
+            self.assertEqual(
+                source_family_identity_text("D:/library/one/one_0001.mp4"),
+                "path::d:/library/one",
+            )
+            self.assertEqual(
+                source_family_identity("D:/library/one/one_0001.mp4"),
+                "path::d:/library/one",
+            )
 
     def test_source_family_identity_is_stable_and_distinguishes_unrelated_sources(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -16,7 +16,6 @@ import math
 import time
 import shutil
 import os
-import ntpath
 import subprocess
 import uuid
 import threading
@@ -44,7 +43,7 @@ from .footage import (FootageItem, download_footage, download_youtube_segment, s
                       search_wikimedia_videos, search_youtube_videos)
 from .mixer import make_mix_plans, render_mixes
 from .claude import chrome_path, open_login_window
-from .ai_index import ClipIndex, SearchHit, SEMANTIC_TAG_LABELS, source_family_identity
+from .ai_index import ClipIndex, SearchHit, SEMANTIC_TAG_LABELS, source_family_identity_text
 from .footage import scan_folders, tokenize
 from .timeline import (TimelineClip, TimelineProject, agent_plan_prompt, fallback_scene_plan,
                        fit_scene_plan_to_voice_duration, title_only_scene_plan, parse_agent_scene_plan,
@@ -9857,13 +9856,20 @@ def _montage_has_war_action(value: str) -> bool:
     return "strike" in lowered and not _has_any(lowered, _LABOR_STRIKE_QUERY_TERMS)
 
 
+def _montage_semantic_rule_applies(query: str, query_terms: tuple[str, ...],
+                                   preferred_tags: tuple[str, ...]) -> bool:
+    if preferred_tags == _WAR_VISUAL_TAGS:
+        return _montage_has_war_action(query) and _has_any(query, query_terms)
+    return _has_any(query, query_terms)
+
+
 def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     """Prefer concrete enriched footage for every supported news cluster."""
     query = str(scene_query or "").casefold()
     haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
     bonus = 0.0
     for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:
-        if _has_any(query, query_terms):
+        if _montage_semantic_rule_applies(query, query_terms, preferred_tags):
             matches = sum(tag in haystack for tag in preferred_tags)
             # A small bounded bonus only breaks ties among visually similar
             # results; it cannot turn an unrelated clip into a match alone.
@@ -9895,7 +9901,7 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
             return False
     expected_semantic_tags: set[str] = set()
     for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:
-        if _has_any(query, query_terms):
+        if _montage_semantic_rule_applies(query, query_terms, preferred_tags):
             expected_semantic_tags.update(preferred_tags)
     semantic_tags = set(item.tags or ()) & SEMANTIC_TAG_LABELS
     specific_semantic_tags = semantic_tags - _MONTAGE_GENERIC_SAFE_SEMANTIC_TAGS
@@ -10113,7 +10119,7 @@ def _reservation_contains(values, key: str) -> bool:
 
 
 def _montage_hit_family(hit: SearchHit) -> str:
-    return str(hit.source_family or source_family_identity(hit.item.path, hit.item.source_url))
+    return str(hit.source_family or source_family_identity_text(hit.item.path, hit.item.source_url))
 
 
 def _montage_position_bucket(position: int, total: int) -> str:
@@ -10203,7 +10209,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
 
     def choose(pool, *, minimum_score: float | None, allow_historical: bool,
                allow_reserved: bool, allow_project_reuse: bool, avoid_recent: bool,
-               level: str):
+               level: str, skip_previous: bool = False):
         seen: set[str] = set()
 
         def rank_value(value: SearchHit) -> tuple[float, str]:
@@ -10231,6 +10237,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if key in seen:
                 continue
             seen.add(key)
+            if skip_previous and previous_path and key == previous_path:
+                reject("diversity", key)
+                continue
             # Hard constraints are invariant across every fallback level.
             # Validate them before quality preferences so diagnostics can
             # distinguish a viable exhausted pool from a genuinely empty one.
@@ -10313,15 +10322,21 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             (category, _montage_level_score_floor("CATEGORY_MATCH", match_threshold)),
             (context, _montage_level_score_floor("SAFE_CONTEXT", match_threshold)),
         ]
-        for pool, minimum in reuse_ladder:
+        # First search every semantic level for a safe non-adjacent source.
+        # Only when no such alternative exists may the immediate previous
+        # source be reused. This preserves A→B→A behavior without accepting
+        # candidates below the floor of their semantic level.
+        for skip_previous in (True, False):
             for avoid_recent in (True, False):
-                selected = choose(
-                    pool, minimum_score=minimum, allow_historical=True,
-                    allow_reserved=True, allow_project_reuse=True,
-                    avoid_recent=avoid_recent, level="SAFE_REUSE",
-                )
-                if selected:
-                    return selected
+                for pool, minimum in reuse_ladder:
+                    selected = choose(
+                        pool, minimum_score=minimum, allow_historical=True,
+                        allow_reserved=True, allow_project_reuse=True,
+                        avoid_recent=avoid_recent, level="SAFE_REUSE",
+                        skip_previous=skip_previous,
+                    )
+                    if selected:
+                        return selected
     raise MontageSelectionFailure(diagnostics)
 
 
@@ -10358,7 +10373,7 @@ def _montage_clip_key(path: str) -> str:
 @lru_cache(maxsize=131072)
 def _montage_family_key_from_normalized_path(candidate: str) -> str:
     """Use the MONTAGE-002 index family contract as the single source of truth."""
-    return source_family_identity(candidate)
+    return source_family_identity_text(candidate)
 
 
 def _montage_clip_family_key(path: str) -> str:
@@ -10376,7 +10391,7 @@ def _montage_clip_family_key(path: str) -> str:
 
 def _montage_item_is_excluded(item: FootageItem, excluded_paths: set[str] | None,
                                excluded_families: set[str] | None) -> bool:
-    family = source_family_identity(item.path, item.source_url)
+    family = source_family_identity_text(item.path, item.source_url)
     return (_montage_clip_key(item.path) in (excluded_paths or set())
             or family in (excluded_families or set()))
 
@@ -10813,7 +10828,7 @@ def prepare_montage(payload: dict) -> dict:
                 excluded=project_used, excluded_families=project_used_families,
             )
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
-            external_family = source_family_identity(selected.path, selected.source_url) if selected else ""
+            external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
             if (selected and _semantic_clip_ok(scene["visual_query_en"], selected)
                     and not batch_is_reserved(selected, external_family)
                     and claim_batch_source(selected, external_family)):
@@ -11504,7 +11519,7 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
                 score=0.0,
                 source=item.source or clip.source,
                 fallback_level="SAFE_CONTEXT",
-                source_family=source_family_identity(item.path, item.source_url),
+                source_family=source_family_identity_text(item.path, item.source_url),
                 reused=False,
                 position_rotation_reason="восстановление отсутствующего или повреждённого футажа",
                 strict_rejection_reason=(
@@ -11626,7 +11641,7 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
         reuse_items.sort(key=lambda item: _montage_clip_key(item.path) == previous_key)
     tail_clips = []
     for item in [*unique_items, *reuse_items]:
-        family = source_family_identity(item.path, item.source_url)
+        family = source_family_identity_text(item.path, item.source_url)
         reused = (_montage_clip_key(item.path) in existing_paths or family in existing_families)
         tail_clips.append(TimelineClip(
             item.path, last.narration, last.visual_query_en, duration=6.0,
