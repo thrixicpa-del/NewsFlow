@@ -1297,7 +1297,7 @@ def load_settings() -> Settings:
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - incompatible legacy values fall back to safe defaults
         return Settings()
 
 
@@ -1343,7 +1343,7 @@ def _api_key_record_identity(record: dict, position: int) -> str:
     protected = str(record.get("secret_protected", "") or "")
     try:
         secret = unprotect(protected).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 - DPAPI/backend failures must not break a settings merge
         secret = ""
     if secret:
         return f"secret:{secret}"
@@ -1454,7 +1454,7 @@ def allow_empty_release_state(settings: Settings, *field_names: str) -> None:
     """
     allowed = set(getattr(settings, "_allowed_empty_release_fields", set()))
     allowed.update(name for name in field_names if name in _RELEASE_STATE_FIELDS)
-    setattr(settings, "_allowed_empty_release_fields", allowed)
+    settings._allowed_empty_release_fields = allowed
 
 
 def _has_release_state(value: object) -> bool:
