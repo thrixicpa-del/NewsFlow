@@ -491,6 +491,49 @@ class ClipIndexTests(unittest.TestCase):
             index.index_folders([str(root)])
             self.assertEqual(index.metadata(blocked).english_text, 0)
 
+    def test_indexing_obvious_text_sets_current_classifier_version_without_second_decode(self):
+        class TextImageEmbedding:
+            def embed(self, images, **_):
+                for image in images:
+                    yield (
+                        np.asarray([1.0, 0.0], dtype=np.float32)
+                        if image == "text"
+                        else np.asarray([0.0, 1.0], dtype=np.float32)
+                    )
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            clip = root / "headline.mp4"
+            clip.write_bytes(b"video")
+            index = ClipIndex(root / "index.sqlite3")
+            query_vectors = np.asarray(
+                [
+                    [1.0, 0.0],
+                    [1.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
+            with patch.object(index, "_models", return_value=(TextImageEmbedding(), object())), \
+                 patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "_query_vectors", return_value=query_vectors), \
+                 patch.object(index, "_sample_frames",
+                              return_value=(["clean", "text", "clean"], 6.0, 1920, 1080, 30.0)):
+                result = index.index_folders([str(root)])
+
+            self.assertEqual(result.indexed, 1)
+            with index._connect() as connection:
+                row = connection.execute(
+                    "SELECT english_text,english_text_version FROM clips WHERE path=?",
+                    (str(clip.resolve()),),
+                ).fetchone()
+            self.assertEqual(
+                (int(row["english_text"]), int(row["english_text_version"])),
+                (1, SCREEN_TEXT_CLASSIFIER_VERSION),
+            )
+
     def test_frame_level_screen_text_blocks_one_text_frame_and_caches_safe_result(self):
         class TextImageEmbedding:
             def embed(self, images, **_):

@@ -614,7 +614,7 @@ class ClipIndex:
                     # until the strict five-frame selection gate verifies them.
                     indexed_english = 1 if obvious_text else 0
                     indexed_english_version = (
-                        SCREEN_TEXT_CLASSIFIER_VERSION if screen_state == 1 else 0
+                        SCREEN_TEXT_CLASSIFIER_VERSION if indexed_english == 1 else 0
                     )
                     try:
                         size, mtime_ns = self._signature(path)

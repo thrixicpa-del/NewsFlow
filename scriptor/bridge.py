@@ -10154,8 +10154,10 @@ def _batch_history_paths(usage: dict | None, current_paths) -> tuple[str, ...]:
         return tuple(str(path) for path in baseline)
 
 
-def _batch_reserved_families(usage: dict | None, position_bucket: str) -> set[str]:
-    """Return families already claimed for the same timeline region."""
+def _batch_reserved_families(usage: dict | None, position_bucket: str,
+                             *, opening_only: bool = False) -> set[str]:
+    """Prefer globally unused families; openings get a scarcity fallback."""
+    del position_bucket
     if not isinstance(usage, dict):
         return set()
     lock = usage.get("lock")
@@ -10168,13 +10170,14 @@ def _batch_reserved_families(usage: dict | None, position_bucket: str) -> set[st
         return {
             str(key[1])
             for key in claims
-            if isinstance(key, tuple) and len(key) == 2 and key[0] == position_bucket
+            if isinstance(key, tuple) and len(key) == 2
+            and (not opening_only or key[0] == "EARLY")
         }
 
 
 def _claim_batch_family(usage: dict | None, family: str, position_bucket: str,
-                        scenario_index: int) -> bool:
-    """Atomically reserve one family only for its EARLY/MIDDLE/LATE bucket."""
+                        scenario_index: int, *, allow_cross_bucket_reuse: bool = False) -> bool:
+    """Reserve globally first; allow a reused family only to preserve a fresh opening."""
     if not isinstance(usage, dict):
         return True
     lock = usage.get("lock")
@@ -10185,9 +10188,19 @@ def _claim_batch_family(usage: dict | None, family: str, position_bucket: str,
         if not isinstance(claims, dict):
             claims = {}
             usage["claims"] = claims
-        key = (str(position_bucket), str(family))
-        if key in claims:
-            return False
+        family = str(family)
+        bucket = str(position_bucket)
+        if allow_cross_bucket_reuse:
+            key = ("EARLY", family)
+            if key in claims:
+                return False
+        else:
+            if any(
+                isinstance(key, tuple) and len(key) == 2 and str(key[1]) == family
+                for key in claims
+            ):
+                return False
+            key = (bucket, family)
         claims[key] = int(scenario_index)
         return True
 
@@ -10639,13 +10652,20 @@ def prepare_montage(payload: dict) -> dict:
     project_used: set[str] = set()
     project_used_families: set[str] = set()
 
-    def batch_is_reserved(item: FootageItem, family: str = "", position_bucket: str = "") -> bool:
+    def batch_is_reserved(item: FootageItem, family: str = "", position_bucket: str = "",
+                          *, opening_only: bool = False) -> bool:
         family = family or _montage_clip_family_key(item.path)
-        return family in _batch_reserved_families(batch_usage, position_bucket)
+        return family in _batch_reserved_families(
+            batch_usage, position_bucket, opening_only=opening_only,
+        )
 
-    def claim_batch_source(item: FootageItem, family: str = "", position_bucket: str = "") -> bool:
+    def claim_batch_source(item: FootageItem, family: str = "", position_bucket: str = "",
+                           *, allow_cross_bucket_reuse: bool = False) -> bool:
         family = family or _montage_clip_family_key(item.path)
-        return _claim_batch_family(batch_usage, family, position_bucket, scenario_index)
+        return _claim_batch_family(
+            batch_usage, family, position_bucket, scenario_index,
+            allow_cross_bucket_reuse=allow_cross_bucket_reuse,
+        )
     clips = []
     voice_duration = probe_media_duration(Path(voice_path))
     # If a finished narration exists, use it for scene semantics even when
@@ -10776,17 +10796,14 @@ def prepare_montage(payload: dict) -> dict:
                 verified_source_durations[key] = 0.0
         return verified_source_durations[key]
 
-    def reservation_snapshot(position_bucket: str):
-        """Copy position-scoped reservations plus placement/window history."""
+    def reservation_snapshot(position_bucket: str, *, opening_only: bool = False):
+        """Copy global unique reservations; openings may later relax to prior non-openings."""
         if batch_lock is None:
             return set(), set(), dict(batch_family_buckets), dict(batch_source_windows)
         with batch_lock:
-            claims = batch_usage.get("claims", {}) if isinstance(batch_usage, dict) else {}
-            reserved_families = {
-                str(key[1])
-                for key in claims
-                if isinstance(key, tuple) and len(key) == 2 and key[0] == position_bucket
-            } if isinstance(claims, dict) else set()
+            reserved_families = _batch_reserved_families(
+                batch_usage, position_bucket, opening_only=opening_only,
+            )
             return (
                 set(),
                 reserved_families,
@@ -10923,6 +10940,43 @@ def prepare_montage(payload: dict) -> dict:
             if claim_batch_source(selection.item, selection.source_family, position_bucket):
                 break
             selection = None
+
+        # With a scarce library, middle/late scenes can consume every globally
+        # unused family before later projects reach their opening. Keep global
+        # uniqueness as the first choice, then allow an EARLY scene to reuse a
+        # family seen only outside EARLY so openings remain distinct.
+        if selection is None and position_bucket == "EARLY":
+            for _attempt in range(claim_attempt_limit):
+                reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(
+                    position_bucket, opening_only=True,
+                )
+                try:
+                    selection = _select_montage_candidate(
+                        scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
+                        relaxed_hits=relaxed_hits, category_hits=category_hits,
+                        safe_context_hits=safe_context_hits,
+                        required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                        used_paths=used, used_families=used_families,
+                        project_used_paths=project_used, project_used_families=project_used_families,
+                        reserved_paths=reserved_paths, reserved_families=reserved_families,
+                        source_exists=source_exists, source_duration=verified_duration,
+                        source_allowed=lambda item: _montage_screen_text_safe(index, item),
+                        recent_project_paths=recent_project_paths,
+                        immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                        position_bucket=position_bucket, batch_family_buckets=family_buckets,
+                        diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
+                        allow_safe_reuse=False,
+                    )
+                except MontageSelectionFailure as error:
+                    selection_failure_diagnostics = error.diagnostics
+                    selection = None
+                    break
+                if claim_batch_source(
+                    selection.item, selection.source_family, position_bucket,
+                    allow_cross_bucket_reuse=True,
+                ):
+                    break
+                selection = None
         preparation_metrics["selection"] += (time.perf_counter() - selection_started) * 1000
         if selection is not None:
             selected = selection.item

@@ -383,7 +383,7 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         self.assertEqual(selection.source_family, "family-b")
         self.assertEqual(selection.position_bucket, "EARLY")
 
-    def test_batch_history_is_frozen_and_family_claims_are_position_scoped(self):
+    def test_batch_history_is_frozen_and_family_claims_are_global_until_opening_fallback(self):
         usage = {"lock": __import__("threading").RLock(), "claims": {}}
 
         self.assertEqual(
@@ -395,11 +395,23 @@ class MontageSemanticDiversityTests(unittest.TestCase):
             ("D:/old/a.mp4",),
         )
 
-        self.assertTrue(bridge._claim_batch_family(usage, "family-a", "EARLY", 0))
-        self.assertFalse(bridge._claim_batch_family(usage, "family-a", "EARLY", 1))
-        self.assertTrue(bridge._claim_batch_family(usage, "family-a", "MIDDLE", 1))
+        self.assertTrue(bridge._claim_batch_family(usage, "family-a", "MIDDLE", 0))
         self.assertEqual(bridge._batch_reserved_families(usage, "EARLY"), {"family-a"})
-        self.assertEqual(bridge._batch_reserved_families(usage, "LATE"), set())
+        self.assertEqual(
+            bridge._batch_reserved_families(usage, "EARLY", opening_only=True),
+            set(),
+        )
+        self.assertFalse(bridge._claim_batch_family(usage, "family-a", "EARLY", 1))
+        self.assertTrue(bridge._claim_batch_family(
+            usage, "family-a", "EARLY", 1, allow_cross_bucket_reuse=True,
+        ))
+        self.assertEqual(
+            bridge._batch_reserved_families(usage, "EARLY", opening_only=True),
+            {"family-a"},
+        )
+        self.assertFalse(bridge._claim_batch_family(
+            usage, "family-a", "EARLY", 2, allow_cross_bucket_reuse=True,
+        ))
 
     def test_ten_similar_projects_do_not_repeat_the_same_opening_family(self):
         hits = [
