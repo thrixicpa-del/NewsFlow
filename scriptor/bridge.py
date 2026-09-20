@@ -12044,7 +12044,6 @@ def clear_production_queue(payload: dict) -> dict:
         settings.footage_download_folder, settings.mixer_output_folder, settings.montage_output_folder,
         settings.montage_project_folder,
     }
-    removed_files = sum(_clear_production_folder(folder) for folder in folders if str(folder).strip())
     settings.youtube_publication_jobs = []
     settings.youtube_publication_activity = []
     settings.youtube_publication_items = {}
@@ -12095,6 +12094,14 @@ def clear_production_queue(payload: dict) -> dict:
     # old session snapshot as well.
     save_settings(settings)
     save_session([], [])
+    # Physical cleanup happens only after the durable logical reset. If the
+    # process dies or a filesystem operation fails, restart still sees the
+    # queue as deleted and a retry can safely remove any leftover artifacts.
+    removed_files = sum(
+        _clear_production_folder(folder)
+        for folder in folders
+        if str(folder).strip()
+    )
     return {**snapshot(), "operationResult": {"kind": "production-reset", "count": removed_files,
             "message": f"Производство очищено: удалено объектов в рабочих папках: {removed_files}. Каналы, OAuth, ключи и настройки сохранены."}}
 

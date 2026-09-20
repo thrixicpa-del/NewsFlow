@@ -1152,9 +1152,13 @@ class MontageQueueStateTests(unittest.TestCase):
                 events.append(("session", [], []))
                 raise RuntimeError("simulated crash after durable reset fence")
 
+            def cleanup_probe(_folder):
+                events.append(("cleanup", [], []))
+                return 0
+
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "load_session", return_value=(titles, jobs)), \
-                 patch.object(bridge, "_clear_production_folder", return_value=0), \
+                 patch.object(bridge, "_clear_production_folder", side_effect=cleanup_probe), \
                  patch.object(bridge, "save_settings", side_effect=save_settings_probe), \
                  patch.object(bridge, "save_session", side_effect=crash_before_empty_session), \
                  self.assertRaisesRegex(RuntimeError, "simulated crash"):
@@ -1164,9 +1168,48 @@ class MontageQueueStateTests(unittest.TestCase):
                 })
 
             self.assertEqual([event[0] for event in events], ["settings", "session"])
+            self.assertNotIn("cleanup", [event[0] for event in events])
             self.assertIn("старый сценарий", events[0][1])
             self.assertIn("legacy без id", events[0][1])
             self.assertIn("production-old", events[0][2])
+
+    def test_clear_production_persists_logical_reset_before_file_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings = Settings(
+                output_folder=str(root / "output"),
+                voicer_output_folder=str(root / "voices"),
+                cover_output_folder=str(root / "covers"),
+                seo_output_folder=str(root / "seo"),
+                media_output_folder=str(root / "media"),
+                cutter_output_folder=str(root / "cuts"),
+                footage_download_folder=str(root / "downloads"),
+                mixer_output_folder=str(root / "mix"),
+                montage_output_folder=str(root / "mp4"),
+                montage_project_folder=str(root / "projects"),
+            )
+            titles = ["Сценарий"]
+            jobs = [Job(
+                ScenarioRequest(0, titles[0], "", "prod-reset"),
+                RunState.DONE, "Текст", "",
+            )]
+            events = []
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(titles, jobs)), \
+                 patch.object(bridge, "save_settings", side_effect=lambda _value: events.append("settings")), \
+                 patch.object(bridge, "save_session", side_effect=lambda _titles, _jobs: events.append("session")), \
+                 patch.object(bridge, "_clear_production_folder",
+                              side_effect=lambda _folder: (events.append("cleanup") or 0)), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                bridge.clear_production_queue({
+                    "confirmed": True,
+                    "confirmationPhrase": "УДАЛИТЬ ПРОИЗВОДСТВО",
+                })
+
+            self.assertGreater(events.count("cleanup"), 0)
+            self.assertEqual(events[:2], ["settings", "session"])
+            self.assertTrue(all(event == "cleanup" for event in events[2:]))
 
     def test_clear_production_crash_before_session_write_cannot_restore_old_batch(self):
         """Exact reset crash window: durable fence wins over the stale primary."""
