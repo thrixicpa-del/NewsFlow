@@ -325,9 +325,20 @@ class ClipIndexTests(unittest.TestCase):
             source.mkdir()
             first = source / "evening_report_0001.mp4"
             second = source / "evening_report_0002.mp4"
+            random_cut_first = source / "clip_qcsfjt_204.mp4"
+            random_cut_second = source / "clip_5yf7qx_488.mp4"
             plain_report = root / "report_2024.mp4"
             another_report = root / "report_2025.mp4"
-            for path in (first, second, plain_report, another_report):
+            ordinary_clip = root / "clip_editorial_2024.mp4"
+            for path in (
+                first,
+                second,
+                random_cut_first,
+                random_cut_second,
+                plain_report,
+                another_report,
+                ordinary_clip,
+            ):
                 path.write_bytes(path.name.encode("utf-8"))
             database = root / "index.sqlite3"
             index = FakeClipIndex(
@@ -341,7 +352,10 @@ class ClipIndexTests(unittest.TestCase):
                                  for item in reopened.all_items()}
 
             self.assertEqual(families[first.name], families[second.name])
+            self.assertEqual(families[random_cut_first.name], families[random_cut_second.name])
+            self.assertEqual(families[first.name], families[random_cut_first.name])
             self.assertNotEqual(families[plain_report.name], families[another_report.name])
+            self.assertNotEqual(families[random_cut_first.name], families[ordinary_clip.name])
             self.assertEqual(families, reopened_families)
             self.assertEqual(
                 source_family_identity(first, "https://example.test/watch?v=Original"),

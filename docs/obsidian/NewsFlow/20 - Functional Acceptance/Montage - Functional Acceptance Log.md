@@ -288,3 +288,33 @@ The quality correction treats human review as authoritative acceptance evidence:
 - Cross-video source-family reuse receives a stronger but bounded rotation penalty: near-equal matches rotate, while materially better semantic matches remain authoritative.
 
 Technical GREEN is therefore not sufficient to close MONTAGE-003 until a fresh human-review render demonstrates the quality criteria above.
+
+
+## MONTAGE-003 combined quality-v2 hardening
+
+Date: **2026-09-20**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
+
+### Confirmed RED and root cause
+
+- The first quality-v2 rerender classified the bounded prior pool as **11 safe / 12 blocked / 0 unchecked**, but repeatedly selected `clip_00rmpg_698.mp4`; family reuse and adjacent-repeat acceptance failed.
+- A story-specific expansion confirmed the classifier was fail-closed rather than silently passing uncertain footage: only **5/72** initial candidates were safe. The bounded pre-screen was therefore moved to the isolated candidate-index copy; production index/media were read-only.
+- Human-review evidence then exposed the tracked defect: real Cutter names such as `clip_qcsfjt_204.mp4` and `clip_5yf7qx_488.mp4` under one source folder were reported as different families. This let adjacent cuts from the same original evade diversity accounting.
+- Regression RED: `test_cutter_numbered_outputs_share_family_without_collapsing_plain_year_names` expected one family and received two path+stem identities.
+
+### Minimal fix
+
+- Canonical `source_family_identity_text()` now recognizes the real random Cutter form `clip_<six lowercase alphanumeric characters>_<three digits>.mp4` as the parent source family.
+- Existing `<parent>_NNNN.mp4` and `_slices` rules remain unchanged. Ordinary files such as `report_2024.mp4`, `report_2025.mp4` and `clip_editorial_2024.mp4` remain distinct; URL identity remains authoritative.
+- No scoring threshold, semantic fallback level, screen-text classifier threshold, UI, IPC, renderer or provider path changed.
+
+### GREEN verification and real review evidence
+
+- Required isolated backend suite: **164 PASS / 0 FAIL / 0 SKIP**; the previously failing English-screen-label regression is included.
+- Targeted Montage UI: **1 file / 16 tests PASS**; `pnpm typecheck` and `verify:security` PASS.
+- `py_compile`, scoped Ruff, secret scan, production integrity guard, range/current `git diff --check`: PASS.
+- Final deterministic smoke: **5/5 MP4**, five distinct opening families, safe reuse present, repeated long sources use different windows, unsafe contradictions rejected, original hashes unchanged; **45.308 s**. Manifest: `.artifacts/NewsFlow-MONTAGE-003-quality-v2-smoke-20260920-final/manifest.json`.
+- Final real quality-v2 review rerender used the same three required stories through the real local `ClipIndex → prepare_montage → render_montage → FFmpeg` path. The isolated pool contained **24 safe-v2 / 0 blocked / 0 unchecked** files; the 18 selected scenes had **0 blocked**, **0 unchecked**, **0 generic query**, **0 semantic-guard contradiction**, **13 source families**, maximum family use **3**, and **0 adjacent family repeats**. Scarcity reuse remained truthful `SAFE_REUSE`.
+- Three new 30.000 s MP4 SHA-256 values: `1c383c894479f28083442e8cc1d736ab946196bd3907b0183bae21a3203276ce`, `a77cdde300d635315bae9c4816c168bd985253697e2e9dde5fe544dd5d752c52`, `9ff150a947bb1380558999aa12dea1c4e3190a347f92d72b2c45d38afa1611e2`.
+- Review root: `.artifacts/NewsFlow-MONTAGE-003-human-review-quality-v2-20260920/`; it contains the manifest, per-scene query/semantic/screen-text provenance, three contact sheets, timings and three rendered MP4 files. Total final run: **71.079 s**; candidate discovery/copy **5.282 s**, base index **7.614 s**, deep enrichment **0.093 s**, screen-text classification **15.646 s**, direct retrieval **0.040 s**.
+- Settings/session/index and every source project, MP3 and footage hash were identical before/after. No paid provider, OAuth or publication call was made; generated media remains ignored and is not committed.

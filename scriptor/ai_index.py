@@ -183,6 +183,8 @@ def source_family_identity_text(path_text: str, source_url: str = "") -> str:
         return f"path::{parent}"
     if parent_name and re.fullmatch(rf"{re.escape(parent_name)}_\d{{4}}", stem):
         return f"path::{parent}"
+    if re.fullmatch(r"clip_[a-z0-9]{6}_\d{3}", stem):
+        return f"path::{parent}"
     stem = re.sub(r"(?:[_\-\s]+(?:clip|slice|cut|part|segment)[_\-\s]*\d+)$", "", stem)
     return f"path::{parent}::{stem}"
 
