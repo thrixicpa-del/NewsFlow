@@ -10975,6 +10975,16 @@ def prepare_montage(payload: dict) -> dict:
                     selection.item, selection.source_family, position_bucket,
                     allow_cross_bucket_reuse=True,
                 ):
+                    selection = replace(
+                        selection,
+                        fallback_level="SAFE_REUSE",
+                        reused_reserved_candidate=True,
+                        reused=True,
+                        position_rotation_reason=(
+                            "глобально уникальные семьи исчерпаны — "
+                            "для нового открытия использован другой сегмент ранее выбранной семьи"
+                        ),
+                    )
                     break
                 selection = None
         preparation_metrics["selection"] += (time.perf_counter() - selection_started) * 1000
