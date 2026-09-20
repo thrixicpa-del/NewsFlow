@@ -1787,6 +1787,13 @@ def save_settings(settings: Settings):
             item for item in data.get("idea_production_items", [])
             if not isinstance(item, dict) or str(item.get("id", "")).strip() not in deleted_production_ids
         ]
+        deleted_scenario_titles = {
+            " ".join(str(value).split()).casefold() for value in [
+                *(on_disk.get("deleted_scenario_titles") or []),
+                *(data.get("deleted_scenario_titles") or []),
+            ] if str(value).strip()
+        }
+        data["deleted_scenario_titles"] = sorted(deleted_scenario_titles)[-10000:]
         deleted_scenario_production_ids = {
             str(value).strip() for value in [
                 *(on_disk.get("deleted_scenario_production_ids") or []),

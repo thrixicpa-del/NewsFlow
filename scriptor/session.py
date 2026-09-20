@@ -180,29 +180,14 @@ def _recover_empty_primary_from_backup() -> tuple[list[str], list[Job]] | None:
         ]
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return None
-    # A delete tombstone is a newer user decision than the emergency backup.
-    # Do not partially recover this batch: compacted indexes would otherwise
-    # associate its retained rows with the wrong scripts, while a stale cover
-    # record could resurrect the deleted row on the next start.
-    deleted_titles = {
-        str(value).strip().casefold()
-        for value in getattr(settings, "deleted_scenario_titles", [])
-        if str(value).strip()
-    }
-    deleted_production_ids = {
-        str(value).strip()
-        for value in getattr(settings, "deleted_scenario_production_ids", [])
-        if str(value).strip()
-    }
-    if deleted_titles or deleted_production_ids:
-        jobs_by_index = {job.request.index: job for job in backup_jobs}
-        if any(
-            _title_key(title) in deleted_titles
-            or str(jobs_by_index.get(index).request.production_item_id
-                   if jobs_by_index.get(index) else "").strip() in deleted_production_ids
-            for index, title in enumerate(backup_titles)
-        ):
-            return None
+    # A delete/reset tombstone is newer than the emergency backup. Do not
+    # partially recover a compacted batch: that could remap retained rows onto
+    # the wrong scenario indexes.
+    filtered_titles, _filtered_jobs = _apply_scenario_tombstones(
+        backup_titles, backup_jobs, settings=settings,
+    )
+    if len(filtered_titles) != len(backup_titles):
+        return None
     # The title list was historically written by a different worker than the
     # scenario/cover queue.  If it points to another batch, the persistent
     # cover queue is the stronger recovery proof: it carries the scripts and

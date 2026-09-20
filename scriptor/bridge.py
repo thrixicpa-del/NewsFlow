@@ -12016,6 +12016,28 @@ def clear_production_queue(payload: dict) -> dict:
             or str(payload.get("confirmationPhrase") or "").strip() != "УДАЛИТЬ ПРОИЗВОДСТВО"):
         raise ValueError("Введите контрольную фразу «УДАЛИТЬ ПРОИЗВОДСТВО» для очистки производственной очереди.")
     settings = load_settings()
+    titles, jobs = load_session()
+    # A production reset is a durable user decision. Record every current
+    # scenario before clearing the queue so detached workers and emergency
+    # backups can never resurrect this release after the reset.
+    removed_titles = {
+        " ".join(str(title).split()).casefold()
+        for title in titles if str(title).strip()
+    }
+    removed_production_ids = {
+        str(job.request.production_item_id).strip()
+        for job in jobs if str(job.request.production_item_id).strip()
+    }
+    settings.deleted_scenario_titles = sorted({
+        *(str(value).strip().casefold()
+          for value in settings.deleted_scenario_titles if str(value).strip()),
+        *removed_titles,
+    })[-10000:]
+    settings.deleted_scenario_production_ids = sorted({
+        *(str(value).strip()
+          for value in settings.deleted_scenario_production_ids if str(value).strip()),
+        *removed_production_ids,
+    })[-10000:]
     folders = {
         settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
         settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
@@ -12066,8 +12088,13 @@ def clear_production_queue(payload: dict) -> dict:
         "youtube_publication_executions", "youtube_publication_receipts", "youtube_publication_assignments",
         "cover_queue",
     )
-    save_session([], [])
+    # Persist the deletion fence first. If the process dies before the
+    # physical session is emptied, load_session() will still project these
+    # tombstones over the stale primary file. If a stale worker writes later,
+    # save_settings() preserves the tombstones and load_session() filters its
+    # old session snapshot as well.
     save_settings(settings)
+    save_session([], [])
     return {**snapshot(), "operationResult": {"kind": "production-reset", "count": removed_files,
             "message": f"Производство очищено: удалено объектов в рабочих папках: {removed_files}. Каналы, OAuth, ключи и настройки сохранены."}}
 
