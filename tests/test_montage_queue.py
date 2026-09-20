@@ -1,3 +1,4 @@
+import os
 import tempfile
 import threading
 import unittest
@@ -1167,6 +1168,153 @@ class MontageQueueStateTests(unittest.TestCase):
                  self.assertRaisesRegex(ValueError, "контрольную фразу"):
                 bridge.clear_production_queue({"confirmed": True})
             self.assertTrue(protected_video.exists())
+
+    def test_clear_production_writes_scenario_tombstone_fence_before_empty_session(self):
+        """A crash between settings/session writes must not revive the old batch."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings = Settings(
+                output_folder=str(root / "output"),
+                voicer_output_folder=str(root / "voices"),
+                cover_output_folder=str(root / "covers"),
+                seo_output_folder=str(root / "seo"),
+                media_output_folder=str(root / "media"),
+                cutter_output_folder=str(root / "cuts"),
+                footage_download_folder=str(root / "downloads"),
+                mixer_output_folder=str(root / "mix"),
+                montage_output_folder=str(root / "mp4"),
+                montage_project_folder=str(root / "projects"),
+                idea_results=["Старый сценарий"],
+                cover_queue=[{"title": "Старый сценарий"}],
+            )
+            titles = ["Старый сценарий", "Legacy без ID"]
+            jobs = [
+                Job(ScenarioRequest(0, titles[0], "", "production-old"),
+                    RunState.DONE, "Текст", ""),
+                Job(ScenarioRequest(1, titles[1], "", ""),
+                    RunState.DONE, "Legacy text", ""),
+            ]
+            events = []
+
+            def save_settings_probe(value):
+                events.append((
+                    "settings",
+                    list(value.deleted_scenario_titles),
+                    list(value.deleted_scenario_production_ids),
+                ))
+
+            def crash_before_empty_session(_titles, _jobs):
+                events.append(("session", [], []))
+                raise RuntimeError("simulated crash after durable reset fence")
+
+            def cleanup_probe(_folder):
+                events.append(("cleanup", [], []))
+                return 0
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(titles, jobs)), \
+                 patch.object(bridge, "_clear_production_folder", side_effect=cleanup_probe), \
+                 patch.object(bridge, "save_settings", side_effect=save_settings_probe), \
+                 patch.object(bridge, "save_session", side_effect=crash_before_empty_session), \
+                 self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                bridge.clear_production_queue({
+                    "confirmed": True,
+                    "confirmationPhrase": "УДАЛИТЬ ПРОИЗВОДСТВО",
+                })
+
+            self.assertEqual([event[0] for event in events], ["settings", "session"])
+            self.assertNotIn("cleanup", [event[0] for event in events])
+            self.assertIn("старый сценарий", events[0][1])
+            self.assertIn("legacy без id", events[0][1])
+            self.assertIn("production-old", events[0][2])
+
+    def test_clear_production_persists_logical_reset_before_file_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings = Settings(
+                output_folder=str(root / "output"),
+                voicer_output_folder=str(root / "voices"),
+                cover_output_folder=str(root / "covers"),
+                seo_output_folder=str(root / "seo"),
+                media_output_folder=str(root / "media"),
+                cutter_output_folder=str(root / "cuts"),
+                footage_download_folder=str(root / "downloads"),
+                mixer_output_folder=str(root / "mix"),
+                montage_output_folder=str(root / "mp4"),
+                montage_project_folder=str(root / "projects"),
+            )
+            titles = ["Сценарий"]
+            jobs = [Job(
+                ScenarioRequest(0, titles[0], "", "prod-reset"),
+                RunState.DONE, "Текст", "",
+            )]
+            events = []
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(titles, jobs)), \
+                 patch.object(bridge, "save_settings", side_effect=lambda _value: events.append("settings")), \
+                 patch.object(bridge, "save_session", side_effect=lambda _titles, _jobs: events.append("session")), \
+                 patch.object(bridge, "_clear_production_folder",
+                              side_effect=lambda _folder: (events.append("cleanup") or 0)), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                bridge.clear_production_queue({
+                    "confirmed": True,
+                    "confirmationPhrase": "УДАЛИТЬ ПРОИЗВОДСТВО",
+                })
+
+            self.assertGreater(events.count("cleanup"), 0)
+            self.assertEqual(events[:2], ["settings", "session"])
+            self.assertTrue(all(event == "cleanup" for event in events[2:]))
+
+    def test_clear_production_crash_before_session_write_cannot_restore_old_batch(self):
+        """Exact reset crash window: durable fence wins over the stale primary."""
+        from scriptor.session import load_session as reload_session
+        from scriptor.session import save_session as persist_session
+
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            root = Path(folder) / "media"
+            titles = ["Сценарий 1", "Сценарий 2"]
+            jobs = [
+                Job(ScenarioRequest(0, titles[0], "", "prod-1"), RunState.DONE, "Текст 1", ""),
+                Job(ScenarioRequest(1, titles[1], "", ""), RunState.DONE, "Legacy text", ""),
+            ]
+            settings = Settings(
+                output_folder=str(root / "output"),
+                voicer_output_folder=str(root / "voices"),
+                cover_output_folder=str(root / "covers"),
+                seo_output_folder=str(root / "seo"),
+                media_output_folder=str(root / "media"),
+                cutter_output_folder=str(root / "cuts"),
+                footage_download_folder=str(root / "downloads"),
+                mixer_output_folder=str(root / "mix"),
+                montage_output_folder=str(root / "mp4"),
+                montage_project_folder=str(root / "projects"),
+                idea_results=list(titles),
+                cover_queue=[{"title": title} for title in titles],
+            )
+            config.save_settings(settings)
+            persist_session(titles, jobs)
+
+            with patch.object(bridge, "_clear_production_folder", return_value=0), \
+                 patch.object(
+                     bridge, "save_session",
+                     side_effect=RuntimeError("simulated crash before session empty write"),
+                 ), \
+                 self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                bridge.clear_production_queue({
+                    "confirmed": True,
+                    "confirmationPhrase": "УДАЛИТЬ ПРОИЗВОДСТВО",
+                })
+
+            # The physical primary still contains the old jobs, exactly like a
+            # crash between settings and session writes. Tombstones must make
+            # the restart projection empty nevertheless.
+            restored_titles, restored_jobs = reload_session()
+            self.assertEqual((restored_titles, restored_jobs), ([], []))
+            restored_settings = config.load_settings()
+            self.assertIn("сценарий 1", restored_settings.deleted_scenario_titles)
+            self.assertIn("сценарий 2", restored_settings.deleted_scenario_titles)
+            self.assertIn("prod-1", restored_settings.deleted_scenario_production_ids)
 
     def test_settings_save_creates_an_independent_recovery_snapshot(self):
         """A future faulty write must leave a readable pre-write state behind."""
