@@ -159,6 +159,49 @@ def _same_title_batch(left: list[str], right: list[str]) -> bool:
         _title_key(item) for item in right]
 
 
+def _apply_scenario_tombstones(titles: list[str], jobs: list[Job], settings=None) -> tuple[list[str], list[Job]]:
+    """Project explicit scenario deletions over any persisted session snapshot.
+
+    Detached workers may save stale pre-delete state after the user has removed
+    scenarios or reset production. Tombstones are the newer durable authority
+    and therefore apply to both the primary session and the emergency backup.
+
+    Title tombstones are compatibility protection for legacy rows that have no
+    durable ProductionItem ID. A newly-created scenario may reuse the same
+    human title when it carries a new non-deleted ID.
+    """
+    if settings is None:
+        try:
+            settings = load_settings()
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return titles, jobs
+
+    deleted_titles = {
+        _title_key(value)
+        for value in getattr(settings, "deleted_scenario_titles", [])
+        if str(value).strip()
+    }
+    deleted_ids = {
+        str(value).strip()
+        for value in getattr(settings, "deleted_scenario_production_ids", [])
+        if str(value).strip()
+    }
+    if not deleted_titles and not deleted_ids:
+        return titles, jobs
+
+    jobs_by_index = {job.request.index: job for job in jobs}
+    removed: set[int] = set()
+    for index, title in enumerate(titles):
+        job = jobs_by_index.get(index)
+        production_id = str(job.request.production_item_id if job else "").strip()
+        if production_id:
+            if production_id in deleted_ids:
+                removed.add(index)
+        elif _title_key(title) in deleted_titles:
+            removed.add(index)
+    return remove_scenarios(titles, jobs, removed) if removed else (titles, jobs)
+
+
 def _recover_empty_primary_from_backup() -> tuple[list[str], list[Job]] | None:
     """Recover only when settings prove the backup belongs to the active batch.
 
@@ -180,29 +223,14 @@ def _recover_empty_primary_from_backup() -> tuple[list[str], list[Job]] | None:
         ]
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return None
-    # A delete tombstone is a newer user decision than the emergency backup.
-    # Do not partially recover this batch: compacted indexes would otherwise
-    # associate its retained rows with the wrong scripts, while a stale cover
-    # record could resurrect the deleted row on the next start.
-    deleted_titles = {
-        str(value).strip().casefold()
-        for value in getattr(settings, "deleted_scenario_titles", [])
-        if str(value).strip()
-    }
-    deleted_production_ids = {
-        str(value).strip()
-        for value in getattr(settings, "deleted_scenario_production_ids", [])
-        if str(value).strip()
-    }
-    if deleted_titles or deleted_production_ids:
-        jobs_by_index = {job.request.index: job for job in backup_jobs}
-        if any(
-            _title_key(title) in deleted_titles
-            or str(jobs_by_index.get(index).request.production_item_id
-                   if jobs_by_index.get(index) else "").strip() in deleted_production_ids
-            for index, title in enumerate(backup_titles)
-        ):
-            return None
+    # A delete/reset tombstone is newer than the emergency backup. Do not
+    # partially recover a compacted batch: that could remap retained rows onto
+    # the wrong scenario indexes.
+    filtered_titles, _filtered_jobs = _apply_scenario_tombstones(
+        backup_titles, backup_jobs, settings=settings,
+    )
+    if len(filtered_titles) != len(backup_titles):
+        return None
     # The title list was historically written by a different worker than the
     # scenario/cover queue.  If it points to another batch, the persistent
     # cover queue is the stronger recovery proof: it carries the scripts and
@@ -301,28 +329,11 @@ def load_session() -> tuple[list[str], list[Job]]:
             continue
         try:
             titles, jobs = _read_session(candidate)
-            # A session backup is an emergency recovery artifact, not an
-            # authority that can undo an explicit user deletion.
-            if candidate == backup_session_path():
-                settings = load_settings()
-                deleted_titles = {str(value).strip().casefold() for value in settings.deleted_scenario_titles}
-                deleted_production_ids = {
-                    str(value).strip() for value in settings.deleted_scenario_production_ids if str(value).strip()
-                }
-                if deleted_titles or deleted_production_ids:
-                    jobs_by_index = {job.request.index: job for job in jobs}
-                    removed = {
-                        index for index, title in enumerate(titles)
-                        if _title_key(title) in deleted_titles
-                        or str(jobs_by_index.get(index).request.production_item_id
-                               if jobs_by_index.get(index) else "").strip() in deleted_production_ids
-                    }
-                    if removed:
-                        titles, jobs = remove_scenarios(titles, jobs, removed)
+            titles, jobs = _apply_scenario_tombstones(titles, jobs)
             if candidate == path and not titles and not jobs:
                 recovered_empty = _recover_empty_primary_from_backup()
                 if recovered_empty:
-                    return recovered_empty
+                    return _apply_scenario_tombstones(*recovered_empty)
             return titles, jobs
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue

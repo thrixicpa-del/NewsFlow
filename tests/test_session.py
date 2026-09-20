@@ -1,15 +1,22 @@
-import os
 import json
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
-from scriptor.config import Settings, save_settings
 from scriptor.runner import Job, RunState
-from scriptor.session import (backup_session_path, legacy_session_path, load_session,
-                              migrate_legacy_session, remove_scenarios, rename_scenario,
-                              save_session, session_path)
+from scriptor.session import (
+    backup_session_path,
+    legacy_session_path,
+    load_session,
+    migrate_legacy_session,
+    remove_scenarios,
+    rename_scenario,
+    save_session,
+    session_path,
+)
 
 
 class SessionTests(unittest.TestCase):
@@ -169,6 +176,56 @@ class SessionTests(unittest.TestCase):
 
             self.assertEqual(load_session(), ([], []))
 
+
+    def test_primary_session_projects_durable_tombstones_after_stale_worker_write(self):
+        """A stale full primary written after delete/reset must stay deleted on restart."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            settings = Settings(
+                deleted_scenario_titles=["legacy deleted"],
+                deleted_scenario_production_ids=["deleted-id"],
+            )
+            save_settings(settings)
+            titles = ["Оставить", "Удалено по ID", "Legacy Deleted"]
+            jobs = [
+                Job(ScenarioRequest(0, titles[0], "P0", "keep-id"), RunState.DONE, "Keep", ""),
+                Job(ScenarioRequest(1, titles[1], "P1", "deleted-id"), RunState.DONE, "Gone", ""),
+                Job(ScenarioRequest(2, titles[2], "P2", ""), RunState.DONE, "Legacy gone", ""),
+            ]
+            # Simulates a detached worker which persisted its stale pre-delete
+            # in-memory session after the user action had already completed.
+            save_session(titles, jobs)
+
+            restored_titles, restored_jobs = load_session()
+
+            self.assertEqual(restored_titles, ["Оставить"])
+            self.assertEqual([job.request.production_item_id for job in restored_jobs], ["keep-id"])
+
+    def test_new_production_id_may_reuse_a_legacy_deleted_title(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_settings(Settings(deleted_scenario_titles=["повторяемая тема"]))
+            save_session(
+                ["Повторяемая тема"],
+                [Job(ScenarioRequest(0, "Повторяемая тема", "P", "new-production-id"),
+                     RunState.DONE, "New work", "")],
+            )
+
+            titles, jobs = load_session()
+
+            self.assertEqual(titles, ["Повторяемая тема"])
+            self.assertEqual(jobs[0].request.production_item_id, "new-production-id")
+
+    def test_stale_settings_save_cannot_erase_scenario_tombstones(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_settings(Settings(
+                deleted_scenario_titles=["Удалённая тема"],
+                deleted_scenario_production_ids=["deleted-id"],
+            ))
+            # Detached workers created before the delete carry no tombstones.
+            save_settings(Settings())
+            restored = load_settings()
+
+            self.assertIn("удалённая тема", restored.deleted_scenario_titles)
+            self.assertIn("deleted-id", restored.deleted_scenario_production_ids)
 
 if __name__ == "__main__":
     unittest.main()
