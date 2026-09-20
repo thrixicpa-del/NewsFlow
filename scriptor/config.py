@@ -13,7 +13,6 @@ from pathlib import Path
 
 from .security import protect, unprotect
 
-
 _SETTINGS_WRITE_LOCK = threading.RLock()
 _TEST_MODE_ENV = "NEWSFLOW_TEST_MODE"
 _TEST_ROOT_ENV = "NEWSFLOW_TEST_ROOT"
@@ -1299,7 +1298,7 @@ def load_settings() -> Settings:
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
-    except Exception:  # noqa: BLE001 - incompatible legacy values fall back to safe defaults
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         return Settings()
 
 
@@ -1345,7 +1344,7 @@ def _api_key_record_identity(record: dict, position: int) -> str:
     protected = str(record.get("secret_protected", "") or "")
     try:
         secret = unprotect(protected).strip()
-    except Exception:  # noqa: BLE001 - DPAPI/backend failures must not break a settings merge
+    except (OSError, ValueError):
         secret = ""
     if secret:
         return f"secret:{secret}"

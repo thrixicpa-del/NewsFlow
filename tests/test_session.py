@@ -1,15 +1,22 @@
-import os
 import json
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from scriptor.core import ScenarioRequest
 from scriptor.config import Settings, load_settings, save_settings
+from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
-from scriptor.session import (backup_session_path, legacy_session_path, load_session,
-                              migrate_legacy_session, remove_scenarios, rename_scenario,
-                              save_session, session_path)
+from scriptor.session import (
+    backup_session_path,
+    legacy_session_path,
+    load_session,
+    migrate_legacy_session,
+    remove_scenarios,
+    rename_scenario,
+    save_session,
+    session_path,
+)
 
 
 class SessionTests(unittest.TestCase):

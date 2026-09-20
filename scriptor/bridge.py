@@ -5,89 +5,202 @@ session registry; the redesign must not create a second, incompatible project.
 """
 from __future__ import annotations
 
-import json
-import sys
 import asyncio
-import hashlib
 import difflib
-import re
-import random
+import hashlib
+import json
 import math
-import time
-import shutil
 import os
-import subprocess
-import uuid
-import threading
-import zipfile
+import random
+import re
+import shutil
 import sqlite3
-from functools import lru_cache
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+import subprocess
+import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
-from .config import (ChromeSession, FastGenKey, OpenAIKey, SecretVoicerKey, LumeanKey, VoiceGenKey, WProjectKey, Settings,
-                     allow_empty_release_state, app_data_root, load_settings, save_settings)
-from .covers import FastGenError, FastGenPool
-from .cover_library import CoverLibrary
-from .openai_client import HybridTextPool, OpenAIAPIError
-from .voicer import (ChromeSecretVoicer, LumeanClient, SecretVoicerClient, VoiceGenClient, WProjectClient,
-                     VoiceProfile, open_voice_login, safe_audio_name)
-from .cutter import cut_single_clip, cut_sources
-from .footage import (FootageItem, download_footage, download_youtube_segment, search_all_available_videos,
-                      search_wikimedia_videos, search_youtube_videos)
-from .mixer import make_mix_plans, render_mixes
-from .claude import chrome_path, open_login_window
-from .ai_index import ClipIndex, SearchHit, SEMANTIC_TAG_LABELS, source_family_identity_text
-from .footage import scan_folders, tokenize
-from .timeline import (TimelineClip, TimelineProject, agent_plan_prompt, fallback_scene_plan,
-                       fit_scene_plan_to_voice_duration, title_only_scene_plan, parse_agent_scene_plan,
-                       align_timeline_to_audio, probe_media_duration, probe_video_duration,
-                       remotion_payload, render_project, export_fcpxml, validate_rendered_montage,
-                       required_video_duration)
-from .davinci import import_fcpxml, resolve_status
-from .core import PromptRange, ScenarioRequest, build_requests, parse_titles, safe_filename
 from . import idea_engine
-from .runner import Job, ParallelRunner, RunState, scenario_length_status
-from .session import load_session, remove_scenarios, rename_scenario, save_session
-from .youtube_publisher import (PublicationJob, apply_rewritten_title, build_linked_community_post, can_upload,
-                                create_publication_job_from_package, plan_jobs_on_publication_grid,
-                                publication_job_record, suggest_youtube_title)
-from .youtube_allocation import allocate_ready_jobs, build_allocation_summary
-from .youtube_engagement import build_engagement_plan, new_engagement_state, transition_engagement_step
-from .publication_v2 import (apply_bulk_schedule_range, build_distribution_preview, cancel_publication_execution, confirm_publication_snapshots,
-                              begin_upload_attempt, claim_execution, classify_publication_error, complete_upload_attempt,
-                              complete_publication_stage, fail_publication_stage, migrate_legacy_publication_data, publication_queue_projection,
-                              persist_publication_receipt, reconcile_publication_executions, reconcile_publication_items,
-                              reconcile_youtube_video_state, release_execution, retry_publication_stage,
-                              validate_publication_snapshot)
-from .youtube_studio import StudioAutomationError, execute_studio_task
-from .seo_prefixes import normalize_prefix_ranges, prepend_description_prefix
-from .cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
-from .thumbnail_prompt_v2 import (append_universal_thumbnail_core_v2,
-                                  build_final_provider_prompt,
-                                  prompt_sources_debug,
-                                  strip_legacy_thumbnail_phrases,
-                                  universal_thumbnail_core_v2)
-from .tts_ranges import (RangeValidationError, ensure_production_item_ids, freeze_batch,
-                         migrate_voice_range_settings, resolve_assignments, snapshot_tts_job,
-                         validate_ranges)
+from .ai_index import (
+    SEMANTIC_TAG_LABELS,
+    ClipIndex,
+    SearchHit,
+    source_family_identity_text,
+)
 from .channel_research import channel_research_state, new_task, parse_txt_sources
-from .command_contract import COMMAND_CONTRACT, validate_command_request, validate_command_result
+from .claude import chrome_path, open_login_window
+from .command_contract import (
+    COMMAND_CONTRACT,
+    validate_command_request,
+    validate_command_result,
+)
+from .config import (
+    ChromeSession,
+    FastGenKey,
+    LumeanKey,
+    OpenAIKey,
+    SecretVoicerKey,
+    Settings,
+    VoiceGenKey,
+    WProjectKey,
+    allow_empty_release_state,
+    app_data_root,
+    load_settings,
+    save_settings,
+)
+from .core import (
+    PromptRange,
+    ScenarioRequest,
+    build_requests,
+    parse_titles,
+    safe_filename,
+)
+from .cover_library import CoverLibrary
+from .cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
+from .covers import FastGenError, FastGenPool
+from .cutter import cut_single_clip, cut_sources
+from .davinci import import_fcpxml, resolve_status
+from .footage import (
+    FootageItem,
+    download_footage,
+    download_youtube_segment,
+    scan_folders,
+    search_all_available_videos,
+    search_wikimedia_videos,
+    search_youtube_videos,
+    tokenize,
+)
+from .mixer import make_mix_plans, render_mixes
 from .observability import start_action_trace
-from .youtube_oauth import (CloudflareOAuthSession, authorize_desktop_channel,
-                            cancel_cloudflare_authorization, open_channel_authorization,
-                            start_cloudflare_channel_authorization,
-                            validate_desktop_client_file, wait_for_cloudflare_credentials,
-                            _oauth_service_url)
-from .youtube_api import (build_private_video_insert_body, fetch_current_channel, fetch_google_account_email,
-                          fetch_youtube_analytics, fetch_youtube_video_state, set_youtube_thumbnail, upload_private_video)
+from .openai_client import HybridTextPool, OpenAIAPIError
+from .publication_v2 import (
+    apply_bulk_schedule_range,
+    begin_upload_attempt,
+    build_distribution_preview,
+    cancel_publication_execution,
+    claim_execution,
+    classify_publication_error,
+    complete_publication_stage,
+    complete_upload_attempt,
+    confirm_publication_snapshots,
+    fail_publication_stage,
+    migrate_legacy_publication_data,
+    persist_publication_receipt,
+    publication_queue_projection,
+    reconcile_publication_executions,
+    reconcile_publication_items,
+    reconcile_youtube_video_state,
+    release_execution,
+    retry_publication_stage,
+    validate_publication_snapshot,
+)
+from .runner import Job, ParallelRunner, RunState, scenario_length_status
+from .seo_prefixes import normalize_prefix_ranges, prepend_description_prefix
+from .session import load_session, remove_scenarios, rename_scenario, save_session
+from .thumbnail_prompt_v2 import (
+    append_universal_thumbnail_core_v2,
+    build_final_provider_prompt,
+    prompt_sources_debug,
+    strip_legacy_thumbnail_phrases,
+)
+from .timeline import (
+    TimelineClip,
+    TimelineProject,
+    agent_plan_prompt,
+    align_timeline_to_audio,
+    export_fcpxml,
+    fallback_scene_plan,
+    fit_scene_plan_to_voice_duration,
+    parse_agent_scene_plan,
+    probe_media_duration,
+    probe_video_duration,
+    remotion_payload,
+    render_project,
+    required_video_duration,
+    title_only_scene_plan,
+    validate_rendered_montage,
+)
+from .tts_ranges import (
+    RangeValidationError,
+    ensure_production_item_ids,
+    freeze_batch,
+    migrate_voice_range_settings,
+    resolve_assignments,
+    snapshot_tts_job,
+    validate_ranges,
+)
+from .voicer import (
+    ChromeSecretVoicer,
+    LumeanClient,
+    SecretVoicerClient,
+    VoiceGenClient,
+    VoiceProfile,
+    WProjectClient,
+    open_voice_login,
+    safe_audio_name,
+)
+from .youtube_allocation import allocate_ready_jobs, build_allocation_summary
+from .youtube_api import (
+    build_private_video_insert_body,
+    fetch_current_channel,
+    fetch_google_account_email,
+    fetch_youtube_analytics,
+    fetch_youtube_video_state,
+    set_youtube_thumbnail,
+    upload_private_video,
+)
+from .youtube_engagement import (
+    build_engagement_plan,
+    new_engagement_state,
+    transition_engagement_step,
+)
+from .youtube_oauth import (
+    CloudflareOAuthSession,
+    _oauth_service_url,
+    authorize_desktop_channel,
+    cancel_cloudflare_authorization,
+    open_channel_authorization,
+    start_cloudflare_channel_authorization,
+    validate_desktop_client_file,
+    wait_for_cloudflare_credentials,
+)
+from .youtube_publisher import (
+    PublicationJob,
+    apply_rewritten_title,
+    build_linked_community_post,
+    can_upload,
+    create_publication_job_from_package,
+    plan_jobs_on_publication_grid,
+    publication_job_record,
+    suggest_youtube_title,
+)
+from .youtube_studio import StudioAutomationError, execute_studio_task
 
+# Fail closed on programming defects while preserving the bridge's established
+# recovery behavior for filesystem, provider, parsing, and subprocess failures.
+_BRIDGE_OPERATION_ERRORS = (
+    ImportError,
+    LookupError,
+    OSError,
+    RuntimeError,
+    SyntaxError,
+    TypeError,
+    ValueError,
+    sqlite3.Error,
+    subprocess.SubprocessError,
+    urllib.error.URLError,
+)
 
 _COVER_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".jfif", ".tif", ".tiff"}
 _FASTGEN_REFERENCE_SAFE_BYTES = int(4.7 * 1024 * 1024)
@@ -212,7 +325,7 @@ def _select_current_cover_generation_rows(
     if expected_values is None:
         expected_values = []
     if not isinstance(expected_values, list):
-        raise ValueError("productionItemIds должен быть списком durable ProductionItem ID")
+        raise TypeError("productionItemIds должен быть списком durable ProductionItem ID")
     expected_ids = {str(value).strip() for value in expected_values if str(value).strip()}
     if requested and not expected_ids:
         # Current session actions must carry the identity seen by the UI.  The
@@ -567,7 +680,7 @@ def _compress_prepared_face_for_fastgen(path: Path) -> bool:
         with Image.open(path) as source:
             source.load()
             image = source.convert("RGBA")
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         raise RuntimeError(f"Не удалось сжать подготовленное лицо {path.name}") from exc
     temporary = path.with_name(f"{path.stem}.compressing.png")
     try:
@@ -883,7 +996,7 @@ def _cover_face_cutout(face_path: Path, library_folder: Path, prepared_folder: P
         target.write_bytes(remove(face_path.read_bytes(), session=session))
         _compress_prepared_face_for_fastgen(target)
         return target
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         raise RuntimeError(f"Не удалось автоматически вырезать фон у портрета: {exc}") from exc
 
 
@@ -933,7 +1046,7 @@ def compose_cover_faces(payload: dict) -> dict:
                             path=selected, selected_path=selected, selected_base_path=selected,
                             status="Лицо наложено", error="")
                 written += len(composed)
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             _cover_step(item, "Ошибка наложения лица", 100, str(exc))
             item.update(error=f"Не удалось наложить лицо: {exc}")
         _save_cover_state(settings)
@@ -1059,7 +1172,7 @@ def _claim_footage_index_lock() -> _FootageIndexLease:
                 raise RuntimeError("Не удалось снять старую блокировку ИИ-индексации")
         try:
             with lock_path.open("x", encoding="utf-8") as stream:
-                json.dump({"pid": os.getpid(), "startedAt": datetime.now().isoformat(timespec="seconds")}, stream)
+                json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
         except FileExistsError:
             raise RuntimeError("ИИ-индексация уже выполняется. Дождитесь её завершения.")
         return _FootageIndexLease(lock_path)
@@ -1416,7 +1529,7 @@ def snapshot() -> dict:
                 "stage": "paused",
                 "active": False,
                 "message": "Индексация остановлена. Нажмите «Продолжить индексацию» — уже готовые клипы повторно не анализируются.",
-                "updatedAt": datetime.now().isoformat(timespec="seconds"),
+                "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
             })
     footage_total = 0
     footage_indexed = 0
@@ -1811,7 +1924,6 @@ def export_obsidian_notes(payload: dict) -> dict:
     seo_by_title = {str(item.get("source_title", "")): item for item in settings.seo_queue
                     if item.get("status") == "Готово"}
     created = 0
-    compressed = 0
     for title in titles:
         job = job_by_title.get(title)
         if not job:
@@ -2000,7 +2112,7 @@ def _reference_video_score(item: dict) -> tuple[float, float]:
     timestamp = item.get("timestamp") or item.get("release_timestamp") or item.get("upload_timestamp")
     if not timestamp and str(item.get("upload_date") or "").isdigit():
         try:
-            timestamp = datetime.strptime(str(item["upload_date"]), "%Y%m%d").timestamp()
+            timestamp = datetime.strptime(str(item["upload_date"]), "%Y%m%d").astimezone().timestamp()
         except ValueError:
             timestamp = None
     age_hours = max(1.0, (time.time() - float(timestamp)) / 3600) if timestamp else 24.0
@@ -2029,7 +2141,7 @@ def _read_reference_channel(channel: dict, limit: int) -> list[dict]:
                 continue
             try:
                 detail = ydl.extract_info(video_url, download=False) or item
-            except Exception:
+            except _BRIDGE_OPERATION_ERRORS:
                 continue
             title = str(detail.get("title") or "").strip()
             views_hour, age_hours = _reference_video_score(detail)
@@ -2057,7 +2169,7 @@ def analyze_idea_reference_channels(payload: dict) -> dict:
     for channel in settings.idea_reference_channels:
         try:
             sample.extend(_read_reference_channel(channel, max(3, min(8, count))))
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             errors.append(f"{channel.get('label') or channel.get('url')}: {str(exc)[:120]}")
     sample.sort(key=lambda row: (row.get("viewsHour", 0), row.get("views", 0)), reverse=True)
     sample = sample[:max(3, min(24, count * 2))]
@@ -2112,7 +2224,7 @@ def _youtube_research(query: str, limit: int) -> list[dict]:
         try:
             with YoutubeDL(details_options) as client:
                 detail = client.extract_info(str(item.get("source_url", "")), download=False) or {}
-        except Exception:
+        except _BRIDGE_OPERATION_ERRORS:
             # A search result still helps the editor even when its public
             # counters are hidden or YouTube temporarily rejects a request.
             detail = {}
@@ -2144,7 +2256,7 @@ def _youtube_api_research(query: str, limit: int, api_key: str) -> list[dict]:
         except urllib.error.HTTPError as exc:
             try:
                 message = json.loads(exc.read().decode("utf-8")).get("error", {}).get("message", "")
-            except Exception:
+            except _BRIDGE_OPERATION_ERRORS:
                 message = ""
             raise ValueError(f"YouTube Data API: {message or f'HTTP {exc.code}'}") from exc
         except urllib.error.URLError as exc:
@@ -2217,7 +2329,6 @@ def _news_research(query: str, limit: int) -> list[dict]:
             root = ET.fromstring(response.read())
     except (urllib.error.URLError, ET.ParseError) as exc:
         raise ValueError(f"Не удалось получить новостную выборку: {exc}") from exc
-    namespace = {"source": "http://search.yahoo.com/mrss/"}
     rows: list[dict] = []
     for item in root.findall("./channel/item")[:max(1, min(30, limit * 3))]:
         raw_title = (item.findtext("title") or "").strip()
@@ -3897,7 +4008,7 @@ def save_voice_range_preset(payload: dict) -> dict:
     if not isinstance(profiles, list) or not profiles:
         raise ValueError("В пресете нужен хотя бы один профиль")
     if not isinstance(ranges, list):
-        raise ValueError("Диапазоны пресета переданы неверно")
+        raise TypeError("Диапазоны пресета переданы неверно")
     value = {"name": name, "profiles": profiles, "ranges": ranges,
              "defaultProfileId": str(payload.get("defaultProfileId", settings.voice_default_profile_id) or ""),
              "queueConcurrency": max(1, min(100, int(payload.get("queueConcurrency", settings.voice_queue_concurrency) or 1))),
@@ -4076,7 +4187,7 @@ def reset_youtube_channel_account(payload: dict) -> dict:
     if profile_dir.exists():
         retired_root = profile_dir.parent / ".retired"
         retired_root.mkdir(parents=True, exist_ok=True)
-        archived = retired_root / f"{profile_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        archived = retired_root / f"{profile_id}-{datetime.now().astimezone().strftime('%Y%m%d%H%M%S')}"
         shutil.move(str(profile_dir), str(archived))
     settings.youtube_oauth_tokens.pop(profile_id, None)
     channel.update({
@@ -4128,7 +4239,7 @@ def save_youtube_oauth_service(payload: dict) -> dict:
 def _handoff_session_from_payload(payload: dict) -> CloudflareOAuthSession:
     value = payload.get("session")
     if not isinstance(value, dict):
-        raise ValueError("Сессия входа не найдена")
+        raise TypeError("Сессия входа не найдена")
     try:
         return CloudflareOAuthSession(
             session_id=str(value["sessionId"]),
@@ -4194,7 +4305,7 @@ def finish_youtube_channel_handoff(payload: dict) -> dict:
         channel["oauth_account_email"] = ""
     channel["status"] = "OAuth-токен получен — проверяем доступный YouTube-канал"
     save_settings(settings)
-    profile, refreshed_credentials = fetch_current_channel(credentials)
+    profile, _refreshed_credentials = fetch_current_channel(credentials)
     channel.update({
         "channel_id": profile["channelId"], "name": profile["name"],
         "thumbnail_url": profile.get("thumbnailUrl", ""), "subscribers": str(profile["subscribers"]),
@@ -4312,7 +4423,7 @@ def refresh_analytics(payload: dict) -> dict:
                     refreshed_token,
                     include_monetary=bool(channel.get("monetary_access", False)),
                 )
-            except Exception as analytics_error:
+            except _BRIDGE_OPERATION_ERRORS as analytics_error:
                 # Data v3 profile metadata remains useful when the optional
                 # Analytics API has not yet been enabled or has delayed data.
                 report = {"videos": [], "financialAvailable": False, "errors": [str(analytics_error)[:220]]}
@@ -4373,7 +4484,7 @@ def refresh_analytics(payload: dict) -> dict:
                 channel["analytics_note"] = ""
             settings.youtube_oauth_tokens[profile_id] = json.dumps(refreshed_token, ensure_ascii=False)
             refreshed += 1
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             channel["status"] = f"Ошибка аналитики: {str(exc)[:180]}"
             failures += 1
     settings.youtube_analytics_metric_points = settings.youtube_analytics_metric_points[-20000:]
@@ -5019,7 +5130,8 @@ def prepare_cover_face_library(payload: dict) -> dict:
                     # Never put a large model on C: or into the untouched source-photo
                     # library.  The reusable model lives next to the generated PNGs.
                     os.environ["U2NET_HOME"] = str(prepared_folder / "_модели_вырезания_фона")
-                    from rembg import new_session, remove as rembg_remove  # type: ignore[import-not-found]
+                    from rembg import new_session  # type: ignore[import-not-found]
+                    from rembg import remove as rembg_remove
                     # silueta is deliberately used instead of rembg's heavyweight default
                     # BRIA model. It is sufficient for portrait cut-outs.
                     session = new_session("silueta")
@@ -5029,14 +5141,14 @@ def prepare_cover_face_library(payload: dict) -> dict:
                         "Для вырезания фона нужен модуль rembg. Он добавлен в зависимости NewsFlow; "
                         "после следующей сборки установщика функция будет доступна."
                     ) from exc
-                except Exception as exc:
+                except _BRIDGE_OPERATION_ERRORS as exc:
                     raise RuntimeError(f"Не удалось подготовить лёгкую модель вырезания фона: {exc}") from exc
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(remove(source.read_bytes(), session=session))
             if _compress_prepared_face_for_fastgen(target):
                 compressed += 1
             created += 1
-        except Exception as exc:  # individual damaged images must not stop the library
+        except _BRIDGE_OPERATION_ERRORS as exc:  # individual damaged images must not stop the library
             errors.append(f"{source.name}: {exc}")
     _save_cover_state(settings)
     detail = f"Подготовлено PNG без фона: {created}; уже были готовы: {reused}; сжато для FastGen ≤5 МБ: {compressed}."
@@ -5126,7 +5238,7 @@ def _prepare_cover_visual_reference(path: Path) -> Path:
         with Image.open(path) as source:
             source.load()
             image = source.convert("RGB")
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         raise ValueError(f"Не удалось прочитать изображение «{path.name}». Выберите исправный JPG, PNG или WEBP.") from exc
     try:
         if path.resolve().is_relative_to(directory.resolve()) and image.size == (1920, 1080) \
@@ -5154,7 +5266,7 @@ def _prepare_cover_visual_reference(path: Path) -> Path:
             with Image.open(destination) as cached:
                 if cached.size == target_size and 0 < destination.stat().st_size <= _FASTGEN_REFERENCE_SAFE_BYTES:
                     return destination
-        except Exception:
+        except _BRIDGE_OPERATION_ERRORS:
             destination.unlink(missing_ok=True)
     for quality in (90, 84, 78, 72):
         image.save(destination, format="WEBP", quality=quality, method=6)
@@ -5462,7 +5574,7 @@ def _cover_step(item: dict, label: str, progress: int, detail: str = "") -> None
         # Used by Settings' per-row merge when montage and FastGen work at
         # the same time. Microseconds prevent equal-second progress updates
         # from being mistaken for an older bridge snapshot.
-        updatedAt=datetime.now().isoformat(timespec="microseconds"),
+        updatedAt=datetime.now().astimezone().isoformat(timespec="microseconds"),
     )
 
 
@@ -5692,7 +5804,7 @@ def _clean_cover_prompts(value: str, count: int) -> tuple[list[str], int]:
         prompts = [text]
     cleaned = []
     for raw in prompts:
-        prompt = re.sub(r"^(?:prompt|промпт)\s*[:—-]\s*", "", str(raw), flags=re.I).strip()
+        prompt = re.sub(r"^(?:prompt|промпт)\s*[:—-]\s*", "", str(raw), flags=re.IGNORECASE).strip()
         prompt = " ".join(prompt.split())[:6000]
         if len(prompt) >= 35 and prompt not in cleaned:
             cleaned.append(prompt)
@@ -5769,7 +5881,7 @@ class _BoundedCoverTextProvider:
             self.on_attempt(self.attempts)
             try:
                 return await self.pool.generate(prompt, **kwargs)
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 if not _cover_text_provider_error_is_transient(exc) or self.attempts >= 4:
                     raise
                 await asyncio.sleep(0)
@@ -5798,7 +5910,7 @@ def generate_cover_prompts(payload: dict) -> dict:
     pool_error: Exception | None = None
     try:
         pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         pool_error = exc
     settings.cover_prompt_provider = provider
     rewrite = bool(payload.get("rewrite"))
@@ -5852,7 +5964,7 @@ def generate_cover_prompts(payload: dict) -> dict:
             item.update(image_prompt_options=options, selected_prompt_index=chosen, image_prompt=options[chosen],
                         prompt_provider=provider, prompt_text_signature=_cover_text_revision(item), error="")
             item["prompt_revision_id"] = _cover_prompt_revision(item)
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             if _cover_prompt_safety_blocked(exc):
                 fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
                 options = [_normalize_cover_photo_prompt(_fallback_cover_prompt(item, variant), item) for variant in range(fallback_count)]
@@ -6035,7 +6147,7 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
     """Return explicit validation/reason codes; never silently truncate into READY."""
     raw = str(value or "").strip()
     result = {"valid": False, "value": raw, "reason_code": "", "reason_detail": "", "semantic_slots": []}
-    if not raw or raw.startswith(chr(96) * 3) or raw.startswith("{") or "\n" in raw:
+    if not raw or raw.startswith((chr(96) * 3, "{")) or "\n" in raw:
         result.update(reason_code="INVALID_JSON", reason_detail="Ожидалось одно значение из JSON-ответа")
         return result
     words = raw.split()
@@ -6068,10 +6180,12 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         result.update(reason_code="GENERIC_ONLY", reason_detail="Фраза состоит только из общего кликбейта")
         return result
     source = _cover_word_source_text(item).casefold()
-    if any(token in raw.casefold() for token in _COVER_WORD_ASSERTIVE_TERMS) and any(token in source for token in _COVER_WORD_RISK_TERMS):
-        if "?" not in raw and not any(token in raw.casefold() for token in ("может", "риск", "угроз")):
-            result.update(reason_code="CLAIM_STRENGTH_ERROR", reason_detail="Риск выдан за подтверждённый факт")
-            return result
+    if (any(token in raw.casefold() for token in _COVER_WORD_ASSERTIVE_TERMS)
+            and any(token in source for token in _COVER_WORD_RISK_TERMS)
+            and "?" not in raw
+            and not any(token in raw.casefold() for token in ("может", "риск", "угроз"))):
+        result.update(reason_code="CLAIM_STRENGTH_ERROR", reason_detail="Риск выдан за подтверждённый факт")
+        return result
     if set(re.findall(r"\d+(?:[.,]\d+)?%?", raw)) - set(re.findall(r"\d+(?:[.,]\d+)?%?", source)):
         result.update(reason_code="UNSUPPORTED_FACT", reason_detail="В строку добавлено отсутствующее в источнике число")
         return result
@@ -6439,8 +6553,6 @@ def generate_cover_headlines(payload: dict) -> dict:
     if template and not use_default:
         settings.cover_headline_template = template[:12000]
     active_template = Settings().cover_headline_template if use_default else settings.cover_headline_template
-    use_structure = bool(payload.get("useStructure", settings.cover_text_use_structure))
-    avoid_repeats = bool(payload.get("avoidRepeats", settings.cover_text_avoid_repeats))
     force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
     scope = _current_cover_generation_scope(
         settings, payload, "Выберите сценарии для фраз на обложку",
@@ -6485,11 +6597,11 @@ def generate_cover_headlines(payload: dict) -> dict:
                            headline_structure_id=structure["headline_structure_id"], headline_variation_index=variation,
                            headline_attempt_count=len(attempts), headline_semantic_slots=validation["semantic_slots"],
                            headline_repair_history=attempts, headline_pattern_signature=_cover_word_pattern_signature(headline),
-                           headline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+                           headline_generation_timestamp=datetime.now().astimezone().isoformat(timespec="seconds"))
             _mark_cover_prompt_stale_for_current_text(current)
             current["headline_provider_attempt_count"] = provider_call.attempts
             current.pop("cover_headline_suggestion", None)
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             settings.cover_queue[index].update(
                 headline_status="FAILED", headline_error=_cover_provider_error_message(exc),
                 headline_provider_attempt_count=provider_call.attempts,
@@ -6541,8 +6653,6 @@ def generate_cover_subheadlines(payload: dict) -> dict:
     if template and not use_default:
         settings.cover_subheadline_template = template[:12000]
     active_template = Settings().cover_subheadline_template if use_default else settings.cover_subheadline_template
-    use_structure = bool(payload.get("useStructure", settings.cover_text_use_structure))
-    avoid_repeats = bool(payload.get("avoidRepeats", settings.cover_text_avoid_repeats))
     force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
     scope = _current_cover_generation_scope(
         settings, payload, "Выберите сценарии для подзаголовков",
@@ -6591,11 +6701,11 @@ def generate_cover_subheadlines(payload: dict) -> dict:
                            subheadline_variation_index=variation, subheadline_attempt_count=len(attempts),
                            subheadline_semantic_slots=validation["semantic_slots"], subheadline_repair_history=attempts,
                            subheadline_pattern_signature=_cover_word_pattern_signature(subheadline),
-                           subheadline_generation_timestamp=datetime.now().isoformat(timespec="seconds"))
+                           subheadline_generation_timestamp=datetime.now().astimezone().isoformat(timespec="seconds"))
             _mark_cover_prompt_stale_for_current_text(current)
             current["subheadline_provider_attempt_count"] = provider_call.attempts
             current.pop("cover_subheadline_suggestion", None)
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             settings.cover_queue[index].update(
                 subheadline_status="FAILED", subheadline_error=_cover_provider_error_message(exc),
                 subheadline_provider_attempt_count=provider_call.attempts,
@@ -7139,7 +7249,7 @@ def _claim_cover_generation_lock() -> Path | None:
             return None
     try:
         with lock_path.open("x", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "startedAt": datetime.now().isoformat(timespec="seconds")}, stream)
+            json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
     except FileExistsError:
         return None
     return lock_path
@@ -7414,8 +7524,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         values: list[str] = []
         prompt_image_paths: list[dict[str, object]] = []
         try:
-            def progress(label: str, percent: int, detail: str = ""):
-                _cover_step(item, label, percent, detail)
+            def progress(label: str, percent: int, detail: str = "", *, _item=item):
+                _cover_step(_item, label, percent, detail)
                 _save_cover_state(settings)
 
             seed = int(settings.cover_seed) if settings.cover_seed.isdigit() else None
@@ -7459,14 +7569,14 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                         generation_history.append({
                             "promptIndex": prompt_index, "round": 1, "attempt": attempt,
                             "totalAttempt": attempt, "rewritten": False, "preBilling": True,
-                            "status": "success", "at": datetime.now().isoformat(timespec="seconds"),
+                            "status": "success", "at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         })
                         item.update(
                             generation_history=generation_history[-128:],
                             generation_rejected_before_acceptance=False,
                         )
                         break
-                    except Exception as generation_error:
+                    except _BRIDGE_OPERATION_ERRORS as generation_error:
                         last_error = generation_error
                         accepted_generation_id = _cover_accepted_generation_id(generation_error)
                         reason = _cover_provider_error_message(generation_error)
@@ -7475,7 +7585,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                             "totalAttempt": attempt, "rewritten": False,
                             "preBilling": not bool(accepted_generation_id),
                             "status": "failed", "error": reason,
-                            "at": datetime.now().isoformat(timespec="seconds"),
+                            "at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         })
                         item.update(
                             generation_history=generation_history[-128:],
@@ -7514,7 +7624,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     "at": datetime.now().astimezone().isoformat(), "count": len(values),
                 })
                 settings.cover_rate_usage_events = settings.cover_rate_usage_events[-10000:]
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             detail = _cover_provider_error_message(exc)
             if values:
                 detail = f"{detail}. Получено вариантов: {len(values)} из {len(prompt_options) * settings.cover_variant_count}"
@@ -7986,7 +8096,7 @@ def remove_cover_prompts(payload: dict) -> dict:
             # The library may be read by a polling bridge that started with an
             # older settings snapshot.  A per-row revision makes this explicit
             # removal win over that stale copy during the next hydration.
-            item["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+            item["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
             removed += 1
     if not removed:
         raise ValueError("Нет промптов для удаления")
@@ -8125,12 +8235,12 @@ def render_cover_text(payload: dict) -> dict:
             max_width = int(width * (.55 if has_face else .88))
             measure = ImageDraw.Draw(image)
 
-            def wrap_text(text: str, active_font) -> list[str]:
+            def wrap_text(text: str, active_font, *, _measure=measure, _max_width=max_width) -> list[str]:
                 lines: list[str] = []
                 line = ""
                 for word in text.split():
                     candidate = (line + " " + word).strip()
-                    if line and measure.textbbox((0, 0), candidate, font=active_font)[2] > max_width:
+                    if line and _measure.textbbox((0, 0), candidate, font=active_font)[2] > _max_width:
                         lines.append(line)
                         line = word
                     else:
@@ -8250,7 +8360,7 @@ def render_cover_text(payload: dict) -> dict:
                         selected_path=str(destination), path=str(destination),
                         status="Готово с текстом", error="")
             written += 1
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             item.update(status="Ошибка текста", error=str(exc))
         save_settings(settings)
     if not written:
@@ -8444,7 +8554,7 @@ def generate_seo(payload: dict) -> dict:
             )
             item.update(status="Готово", title=parsed["title"], description=description,
                         hashtags=parsed["hashtags"], error="")
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             item.update(status="Ошибка", error=str(exc))
         save_settings(settings)
     return snapshot()
@@ -8486,7 +8596,7 @@ def generate_tags(payload: dict) -> dict:
             if not tags:
                 raise ValueError("ИИ не вернул теги")
             item.update(tags_status="Готово", tags=tags, tags_error="")
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             item.update(tags_status="Ошибка", tags_error=str(exc))
         save_settings(settings)
     return snapshot()
@@ -9042,7 +9152,7 @@ def generate_voice(payload: dict) -> dict:
                 content = SecretVoicerClient(attempt_key.secret).synthesize(
                     job.result, profile, lambda label, percent: set_task_status(index, f"API: {label}", percent))
                 break
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 last_error = exc
                 if not settings.voice_key_failover or not _can_failover_voice(exc):
                     raise
@@ -9067,7 +9177,7 @@ def generate_voice(payload: dict) -> dict:
                 content, template_id, signature = LumeanClient(attempt_key.secret).synthesize(
                     job.result, profile, lambda label, percent: set_task_status(index, label, percent))
                 break
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 last_error = exc
                 if not settings.voice_key_failover or not _can_failover_voice(exc):
                     raise
@@ -9105,7 +9215,7 @@ def generate_voice(payload: dict) -> dict:
                     threads=max(1, int(profile.task_threads)),
                     progress=lambda label, percent: set_task_status(index, label, percent))
                 break
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 last_error = exc
                 if not settings.voice_key_failover or not _can_failover_voice(exc):
                     raise
@@ -9140,7 +9250,7 @@ def generate_voice(payload: dict) -> dict:
             content: bytes | None = None
             idempotency_key = str(job_snapshot.get("provider_idempotency_key") or "").strip()
             if not idempotency_key:
-                idempotency_key = f"newsflow:voice:{str(job_snapshot.get('id') or uuid.uuid4().hex)}"[:128]
+                idempotency_key = f"newsflow:voice:{job_snapshot.get('id') or uuid.uuid4().hex!s}"[:128]
                 job_snapshot["provider_idempotency_key"] = idempotency_key
             # The provider can accept a POST while the local process loses its
             # response. Persist the key first so every retry represents the
@@ -9164,7 +9274,7 @@ def generate_voice(payload: dict) -> dict:
                     content = client.wait_download(
                         str(task_id), progress=lambda label, percent: set_task_status(index, label, percent))
                     break
-                except Exception as exc:
+                except _BRIDGE_OPERATION_ERRORS as exc:
                     last_error = exc
                     # Once WProject returned an id, it owns the task.  Do not
                     # fail over to another key and accidentally create a
@@ -9227,7 +9337,7 @@ def generate_voice(payload: dict) -> dict:
                         continue
                     fallback_id = str(saved.get("id") or profile.voice_id or "wproject")
                     job_snapshot["provider_idempotency_key"] = (
-                        f"newsflow:voice:{str(job_snapshot.get('id') or uuid.uuid4().hex)}:fallback:{fallback_id}"[:128]
+                        f"newsflow:voice:{job_snapshot.get('id') or uuid.uuid4().hex!s}:fallback:{fallback_id}"[:128]
                     )
                     mark_provider_running(index, provider, saved)
                     return wproject_task(index, keys[0], profile)
@@ -9235,7 +9345,7 @@ def generate_voice(payload: dict) -> dict:
                     continue
                 output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
                 return index, str(output)
-            except Exception:
+            except _BRIDGE_OPERATION_ERRORS:
                 continue
         raise RuntimeError("Резервные активные голоса не смогли принять задачу")
 
@@ -9261,7 +9371,7 @@ def generate_voice(payload: dict) -> dict:
 
                 return ChromeSecretVoicer(browser_profile).synthesize(
                     job.result, chrome_profile, progress=chrome_progress)
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 last_error = exc
                 if attempt >= 3 or not _retryable_browser_voice_error(exc):
                     raise
@@ -9313,7 +9423,7 @@ def generate_voice(payload: dict) -> dict:
                         if provider == "voicegen":
                             return voicegen_task(index, key, profile)
                         return wproject_task(index, key, profile)
-                    except Exception as error:
+                    except _BRIDGE_OPERATION_ERRORS as error:
                         # 429/network/service overload is a queue condition,
                         # not a reason to discard the immutable job or its
                         # script-to-audio binding.  Back off within this
@@ -9331,7 +9441,7 @@ def generate_voice(payload: dict) -> dict:
             mark_provider_running(index, "chrome")
             try:
                 content = chrome_task(index, job, profile)
-            except Exception:
+            except _BRIDGE_OPERATION_ERRORS:
                 if not settings.voice_api_fallback or not slots:
                     raise
                 set_task_status(index, "Chrome недоступен — резерв через API", 15)
@@ -9369,7 +9479,7 @@ def generate_voice(payload: dict) -> dict:
                 set_task_status(completed_index, "Готово", 100, artifact={
                     "artifactPath": output, "durationSeconds": duration,
                 })
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 if _can_failover_voice(exc):
                     try:
                         completed_index, output = cross_service_fallback(index, str(job_snapshot.get("provider", "")))
@@ -9382,7 +9492,7 @@ def generate_voice(payload: dict) -> dict:
                             "artifactPath": output, "durationSeconds": duration,
                         })
                         continue
-                    except Exception:
+                    except _BRIDGE_OPERATION_ERRORS:
                         pass
                 job_snapshot["state"] = "error"
                 job_snapshot["error"] = _voice_error_reason(exc)
@@ -9579,9 +9689,8 @@ def index_footage(payload: dict) -> dict:
         raise ValueError("Добавьте хотя бы одну папку с футажами")
     lock = _claim_footage_index_lock()
     progress = payload.get("_progress") if callable(payload.get("_progress")) else None
-    download_semaphore = payload.get("_downloadSemaphore")
     index = ClipIndex(app_data_root() / "footage-index.sqlite3")
-    started_at = datetime.now().isoformat(timespec="seconds")
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
     def report(state) -> None:
         _write_footage_index_status({
@@ -9596,7 +9705,7 @@ def index_footage(payload: dict) -> dict:
             "current": state.current,
             "ownerPid": os.getpid(),
             "startedAt": started_at,
-            "updatedAt": datetime.now().isoformat(timespec="seconds"),
+            "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
             "message": (f"Завершено с ошибками: {state.failed}. Проверьте повреждённые или недоступные файлы."
                         if state.stage == "complete" and state.failed else ""),
         })
@@ -9614,10 +9723,10 @@ def index_footage(payload: dict) -> dict:
                 "indexResult": {"total": progress.total, "processed": progress.processed,
                                 "indexed": progress.indexed, "skipped": progress.skipped,
                                 "failed": progress.failed, "removed": progress.removed}}
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         current = _read_footage_index_status()
         current.update({"stage": "error", "active": False, "error": str(exc),
-                        "updatedAt": datetime.now().isoformat(timespec="seconds")})
+                        "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds")})
         _write_footage_index_status(current)
         raise
     finally:
@@ -9759,7 +9868,7 @@ def _full_intro_duration(path: str, fallback: float = 6.0) -> float:
         # audio.  The fallback is only for malformed media that ffprobe cannot
         # inspect; the renderer will then still show a clear per-task error.
         return max(0.1, probe_media_duration(Path(path)))
-    except Exception:
+    except _BRIDGE_OPERATION_ERRORS:
         return max(0.1, float(fallback or 6.0))
 
 
@@ -10229,7 +10338,7 @@ def _montage_rotation_penalty(placements: list[str], position_bucket: str) -> fl
 
 
 def _montage_stable_variation(seed: str, query: str, family: str) -> float:
-    digest = hashlib.sha256(f"{seed}|{query}|{family}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{seed}|{query}|{family}".encode()).digest()
     return int.from_bytes(digest[:4], "big") / (2 ** 32 - 1) * .006
 
 
@@ -10241,7 +10350,7 @@ def _montage_source_start(source_duration: float, beat_duration: float, previous
         return 0.0
     fractions = {"EARLY": (.25, .5, .75), "MIDDLE": (.5, .75, .25), "LATE": (.75, .5, .25)}
     candidates = [round(available * fraction, 3) for fraction in fractions.get(position_bucket, (.5, .25, .75))]
-    offset = int.from_bytes(hashlib.sha256(f"{seed}|{family}".encode("utf-8")).digest()[:2], "big") % len(candidates)
+    offset = int.from_bytes(hashlib.sha256(f"{seed}|{family}".encode()).digest()[:2], "big") % len(candidates)
     candidates = candidates[offset:] + candidates[:offset]
     for candidate in candidates:
         if all(abs(candidate - previous) >= .2 for previous in previous_starts):
@@ -10521,7 +10630,7 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
     if settings.montage_auto_web:
         try:
             candidates.extend(search_wikimedia_videos(query, limit=4))
-        except Exception:
+        except _BRIDGE_OPERATION_ERRORS:
             pass
     if not candidates:
         return None
@@ -10566,7 +10675,7 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
             if not _montage_screen_text_safe(index, normalized):
                 continue
             return normalized
-        except Exception:
+        except _BRIDGE_OPERATION_ERRORS:
             # A weak or restricted external source must never prevent the
             # local associative fallback from completing the entire video.
             continue
@@ -10681,7 +10790,7 @@ def prepare_montage(payload: dict) -> dict:
                 agent_plan_prompt(titles[scenario_index], narration)
             ))
             scenes = parse_agent_scene_plan(response)
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             # A quota/network problem must not stop a finished narration from
             # becoming a video: use the deterministic local visual planner.
             if progress:
@@ -11197,7 +11306,7 @@ def render_montage(payload: dict) -> dict:
             # Resolve is an optional hand-off.  A missing DLL, a closed
             # project or an unexpected API exception must never invalidate an
             # already rendered MP4 and its FCPXML plan.
-            except Exception as error:
+            except _BRIDGE_OPERATION_ERRORS as error:
                 davinci_warning = f"XML создан, но не импортирован в DaVinci: {error}"
     project.save(project_path)
     remotion_path = output.with_suffix(".remotion.json")
@@ -11244,7 +11353,7 @@ def export_davinci_xml(payload: dict) -> dict:
 
 def import_davinci_xml(payload: dict) -> dict:
     """Ask an open DaVinci Resolve instance to import one or more FCPXML files."""
-    settings = load_settings()
+    _settings = load_settings()
     paths = [Path(str(value)) for value in payload.get("paths", []) if str(value).strip()]
     if not paths:
         project_path = Path(str(payload.get("projectPath", "")).strip())
@@ -11261,7 +11370,7 @@ def import_davinci_xml(payload: dict) -> dict:
             with _DAVINCI_IMPORT_LOCK:
                 result = import_fcpxml(xml, timeline_name)
             imported.append(result)
-        except Exception as error:
+        except _BRIDGE_OPERATION_ERRORS as error:
             errors.append(f"{xml.name}: {error}")
     if not imported:
         raise RuntimeError("; ".join(errors) or "DaVinci не импортировал XML")
@@ -12139,7 +12248,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 try:
                     with _DAVINCI_IMPORT_LOCK:
                         import_fcpxml(Path(project.davinci_xml_path), project.title)
-                except Exception as error:
+                except _BRIDGE_OPERATION_ERRORS as error:
                     # The video and XML are valid without a currently open Resolve;
                     # retain the result and show the exact import issue in timeline.
                     _montage_task_update(settings, index, detail=f"XML готов; DaVinci: {error}")
@@ -12179,7 +12288,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                     try:
                         planned_index, project_path = future.result()
                         renders[renderers.submit(render_task, planned_index, project_path)] = planned_index
-                    except Exception as exc:
+                    except _BRIDGE_OPERATION_ERRORS as exc:
                         _release_batch_footage_reservations(batch_footage_usage, index)
                         _montage_task_update(settings, index, status="Ошибка", phase="Ошибка подготовки", progress=100,
                                              detail=str(exc), error=str(exc))
@@ -12188,7 +12297,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 try:
                     future.result()
                     rendered_count += 1
-                except Exception as exc:
+                except _BRIDGE_OPERATION_ERRORS as exc:
                     attempt = int((settings.montage_task_statuses.get(str(index)) or {}).get("renderAttempt", 1) or 1)
                     if _is_retryable_montage_error(exc) and attempt < 3:
                         delay = attempt * 2
@@ -12280,7 +12389,7 @@ def remove_montage_projects(payload: dict) -> dict:
 
 def package_outputs(payload: dict) -> dict:
     settings = load_settings()
-    titles, jobs = load_session()
+    _titles, jobs = load_session()
     jobs_by_title = {job.request.title: job for job in jobs if job.state == RunState.DONE}
     covers_by_title = {str(item.get("title", "")): item for item in settings.cover_queue}
     seo_by_title = {str(item.get("source_title", "")): item for item in settings.seo_queue if item.get("status") == "Готово"}
@@ -13092,7 +13201,7 @@ def upload_publication_jobs(payload: dict) -> dict:
                 channel_id = str(current.get("channelId", ""))
                 settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed_credentials, ensure_ascii=False)
                 succeeded.append(completed_id)
-            except Exception as exc:  # Each task retains its own recoverable error.
+            except _BRIDGE_OPERATION_ERRORS as exc:  # Each task retains its own recoverable error.
                 current = records[job_id]
                 current.update({"status": "failed", "videoStatus": "failed", "uploadError": str(exc)})
                 failures.append((job_id, str(exc)))
@@ -13254,7 +13363,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 # This is the durable crash/restart boundary: the RUNNING
                 # lease exists on disk before the request can leave the PC.
                 save_settings(settings)
-            except Exception as exc:
+            except _BRIDGE_OPERATION_ERRORS as exc:
                 blocked.append((snapshot_id, str(exc)))
                 return
             snapshot_record = dict(snapshots[snapshot_id])
@@ -13275,7 +13384,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
                 save_settings(settings)
                 succeeded.append(snapshot_id)
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             with lock:
                 fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", classify_publication_error(exc), str(exc))
                 release_execution(settings, snapshot_id, worker_id)
@@ -13312,7 +13421,7 @@ def reconcile_publication_v2_youtube(payload: dict) -> dict:
             reconcile_youtube_video_state(settings, snapshot_id, video)
             settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
             confirmed += 1
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             fail_publication_stage(settings, snapshot_id, "YOUTUBE_PROCESSING", classify_publication_error(exc), str(exc))
             failures.append((snapshot_id, str(exc)))
     save_settings(settings)
@@ -13345,7 +13454,7 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
         if not claim_execution(settings, snapshot_id, worker_id):
             failures.append((snapshot_id, "Snapshot занят другим worker."))
             continue
-        steps = dict((settings.youtube_publication_executions[snapshot_id].get("steps", {}) or {}))
+        steps = dict(settings.youtube_publication_executions[snapshot_id].get("steps", {}) or {})
         step = dict(steps.get("THUMBNAIL", {}) or {})
         step.update({"status": "RUNNING", "attempts": int(step.get("attempts", 0) or 0) + 1, "startedAt": datetime.now().astimezone().isoformat(), "error": None})
         steps["THUMBNAIL"] = step
@@ -13359,7 +13468,7 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
             settings.youtube_oauth_tokens[channel_id] = json.dumps(result.get("credentials", credentials), ensure_ascii=False)
             save_settings(settings)
             succeeded += 1
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             fail_publication_stage(settings, snapshot_id, "THUMBNAIL", classify_publication_error(exc), str(exc))
             release_execution(settings, snapshot_id, worker_id)
             save_settings(settings)
@@ -13620,7 +13729,7 @@ def update_voicer_key_settings(payload: dict) -> dict:
     settings = load_settings()
     rows = payload.get("keys")
     if not isinstance(rows, list):
-        raise ValueError("Передайте список ключей Secret Voicer")
+        raise TypeError("Передайте список ключей Secret Voicer")
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -13643,7 +13752,7 @@ def refresh_voicer_balances(payload: dict) -> dict:
         try:
             key.balance = SecretVoicerClient(key.secret).balance_label()
             key.balance_status = "ok"
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             # Do not invent a balance when this deployment does not expose it.
             key.balance = "—"
             key.balance_status = str(exc)[:220]
@@ -13656,7 +13765,7 @@ def update_lumean_key_settings(payload: dict) -> dict:
     settings = load_settings()
     rows = payload.get("keys")
     if not isinstance(rows, list):
-        raise ValueError("Передайте список ключей Lumean")
+        raise TypeError("Передайте список ключей Lumean")
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -13680,17 +13789,17 @@ def refresh_lumean_catalog(payload: dict) -> dict:
     errors: list[str] = []
     try:
         settings.lumean_voice_cache = client.voices()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"голоса: {_voice_error_reason(exc)}")
     try:
         settings.lumean_model_cache = client.models()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"модели: {_voice_error_reason(exc)}")
     for key in keys:
         try:
             key.balance = LumeanClient(key.secret).balance_label()
             key.balance_status = "ok"
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             key.balance = "—"
             key.balance_status = _voice_error_reason(exc)[:220]
     save_settings(settings)
@@ -13708,7 +13817,7 @@ def update_voicegen_key_settings(payload: dict) -> dict:
     settings = load_settings()
     rows = payload.get("keys")
     if not isinstance(rows, list):
-        raise ValueError("Передайте список ключей VoiceGen")
+        raise TypeError("Передайте список ключей VoiceGen")
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -13732,28 +13841,28 @@ def refresh_voicegen_catalog(payload: dict) -> dict:
     errors: list[str] = []
     try:
         settings.voicegen_profile_cache = client.profile()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"профиль: {_voice_error_reason(exc)}")
     try:
         voices, capacity = client.voices()
         settings.voicegen_voice_cache = voices
         if capacity:
             settings.voicegen_profile_cache["voice_capacity"] = capacity
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"голоса: {_voice_error_reason(exc)}")
     try:
         settings.voicegen_preset_cache = client.presets("elevenLabsV3")
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"пресеты: {_voice_error_reason(exc)}")
     try:
         settings.voicegen_engine_cache = client.engines()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"движки: {_voice_error_reason(exc)}")
     for key in keys:
         try:
             key.balance = VoiceGenClient(key.secret).balance_label()
             key.balance_status = "ok"
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             key.balance = "—"
             key.balance_status = _voice_error_reason(exc)[:220]
     save_settings(settings)
@@ -13769,7 +13878,7 @@ def update_wproject_key_settings(payload: dict) -> dict:
     settings = load_settings()
     rows = payload.get("keys")
     if not isinstance(rows, list):
-        raise ValueError("Передайте список ключей WProject")
+        raise TypeError("Передайте список ключей WProject")
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -13793,15 +13902,15 @@ def refresh_wproject_catalog(payload: dict) -> dict:
     errors: list[str] = []
     try:
         settings.wproject_profile_cache = client.profile()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"профиль: {_voice_error_reason(exc)}")
     try:
         settings.wproject_usage_cache = client.usage()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"лимиты: {_voice_error_reason(exc)}")
     try:
         settings.wproject_voice_cache = client.voices()
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         errors.append(f"голоса: {_voice_error_reason(exc)}")
     # WProject's usage document is the authoritative quota source.  Keep the
     # full payload in a dedicated cache and show only a safe compact summary
@@ -13813,7 +13922,7 @@ def refresh_wproject_catalog(payload: dict) -> dict:
             used, limit = characters.get("used"), characters.get("limit")
             key.balance = (f"символы: {used}/{limit}" if used is not None and limit is not None else "доступ подтверждён")
             key.balance_status = "ok"
-        except Exception as exc:
+        except _BRIDGE_OPERATION_ERRORS as exc:
             key.balance = "—"
             key.balance_status = _voice_error_reason(exc)[:220]
     save_settings(settings)
@@ -14266,7 +14375,7 @@ def main() -> None:
         if isinstance(result, dict):
             result["actionTrace"] = trace.result_context()
         print(json.dumps(result, ensure_ascii=False))
-    except Exception as exc:
+    except _BRIDGE_OPERATION_ERRORS as exc:
         if trace is None:
             trace = start_action_trace(command, {})
         trace.failed(exc)
