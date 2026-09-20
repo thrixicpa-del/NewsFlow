@@ -9971,15 +9971,11 @@ export function Editor({
               checked={useScriptText}
               onChange={(event) => setUseScriptText(event.target.checked)}
             />
-            Использовать TXT сценария для точного подбора футажей
+            Требовать готовый текст сценария; если выключено — разрешить fallback по названию только когда текста нет
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
-              checked={excludeEnglishText}
-              onChange={(event) => setExcludeEnglishText(event.target.checked)}
-            />
-            Не использовать футажи с английскими надписями
+            <input type="checkbox" checked disabled readOnly />
+            Не использовать футажи с английскими/латинскими надписями — обязательное правило
           </label>
           <label className="check-row">
             <input
@@ -9991,10 +9987,11 @@ export function Editor({
           </label>
         </div>
         <small className="workflow-note">
-          TXT + MP3 — самый точный режим: TXT даёт смысл каждой реплики, MP3 —
-          точную длину. Если выключить TXT, монтаж быстрее строит сцены только
-          по названию и длительности MP3. Метка английского текста хранится в
-          локальном индексе, поэтому один и тот же клип не проверяется повторно.
+          Если готовый сценарий есть, NewsFlow всегда использует смысл каждой
+          реплики для подбора футажей; MP3 задаёт точную длину. Выключение
+          требования TXT разрешает режим по названию только когда текста
+          действительно нет. Футаж с английскими/латинскими надписями не
+          допускается: безопасная проверка кэшируется в локальном индексе.
         </small>
       </section>
       <section className="panel fast-reuse-panel">
@@ -10689,6 +10686,11 @@ export function Editor({
           {selectedProject.error ? (
             <p className="task-error">{selectedProject.error}</p>
           ) : null}
+          {selectedProject.selectionSummaryText ? (
+            <p className="project-duration">
+              {selectedProject.selectionSummaryText}
+            </p>
+          ) : null}
           {selectedProject.outputPath ? (
             <video
               className="project-video"
@@ -10719,6 +10721,12 @@ export function Editor({
                   <small>
                     {clip.duration?.toFixed(1)} c · {clip.source || "local"}
                   </small>
+                  {clip.fallbackLevel ? (
+                    <small title={clip.positionRotationReason || undefined}>
+                      {clip.fallbackLevel} · {clip.positionBucket || "—"} · start{" "}
+                      {Number(clip.sourceStart || 0).toFixed(1)} c
+                    </small>
+                  ) : null}
                 </div>
               ))
             ) : (

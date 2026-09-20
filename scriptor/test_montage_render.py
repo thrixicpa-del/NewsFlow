@@ -306,17 +306,39 @@ class MontageRenderTests(unittest.TestCase):
         self.assertTrue(all("hormuz" in item["visual_query_en"].casefold() for item in plan))
 
     def test_english_screen_label_is_persisted_and_excluded_from_search(self):
-        """A labelled English-caption clip is excluded after restarts/searches."""
+        """Frame-level English screening persists and excludes the blocked clip."""
+        class DummyImageEmbedder:
+            def embed(self, images, **_):
+                for image in images:
+                    yield (
+                        np.asarray([1.0, 0.0], dtype=np.float32)
+                        if image == "text"
+                        else np.asarray([0.0, 1.0], dtype=np.float32)
+                    )
+
         class DummyTextEmbedder:
-            def query_embed(self, value):
+            def query_embed(self, value, **_):
                 queries = value if isinstance(value, list) else [value]
                 for query in queries:
-                    # The first classifier prompt represents English lettering,
-                    # the second clean frame; normal searches favour safe clip.
-                    if "prominent English words" in query:
+                    lowered = str(query).casefold()
+                    if (
+                        "readable english" in lowered
+                        or "english headline" in lowered
+                        or "sign billboard" in lowered
+                    ):
                         yield np.asarray([1.0, 0.0], dtype=np.float32)
                     else:
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
+
+        class FrameIndex(ClipIndex):
+            @staticmethod
+            def _sample_frames(path, samples=3):
+                frames = (
+                    ["clean", "clean", "clean", "text", "clean"]
+                    if "english-caption" in path.name
+                    else ["clean"] * 5
+                )
+                return frames[:samples], 6.0, 1920, 1080, 30.0
 
         with tempfile.TemporaryDirectory(prefix="newsflow-text-label-") as temporary:
             root = Path(temporary)
@@ -324,17 +346,17 @@ class MontageRenderTests(unittest.TestCase):
             safe_path = root / "safe-footage.mp4"
             english_path.touch()
             safe_path.touch()
-            index = ClipIndex(root / "clips.sqlite3",
-                              embedder_factory=lambda: (object(), DummyTextEmbedder()))
-            with index._connect() as connection:
-                rows = [
-                    (str(english_path), english_path.name, b"", np.asarray([1.0, 0.0], dtype=np.float32).tobytes()),
-                    (str(safe_path), safe_path.name, b"", np.asarray([0.0, 1.0], dtype=np.float32).tobytes()),
-                ]
-                connection.executemany(
-                    "INSERT INTO clips(path,name,size,mtime_ns,tags,embedding,model) VALUES(?,?,0,0,?, ?, 'test')",
-                    [(path, name, "[]", vector) for path, name, _unused, vector in rows],
-                )
+            index = FrameIndex(
+                root / "clips.sqlite3",
+                embedder_factory=lambda: (DummyImageEmbedder(), DummyTextEmbedder()),
+            )
+            indexed = index.index_folders([str(root)])
+            self.assertEqual(indexed.indexed, 2)
+            # The cheap three-frame indexing pass deliberately leaves both
+            # rows unchecked; the strict five-frame maintenance pass must
+            # discover the later English-text frame and persist both verdicts.
+            self.assertEqual(index.screen_text_stats(), {"blocked": 0, "safe": 0, "unchecked": 2})
+
             labeled = index.classify_english_screen_text()
             self.assertEqual(labeled["checked"], 2)
             self.assertEqual(labeled["blocked"], 1)
@@ -342,6 +364,10 @@ class MontageRenderTests(unittest.TestCase):
             self.assertEqual(index.screen_text_stats(), {"blocked": 1, "safe": 1, "unchecked": 0})
             self.assertEqual([hit.item.name for hit in index.search("safe footage", limit=10)], ["safe-footage.mp4"])
             self.assertEqual([item.name for item in index.all_items(exclude_english_text=True)], ["safe-footage.mp4"])
+
+            reopened = ClipIndex(root / "clips.sqlite3")
+            self.assertFalse(reopened.screen_text_safe(english_path))
+            self.assertTrue(reopened.screen_text_safe(safe_path))
 
     def test_ffmpeg_render_is_30fps_has_audio_and_does_not_crop_voice(self):
         source_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"

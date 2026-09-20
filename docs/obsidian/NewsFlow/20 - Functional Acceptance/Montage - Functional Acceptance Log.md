@@ -126,3 +126,195 @@ Review verification:
 - Targeted Footage UI: **1 file / 5 PASS**; full UI: **34 files / 198 PASS**; `pnpm typecheck`: **PASS**.
 - `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD`: **PASS**; secret scan: **PASS**; scoped Ruff: **PASS**; `git diff --check`: **PASS**.
 - Total SKIP: **0**. Production footage/settings and provider/network paths were not touched. Status remains **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**.
+
+## MONTAGE-003 — semantic fallback, diversity rotation and ultra-fast selection
+
+Date: **2026-09-19**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
+
+### Confirmed RED
+
+- The deterministic regression initially failed because the selector exposed neither the full named fallback ladder nor one batched ladder retrieval; a high-score agriculture clip could also beat a safe oil/port context candidate.
+- Legacy fallback labels were ambiguous (`RELAXED_MATCH`, `CATEGORY_CONTEXT_FALLBACK`, `RESERVED_REUSE`, `LAST_RESORT`) and local reuse could happen before an external fallback opportunity.
+- The first isolated multi-video run proved that the old tail normalizer discarded the selected scene plan: four prepared beats became two full-source clips and every alternate `source_start` was reset to `0.0`.
+- The real smoke also exposed an English-metadata safety hole: `ukraine_oil_tanker_wrong_country.mp4` was not rejected for a Hormuz scene because the country guard contained Russian Ukraine terms but not `ukraine/kyiv/odesa/donbas`.
+- UI RED: the saved project summary and per-clip fallback/bucket/window diagnostics were present in the backend contract but invisible in the Montage timeline.
+
+### Minimal architecture fix
+
+- The bounded selector now records the exact order `STRICT_MATCH → RELAXED_SEMANTIC → CATEGORY_MATCH → SAFE_CONTEXT → EXTERNAL_FALLBACK → SAFE_REUSE`. Empty/missing/short/stale candidates remain invalid; reuse is permitted only after unique local levels and optional external fallback are exhausted.
+- Every scene's bounded query ladder is flattened into one `ClipIndex.search_many(..., limit=256)` call. Results are regrouped in memory by scene and level; no folder discovery, media decode, embedding rebuild or full-corpus filesystem pass was added. The MONTAGE-002 bounded candidate-pool search remains authoritative.
+- Ranking combines semantic score, the existing bounded topic bonus, a position-family penalty and a tiny stable hash variation. The same project seed is reproducible; different similar projects can choose different equally safe families. A 10-project/24-family regression produces 10 distinct opening families.
+- Shared batch state now tracks path/family reservations plus `EARLY/MIDDLE/LATE` placements and source windows. Reusing a long source selects a deterministic different valid `source_start`; immediate A→A is avoided while another safe candidate exists. A one-family library completes through truthful `SAFE_REUSE` instead of failing.
+- Semantic safety remains fail-closed at every level: frontline vs political office/agriculture, oil/port vs agriculture, Hormuz vs English/Russian Ukraine metadata and named-person contradictions are rejected even when their vector score is higher. No unrelated clip is accepted merely to complete a timeline.
+- A valid prepared beat sequence is no longer collapsed by tail completion. Existing `source_start` and scene durations are preserved; only the final beat receives the tiny MP3/30 FPS margin when the source has enough material. Legacy incomplete-project recovery remains available.
+- `.newsflow` clips persist fallback level, source family, reuse flag, bucket, rotation penalty/reason, strict rejection reason and source start. Projects persist selection totals and planning/retrieval/selection/fallback/external/total timings. UI shows summaries such as `4 сцен · strict 2 · semantic 0 · reuse 2` and per-clip level/bucket/start.
+
+### Deterministic and performance coverage
+
+- New `tests/test_montage_semantic_diversity.py`: **14 PASS, 0 FAIL, 0 SKIP**. Coverage includes every local fallback level, missing/short candidates, safety contradictions, scarce-library reuse, deterministic variation, 10 similar projects, position buckets, alternate windows, one batched index request and persistence round-trips.
+- Combined isolated backend command (`test_ai_index`, index integrity, queue, benchmark, montage render, timeline and MONTAGE-003 regressions): **144 PASS, 0 FAIL, 0 SKIP** after the final safety/tail fixes.
+- Large-library protection inherited and reverified: the 20,000-row fake corpus validates only the bounded candidate pool; `search_many` performs no discovery or repeated source decoding.
+- Real smoke persisted per-project timings. Retrieval was **1.768 / 0.714 / 0.736 ms**; selection was **3.185 / 6.535 / 5.882 ms**; fallback expansion was **0 / 1.418 / 2.496 ms**. Total isolated preparation was **626.152 / 628.907 / 647.092 ms**.
+
+### Isolated real multi-video smoke
+
+- Reproducible command: `python tests/run_montage_diversity_smoke.py --output .artifacts/NewsFlow-MONTAGE-003-review-20260919`.
+- Runtime path: real `ClipIndex.index_folders → prepare_montage → render_montage → render_project(renderer="ffmpeg")` with isolated app-data, settings, session, footage, MP3, project and output roots.
+- Review manifest: `.artifacts/NewsFlow-MONTAGE-003-review-20260919/manifest.json` (ignored, not committed). Three related Hormuz scenarios produced three **18.000 s** MP4 files in **26.239 s** total.
+- Opening families were distinct: `oil_tanker_family_1`, `oil_tanker_family_6`, `oil_tanker_family_4`. Safe repeated long-source windows included `0.0 → 3.0 → 9.0`, `0.0 → 4.487 → 8.975`, `0.0 → 9.0` and `0.0 → 6.0` seconds.
+- Output SHA-256: `0bb10d395282c062ebd9e0ccc6fcddc9f672c2e2d9bdfb001156755613fd6c4f`, `218f4ef4497372b10c0fab3c785fd9b0e5a558e3e528852b723850a188a2c333`, `be4581949ad62d1811d8a316d6477374333f1c488b1f9880b12f89f25b7eb968`.
+- The explicit wrong-country source was rejected; all seven synthetic source hashes were unchanged before/after. Production footage/settings/session/index were not read or modified; no external/provider call was made.
+
+### Verification
+
+- Targeted Montage UI: **1 file / 15 tests PASS**; full UI: **34 files / 199 tests PASS**; `pnpm typecheck`: **PASS**.
+- `tests/test_build_montage_runtime_guard.py`: **1 PASS**.
+- `PRODUCTION_INTEGRITY_GUARD_TEST` / `PRODUCTION_WRITE_GUARD`: **PASS** (including the guard's expected intentional mutation detection).
+- `python scripts/secret-scan.py`: **PASS**; scoped Ruff for the new/changed test files: **PASS**; `git diff --check`: **PASS**.
+- Whole-file Ruff for legacy `scriptor/bridge.py` / `scriptor/timeline.py` still reports pre-existing repository-wide import/style debt unrelated to MONTAGE-003; no bypass or broad cleanup was made.
+- Total SKIP: **0**. No production media/settings and no paid/external provider paths were touched.
+
+
+## MONTAGE-003 independent ChatGPT review follow-up — semantic safety and family identity
+
+Date: **2026-09-19**
+Status: **PATCH COMMITTED BY CHATGPT; PENDING CODEX VERIFICATION**
+
+Independent review of commit `127f5c47384e66734663ffeaf7e96c4c2e194280` found bounded correctness gaps:
+
+- Montage-local source-family identity diverged from the MONTAGE-002 index contract, so recent/batch diversity could fail to recognize the same source family.
+- `CATEGORY_MATCH` / `SAFE_CONTEXT` and terminal reuse could accept weak unrelated candidates that were not covered by a hard contradiction guard.
+- Position rotation could penalize a relevant family strongly enough to promote materially weaker footage.
+- The no-index bootstrap and broken-clip recovery paths could bypass the intended semantic/performance guarantees; recovery could call `index.all_items()`.
+- Timeline fallback/final render margin did not consistently preserve/subtract `source_start`.
+
+The bounded follow-up:
+
+- reuses `ai_index.source_family_identity()` as the family source of truth;
+- rejects contradictory versioned semantic tags and applies score floors to broad fallback/reuse;
+- makes diversity a small near-match preference rather than a relevance override;
+- requires actual metadata overlap when CLIP search is unavailable;
+- keeps broken-clip recovery on bounded `search_many` only and records recovery/tail fallback diagnostics;
+- preserves `source_start` through timeline alignment and makes remaining-source checks offset-aware;
+- adds deterministic regressions and expands the isolated MONTAGE-003 smoke from 3 to 5 related videos with two explicit contradiction sources.
+
+No PASS claim is recorded for this follow-up until Codex completes the isolated backend/frontend/safety verification and fresh 5-video smoke.
+
+
+## MONTAGE-003 verification RED — follow-up 1
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING RE-VERIFICATION**
+
+Codex verification of `f499a181d7f5313a4fa9a8a10a3f80a3750d1484` stopped at backend RED:
+
+- 152 tests: **130 PASS / 4 FAIL / 18 ERROR / 0 SKIP**;
+- all 18 errors shared one ChatGPT patch regression: `same_bucket` was referenced after its inline calculation had been moved into the bounded rotation helper;
+- four family tests still encoded the older broad `clip_*` grouping assumption, while the actual NewsFlow Cutter contract is `<source-folder>/<source-folder>_NNNN.mp4` and MONTAGE-002 intentionally keeps unrelated generic `clip_001.mp4` / `clip_002.mp4` distinct.
+
+The correction restores `same_bucket` only for diagnostics/reason text and updates those four regressions to the real Cutter naming contract. Production family behavior remains the MONTAGE-002 canonical `source_family_identity()`.
+
+No production data/media/settings were touched. Re-verification is required before any GREEN status.
+
+
+## MONTAGE-003 review follow-up — strike disambiguation
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING RE-VERIFICATION**
+
+During the RED follow-up review, ChatGPT found one adjacent semantic ambiguity before restarting the full suite: English `strike` can mean a military strike or a labor strike. The previous military-action detector treated both identically, allowing a workers/picket query to inherit military category/context fallback.
+
+The fix keeps military `strike` behavior for attack/war queries but suppresses military expansion when the query explicitly contains labor/workers/union/picket context. A deterministic regression proves a workers strike does not expand to military categories and rejects a `frontline-combat` candidate in favor of `workers-strike`.
+
+No production paths or provider calls are involved.
+
+
+## MONTAGE-003 verification RED — follow-up 2
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING FULL RE-VERIFICATION**
+
+Verification of `ecaeb00cd4bf64bcd4c6579cafb5e7ca34ea7453` reached 153 backend tests with **151 PASS / 2 FAIL / 0 ERROR / 0 SKIP**.
+
+Confirmed root causes:
+
+- SAFE_REUSE reordered the immediate previous source to the end of one candidate pool, but then allowed it at the strict floor before checking a non-adjacent candidate that qualified at the relaxed floor. The corrected reuse search now traverses the full semantic ladder with the previous source forbidden first; A→A is allowed only if no safe non-adjacent alternative survives any allowed fallback level.
+- Labor-strike disambiguation had been applied to military query expansion, but the semantic tag rule still matched the ambiguous token `strike` and therefore allowed `frontline-combat` as an expected tag. The shared semantic-rule matcher now suppresses the military rule for explicit workers/labor/union/picket strike queries in both bonus and safety logic.
+
+The same follow-up also moves the canonical source-family algorithm into `ai_index.source_family_identity_text()`, so both the index and Montage use one string-only contract without constructing `Path` objects in the candidate-ranking hot path.
+
+No production data/media/settings and no provider/network path were touched.
+
+
+## MONTAGE-003 verification RED — follow-up 3
+
+Date: **2026-09-19**
+Status: **FIX COMMITTED; PENDING SINGLE FULL RE-VERIFICATION**
+
+The full gate on `5e2287367158e5ef96d61fbdf1cee87fd763de82` passed backend (158), full UI (206), typecheck/builds and Electron DEV E2E (2/2), then stopped at the deterministic five-video smoke because only two distinct opening source families were produced.
+
+Root cause: current-batch selections were being treated twice as global history. Every selected family was hard-reserved across the entire batch, and each completed project also appended all of its middle/late clips to `montage_recent_clip_paths`. With eight safe source families, early projects exhausted the library before later openings were selected.
+
+Correction:
+- freeze the persisted recent-history baseline once at batch start;
+- coordinate new in-batch claims atomically by `(source_family, position_bucket)` rather than banning a family globally;
+- preserve project-local no-repeat rules and semantic score/safety floors;
+- keep placement history and alternate `source_start` rotation, so cross-video reuse in a different timeline region remains explicit and truthful;
+- release failed planners' bucket claims along with legacy reservations;
+- persist bucket-claim evidence in the deterministic smoke manifest.
+
+This is a diversity-coordination fix only; UI, IPC, rendering, provider and production-storage behavior are unchanged.
+
+
+## MONTAGE-003 human review — quality follow-up
+
+Date: **2026-09-19**
+Status: **HUMAN REVIEW RED; QUALITY PATCH PENDING VERIFICATION**
+
+The automated gate and three isolated real-news renders were technically GREEN, but human review found three product-quality defects that automation did not measure:
+
+- footage repeats were still visually obvious across different review videos even when per-project diagnostics reported zero local reuse;
+- footage containing English/Latin on-screen text appeared despite the product rule that Montage must not use it;
+- several selected shots were only broadly topical and did not match the narration beat closely enough.
+
+The quality correction treats human review as authoritative acceptance evidence:
+
+- English/Latin screen text is a hard exclusion. Unchecked or stale classifier state is not considered safe; ranked candidates are lazily screened on multiple source frames and only a current verified-safe state can pass.
+- Screen-text labels are versioned so prior coarse safe decisions are revalidated under the stricter frame-level classifier.
+- Local scene planning uses available narration even when title-only fallback is allowed; title-only remains only for genuinely missing scenario text.
+- The local visual vocabulary and semantic index add concrete Washington/US government, Kyiv/Ukraine government, EU/Brussels, NATO, cybersecurity/hybrid-attack and sanctions/economy visual families.
+- Generic fallback wording no longer dilutes a concrete topic query.
+- Cross-video source-family reuse receives a stronger but bounded rotation penalty: near-equal matches rotate, while materially better semantic matches remain authoritative.
+
+Technical GREEN is therefore not sufficient to close MONTAGE-003 until a fresh human-review render demonstrates the quality criteria above.
+
+
+## MONTAGE-003 combined quality-v2 hardening
+
+Date: **2026-09-20**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
+
+### Confirmed RED and root cause
+
+- The first quality-v2 rerender classified the bounded prior pool as **11 safe / 12 blocked / 0 unchecked**, but repeatedly selected `clip_00rmpg_698.mp4`; family reuse and adjacent-repeat acceptance failed.
+- A story-specific expansion confirmed the classifier was fail-closed rather than silently passing uncertain footage: only **5/72** initial candidates were safe. The bounded pre-screen was therefore moved to the isolated candidate-index copy; production index/media were read-only.
+- Human-review evidence then exposed the tracked defect: real Cutter names such as `clip_qcsfjt_204.mp4` and `clip_5yf7qx_488.mp4` under one source folder were reported as different families. This let adjacent cuts from the same original evade diversity accounting.
+- Regression RED: `test_cutter_numbered_outputs_share_family_without_collapsing_plain_year_names` expected one family and received two path+stem identities.
+
+### Minimal fix
+
+- Canonical `source_family_identity_text()` now recognizes the real random Cutter form `clip_<six lowercase alphanumeric characters>_<three digits>.mp4` as the parent source family.
+- Existing `<parent>_NNNN.mp4` and `_slices` rules remain unchanged. Ordinary files such as `report_2024.mp4`, `report_2025.mp4` and `clip_editorial_2024.mp4` remain distinct; URL identity remains authoritative.
+- No scoring threshold, semantic fallback level, screen-text classifier threshold, UI, IPC, renderer or provider path changed.
+
+### GREEN verification and real review evidence
+
+- Required isolated backend suite: **164 PASS / 0 FAIL / 0 SKIP**; the previously failing English-screen-label regression is included.
+- Targeted Montage UI: **1 file / 16 tests PASS**; `pnpm typecheck` and `verify:security` PASS.
+- `py_compile`, scoped Ruff, secret scan, production integrity guard, range/current `git diff --check`: PASS.
+- Final deterministic smoke: **5/5 MP4**, five distinct opening families, safe reuse present, repeated long sources use different windows, unsafe contradictions rejected, original hashes unchanged; **45.308 s**. Manifest: `.artifacts/NewsFlow-MONTAGE-003-quality-v2-smoke-20260920-final/manifest.json`.
+- Final real quality-v2 review rerender used the same three required stories through the real local `ClipIndex → prepare_montage → render_montage → FFmpeg` path. The isolated pool contained **24 safe-v2 / 0 blocked / 0 unchecked** files; the 18 selected scenes had **0 blocked**, **0 unchecked**, **0 generic query**, **0 semantic-guard contradiction**, **13 source families**, maximum family use **3**, and **0 adjacent family repeats**. Scarcity reuse remained truthful `SAFE_REUSE`.
+- Three new 30.000 s MP4 SHA-256 values: `1c383c894479f28083442e8cc1d736ab946196bd3907b0183bae21a3203276ce`, `a77cdde300d635315bae9c4816c168bd985253697e2e9dde5fe544dd5d752c52`, `9ff150a947bb1380558999aa12dea1c4e3190a347f92d72b2c45d38afa1611e2`.
+- Review root: `.artifacts/NewsFlow-MONTAGE-003-human-review-quality-v2-20260920/`; it contains the manifest, per-scene query/semantic/screen-text provenance, three contact sheets, timings and three rendered MP4 files. Total final run: **71.079 s**; candidate discovery/copy **5.282 s**, base index **7.614 s**, deep enrichment **0.093 s**, screen-text classification **15.646 s**, direct retrieval **0.040 s**.
+- Settings/session/index and every source project, MP3 and footage hash were identical before/after. No paid provider, OAuth or publication call was made; generated media remains ignored and is not committed.

@@ -414,6 +414,21 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(restored.montage_renderer, "remotion")
         self.assertTrue(restored.montage_renderer_explicit)
 
+    def test_english_screen_text_filter_is_a_core_non_optional_policy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            settings_path = Path(folder) / "settings.json"
+            settings_path.write_text('{"montage_exclude_english_text":false}', encoding="utf-8")
+            with patch.object(config, "config_path", return_value=settings_path):
+                restored = config.load_settings()
+            self.assertTrue(restored.montage_exclude_english_text)
+
+        settings = Settings(montage_exclude_english_text=True)
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_montage_settings({"excludeEnglishText": False})
+        self.assertTrue(settings.montage_exclude_english_text)
+
     def test_normalized_montage_query_deduplicates_and_removes_generic_phrases(self):
         normalized = bridge._normalized_montage_visual_query(
             "international news, documentary footage, oil tanker refinery oil terminal, "
@@ -447,9 +462,42 @@ class MontageQueueStateTests(unittest.TestCase):
                  patch.object(bridge, "load_session", return_value=(["Iran oil tanker Hormuz"], [job])), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_montage_screen_text_safe", return_value=True), \
                  patch.object(bridge.ClipIndex, "count", return_value=0), \
                  patch.object(bridge, "probe_media_duration", return_value=6.0), \
                  patch.object(bridge, "probe_video_duration", return_value=8.0):
+                result = bridge.prepare_montage({"scenarioIndex": 0})
+
+        self.assertEqual(result["preparedProject"]["clips"], 1)
+
+    def test_available_narration_is_used_even_when_title_only_fallback_is_allowed(self):
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            footage = root / "footage"
+            footage.mkdir()
+            (footage / "NATO cyber security.mp4").write_bytes(b"source")
+            voice = root / "voice.mp3"
+            voice.write_bytes(b"voice")
+            settings = Settings(
+                footage_folders=[str(footage)], voicer_output_folder=str(root),
+                montage_project_folder=str(root / "projects"), montage_output_folder=str(root / "output"),
+                montage_use_script_text=False, montage_auto_web=False,
+            )
+            narration = "НАТО усиливает защиту Европы после гибридной кибератаки."
+            job = Job(ScenarioRequest(0, "НАТО и киберугрозы", ""), RunState.DONE, narration, "")
+            settings.voice_scenario_outputs = {"1": str(voice)}
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(["НАТО и киберугрозы"], [job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_montage_screen_text_safe", return_value=True), \
+                 patch.object(bridge.ClipIndex, "count", return_value=0), \
+                 patch.object(bridge, "probe_media_duration", return_value=6.0), \
+                 patch.object(bridge, "probe_video_duration", return_value=8.0), \
+                 patch.object(bridge, "title_only_scene_plan", side_effect=AssertionError("title-only must not run")):
                 result = bridge.prepare_montage({"scenarioIndex": 0})
 
         self.assertEqual(result["preparedProject"]["clips"], 1)
@@ -486,7 +534,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda item: True, source_duration=lambda item: 6.0,
         )
         self.assertEqual(result.item.path, reserved.path)
-        self.assertEqual(result.fallback_level, "RESERVED_REUSE")
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
         self.assertTrue(result.reused_reserved_candidate)
 
     def test_reservation_race_converts_valid_selection_to_safe_reuse(self):
@@ -512,7 +560,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda item: True, source_duration=lambda item: 6.0,
         )
         self.assertEqual(result.item.path, same.path)
-        self.assertEqual(result.fallback_level, "LAST_RESORT")
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
 
     def test_safe_reuse_avoids_the_immediately_previous_clip_when_an_older_valid_clip_exists(self):
         """A B A is acceptable after quality exhaustion; A A is not."""
@@ -568,19 +616,26 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda _: True, source_duration=lambda _: 6.0,
         )
         self.assertEqual(result.item.path, alternative.path)
-        self.assertEqual(result.fallback_level, "LAST_RESORT")
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
 
     def test_failed_planner_releases_only_its_own_batch_reservations(self):
         usage = {
             "lock": __import__("threading").RLock(),
             "paths": {"path-82": 81, "path-83": 82},
             "families": {"family-82": 81, "family-83": 82},
+            "claims": {("EARLY", "family-82"): 81, ("EARLY", "family-83"): 82},
+            "placements": {"shared": [(81, "EARLY"), (82, "MIDDLE")]},
+            "windows": {"shared": [(81, 0.0), (82, 6.0)]},
         }
         bridge._release_batch_footage_reservations(usage, 81)
         self.assertNotIn("path-82", usage["paths"])
         self.assertNotIn("family-82", usage["families"])
+        self.assertNotIn(("EARLY", "family-82"), usage["claims"])
         self.assertEqual(usage["paths"]["path-83"], 82)
         self.assertEqual(usage["families"]["family-83"], 82)
+        self.assertEqual(usage["claims"][("EARLY", "family-83")], 82)
+        self.assertEqual(usage["placements"]["shared"], [(82, "MIDDLE")])
+        self.assertEqual(usage["windows"]["shared"], [(82, 6.0)])
 
     def test_selection_uses_relaxed_match_below_ideal_threshold(self):
         item = FootageItem("D:/oil/clip_001.mp4", "oil.mp4", tags=["oil-tanker-port"])
@@ -590,7 +645,7 @@ class MontageQueueStateTests(unittest.TestCase):
             project_used_paths=set(), project_used_families=set(), reserved_paths=set(), reserved_families=set(),
             source_exists=lambda _: True, source_duration=lambda _: 6.0,
         )
-        self.assertEqual(result.fallback_level, "RELAXED_MATCH")
+        self.assertEqual(result.fallback_level, "RELAXED_SEMANTIC")
         self.assertEqual(result.diagnostics["rejected_threshold"], 1)
 
     def test_selection_skips_missing_strict_candidate_for_valid_category_candidate(self):
@@ -604,7 +659,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda item: item.path != missing.path, source_duration=lambda _: 6.0,
         )
         self.assertEqual(result.item.path, category.path)
-        self.assertEqual(result.fallback_level, "CATEGORY_CONTEXT_FALLBACK")
+        self.assertEqual(result.fallback_level, "CATEGORY_MATCH")
         self.assertGreaterEqual(result.diagnostics["rejected_missing"], 2)
 
     def test_snapshot_sync_never_replaces_a_render_error_with_new_mp3(self):
@@ -806,23 +861,23 @@ class MontageQueueStateTests(unittest.TestCase):
     def test_candidate_identity_does_not_resolve_each_library_path(self):
         """Ranking thousands of candidates must not call Windows path resolution."""
         with patch("scriptor.bridge.Path.resolve", side_effect=AssertionError("filesystem resolve")):
-            key = bridge._montage_clip_key("D:/library/one/clip_001.mp4")
-            family = bridge._montage_clip_family_key("D:/library/one/clip_001.mp4")
-        self.assertEqual(key, "d:\\library\\one\\clip_001.mp4")
-        self.assertEqual(family, "d:\\library\\one")
+            key = bridge._montage_clip_key("D:/library/one/one_0001.mp4")
+            family = bridge._montage_clip_family_key("D:/library/one/one_0001.mp4")
+        self.assertEqual(key, "d:\\library\\one\\one_0001.mp4")
+        self.assertEqual(family, "path::d:/library/one")
 
     def test_candidate_family_identity_does_not_construct_path_objects(self):
         with patch("scriptor.bridge.Path", side_effect=AssertionError("Path must not be used in ranking")):
-            family = bridge._montage_clip_family_key("D:/library/one/clip_001.mp4")
-        self.assertEqual(family, "d:\\library\\one")
+            family = bridge._montage_clip_family_key("D:/library/one/one_0001.mp4")
+        self.assertEqual(family, "path::d:/library/one")
 
     def test_generated_cuts_from_one_original_are_one_source_family(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "Зеленский" / "Исходный ролик"
             source.mkdir(parents=True)
-            first = source / "clip_a9hd_001.mp4"
-            second = source / "clip_z22p_945.mp4"
-            other = Path(folder) / "Зеленский" / "Другой исходник" / "clip_z22p_945.mp4"
+            first = source / "Исходный ролик_0001.mp4"
+            second = source / "Исходный ролик_0002.mp4"
+            other = Path(folder) / "Зеленский" / "Другой исходник" / "Другой исходник_0001.mp4"
             other.parent.mkdir(parents=True)
             for path in (first, second, other):
                 path.write_bytes(b"x")
@@ -833,8 +888,8 @@ class MontageQueueStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "one-source"
             source.mkdir()
-            used = source / "clip_a_001.mp4"
-            alternate_cut = source / "clip_b_002.mp4"
+            used = source / "one-source_0001.mp4"
+            alternate_cut = source / "one-source_0002.mp4"
             for path in (used, alternate_cut):
                 path.write_bytes(b"x")
             item = FootageItem(str(alternate_cut), alternate_cut.name)
