@@ -3,10 +3,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scriptor.timeline import (TimelineClip, TimelineProject, fallback_scene_plan,
-                               fit_scene_plan_to_voice_duration,
-                               fallback_visual_query, parse_agent_scene_plan, split_narration, remotion_payload,
-                               required_video_duration, _proxy_lock, _replace_with_retry)
+from scriptor.timeline import (
+    TimelineClip,
+    TimelineProject,
+    _proxy_lock,
+    _remaining_source_duration,
+    _replace_with_retry,
+    align_timeline_to_audio,
+    fallback_scene_plan,
+    fallback_visual_query,
+    fit_scene_plan_to_voice_duration,
+    parse_agent_scene_plan,
+    remotion_payload,
+    required_video_duration,
+    split_narration,
+)
 
 
 class TimelineTests(unittest.TestCase):
@@ -25,6 +36,20 @@ class TimelineTests(unittest.TestCase):
     def test_voice_duration_includes_intro_before_final_export(self):
         self.assertEqual(required_video_duration(64.5, 2.0), 66.5)
 
+    def test_remaining_source_duration_respects_source_start(self):
+        self.assertEqual(_remaining_source_duration(30.0, 24.0), 6.0)
+        self.assertEqual(_remaining_source_duration(30.0, -2.0), 30.0)
+        self.assertEqual(_remaining_source_duration(5.0, 9.0), 0.0)
+
+    def test_audio_alignment_preserves_existing_source_window(self):
+        project = TimelineProject(
+            "windowed",
+            clips=[TimelineClip("long.mp4", "voice", "query", duration=4.0, source_start=6.0)],
+        )
+        align_timeline_to_audio(project, 4.0, [], duration_probe=lambda _path: 10.0)
+        self.assertEqual(project.clips[0].source_start, 6.0)
+        self.assertEqual(project.clips[0].duration, 4.0)
+
     def test_visual_plan_uses_full_six_second_clips_except_final_tail(self):
         scenes = [
             {"narration": "Первая длинная реплика", "visual_query_en": "news footage", "duration": 4.0},
@@ -38,6 +63,25 @@ class TimelineTests(unittest.TestCase):
         plan = fallback_scene_plan("Иран обсуждает танкеры в Ормузском проливе.")
         self.assertIn("Iran", plan[0]["visual_query_en"])
         self.assertIn("oil tanker", plan[0]["visual_query_en"])
+
+    def test_geopolitical_and_cyber_queries_are_concrete(self):
+        query = fallback_visual_query(
+            "Вашингтон и Киев обсуждают санкции НАТО после гибридной кибератаки в Европе"
+        )
+        self.assertIn("Washington DC White House", query)
+        self.assertIn("Kyiv Ukraine government", query)
+        self.assertIn("economic sanctions", query)
+        self.assertIn("NATO headquarters", query)
+        self.assertIn("cybersecurity", query)
+
+    def test_topic_context_is_not_diluted_by_generic_sentence_query(self):
+        plan = fallback_scene_plan(
+            "Это решение меняет прежний подход.",
+            "НАТО усиливает защиту Европы от кибератак",
+        )
+        self.assertNotIn("international news, documentary footage", plan[0]["visual_query_en"])
+        self.assertIn("NATO headquarters", plan[0]["visual_query_en"])
+        self.assertIn("cybersecurity", plan[0]["visual_query_en"])
 
     def test_frontline_and_offensive_get_concrete_military_visual_terms(self):
         query = fallback_visual_query("На фронте началось наступление, задействованы танки и артиллерия")

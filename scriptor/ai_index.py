@@ -44,6 +44,12 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
     ("migrant-border", "migrants border crossing checkpoint fence border guards people with luggage"),
     ("refugee-transport", "refugee evacuation buses families luggage humanitarian aid"),
     ("political-office", "Kremlin government office politician press conference meeting room"),
+    ("us-government-washington", "Washington DC White House United States government officials press briefing"),
+    ("ukraine-government-kyiv", "Kyiv Ukraine government officials parliament presidential administration"),
+    ("eu-institutions", "Brussels European Union parliament commission flags government meeting"),
+    ("nato-alliance", "NATO headquarters alliance flags military officials Brussels meeting"),
+    ("cybersecurity-network", "cyber security operations computer networks servers monitoring screens data center"),
+    ("economic-sanctions", "economic sanctions finance banking trade restrictions government business markets"),
     ("negotiations", "diplomatic negotiations leaders conference table journalists cameras"),
     ("diplomatic-negotiations", "diplomatic negotiations summit leaders conference table"),
     ("parliament-government", "parliament government chamber government building political podium"),
@@ -65,7 +71,20 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
     ("documentary-neutral", "safe neutral documentary context everyday people buildings landscape b roll"),
 )
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
-SEMANTIC_INDEX_VERSION = 5
+SEMANTIC_INDEX_VERSION = 6
+
+SCREEN_TEXT_CLASSIFIER_VERSION = 2
+_SCREEN_TEXT_POSITIVE_QUERIES = (
+    "video frame with readable English words Latin alphabet captions subtitles or lower third",
+    "news broadcast frame with English headline ticker labels or on screen text",
+    "sign billboard poster computer screen or document with readable English Latin letters",
+)
+_SCREEN_TEXT_NEGATIVE_QUERIES = (
+    "clean documentary video frame without readable writing captions subtitles labels or text overlay",
+    "natural news b roll with people buildings vehicles and no readable text",
+)
+_SCREEN_TEXT_SAFE_MARGIN = 0.015
+_SCREEN_TEXT_OBVIOUS_MARGIN = 0.060
 
 
 # A montage batch creates several ClipIndex instances (one per worker).  The
@@ -146,20 +165,33 @@ def discover_video_paths(folders: Iterable[str]) -> list[Path]:
     return sorted(found.values(), key=lambda value: str(value).casefold())
 
 
-def source_family_identity(path: str | Path, source_url: str = "") -> str:
-    """Return deterministic original-source identity without filesystem I/O."""
-    candidate = Path(path)
+def source_family_identity_text(path_text: str, source_url: str = "") -> str:
+    """Return canonical family identity with pure string operations."""
     if source_url.strip():
         return f"url::{source_url.strip().casefold()}"
-    parent = str(candidate.parent).replace("\\", "/").casefold()
-    stem = candidate.stem.casefold()
-    parent_name = candidate.parent.name.casefold()
+    candidate = str(path_text).replace("\\", "/").casefold()
+    if "/" in candidate:
+        parent, name = candidate.rsplit("/", 1)
+        parent = parent or "/"
+    else:
+        parent, name = ".", candidate
+    stem_base, separator, _suffix = name.rpartition(".")
+    stem = stem_base if separator and stem_base else name
+    trimmed_parent = parent.rstrip("/")
+    parent_name = trimmed_parent.rsplit("/", 1)[-1] if trimmed_parent else "/"
     if parent_name.endswith("_slices"):
         return f"path::{parent}"
-    if re.fullmatch(rf"{re.escape(parent_name)}_\d{{4}}", stem):
+    if parent_name and re.fullmatch(rf"{re.escape(parent_name)}_\d{{4}}", stem):
+        return f"path::{parent}"
+    if re.fullmatch(r"clip_[a-z0-9]{6}_\d{3}", stem):
         return f"path::{parent}"
     stem = re.sub(r"(?:[_\-\s]+(?:clip|slice|cut|part|segment)[_\-\s]*\d+)$", "", stem)
     return f"path::{parent}::{stem}"
+
+
+def source_family_identity(path: str | Path, source_url: str = "") -> str:
+    """Return deterministic original-source identity without filesystem I/O."""
+    return source_family_identity_text(str(path), source_url)
 
 
 class ClipIndex:
@@ -171,6 +203,7 @@ class ClipIndex:
         self.embedder_factory = embedder_factory
         self._image_embedder = None
         self._text_embedder = None
+        self._screen_text_safe_cache: dict[str, bool] = {}
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
@@ -215,6 +248,7 @@ class ClipIndex:
                     -- 0 = not checked, 1 = English lettering detected,
                     -- -1 = checked and safe. The value stays across restarts.
                     english_text INTEGER NOT NULL DEFAULT 0,
+                    english_text_version INTEGER NOT NULL DEFAULT 0,
                     semantic_version INTEGER NOT NULL DEFAULT 0,
                     semantic_scores TEXT NOT NULL DEFAULT '{}'
                 );
@@ -229,6 +263,8 @@ class ClipIndex:
                 connection.execute("ALTER TABLE clips ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
             if "english_text" not in columns:
                 connection.execute("ALTER TABLE clips ADD COLUMN english_text INTEGER NOT NULL DEFAULT 0")
+            if "english_text_version" not in columns:
+                connection.execute("ALTER TABLE clips ADD COLUMN english_text_version INTEGER NOT NULL DEFAULT 0")
             if "semantic_version" not in columns:
                 connection.execute("ALTER TABLE clips ADD COLUMN semantic_version INTEGER NOT NULL DEFAULT 0")
             if "fps" not in columns:
@@ -287,6 +323,7 @@ class ClipIndex:
         return tuple(fingerprint)
 
     def _invalidate_search_cache(self) -> None:
+        self._screen_text_safe_cache.clear()
         with _SEARCH_CORPORA_LOCK:
             _SEARCH_CORPORA.pop(self._cache_key(), None)
 
@@ -496,7 +533,9 @@ class ClipIndex:
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 25.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        positions = [int(frame_count * value) for value in (0.15, 0.50, 0.85)[:samples]]
+        fractions = ((0.15, 0.50, 0.85) if samples <= 3
+                     else (0.05, 0.25, 0.50, 0.75, 0.95))
+        positions = [int(frame_count * value) for value in fractions[:samples]]
         images = []
         for position in positions:
             capture.set(cv2.CAP_PROP_POS_FRAMES, min(frame_count - 1, position))
@@ -533,6 +572,14 @@ class ClipIndex:
                 progress(state)
             return state
         image_model, _ = self._models()
+        screen_query_vectors = None
+        if self.embedder_factory is None and self._text_model_is_cached():
+            try:
+                screen_query_vectors = self._query_vectors([
+                    *_SCREEN_TEXT_POSITIVE_QUERIES, *_SCREEN_TEXT_NEGATIVE_QUERIES,
+                ])
+            except (OSError, RuntimeError, ValueError):
+                screen_query_vectors = None
         for offset in range(0, len(pending), max(1, batch_clips)):
             if cancel and cancel.is_set():
                 state.stage = "cancelled"
@@ -556,7 +603,21 @@ class ClipIndex:
                 embeddings = list(image_model.embed(flat_images, batch_size=min(32, len(flat_images))))
                 rows = []
                 for group_index, (path, start, length) in enumerate(groups):
-                    vector = self._normalize(np.mean(embeddings[start:start + length], axis=0))
+                    frame_vectors = [
+                        self._normalize(value) for value in embeddings[start:start + length]
+                    ]
+                    vector = self._normalize(np.mean(frame_vectors, axis=0))
+                    obvious_text = (
+                        self._screen_text_obvious_from_vectors(frame_vectors, screen_query_vectors)
+                        if screen_query_vectors is not None else False
+                    )
+                    # Three indexing frames block only high-confidence text
+                    # for free. Ambiguous/clean-looking clips remain unchecked
+                    # until the strict five-frame selection gate verifies them.
+                    indexed_english = 1 if obvious_text else 0
+                    indexed_english_version = (
+                        SCREEN_TEXT_CLASSIFIER_VERSION if indexed_english == 1 else 0
+                    )
                     try:
                         size, mtime_ns = self._signature(path)
                     except OSError:
@@ -565,21 +626,26 @@ class ClipIndex:
                         continue
                     duration, width, height, fps = metadata[group_index]
                     tags = sorted(tokenize(" ".join(path.parts[-4:])))
-                    rows.append((str(path), path.name, size, mtime_ns, duration, width, height, fps,
-                                 source_family_identity(path), json.dumps(tags, ensure_ascii=False),
-                                 vector.tobytes(), IMAGE_MODEL, time.time()))
+                    rows.append((
+                        str(path), path.name, size, mtime_ns, duration, width, height, fps,
+                        source_family_identity(path), json.dumps(tags, ensure_ascii=False),
+                        vector.tobytes(), IMAGE_MODEL, time.time(),
+                        indexed_english, indexed_english_version,
+                    ))
                 with self._lock, self._connect() as connection:
                     connection.executemany(
                         """
                         INSERT INTO clips(path,name,size,mtime_ns,duration,width,height,fps,source_family,
-                                          tags,embedding,model,indexed_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                          tags,embedding,model,indexed_at,english_text,english_text_version)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(path) DO UPDATE SET name=excluded.name,size=excluded.size,
                         mtime_ns=excluded.mtime_ns,duration=excluded.duration,width=excluded.width,
                         height=excluded.height,fps=excluded.fps,
                         source_family=CASE WHEN clips.source_url<>'' THEN clips.source_family ELSE excluded.source_family END,
                         tags=excluded.tags,embedding=excluded.embedding,model=excluded.model,
-                        indexed_at=excluded.indexed_at,english_text=0,semantic_version=0,semantic_scores='{}'
+                        indexed_at=excluded.indexed_at,english_text=excluded.english_text,
+                        english_text_version=excluded.english_text_version,
+                        semantic_version=0,semantic_scores='{}'
                         """, rows)
                 self._invalidate_search_cache()
                 state.indexed += len(rows)
@@ -716,11 +782,13 @@ class ClipIndex:
         self._invalidate_search_cache()
 
     def all_items(self, limit: int | None = None, exclude_english_text: bool = False) -> list[FootageItem]:
-        text_filter = " WHERE english_text<>1" if exclude_english_text else ""
+        text_filter = (" WHERE english_text=-1 AND english_text_version=?"
+                       if exclude_english_text else "")
         query = ("SELECT path,name,source,source_url,license,tags,source_family FROM clips"
                  + text_filter + " ORDER BY name")
+        params = (SCREEN_TEXT_CLASSIFIER_VERSION,) if exclude_english_text else ()
         with self._connect() as connection:
-            rows = connection.execute(query).fetchall()
+            rows = connection.execute(query, params).fetchall()
         current = [FootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
                                json.loads(row["tags"] or "[]"))
                    for row in rows if Path(row["path"]).is_file()]
@@ -866,72 +934,135 @@ class ClipIndex:
             )
         self._invalidate_search_cache()
 
-    def classify_english_screen_text(self) -> dict[str, int]:
-        """Persist a conservative CLIP-based screen-lettering label.
-
-        The footage library is already represented by visual CLIP vectors, so
-        this check does *not* reopen 20k files or extract frames again.  It
-        compares every previously unchecked vector with a positive English
-        lettering prompt and a no-readable-text prompt, records the answer in
-        SQLite, and montage subsequently excludes only the positive rows.
-        A later run only touches newly indexed rows.
-        """
+    @staticmethod
+    def _screen_text_scores(frame, query_vectors) -> tuple[float, float]:
         import numpy as np
 
+        positive_count = len(_SCREEN_TEXT_POSITIVE_QUERIES)
+        positive_vectors = query_vectors[:positive_count]
+        negative_vectors = query_vectors[positive_count:]
+        positive = max(float(np.dot(frame, vector)) for vector in positive_vectors)
+        negative = max(float(np.dot(frame, vector)) for vector in negative_vectors)
+        return positive, negative
+
+    @classmethod
+    def _screen_text_obvious_from_vectors(cls, frame_vectors, query_vectors) -> bool:
+        """Cheap indexing gate: block only unmistakable text evidence."""
+        return any(
+            positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN
+            for positive, negative in (
+                cls._screen_text_scores(frame, query_vectors) for frame in frame_vectors
+            )
+        )
+
+    @classmethod
+    def _screen_text_state_from_vectors(cls, frame_vectors, query_vectors) -> int:
+        """Strict selection gate: every frame must be clearly text-free."""
+        for frame in frame_vectors:
+            positive, negative = cls._screen_text_scores(frame, query_vectors)
+            # Fail closed: ambiguous frames are not safe enough for Montage.
+            if negative < positive + _SCREEN_TEXT_SAFE_MARGIN:
+                return 1
+        return -1
+
+    def _screen_text_state(self, path: Path) -> int:
+        """Return -1 only when every sampled frame is clearly text-free."""
+        if not self._text_model_is_cached():
+            return 0
+        images = self._sample_frames(path, samples=5)[0]
+        image_model, _text_model = self._models()
+        frame_vectors = [
+            self._normalize(value) for value in image_model.embed(images, batch_size=len(images))
+        ]
+        query_vectors = self._query_vectors([
+            *_SCREEN_TEXT_POSITIVE_QUERIES, *_SCREEN_TEXT_NEGATIVE_QUERIES,
+        ])
+        return self._screen_text_state_from_vectors(frame_vectors, query_vectors)
+
+    def screen_text_safe(self, path: str | Path) -> bool:
+        """Lazily verify one ranked candidate; unchecked is never treated as safe."""
+        candidate = Path(path)
+        try:
+            resolved = str(candidate.resolve())
+        except OSError:
+            resolved = str(candidate)
+        cached = self._screen_text_safe_cache.get(resolved)
+        if cached is not None:
+            return cached
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT english_text,english_text_version FROM clips WHERE path=?", (resolved,)
+            ).fetchone()
+        if row is not None and int(row["english_text_version"] or 0) >= SCREEN_TEXT_CLASSIFIER_VERSION:
+            safe = int(row["english_text"]) == -1
+            self._screen_text_safe_cache[resolved] = safe
+            return safe
+        try:
+            state = self._screen_text_state(candidate)
+        except (OSError, ValueError):
+            state = 0
+        if state == 0:
+            self._screen_text_safe_cache[resolved] = False
+            return False
+        if row is not None:
+            with self._lock, self._connect() as connection:
+                connection.execute(
+                    "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
+                    (state, SCREEN_TEXT_CLASSIFIER_VERSION, resolved),
+                )
+            self._invalidate_search_cache()
+        safe = state == -1
+        self._screen_text_safe_cache[resolved] = safe
+        return safe
+
+    def classify_english_screen_text(self) -> dict[str, int]:
+        """Explicit maintenance pass using frame-level, fail-closed screening."""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT path,embedding FROM clips WHERE embedding IS NOT NULL AND english_text=0"
+                """SELECT path FROM clips
+                   WHERE english_text_version < ? OR english_text=0 ORDER BY path""",
+                (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
         if not rows:
-            with self._connect() as connection:
-                blocked = int(connection.execute("SELECT COUNT(*) FROM clips WHERE english_text=1").fetchone()[0])
-            return {"checked": 0, "blocked": blocked, "safe": 0}
-
-        # A fresh portable profile may not have FastEmbed's text files yet.
-        # Previously this started a network/model timeout and the caller then
-        # continued without new labels anyway. Keep the labels which are
-        # already stored in SQLite and do not change matching/reuse rules.
+            stats = self.screen_text_stats()
+            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"]}
         if not self._text_model_is_cached():
-            with self._connect() as connection:
-                blocked = int(connection.execute("SELECT COUNT(*) FROM clips WHERE english_text=1").fetchone()[0])
-            return {"checked": 0, "blocked": blocked, "safe": 0}
+            stats = self.screen_text_stats()
+            return {"checked": 0, "blocked": stats["blocked"], "safe": 0}
 
-        prompts = [
-            "a video frame with prominent English words, Latin alphabet captions, subtitles or text overlay",
-            "a documentary video frame with no readable writing or text overlay",
-        ]
-        vectors = self._query_vectors(prompts)
-        positive, negative = vectors[0], vectors[1]
-        updates: list[tuple[int, str]] = []
-        blocked = safe = 0
+        blocked = safe = checked = 0
         for row in rows:
-            vector = np.frombuffer(row["embedding"], dtype=np.float32)
-            if vector.size != positive.size:
-                continue
-            # Bias toward removal: if visual text is even modestly more likely
-            # than a clean documentary frame, do not risk it in a montage.
-            english = float(np.dot(vector, positive)) >= float(np.dot(vector, negative)) + 0.012
-            updates.append((1 if english else -1, row["path"]))
-            blocked += int(english)
-            safe += int(not english)
-        if updates:
+            result = self.screen_text_safe(row["path"])
             with self._connect() as connection:
-                connection.executemany("UPDATE clips SET english_text=? WHERE path=?", updates)
-            self._invalidate_search_cache()
-        return {"checked": len(updates), "blocked": blocked, "safe": safe}
+                current = connection.execute(
+                    "SELECT english_text,english_text_version FROM clips WHERE path=?", (row["path"],)
+                ).fetchone()
+            if current is None or int(current["english_text_version"] or 0) < SCREEN_TEXT_CLASSIFIER_VERSION:
+                continue
+            checked += 1
+            blocked += int(not result)
+            safe += int(result)
+        return {"checked": checked, "blocked": blocked, "safe": safe}
 
     def screen_text_stats(self) -> dict[str, int]:
-        """Return persisted screen-text labels without reopening media files."""
+        """Return current classifier state without treating stale safe labels as verified."""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT english_text,COUNT(*) AS amount FROM clips GROUP BY english_text"
+                """SELECT english_text,english_text_version,COUNT(*) AS amount
+                   FROM clips GROUP BY english_text,english_text_version"""
             ).fetchall()
-        totals = {int(row["english_text"]): int(row["amount"]) for row in rows}
-        return {
-            "blocked": totals.get(1, 0),
-            "safe": totals.get(-1, 0),
-            "unchecked": totals.get(0, 0),
-        }
+        blocked = safe = unchecked = 0
+        for row in rows:
+            state = int(row["english_text"])
+            version = int(row["english_text_version"] or 0)
+            amount = int(row["amount"])
+            if state == 1:
+                blocked += amount
+            elif state == -1 and version >= SCREEN_TEXT_CLASSIFIER_VERSION:
+                safe += amount
+            else:
+                unchecked += amount
+        return {"blocked": blocked, "safe": safe, "unchecked": unchecked}
 
     def rate(self, path: str, value: int):
         with self._connect() as connection:

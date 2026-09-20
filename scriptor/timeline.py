@@ -116,6 +116,13 @@ class TimelineClip:
     source_start: float = 0.0
     score: float = 0.0
     source: str = "local"
+    fallback_level: str = "STRICT_MATCH"
+    source_family: str = ""
+    reused: bool = False
+    position_bucket: str = ""
+    position_rotation_penalty: float = 0.0
+    position_rotation_reason: str = ""
+    strict_rejection_reason: str = ""
 
 
 @dataclass
@@ -131,6 +138,8 @@ class TimelineProject:
     overlay_path: str = ""
     transition_style: str = "crossfade"
     transition_frames: int = 7
+    selection_summary: dict = field(default_factory=dict)
+    preparation_metrics_ms: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
@@ -172,10 +181,21 @@ VISUAL_TERMS = {
     # "Russia" alone must not become a Kremlin office.  Kremlin/Putin are a
     # specific political visual and are requested only when the narration
     # actually names them.
-    "росси": "Russia current events", "кремл": "Kremlin Moscow government",
+    "росси": "Russia current events", "москв": "Moscow Russia government city",
+    "кремл": "Kremlin Moscow government", "вашингтон": "Washington DC White House US government officials",
+    "сша": "United States Washington DC government officials", "америк": "United States government Washington DC",
+    "киев": "Kyiv Ukraine government city", "брюссел": "Brussels European Union institutions",
+    "евросоюз": "European Union parliament commission Brussels flags",
     "путин": "Vladimir Putin press conference", "трамп": "Donald Trump press conference",
-    "зеленск": "Volodymyr Zelensky Ukraine", "нато": "NATO headquarters military alliance",
-    "европ": "Europe European Parliament", "санкц": "sanctions economy trading floor",
+    "зеленск": "Volodymyr Zelensky Ukraine", "нато": "NATO headquarters flags military alliance officials",
+    "альянс": "NATO military alliance headquarters officials flags",
+    "европ": "Europe European Parliament Brussels institutions",
+    "санкц": "economic sanctions finance banking trade restrictions markets",
+    "эконом": "economy finance business markets industry", "рынк": "financial markets trading screens business",
+    "банк": "banking finance money business", "торгов": "trade cargo logistics markets business",
+    "гибрид": "cybersecurity network operations military command Europe",
+    "кибер": "cybersecurity operations computer networks servers monitoring",
+    "хакер": "cybersecurity computer network operations monitoring screens",
     "одесс": "Odesa port Black Sea", "порт": "seaport cargo cranes ships", "кораб": "ship navy cargo vessel",
     "завод": "industrial factory workers", "переговор": "diplomatic negotiations leaders journalists cameras",
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
@@ -205,10 +225,13 @@ VISUAL_TERMS = {
 }
 
 
+GENERIC_VISUAL_QUERY = "international news, documentary footage"
+
+
 def fallback_visual_query(text: str) -> str:
     lowered = text.casefold()
     terms = [english for stem, english in VISUAL_TERMS.items() if stem in lowered]
-    return ", ".join(dict.fromkeys(terms)) or "international news, documentary footage"
+    return ", ".join(dict.fromkeys(terms)) or GENERIC_VISUAL_QUERY
 
 
 def fallback_scene_plan(narration: str, topic: str = "") -> list[dict]:
@@ -226,6 +249,8 @@ def fallback_scene_plan(narration: str, topic: str = "") -> list[dict]:
         word_count = len(sentence.split())
         duration = min(6.0, max(2.5, word_count / 2.7))
         sentence_query = fallback_visual_query(sentence)
+        if sentence_query == GENERIC_VISUAL_QUERY and topic_query != GENERIC_VISUAL_QUERY:
+            sentence_query = ""
         query = ", ".join(dict.fromkeys(filter(None, (topic_query, sentence_query))))
         plan.append({"narration": sentence, "visual_query_en": query,
                      "duration": round(duration, 2)})
@@ -455,6 +480,11 @@ def required_video_duration(voice_duration: float, intro_duration: float = 0.0) 
     return max(0.0, float(voice_duration)) + max(0.0, float(intro_duration))
 
 
+def _remaining_source_duration(source_duration: float, source_start: float) -> float:
+    """Return playable source duration left after a clip-specific start offset."""
+    return max(0.0, float(source_duration) - max(0.0, float(source_start)))
+
+
 def align_timeline_to_audio(
     project: TimelineProject,
     required_duration: float,
@@ -487,10 +517,10 @@ def align_timeline_to_audio(
     for clip in project.clips:
         if total >= target - tolerance:
             break
-        available = source_duration(clip)
+        available = _remaining_source_duration(source_duration(clip), clip.source_start)
         remaining = max(0.0, target - total)
         contribution = min(available, remaining)
-        normalized.append(replace(clip, duration=contribution, source_start=0.0))
+        normalized.append(replace(clip, duration=contribution))
         total += contribution
         if contribution < available - tolerance:
             project.clips = normalized
@@ -512,12 +542,12 @@ def align_timeline_to_audio(
                 continue
             terminal_reuse_used = True
         try:
-            available = source_duration(candidate)
+            available = _remaining_source_duration(source_duration(candidate), candidate.source_start)
         except (OSError, ValueError):
             continue
         remaining = max(0.0, target - total)
         contribution = min(available, remaining)
-        appended = replace(candidate, duration=contribution, source_start=0.0)
+        appended = replace(candidate, duration=contribution)
         normalized.append(appended)
         added.append(appended)
         used_paths.add(candidate_key)
@@ -743,7 +773,9 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             needed = target + margin - current
             tail_index = len(render_clips) - 1
             tail = render_clips[tail_index]
-            available = probe_video_duration(Path(tail.path))
+            available = _remaining_source_duration(
+                probe_video_duration(Path(tail.path)), tail.source_start,
+            )
             if needed > 0.0 and available + 0.01 >= tail.duration + needed:
                 render_clips[tail_index] = replace(tail, duration=tail.duration + needed)
         except (OSError, RuntimeError, ValueError):
@@ -790,7 +822,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                         # The selector still avoids this for normal queue
                         # planning; this is only the renderer's bounded
                         # fallback for an explicit clip already in a project.
-                        available = max(0.0, probe_video_duration(source) - max(0.0, clip.source_start))
+                        available = _remaining_source_duration(probe_video_duration(source), clip.source_start)
                         loop_args = ["-stream_loop", "-1"] if available + 0.01 < proxy_duration else []
                         command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
                                    "-t", f"{proxy_duration:.3f}", "-i", str(source),
