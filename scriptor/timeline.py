@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 import os
 import re
@@ -11,12 +11,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Callable
 from xml.sax.saxutils import quoteattr
-
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
 _PROXY_LOCK_GUARD = threading.RLock()
@@ -123,6 +122,9 @@ class TimelineClip:
     position_rotation_penalty: float = 0.0
     position_rotation_reason: str = ""
     strict_rejection_reason: str = ""
+    voice_segment_id: int = 0
+    narration_start: float = 0.0
+    narration_end: float = 0.0
 
 
 @dataclass
@@ -140,6 +142,7 @@ class TimelineProject:
     transition_frames: int = 7
     selection_summary: dict = field(default_factory=dict)
     preparation_metrics_ms: dict = field(default_factory=dict)
+    voice_map_provenance: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
@@ -212,7 +215,7 @@ VISUAL_TERMS = {
     "артилл": "artillery firing military position battlefield", "ракет": "missile launcher air defense military",
     "обстрел": "artillery shelling explosion damaged buildings", "дрон": "military drone battlefield soldiers",
     "военн": "soldiers military vehicles", "удар": "explosion aftermath firefighters damaged buildings",
-    "разруш": "war damaged buildings firefighters rescue workers", "эвакуац": "civilian evacuation emergency workers",
+    "разруш": "war damaged buildings firefighters rescue workers",
     "митинг": "protest crowd placards flags street rally", "протест": "protest crowd placards flags street rally",
     "демонстр": "protest crowd demonstration banners street", "пикет": "picket line workers protest banners",
     "забастов": "workers labor strike picket line factory gate", "беспоряд": "street unrest crowd police barriers",
@@ -265,7 +268,7 @@ def title_only_scene_plan(topic: str, duration: float) -> list[dict]:
     precise than the normal narration-aware planner.
     """
     total = max(1.0, float(duration or 0.0))
-    count = max(1, int(math.ceil(total / 4.5)))
+    count = max(1, math.ceil(total / 4.5))
     query = fallback_visual_query(topic)
     base = total / count
     return [{"narration": topic, "visual_query_en": query, "duration": round(base, 2)} for _ in range(count)]
@@ -404,7 +407,7 @@ def video_encoder_args(ffmpeg: str) -> list[str]:
         return list(_ENCODER_CACHE[ffmpeg])
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", creationflags=flags)
+                            encoding="utf-8", errors="replace", creationflags=flags, check=False)
     if "h264_nvenc" in (result.stdout or ""):
         args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", "-b:v", "0"]
     else:
@@ -417,7 +420,7 @@ def probe_media_duration(path: Path) -> float:
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run([ffmpeg, "-i", str(path)], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", creationflags=flags)
+                            encoding="utf-8", errors="replace", creationflags=flags, check=False)
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr or "")
     if not match:
         raise ValueError("Не удалось определить длительность озвучки")
@@ -430,7 +433,7 @@ def probe_video_duration(path: Path) -> float:
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", creationflags=flags)
+                            encoding="utf-8", errors="replace", creationflags=flags, check=False)
     details = result.stderr or ""
     if not re.search(r"\bVideo:\s", details):
         raise ValueError("В файле нет читаемого видеопотока")
@@ -455,7 +458,7 @@ def validate_rendered_montage(path: Path, *, expected_duration: float) -> float:
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", creationflags=flags)
+                            encoding="utf-8", errors="replace", creationflags=flags, check=False)
     details = result.stderr or ""
     if not re.search(r"\bVideo:\s", details):
         raise ValueError("В итоговом MP4 нет читаемого видеопотока")
@@ -589,7 +592,7 @@ def render_workspace_root() -> Path:
     preferred = Path(os.environ.get("NEWSFLOW_RENDER_TEMP_ROOT", r"D:\NewsFlow Studio\Временный рендер"))
     try:
         return _writable_render_folder(preferred)
-    except OSError as preferred_error:
+    except OSError:
         # Keep a functional fallback for computers without a D: drive, but do
         # not choose it when D: is available. The raised message retains the
         # failing folder for a useful task status should every location fail.
@@ -669,7 +672,6 @@ def _render_project_remotion(project: TimelineProject, output: Path,
     # downgrade them: a powerful workstation may deliberately use every slot.
     requested_frames = max(1, int(frame_concurrency or 1))
     active_jobs = max(1, int(parallel_jobs or 1))
-    command = [node, runner, str(manifest), str(partial), str(requested_frames), str(active_jobs)]
     env = {
         **os.environ,
         "ELECTRON_RUN_AS_NODE": "1",

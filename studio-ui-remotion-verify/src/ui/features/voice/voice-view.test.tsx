@@ -224,6 +224,66 @@ describe("Voice Light views", () => {
     expect(screen.getByRole("button", { name: "4. Готовый MP3" })).not.toBeNull();
   });
 
+  it("shows every operator-facing VoiceMap state in the voice queue", () => {
+    const labels = [
+      "Ожидает MP3",
+      "Анализ аудио",
+      "Тайминг готов",
+      "Приблизительный тайминг",
+      "Тайминг устарел",
+      "Ошибка тайминга",
+    ];
+    const data = {
+      ...fallback,
+      scenarios: labels.map((label, index) => ({
+        index,
+        title: `Сценарий ${index + 1}`,
+        state: "Готово",
+        result: "Текст",
+        error: "",
+      })),
+      voiceItems: labels.map((voiceMapLabel, index) => ({
+        index,
+        title: `Сценарий ${index + 1}`,
+        state: index ? "Готово" : "Ожидает",
+        path: index ? `D:/${index}.mp3` : "",
+        productionItemId: `production-${index}`,
+        voiceMapLabel,
+      })),
+    };
+
+    render(<VoiceQueue data={data} go={vi.fn()} command={vi.fn()} refresh={async () => undefined} />);
+
+    for (const label of labels) expect(screen.getByText(label)).toBeTruthy();
+  });
+
+  it("rebuilds timing for the selected ProductionItem without starting Montage", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 3, title: "Готовый MP3", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{
+        index: 3,
+        title: "Готовый MP3",
+        state: "Готово",
+        path: "D:/test.mp3",
+        productionItemId: "production-item-3",
+        voiceMapLabel: "Тайминг готов",
+      }],
+    };
+    render(<VoiceQueue data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "4. Готовый MP3" }));
+    fireEvent.click(screen.getByRole("button", { name: "Перестроить тайминг" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("rebuild-voice-map", {
+      scenarioIndex: 3,
+      productionItemId: "production-item-3",
+    }));
+    const calls = command.mock.calls as unknown as Array<[string, unknown?]>;
+    expect(calls.some(([name]) => name.includes("montage"))).toBe(false);
+  });
+
   it("shows only snapshot-backed provenance when a ready MP3 is inspected", () => {
     const data = {
       ...fallback,

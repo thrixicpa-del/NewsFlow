@@ -140,6 +140,13 @@ from .tts_ranges import (
     snapshot_tts_job,
     validate_ranges,
 )
+from .voice_map import (
+    AlignmentEngine,
+    VoiceMapContext,
+    VoiceMapStatus,
+    ensure_voice_map,
+    remove_voice_map,
+)
 from .voicer import (
     ChromeSecretVoicer,
     LumeanClient,
@@ -1482,6 +1489,7 @@ def snapshot() -> dict:
                     f"reuse {project.selection_summary.get('reuse', 0)}"
                 ) if project.selection_summary else "",
                 "preparationMetricsMs": project.preparation_metrics_ms,
+                "voiceMapProvenance": project.voice_map_provenance,
                 "voicePath": project.voiceover_path,
                 "transitionStyle": project.transition_style,
                 "transitionFrames": project.transition_frames,
@@ -1500,6 +1508,9 @@ def snapshot() -> dict:
                     "reused": clip.reused,
                     "positionBucket": clip.position_bucket,
                     "positionRotationReason": clip.position_rotation_reason,
+                    "voiceSegmentId": clip.voice_segment_id,
+                    "narrationStart": round(float(clip.narration_start), 3),
+                    "narrationEnd": round(float(clip.narration_end), 3),
                 } for clip in project.clips],
             })
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
@@ -1597,7 +1608,11 @@ def snapshot() -> dict:
         "voiceItems": [{
             "index": scenario["index"], "title": scenario["title"], "state": scenario["state"],
             "path": settings.voice_scenario_outputs.get(str(scenario["index"] + 1), ""),
-            "productionItemId": str(voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")),
+            "productionItemId": str(
+                job_by_index.get(scenario["index"]).request.production_item_id
+                if job_by_index.get(scenario["index"]) else
+                voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")
+            ),
             "rangeId": str(voice_assignment_by_index.get(scenario["index"], {}).get("range_id", "")),
             "voiceName": str(voice_assignment_by_index.get(scenario["index"], {}).get("profile", {}).get("name", "")),
             "voiceProvider": str(voice_assignment_by_index.get(scenario["index"], {}).get("profile", {}).get("provider", "")),
@@ -1619,6 +1634,19 @@ def snapshot() -> dict:
             )),
             "voiceUpdatedAt": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("updatedAt", ""),
             "voiceError": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("error", ""),
+            "voiceMapState": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "voiceMapState", "stale" if settings.voice_scenario_outputs.get(str(scenario["index"] + 1), "") else "waiting"
+            ),
+            "voiceMapLabel": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "voiceMapLabel", "Тайминг устарел" if settings.voice_scenario_outputs.get(str(scenario["index"] + 1), "") else "Ожидает MP3"
+            ),
+            "voiceMapPath": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapPath", ""),
+            "voiceMapReason": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapReason", ""),
+            "voiceMapTimingMode": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapTimingMode", ""),
+            "voiceMapEngine": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapEngine", ""),
+            "voiceMapConfidence": float(settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "voiceMapConfidence", 0.0
+            ) or 0.0),
         } for scenario in scenarios],
         "footageFolders": settings.footage_folders,
         "footageIndex": {
@@ -3448,6 +3476,162 @@ def validate_voiceover_artifact(path: Path) -> float:
     return duration
 
 
+def _voice_map_context_for_scenario(
+    index: int,
+    *,
+    settings: Settings | None = None,
+    session: tuple[list[str], list[Job]] | None = None,
+) -> VoiceMapContext | None:
+    current_settings = settings or load_settings()
+    titles, jobs = session or load_session()
+    if not 0 <= index < len(titles):
+        return None
+    job = next((item for item in jobs if item.request.index == index), None)
+    if job is None or job.state != RunState.DONE or not job.result.strip():
+        return None
+    production_item_id = str(job.request.production_item_id or "").strip()
+    if not production_item_id:
+        return None
+    audio_path = Path(str(current_settings.voice_scenario_outputs.get(str(index + 1), "")))
+    if not audio_path.is_file():
+        return None
+    task_status = current_settings.voice_task_statuses.get(str(index + 1), {})
+    duration = float(task_status.get("durationSeconds", 0.0) or 0.0) if isinstance(task_status, dict) else 0.0
+    deleted = {
+        str(value).strip() for value in current_settings.deleted_scenario_production_ids
+        if str(value).strip()
+    }
+    return VoiceMapContext(
+        production_item_id=production_item_id,
+        scenario_index=index,
+        title=titles[index],
+        script=job.result,
+        audio_path=audio_path,
+        audio_duration=duration,
+        storage_root=app_data_root() / "voice-maps",
+        tombstoned=production_item_id in deleted,
+    )
+
+
+def _current_voice_map_context(production_item_id: str) -> VoiceMapContext | None:
+    settings = load_settings()
+    titles, jobs = load_session()
+    job = next((
+        item for item in jobs
+        if str(item.request.production_item_id or "").strip() == production_item_id
+    ), None)
+    if job is None:
+        return None
+    return _voice_map_context_for_scenario(
+        job.request.index,
+        settings=settings,
+        session=(titles, jobs),
+    )
+
+
+def _set_voice_map_status(settings: Settings, index: int, status: VoiceMapStatus) -> None:
+    key = str(index + 1)
+    record = dict(settings.voice_task_statuses.get(key) or {})
+    record.update({
+        "voiceMapState": status.state,
+        "voiceMapLabel": status.label,
+        "voiceMapPath": status.path,
+        "voiceMapReason": status.reason,
+        "voiceMapTimingMode": str(status.data.get("timingMode", "")),
+        "voiceMapEngine": str(status.data.get("alignmentEngine", "")),
+        "voiceMapConfidence": float(status.data.get("alignmentConfidence", 0.0) or 0.0),
+    })
+    settings.voice_task_statuses[key] = record
+
+
+def _ensure_voice_map_for_scenario(
+    index: int,
+    *,
+    settings: Settings | None = None,
+    engine: AlignmentEngine | None = None,
+    force: bool = False,
+) -> VoiceMapStatus:
+    current_settings = settings or load_settings()
+    context = _voice_map_context_for_scenario(index, settings=current_settings)
+    if context is None:
+        return VoiceMapStatus("waiting", "Ожидает MP3", reason="finished scenario/audio identity is missing")
+    if context.tombstoned:
+        return VoiceMapStatus("error", "Ошибка тайминга", reason="ProductionItem was deleted")
+    _set_voice_map_status(
+        current_settings,
+        index,
+        VoiceMapStatus("building", "Анализ аудио"),
+    )
+    save_settings(current_settings)
+    try:
+        status = ensure_voice_map(
+            context,
+            engine=engine,
+            current_context=lambda: _current_voice_map_context(context.production_item_id),
+            force=force,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        status = VoiceMapStatus("error", "Ошибка тайминга", reason=str(error))
+    latest = load_settings()
+    _set_voice_map_status(latest, index, status)
+    save_settings(latest)
+    if latest is not current_settings:
+        _set_voice_map_status(current_settings, index, status)
+    return status
+
+
+def rebuild_voice_map(payload: dict) -> dict:
+    index = int(payload.get("scenarioIndex", -1))
+    requested_identity = str(payload.get("productionItemId", "")).strip()
+    settings = load_settings()
+    context = _voice_map_context_for_scenario(index, settings=settings)
+    if context is None:
+        raise ValueError("Для VoiceMap нужен готовый сценарий с ProductionItem ID и MP3")
+    if requested_identity and requested_identity != context.production_item_id:
+        raise ValueError("Выбранный VoiceMap устарел: ProductionItem ID изменился")
+    status = _ensure_voice_map_for_scenario(index, settings=settings, force=True)
+    return {
+        **snapshot(),
+        "operationResult": {
+            "kind": "voice-map-rebuild",
+            "count": 1 if status.state in {"ready", "approximate"} else 0,
+            "message": status.label if not status.reason else f"{status.label}: {status.reason}",
+        },
+    }
+
+
+def _ensure_ready_voice_maps(indices: list[int] | set[int]) -> None:
+    for index in sorted({int(value) for value in indices}):
+        _ensure_voice_map_for_scenario(index)
+
+
+def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
+    payload = status.data
+    if status.state not in {"ready", "approximate"} or not payload:
+        raise ValueError(status.reason or "VoiceMap is unavailable")
+    scenes = [{
+        "narration": str(segment["text"]),
+        "visual_query_en": str(segment["visualQuery"]),
+        "duration": float(segment["duration"]),
+        "voice_segment_id": int(segment["id"]),
+        "narration_start": float(segment["start"]),
+        "narration_end": float(segment["end"]),
+    } for segment in payload["segments"]]
+    provenance = {
+        "alignmentMode": str(payload["timingMode"]),
+        "voiceMapPath": status.path,
+        "voiceMapSchemaVersion": int(payload["schemaVersion"]),
+        "productionItemId": str(payload["productionItemId"]),
+        "scriptSha256": str(payload["scriptSha256"]),
+        "audioSha256": str(payload["audioSha256"]),
+        "alignmentEngine": str(payload["alignmentEngine"]),
+        "alignmentConfidence": float(payload.get("alignmentConfidence", 0.0) or 0.0),
+    }
+    if status.reason:
+        provenance["alignmentUnavailableReason"] = status.reason
+    return scenes, provenance
+
+
 def _voice_candidate_folder(output_folder: str) -> Path:
     """Keep a newly generated MP3 out of the active output path until validated."""
     return Path(output_folder) / ".newsflow-voice-staging"
@@ -3603,6 +3787,7 @@ def import_voiceover_folder(payload: dict) -> dict:
     target_folder = Path(settings.voicer_output_folder) / "Импортированные"
     target_folder.mkdir(parents=True, exist_ok=True)
     attached = 0
+    attached_indices: set[int] = set()
     errors = list(scanned["errors"])
     for record in attachable:
         index = int(record["scenarioIndex"])
@@ -3631,12 +3816,14 @@ def import_voiceover_folder(payload: dict) -> dict:
             "artifactPath": str(target),
         }
         attached += 1
+        attached_indices.add(index)
     settings.voice_import_summary = {
         "root": str(root), "foldersFound": scanned["foldersFound"], "audioFound": scanned["audioFound"],
         "matched": attached, "requiresChoice": len(review), "unmatched": len(scanned["unmatched"]),
         "errors": len(errors), "review": review[:200], "unmatchedItems": scanned["unmatched"][:200],
     }
     save_settings(settings)
+    _ensure_ready_voice_maps(attached_indices)
     message = (f"Папок: {scanned['foldersFound']}; аудио: {scanned['audioFound']}; "
                f"сопоставлено: {attached}; требуют выбора: {len(review)}; "
                f"не сопоставлено: {len(scanned['unmatched'])}; ошибок: {len(errors)}.")
@@ -3683,6 +3870,7 @@ def import_voiceover_files(payload: dict) -> dict:
     for index, title in enumerate(titles):
         matches.setdefault(audio_title_key(title), []).append(index)
     attached = 0
+    attached_indices: set[int] = set()
     review: list[str] = []
     for source in extracted:
         candidates = matches.get(audio_title_key(source.name), [])
@@ -3706,7 +3894,9 @@ def import_voiceover_files(payload: dict) -> dict:
                                                         "updatedAt": time.strftime("%H:%M:%S"),
                                                         "durationSeconds": duration, "artifactPath": str(final)}
         attached += 1
+        attached_indices.add(index)
     save_settings(settings)
+    _ensure_ready_voice_maps(attached_indices)
     message = f"Импортировано и сопоставлено: {attached}."
     if review:
         message += f" Требуют ручного назначения: {len(review)}."
@@ -3737,6 +3927,7 @@ def import_voiceover(payload: dict) -> dict:
         "durationSeconds": duration, "artifactPath": str(target),
     }
     save_settings(settings)
+    _ensure_ready_voice_maps({index})
     return snapshot()
 
 
@@ -3746,8 +3937,11 @@ def remove_voiceovers(payload: dict) -> dict:
     if not indices:
         raise ValueError("Выберите одну или несколько готовых озвучек")
     settings = load_settings()
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
     root = Path(settings.voicer_output_folder).resolve()
     removed = 0
+    removed_voice_maps: list[VoiceMapContext] = []
     for index in indices:
         key = str(index + 1)
         source_text = settings.voice_scenario_outputs.get(key, "")
@@ -3764,7 +3958,19 @@ def remove_voiceovers(payload: dict) -> dict:
                 raise ValueError(f"Не удалось удалить MP3: {source.name}") from exc
         settings.voice_scenario_outputs.pop(key, None)
         settings.voice_task_statuses.pop(key, None)
+        job = jobs_by_index.get(index)
+        if job and str(job.request.production_item_id).strip():
+            removed_voice_maps.append(VoiceMapContext(
+                production_item_id=str(job.request.production_item_id).strip(),
+                scenario_index=index,
+                title=titles[index] if 0 <= index < len(titles) else job.request.title,
+                script=job.result,
+                audio_path=source or Path(),
+                storage_root=app_data_root() / "voice-maps",
+            ))
     save_settings(settings)
+    for context in removed_voice_maps:
+        remove_voice_map(context)
     return {**snapshot(), "operationResult": {
         "kind": "voice-remove", "count": removed,
         "message": f"Удалено озвучек: {removed}.",
@@ -4640,6 +4846,19 @@ def remove_scenarios_command(payload: dict) -> dict:
     valid = {index for index in indices if 0 <= index < len(titles)}
     if valid:
         settings = load_settings()
+        jobs_by_index = {job.request.index: job for job in jobs}
+        removed_voice_maps = [
+            VoiceMapContext(
+                production_item_id=str(jobs_by_index[index].request.production_item_id).strip(),
+                scenario_index=index,
+                title=titles[index],
+                script=jobs_by_index[index].result,
+                audio_path=Path(settings.voice_scenario_outputs.get(str(index + 1), "")),
+                storage_root=app_data_root() / "voice-maps",
+            )
+            for index in sorted(valid)
+            if index in jobs_by_index and str(jobs_by_index[index].request.production_item_id).strip()
+        ]
         removed_keys = {" ".join(titles[index].split()).casefold() for index in valid}
         removed_production_ids = {
             str(job.request.production_item_id).strip() for job in jobs
@@ -4678,6 +4897,8 @@ def remove_scenarios_command(payload: dict) -> dict:
         settings.voice_scenario_outputs = remapped
         settings.voice_task_statuses = remapped_statuses
         save_settings(settings)
+        for context in removed_voice_maps:
+            remove_voice_map(context)
         titles, jobs = remove_scenarios(titles, jobs, valid)
         save_session(titles, jobs)
     return snapshot()
@@ -9502,6 +9723,10 @@ def generate_voice(payload: dict) -> dict:
                 set_task_status(index, "Ошибка озвучки", 0, reason)
                 errors.append(f"{index + 1}: {reason}")
     persist_voice_state()
+    _ensure_ready_voice_maps({
+        index for index in candidates
+        if Path(settings.voice_scenario_outputs.get(str(index + 1), "")).is_file()
+    })
     if errors:
         raise RuntimeError("; ".join(errors[:5]))
     return snapshot()
@@ -10685,7 +10910,7 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
 def prepare_montage(payload: dict) -> dict:
     preparation_started = time.perf_counter()
     preparation_metrics = {
-        "planning": 0.0, "retrieval": 0.0, "selection": 0.0,
+        "alignment": 0.0, "planning": 0.0, "retrieval": 0.0, "selection": 0.0,
         "fallback_expansion": 0.0, "external": 0.0, "total": 0.0,
     }
     settings = load_settings()
@@ -10777,12 +11002,37 @@ def prepare_montage(payload: dict) -> dict:
         )
     clips = []
     voice_duration = probe_media_duration(Path(voice_path))
-    # If a finished narration exists, use it for scene semantics even when
-    # the optional-text switch allows title-only fallback. Title-only is now
-    # reserved for genuinely missing scenario text.
-    scenes = (fallback_scene_plan(narration, titles[scenario_index])
-              if narration.strip() else title_only_scene_plan(titles[scenario_index], voice_duration))
-    if settings.montage_use_script_text and settings.montage_scene_planner == "agent" and settings.openai_api_keys:
+    voice_map_provenance: dict = {}
+    used_voice_map = False
+    alignment_started = time.perf_counter()
+    if narration.strip() and job and str(job.request.production_item_id).strip():
+        voice_map_status = _ensure_voice_map_for_scenario(scenario_index, settings=settings)
+        if voice_map_status.state in {"ready", "approximate"}:
+            scenes, voice_map_provenance = _voice_map_scenes(voice_map_status)
+            used_voice_map = True
+        else:
+            raise ValueError(
+                f"VoiceMap недоступен: {voice_map_status.reason or voice_map_status.label}"
+            )
+    preparation_metrics["alignment"] = (time.perf_counter() - alignment_started) * 1000
+    # Legacy rows without durable identity retain an explicit approximate
+    # planner. Current ProductionItems always flow through the VoiceMap above.
+    if not used_voice_map:
+        scenes = (fallback_scene_plan(narration, titles[scenario_index])
+                  if narration.strip() else title_only_scene_plan(titles[scenario_index], voice_duration))
+        voice_map_provenance = {
+            "alignmentMode": "approximate",
+            "voiceMapPath": "",
+            "voiceMapSchemaVersion": 0,
+            "productionItemId": str(job.request.production_item_id if job else ""),
+            "scriptSha256": hashlib.sha256(narration.encode("utf-8")).hexdigest() if narration else "",
+            "audioSha256": "",
+            "alignmentEngine": "newsflow-fallback-runtime",
+            "alignmentConfidence": 0.0,
+            "alignmentUnavailableReason": "durable ProductionItem identity or VoiceMap unavailable",
+        }
+    if (not used_voice_map and settings.montage_use_script_text
+            and settings.montage_scene_planner == "agent" and settings.openai_api_keys):
         try:
             if progress:
                 progress("Планирование сцен", "Видеопланировщик уточняет объекты, людей, места и действия")
@@ -10795,9 +11045,10 @@ def prepare_montage(payload: dict) -> dict:
             # becoming a video: use the deterministic local visual planner.
             if progress:
                 progress("Планирование сцен", f"Агент недоступен — локальный план: {str(exc)[:120]}")
-    # Align selection to the MP3 before matching. Full six-second source clips
-    # stay intact; only the final beat is trimmed for exact audio alignment.
-    scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
+    # VoiceMap segments already carry the audio-backed boundary contract.
+    # Only legacy/no-identity fallback needs the old proportional fitter.
+    if not used_voice_map:
+        scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
     preparation_metrics["planning"] = (time.perf_counter() - preparation_started) * 1000
     # Fast visual loop searches only a user-selected prefix of the *voice
     # duration*, not merely the same percentage of scene count.  Afterwards
@@ -10986,7 +11237,10 @@ def prepare_montage(payload: dict) -> dict:
                                       source=f"повтор: {original_source or 'локальный'}",
                                       fallback_level="SAFE_REUSE", source_family=source_family,
                                       reused=True, position_bucket=position_bucket,
-                                      position_rotation_reason="быстрый режим: другой сегмент длинного источника"))
+                                      position_rotation_reason="быстрый режим: другой сегмент длинного источника",
+                                      voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
+                                      narration_start=float(scene.get("narration_start", 0.0) or 0.0),
+                                      narration_end=float(scene.get("narration_end", 0.0) or 0.0)))
             if progress:
                 progress("Подбор футажей", f"Ротация {scene_number}/{len(scenes)}: {Path(selected.path).name}")
             continue
@@ -11201,7 +11455,10 @@ def prepare_montage(payload: dict) -> dict:
                                   position_bucket=position_bucket,
                                   position_rotation_penalty=selection.position_rotation_penalty,
                                   position_rotation_reason=selection.position_rotation_reason,
-                                  strict_rejection_reason=selection.strict_rejection_reason))
+                                  strict_rejection_reason=selection.strict_rejection_reason,
+                                  voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
+                                  narration_start=float(scene.get("narration_start", 0.0) or 0.0),
+                                  narration_end=float(scene.get("narration_end", 0.0) or 0.0)))
         if fast_reuse:
             reuse_pool.append((selected, max(float(scene["duration"]), selected_duration), score, source, source_family))
         if progress:
@@ -11233,7 +11490,8 @@ def prepare_montage(payload: dict) -> dict:
                               intro_duration=_full_intro_duration(intro_path, settings.montage_intro_duration) if intro_path else 0,
                               overlay_path=_random_video(settings.montage_overlay_folder) if settings.montage_overlay_enabled else "",
                               transition_style=settings.montage_transition_style,
-                              transition_frames=settings.montage_transition_frames)
+                              transition_frames=settings.montage_transition_frames,
+                              voice_map_provenance=voice_map_provenance)
     # Use each selected source in full and close a residual tail with more
     # real footage.  There is no FFmpeg looping or cloned final frame here;
     # only the final source that crosses the MP3 boundary is trimmed.
@@ -12776,6 +13034,17 @@ def clear_production_queue(payload: dict) -> dict:
         str(job.request.production_item_id).strip()
         for job in jobs if str(job.request.production_item_id).strip()
     }
+    removed_voice_maps = [
+        VoiceMapContext(
+            production_item_id=str(job.request.production_item_id).strip(),
+            scenario_index=job.request.index,
+            title=job.request.title,
+            script=job.result,
+            audio_path=Path(settings.voice_scenario_outputs.get(str(job.request.index + 1), "")),
+            storage_root=app_data_root() / "voice-maps",
+        )
+        for job in jobs if str(job.request.production_item_id).strip()
+    ]
     settings.deleted_scenario_titles = sorted({
         *(str(value).strip().casefold()
           for value in settings.deleted_scenario_titles if str(value).strip()),
@@ -12839,6 +13108,8 @@ def clear_production_queue(payload: dict) -> dict:
     # process dies between these writes and file deletion, the deletion fence
     # still prevents the stale primary/backup from becoming active again.
     save_settings(settings)
+    for context in removed_voice_maps:
+        remove_voice_map(context)
     save_session([], [])
     removed_files = sum(
         _clear_production_folder(folder)
@@ -14023,6 +14294,8 @@ def main() -> None:
             result = import_voiceover_folder(payload if isinstance(payload, dict) else {})
         elif command == "remove-voiceovers":
             result = remove_voiceovers(payload if isinstance(payload, dict) else {})
+        elif command == "rebuild-voice-map":
+            result = rebuild_voice_map(payload if isinstance(payload, dict) else {})
         elif command == "export-stage":
             result = export_stage(payload if isinstance(payload, dict) else {})
         elif command == "export-scenario-titles":

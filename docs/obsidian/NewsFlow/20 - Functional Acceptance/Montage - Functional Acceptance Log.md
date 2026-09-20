@@ -318,3 +318,45 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
 - Three new 30.000 s MP4 SHA-256 values: `1c383c894479f28083442e8cc1d736ab946196bd3907b0183bae21a3203276ce`, `a77cdde300d635315bae9c4816c168bd985253697e2e9dde5fe544dd5d752c52`, `9ff150a947bb1380558999aa12dea1c4e3190a347f92d72b2c45d38afa1611e2`.
 - Review root: `.artifacts/NewsFlow-MONTAGE-003-human-review-quality-v2-20260920/`; it contains the manifest, per-scene query/semantic/screen-text provenance, three contact sheets, timings and three rendered MP4 files. Total final run: **71.079 s**; candidate discovery/copy **5.282 s**, base index **7.614 s**, deep enrichment **0.093 s**, screen-text classification **15.646 s**, direct retrieval **0.040 s**.
 - Settings/session/index and every source project, MP3 and footage hash were identical before/after. No paid provider, OAuth or publication call was made; generated media remains ignored and is not committed.
+
+
+## MONTAGE-004 — automatic VoiceMap narration alignment
+
+Date: **2026-09-20**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/WINDOWS REVIEW**
+
+### Confirmed RED and root cause
+
+- Montage previously inferred scene timing independently from the final MP3. There was no durable artifact connecting the canonical final scenario, its ProductionItem identity, real audio timing and the selected montage clips.
+- Initial deterministic regression was RED because `scriptor.voice_map` did not exist. The UI regression was RED because none of the six operator-facing timing states or the explicit rebuild command existed.
+- The first real isolated render found an avoidable 0.75-second final aligned segment. The word-boundary chooser excluded the final word from its candidate range and selected a 4.5-second split even though the complete final sentence fit inside the 6.8-second preferred maximum. A focused RED regression now protects this boundary.
+
+### Minimal architecture fix
+
+- Added a versioned, hashed VoiceMap artifact keyed by `ProductionItem ID + script SHA-256 + audio SHA-256 + schema version`. Title and scenario index remain metadata only. Valid matching artifacts are reused without rerunning alignment.
+- Canonical NewsFlow scenario text remains the text authority and the MP3 remains the timing authority. Optional FFmpeg/whisper output supplies timed observations only; it must reconcile completely to canonical tokens before `timingMode=aligned` can be published. Low coverage, malformed/non-monotonic observations, a missing cached model or a missing FFmpeg whisper filter produce an explicit `approximate` VoiceMap with truthful reason/provenance.
+- No model is downloaded or bundled. The optional adapter reads only an explicitly supplied `NEWSFLOW_WHISPER_MODEL` or the controlled app-data cache path and resolves FFmpeg through the packaged NewsFlow runtime path. Segment-only output never fabricates word timing; real word evidence is stored only when the engine provides it.
+- Candidate JSON is schema/timestamp validated, then ProductionItem existence, tombstone state, script hash and audio hash are revalidated immediately before atomic replace. Delete/reset persists SESSION-001 tombstone authority before physical VoiceMap cleanup, so a stale worker cannot republish a deleted item.
+- Voice import and successful TTS attachment automatically ensure a map, but never start Montage. The UI exposes `Ожидает MP3`, `Анализ аудио`, `Тайминг готов`, `Приблизительный тайминг`, `Тайминг устарел`, `Ошибка тайминга` and a manual `Перестроить тайминг` action bound to the exact ProductionItem ID.
+- Montage consumes one VoiceMap contract for aligned and approximate modes. `.newsflow` persists map path/schema/hashes/engine/confidence plus each clip's `voiceSegmentId`, narration start and narration end. Existing semantic safety, screen-text safety, diversity, source-family/source-start and queue behavior are unchanged.
+
+### Automated verification
+
+- VoiceMap targeted suite: **30 PASS, 0 FAIL, 0 SKIP**. Coverage includes alignment/reconciliation, natural boundaries, optional word evidence integrity, contiguous segment validation, approximate provenance, missing model/filter, packaged FFmpeg resolution, cache invalidation, corrupt/interrupted artifacts, atomic stale-worker rejection, fail-closed Montage consumption, SESSION-001 delete order, UI rebuild behavior and `.newsflow` round-trip.
+- Combined Voice/SESSION-001/Montage queue/timeline/MONTAGE-003/index/render/runtime suite: **220 PASS, 0 FAIL, 0 SKIP**; `PRODUCTION_WRITE_GUARD=PASS`.
+- Targeted Voice UI: **1 file / 18 tests PASS**. Full frontend: **36 files / 209 tests PASS**. `pnpm typecheck`, Electron security gate and web/desktop/Remotion source builds: **PASS**.
+- Source Electron E2E with `NEWSFLOW_RUN_ELECTRON_E2E=1`: **2 PASS, 0 FAIL, 0 SKIP**, including accessibility/UX guards.
+- `py_compile`, scoped Ruff for all changed Python files, secret scan, production integrity guard and working-tree `git diff --check`: **PASS**.
+
+### Isolated real media acceptance
+
+- Reproducible command: `python tests/run_voice_map_montage_smoke.py --output .artifacts/montage-004/2026-09-20-voice-map-smoke-05`.
+- Runtime path: real local synthetic MP3 and four MP4 sources → incremental `ClipIndex` → durable aligned VoiceMap → `prepare_montage` → persisted `.newsflow` → `render_montage(renderer="ffmpeg")` → FFprobe. All storage and media roots were isolated under `.artifacts`; no provider/network/OAuth/publication or production path was used.
+- VoiceMap produced three natural canonical segments of **4.515 / 5.268 / 5.267 s**, confidence **1.0**, and full **15.050 s** audio coverage. Every project clip retained the matching segment ID and narration timestamps; the expected 30 FPS visual safety tail was present.
+- Final MP4 duration: **15.000 s** with audio and video streams. Timings: alignment **0.004 s**, preparation **0.683 s**, render **7.372 s**. MP4 SHA-256: `b9fd7c38b145af696e47d6bc54e09449c3e74d20fd5e2fdef2457d34f559899f`.
+- Manifest: `.artifacts/montage-004/2026-09-20-voice-map-smoke-05/manifest.json`. All **13** contract/media assertions passed; every synthetic source hash was identical before/after. Generated evidence is ignored and not committed.
+
+### Deferred / N/A
+
+- A cached production whisper.cpp model was intentionally not installed or downloaded. The adapter capability, parsing and canonical reconciliation are deterministic-test covered; model-unavailable behavior is an accepted approximate fallback, not a Montage failure.
+- Packaged EXE/clean-Windows release acceptance and controlled real-provider smoke are N/A for this source-level issue. The requested three 3–5 minute human quality-review videos remain a separate follow-up after this implementation is reviewed.
