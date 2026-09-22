@@ -192,6 +192,13 @@ class PublicationJobTests(unittest.TestCase):
         self.assertIn("ровно 9", instruction)
         self.assertNotIn("3–5", instruction)
 
+    def test_seo_json_deduplicates_hashtags_case_insensitively(self):
+        parsed = bridge._parse_seo_json(
+            '{"title":"Тема","description":"Описание","hashtags":["#Ормуз","орМУЗ","#танкеры"]}'
+        )
+
+        self.assertEqual(parsed["hashtags"], ["#Ормуз", "#танкеры"])
+
     def test_auto_pipeline_generates_tags_after_seo_stage(self):
         job = SimpleNamespace(
             request=SimpleNamespace(index=0),
