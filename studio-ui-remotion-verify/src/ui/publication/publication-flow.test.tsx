@@ -88,6 +88,54 @@ describe("PublicationPage interactions", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("upload-publication-v2-snapshots", { snapshotIds: ["snapshot-ready"] }));
   });
 
+  it("does not let a stale Videos selection silently scope Queue actions that show all selected", async () => {
+    const data = {
+      ...base,
+      publication: {
+        ...base.publication,
+        v2: {
+          ...(base.publication as any).v2,
+          items: {
+            ...(base.publication as any).v2.items,
+            "item-second": {
+              productionItemId: "item-second",
+              metadata: { title: "Второй готовый ролик" },
+              readiness: { state: "VIDEO_READY" },
+              artifacts: { video: { path: "D:/second.mp4", exists: true } },
+            },
+          },
+          queue: [
+            ...(base.publication as any).v2.queue,
+            {
+              snapshotId: "snapshot-second",
+              productionItemId: "item-second",
+              title: "Второй готовый ролик",
+              channelId: "channel-a",
+              currentStage: "WAITING",
+              status: "WAITING",
+              active: false,
+              completion: { completed: 0, total: 8 },
+              steps: {},
+            },
+          ],
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={data} command={command} />);
+
+    fireEvent.click(screen.getByLabelText("Выбрать Готовый ролик"));
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    expect(screen.getByText("Выбрано:")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Запустить очередь" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Запустить очередь" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "upload-publication-v2-snapshots",
+      { snapshotIds: ["snapshot-ready", "snapshot-second"] },
+    ));
+  });
+
   it("starts only explicitly selected queue snapshots", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<PublicationPage data={base} command={command} />);
