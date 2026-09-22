@@ -54,7 +54,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     date: "",
     startTime: "04:00",
     endTime: "10:00",
-    timezone: "UTC",
+    timezone: "Europe/Minsk",
     channelIds: model.channels.filter((channel) => channel.enabled).map((channel) => channel.channelId),
     maxPerChannel: 1,
   }));
@@ -82,7 +82,9 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       ...(selectedVideoIds.length ? { productionItemIds: selectedVideoIds } : {}),
       ...(range ? { bulkSchedule: range } : {}),
     };
-    const result = await command("preview-publication-v2-distribution", payload);
+    const result = Object.keys(payload).length
+      ? await command("preview-publication-v2-distribution", payload)
+      : await command("preview-publication-v2-distribution");
     const resultPreview = (result as (NewsFlowSnapshot & { publicationPreview?: Preview } | undefined))?.publicationPreview || null;
     if (!resultPreview) return;
     setDistribution(resultPreview.assignments.map((assignment) => {
