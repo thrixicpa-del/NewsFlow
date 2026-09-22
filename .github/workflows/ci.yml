@@ -16,7 +16,7 @@ jobs:
           lfs: true
       - uses: actions/setup-python@v6
         with: { python-version: '3.12' }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with: { version: '11.19.0' }
       - uses: actions/setup-node@v6
         with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
