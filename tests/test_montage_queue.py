@@ -430,6 +430,50 @@ class MontageQueueStateTests(unittest.TestCase):
             bridge.save_montage_settings({"excludeEnglishText": False})
         self.assertTrue(settings.montage_exclude_english_text)
 
+    def test_uncertain_screen_candidate_waits_for_rescue_deep_check(self):
+        calls = []
+
+        class FakeIndex:
+            def screen_text_eligibility(self, _path, *, deep=False):
+                calls.append(deep)
+                return "UNCERTAIN"
+
+        item = FootageItem("D:/library/russian-caption.mp4", "russian-caption.mp4")
+        self.assertFalse(bridge._montage_screen_text_safe(FakeIndex(), item))
+        self.assertTrue(bridge._montage_screen_text_safe(
+            FakeIndex(), item, allow_uncertain=True,
+        ))
+        self.assertEqual(calls, [False, True])
+
+    def test_semantic_rescue_can_use_best_safe_hit_below_normal_score_floor(self):
+        candidate = FootageItem(
+            "D:/library/neutral-government.mp4",
+            "neutral-government.mp4",
+            tags=["documentary-neutral"],
+        )
+        kwargs = dict(
+            scene_query="Washington government press conference",
+            strict_hits=[SearchHit(candidate, .03, duration=6.0)],
+            fallback_hits=[],
+            relaxed_hits=[], category_hits=[], safe_context_hits=[],
+            required_duration=6.0, match_threshold=.22,
+            used_paths=set(), used_families=set(),
+            project_used_paths=set(), project_used_families=set(),
+            reserved_paths=set(), reserved_families=set(),
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            allow_safe_reuse=False,
+        )
+        with self.assertRaises(bridge.MontageSelectionFailure):
+            bridge._select_montage_candidate(**kwargs)
+
+        rescued = bridge._select_montage_candidate(
+            **kwargs, allow_below_threshold=True,
+        )
+        self.assertEqual(rescued.item.path, candidate.path)
+        self.assertEqual(rescued.fallback_level, "STRICT_MATCH")
+
     def test_normalized_montage_query_deduplicates_and_removes_generic_phrases(self):
         normalized = bridge._normalized_montage_visual_query(
             "international news, documentary footage, oil tanker refinery oil terminal, "
