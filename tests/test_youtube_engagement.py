@@ -8,7 +8,7 @@ from scriptor.config import Settings
 from scriptor import bridge
 from scriptor.youtube_engagement import (
     build_ad_plan,
-    build_ads_plan,
+    build_ad_plan,
     build_engagement_plan,
     new_engagement_state,
     transition_engagement_step,
@@ -17,7 +17,7 @@ from scriptor.youtube_engagement import (
 
 class YouTubeEngagementAdsPlanTests(unittest.TestCase):
     def test_monetized_long_video_requests_auto_and_39_second_manual_slots(self):
-        plan = build_ads_plan(8 * 60 + 30, monetized=True)
+        plan = build_ad_plan(8 * 60 + 30, monetized=True)
 
         self.assertEqual(plan["mode"], "AUTO+MANUAL")
         self.assertTrue(plan["automatic"])
@@ -26,7 +26,7 @@ class YouTubeEngagementAdsPlanTests(unittest.TestCase):
         self.assertTrue(all(slot % 39 == 0 for slot in plan["manualSlots"]))
 
     def test_monetized_short_video_keeps_monetization_but_midroll_is_not_applicable(self):
-        plan = build_ads_plan(7 * 60 + 59, monetized=True)
+        plan = build_ad_plan(7 * 60 + 59, monetized=True)
 
         self.assertEqual(plan["mode"], "AUTO_ONLY")
         self.assertTrue(plan["automatic"])
@@ -35,7 +35,7 @@ class YouTubeEngagementAdsPlanTests(unittest.TestCase):
         self.assertEqual(plan["manualSlots"], [])
 
     def test_non_monetized_channel_has_no_ads_stage(self):
-        plan = build_ads_plan(900, monetized=False)
+        plan = build_ad_plan(900, monetized=False)
 
         self.assertEqual(plan["mode"], "NONE")
         self.assertFalse(plan["enabled"])
