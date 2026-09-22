@@ -1656,5 +1656,6 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
             "uploadConcurrency": int(getattr(settings, "youtube_publication_upload_concurrency", 1) or 1),
             "channelRules": dict(getattr(settings, "youtube_channel_publication_rules", {}) or {}),
             "rulePresets": list(getattr(settings, "youtube_publication_v2_rule_presets", []) or []),
+            "planVersions": list(getattr(settings, "youtube_publication_plan_versions", []) or []),
             "assignments": dict(getattr(settings, "youtube_publication_assignments", {}) or {}),
             "receipts": dict(getattr(settings, "youtube_publication_receipts", {}) or {})}
