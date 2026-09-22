@@ -1187,6 +1187,8 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
     expected = dict(snapshot.get("metadata", {}) or {})
     steps = dict(execution.get("steps", {}) or {})
     now = _now()
+    execution["youtubePrivacyStatus"] = str(remote_status.get("privacyStatus", "")).strip() or execution.get("youtubePrivacyStatus")
+    execution["actualPublishedAt"] = str(snippet.get("publishedAt", "")).strip() or execution.get("actualPublishedAt")
 
     processing_status = str(processing.get("processingStatus", "")).casefold()
     processing_step = dict(steps.get("YOUTUBE_PROCESSING", {}) or _step())
