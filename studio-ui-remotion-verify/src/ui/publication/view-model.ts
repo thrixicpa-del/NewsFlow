@@ -205,12 +205,24 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
       return { name: text(preset.name), rules: record(preset.rules), updatedAt: text(preset.updatedAt) };
     })
     .filter((preset) => preset.name);
+  const planVersions = (Array.isArray(rawV2.planVersions) ? rawV2.planVersions : [])
+    .map((value) => {
+      const item = record(value);
+      return {
+        id: text(item.id),
+        name: text(item.name),
+        createdAt: text(item.createdAt),
+        assignments: Array.isArray(item.assignments) ? item.assignments.map((assignment) => record(assignment)) : [],
+      };
+    })
+    .filter((item) => item.id && item.name);
   return {
     videos: videoRows,
     channels: channelRows,
     queue,
     receipts,
     rulePresets,
+    planVersions,
     uploadConcurrency: Math.max(1, Number(rawV2.uploadConcurrency || data.publication.uploadConcurrency) || 1),
     paused: Boolean(rawV2.paused),
     counters: record(rawV2.counters) as Record<string, number>,
