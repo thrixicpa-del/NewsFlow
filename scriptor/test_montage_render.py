@@ -23,7 +23,14 @@ import numpy as np
 from . import bridge
 from . import config as config_module
 from . import timeline as timeline_module
-from .ai_index import _SCREEN_TEXT_POSITIVE_QUERIES, ClipIndex
+from .ai_index import (
+    SCREEN_ELIGIBILITY_BLOCKED,
+    SCREEN_ELIGIBILITY_SAFE,
+    SCREEN_ELIGIBILITY_UNCERTAIN,
+    SCREEN_TEXT_CLASSIFIER_VERSION,
+    _SCREEN_TEXT_POSITIVE_QUERIES,
+    ClipIndex,
+)
 from .bridge import _semantic_clip_ok
 from .config import Settings, _exclusive_settings_write
 from .cutter import cut_single_clip
@@ -325,23 +332,26 @@ class MontageRenderTests(unittest.TestCase):
         self.assertAlmostEqual(sum(item["duration"] for item in plan), 10.0, places=1)
         self.assertTrue(all("hormuz" in item["visual_query_en"].casefold() for item in plan))
 
-    def test_english_screen_label_is_persisted_and_excluded_from_search(self):
-        """Frame-level English screening persists and excludes the blocked clip."""
+    def test_screen_v4_restores_english_only_contract_and_blocks_interstitials(self):
+        """Russian text is allowed; English and full-screen slates are blocked."""
         class DummyImageEmbedder:
             def embed(self, images, **_):
                 for image in images:
-                    yield (
-                        np.asarray([1.0, 0.0], dtype=np.float32)
-                        if image == "text"
-                        else np.asarray([0.0, 1.0], dtype=np.float32)
-                    )
+                    if image in {"english", "interstitial"}:
+                        yield np.asarray([1.0, 0.0], dtype=np.float32)
+                    elif image == "uncertain":
+                        yield np.asarray([1.0, 1.0], dtype=np.float32)
+                    else:
+                        # clean and ordinary Cyrillic footage both align with
+                        # the allowed/no-English side of the classifier.
+                        yield np.asarray([0.0, 1.0], dtype=np.float32)
 
         class DummyTextEmbedder:
             def query_embed(self, value, **_):
                 queries = value if isinstance(value, list) else [value]
+                positive = {item.casefold() for item in _SCREEN_TEXT_POSITIVE_QUERIES}
                 for query in queries:
-                    lowered = str(query).casefold()
-                    if lowered in {item.casefold() for item in _SCREEN_TEXT_POSITIVE_QUERIES}:
+                    if str(query).casefold() in positive:
                         yield np.asarray([1.0, 0.0], dtype=np.float32)
                     else:
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
@@ -349,41 +359,64 @@ class MontageRenderTests(unittest.TestCase):
         class FrameIndex(ClipIndex):
             @staticmethod
             def _sample_frames(path, samples=3):
-                frames = (
-                    ["clean", "clean", "clean", "text", "clean"]
-                    if "english-caption" in path.name
-                    else ["clean"] * 5
-                )
+                name = path.name
+                if "english-caption" in name:
+                    frames = ["clean", "clean", "clean", "english", "clean"]
+                elif "russian-caption" in name:
+                    frames = ["cyrillic"] * max(11, samples)
+                elif "title-card" in name:
+                    frames = ["clean", "interstitial", "interstitial", "clean", "clean"]
+                elif "uncertain" in name:
+                    frames = ["uncertain"] * max(11, samples)
+                else:
+                    frames = ["clean"] * max(11, samples)
                 return frames[:samples], 6.0, 1920, 1080, 30.0
 
-        with tempfile.TemporaryDirectory(prefix="newsflow-text-label-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-v4-") as temporary:
             root = Path(temporary)
             english_path = root / "english-caption.mp4"
-            safe_path = root / "safe-footage.mp4"
-            english_path.touch()
-            safe_path.touch()
+            russian_path = root / "russian-caption.mp4"
+            interstitial_path = root / "title-card.mp4"
+            uncertain_path = root / "uncertain.mp4"
+            for path in (english_path, russian_path, interstitial_path, uncertain_path):
+                path.touch()
             index = FrameIndex(
                 root / "clips.sqlite3",
                 embedder_factory=lambda: (DummyImageEmbedder(), DummyTextEmbedder()),
             )
             indexed = index.index_folders([str(root)])
-            self.assertEqual(indexed.indexed, 2)
-            # The cheap three-frame indexing pass deliberately leaves both
-            # rows unchecked; the strict five-frame maintenance pass must
-            # discover the later English-text frame and persist both verdicts.
-            self.assertEqual(index.screen_text_stats(), {"blocked": 0, "safe": 0, "unchecked": 2})
+            self.assertEqual(indexed.indexed, 4)
+            self.assertEqual(index.screen_text_stats(), {"blocked": 0, "safe": 0, "unchecked": 4})
 
             labeled = index.classify_english_screen_text()
-            self.assertEqual(labeled["checked"], 2)
-            self.assertEqual(labeled["blocked"], 1)
+            self.assertEqual(labeled["checked"], 4)
+            self.assertEqual(labeled["blocked"], 2)
             self.assertEqual(labeled["safe"], 1)
-            self.assertEqual(index.screen_text_stats(), {"blocked": 1, "safe": 1, "unchecked": 0})
-            self.assertEqual([hit.item.name for hit in index.search("safe footage", limit=10)], ["safe-footage.mp4"])
-            self.assertEqual([item.name for item in index.all_items(exclude_english_text=True)], ["safe-footage.mp4"])
+            self.assertEqual(labeled["uncertain"], 1)
+            self.assertEqual(index.screen_text_eligibility(english_path), SCREEN_ELIGIBILITY_BLOCKED)
+            self.assertEqual(index.screen_text_eligibility(interstitial_path), SCREEN_ELIGIBILITY_BLOCKED)
+            self.assertEqual(index.screen_text_eligibility(russian_path), SCREEN_ELIGIBILITY_SAFE)
+            self.assertEqual(index.screen_text_eligibility(uncertain_path), SCREEN_ELIGIBILITY_UNCERTAIN)
+            self.assertEqual(index.screen_text_eligibility(uncertain_path, deep=True), SCREEN_ELIGIBILITY_UNCERTAIN)
 
-            reopened = ClipIndex(root / "clips.sqlite3")
-            self.assertFalse(reopened.screen_text_safe(english_path))
-            self.assertTrue(reopened.screen_text_safe(safe_path))
+            names = {item.name for item in index.all_items(exclude_english_text=True)}
+            self.assertEqual(names, {"russian-caption.mp4", "uncertain.mp4"})
+
+    def test_stale_v3_blocks_reenter_search_as_uncertain_under_v4(self):
+        """Old all-language v3 blocks must not permanently trash the library."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-v3-migration-") as temporary:
+            root = Path(temporary)
+            path = root / "russian-news.mp4"
+            path.touch()
+            index = ClipIndex(root / "clips.sqlite3")
+            index.add_item(FootageItem(str(path), path.name))
+            with index._connect() as connection:
+                connection.execute(
+                    "UPDATE clips SET english_text=1,english_text_version=? WHERE path=?",
+                    (SCREEN_TEXT_CLASSIFIER_VERSION - 1, str(path)),
+                )
+            self.assertEqual([item.name for item in index.all_items(exclude_english_text=True)], [path.name])
+            self.assertEqual(index.screen_text_stats(), {"blocked": 0, "safe": 0, "unchecked": 1})
 
     def test_ffmpeg_render_is_30fps_has_audio_and_does_not_crop_voice(self):
         source_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"
