@@ -11058,15 +11058,36 @@ def _montage_item_is_excluded(item: FootageItem, excluded_paths: set[str] | None
             or family in (excluded_families or set()))
 
 
-def _montage_screen_text_safe(index, item: FootageItem) -> bool:
-    """Readable on-screen text, title cards and interstitial slates are hard exclusions."""
-    checker = getattr(index, "screen_text_safe", None)
-    if not callable(checker):
-        return True
+def _montage_screen_text_state(index, item: FootageItem, *, deep: bool = False) -> str:
+    """Return SAFE / UNCERTAIN / BLOCKED without discarding ambiguity early."""
+    checker = getattr(index, "screen_text_eligibility", None)
+    if callable(checker):
+        try:
+            state = str(checker(item.path, deep=deep))
+        except (OSError, RuntimeError, ValueError):
+            return SCREEN_ELIGIBILITY_UNCERTAIN
+        if state in {
+            SCREEN_ELIGIBILITY_SAFE,
+            SCREEN_ELIGIBILITY_UNCERTAIN,
+            SCREEN_ELIGIBILITY_BLOCKED,
+        }:
+            return state
+        return SCREEN_ELIGIBILITY_UNCERTAIN
+    legacy = getattr(index, "screen_text_safe", None)
+    if not callable(legacy):
+        return SCREEN_ELIGIBILITY_SAFE
     try:
-        return bool(checker(item.path))
+        return SCREEN_ELIGIBILITY_SAFE if bool(legacy(item.path)) else SCREEN_ELIGIBILITY_BLOCKED
     except (OSError, RuntimeError, ValueError):
+        return SCREEN_ELIGIBILITY_UNCERTAIN
+
+
+def _montage_screen_text_safe(index, item: FootageItem, *, allow_uncertain: bool = False) -> bool:
+    """Prefer verified SAFE; deep-check UNCERTAIN only in the rescue stage."""
+    state = _montage_screen_text_state(index, item, deep=allow_uncertain)
+    if state == SCREEN_ELIGIBILITY_BLOCKED:
         return False
+    return state == SCREEN_ELIGIBILITY_SAFE or allow_uncertain
 
 
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
