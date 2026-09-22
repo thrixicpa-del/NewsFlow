@@ -133,7 +133,9 @@ describe("PublicationPage interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
 
-    await waitFor(() => expect(screen.getByRole("region", { name: "План публикаций на сутки" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Распределение" })).toHaveAttribute("aria-selected", "true"));
+    fireEvent.click(screen.getByRole("tab", { name: "План дня" }));
+    expect(screen.getByRole("region", { name: "План публикаций на сутки" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "04:00" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "04:15" })).toBeInTheDocument();
     expect(screen.getByText("Готовый ролик", { selector: ".nf-day-plan td span" })).toBeInTheDocument();
