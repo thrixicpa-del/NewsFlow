@@ -104,6 +104,7 @@ from .publication_v2 import (
     normalize_channel_publication_rule,
     persist_publication_receipt,
     publication_queue_projection,
+    publication_artifact_fingerprint,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
@@ -14772,6 +14773,21 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
             fail_publication_stage(settings, snapshot_id, "THUMBNAIL", "USER_ACTION_REQUIRED", "Файл обложки не найден; загрузка MP4 сохранена.")
             failures.append((snapshot_id, "Файл обложки не найден."))
             continue
+        frozen_thumbnail = dict(
+            dict(snapshot_record.get("artifactFingerprints", {}) or {}).get("thumbnail", {}) or {}
+        )
+        if frozen_thumbnail:
+            current_thumbnail = publication_artifact_fingerprint(thumbnail_path)
+            if current_thumbnail != frozen_thumbnail:
+                fail_publication_stage(
+                    settings,
+                    snapshot_id,
+                    "THUMBNAIL",
+                    "USER_ACTION_REQUIRED",
+                    "Обложка изменилась после подтверждения snapshot. Переподтвердите назначение перед загрузкой обложки.",
+                )
+                failures.append((snapshot_id, "Обложка изменилась после подтверждения snapshot."))
+                continue
         worker_id = f"publication-v2-thumbnail-{uuid.uuid4().hex[:8]}-{position}"
         if not claim_execution(settings, snapshot_id, worker_id):
             failures.append((snapshot_id, "Snapshot занят другим worker."))
