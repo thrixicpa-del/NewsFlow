@@ -9,7 +9,11 @@ from unittest.mock import patch
 from scriptor import bridge, config
 from scriptor.config import FastGenKey, OpenAIKey, Settings, WProjectKey
 from scriptor.runner import RunState
-from scriptor.youtube_allocation import allocate_ready_jobs, build_allocation_summary, recommend_quota
+from scriptor.youtube_allocation import (
+    allocate_ready_jobs,
+    build_allocation_summary,
+    recommend_quota,
+)
 from scriptor.youtube_api import (
     build_private_video_insert_body,
     normalize_youtube_tags,
