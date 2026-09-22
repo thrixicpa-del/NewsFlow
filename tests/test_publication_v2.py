@@ -1068,6 +1068,56 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(steps["TAGS"]["status"], "SUCCESS")
         self.assertEqual(steps["THUMBNAIL"]["status"], "PENDING")
 
+    def test_youtube_readback_verifies_frozen_seo_title_instead_of_source_title(self):
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "metadata": {
+                        "title": "Исходное название сценария",
+                        "seoTitle": "SEO-заголовок для YouTube",
+                        "description": "Описание",
+                        "tags": ["тег"],
+                    },
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "overallStatus": "PROCESSING",
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "RUNNING"},
+                        "TITLE": {"status": "PENDING"},
+                        "DESCRIPTION": {"status": "PENDING"},
+                        "TAGS": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+
+        reconcile_youtube_video_state(
+            settings,
+            "snapshot-1",
+            {
+                "snippet": {
+                    "title": "SEO-заголовок для YouTube",
+                    "description": "Описание",
+                    "tags": ["тег"],
+                },
+                "processingDetails": {"processingStatus": "succeeded"},
+                "status": {"privacyStatus": "private"},
+            },
+        )
+
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["TITLE"]["status"],
+            "SUCCESS",
+        )
+
+
     def test_cancel_after_youtube_id_stops_automation_without_deleting_or_reuploading_video(self):
         """Cancellation after transport is a downstream stop, never a YouTube deletion."""
         settings = Settings(youtube_publication_executions={
@@ -1215,6 +1265,59 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"], "yt-new")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(upload.call_args.kwargs["thumbnail_path"], "")
+
+    def test_v2_upload_uses_frozen_seo_title_and_keeps_source_title_as_identity_metadata(self):
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {
+                            "title": "Исходное название сценария",
+                            "seoTitle": "SEO-заголовок для YouTube",
+                            "description": "SEO-описание",
+                            "tags": ["тег"],
+                            "hashtags": ["#новости"],
+                        },
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "READY",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "steps": {"VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0}},
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(
+                     bridge,
+                     "upload_private_video",
+                     return_value=(
+                         {"videoId": "yt-new", "videoUrl": "https://youtu.be/yt-new", "privacyStatus": "private"},
+                         {"token": "refreshed"},
+                     ),
+                 ) as upload:
+                bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        body = upload.call_args.kwargs["body"]
+        self.assertEqual(body["snippet"]["title"], "SEO-заголовок для YouTube")
+        self.assertEqual(
+            settings.youtube_publication_snapshots["snapshot-1"]["metadata"]["title"],
+            "Исходное название сценария",
+        )
+
 
     def test_v2_upload_queue_drains_requested_batch_without_exceeding_configured_transport_workers(self):
         """Finished transports free their slot so the next requested snapshot starts in the same queue run."""
