@@ -99,6 +99,7 @@ interface NewsFlowSnapshot {
       uploadConcurrency: number;
       channelRules: Record<string, Record<string, unknown>>;
       rulePresets?: Array<{ name: string; rules?: Record<string, Record<string, unknown>> }>;
+      planVersions?: Array<{ id: string; name: string; createdAt?: string; assignments?: Array<Record<string, unknown>> }>;
       assignments: Record<string, Record<string, unknown>>;
       receipts?: Record<string, {
         productionItemId?: string; title?: string; channelId?: string; youtubeVideoId?: string; youtubeVideoUrl?: string;
