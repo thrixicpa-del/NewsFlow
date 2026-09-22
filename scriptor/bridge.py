@@ -14682,12 +14682,25 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
             channel_id = str(snapshot_record.get("channelId", "")).strip()
             credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
         try:
-            _profile, validated_credentials = fetch_current_channel(credentials)
+            profile, validated_credentials = fetch_current_channel(credentials)
         except _BRIDGE_OPERATION_ERRORS as exc:
             with lock:
                 fail_publication_stage(settings, snapshot_id, "AUTH_CHECK", classify_publication_error(exc), str(exc))
                 save_settings(settings)
                 blocked.append((snapshot_id, str(exc)))
+            return
+        configured_channel = next((
+            dict(channel or {}) for channel in settings.analytics_channels
+            if str(dict(channel or {}).get("profile_id", "")).strip() == channel_id
+        ), {})
+        expected_youtube_channel_id = str(configured_channel.get("channel_id", "")).strip()
+        actual_youtube_channel_id = str(dict(profile or {}).get("channelId", "")).strip()
+        if expected_youtube_channel_id and actual_youtube_channel_id != expected_youtube_channel_id:
+            message = "OAuth подключён к другому YouTube-каналу. Переподключите выбранный канал."
+            with lock:
+                fail_publication_stage(settings, snapshot_id, "AUTH_CHECK", "AUTH_REQUIRED", message)
+                save_settings(settings)
+                blocked.append((snapshot_id, message))
             return
         with lock:
             settings.youtube_oauth_tokens[channel_id] = json.dumps(validated_credentials, ensure_ascii=False)
