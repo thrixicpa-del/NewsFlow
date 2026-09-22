@@ -11184,10 +11184,10 @@ def prepare_montage(payload: dict) -> dict:
         unique_scene_count = min(len(scenes), max(2, unique_scene_count))
     if progress:
         mode_detail = (
-        f"быстрый режим {fast_reuse_percent}%: после {unique_scene_count} сцен reuse разрешён "
-        "раньше внешнего поиска; новые безопасные семьи остаются приоритетом"
-        if fast_reuse else f"{len(scenes)} уникальных сцен"
-    )
+            f"быстрый режим {fast_reuse_percent}%: после {unique_scene_count} сцен reuse разрешён "
+            "раньше внешнего поиска; новые безопасные семьи остаются приоритетом"
+            if fast_reuse else f"{len(scenes)} уникальных сцен"
+        )
         progress("Подбор футажей", f"Пакетный поиск: {mode_detail}")
     # Ask the text model once for the whole scenario and score all scenes
     # against the shared in-memory vector matrix.  Keep extra candidates so a
