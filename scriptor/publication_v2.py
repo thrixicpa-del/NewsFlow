@@ -92,13 +92,26 @@ def migrate_legacy_publication_data(settings: Any) -> PublicationMigrationReport
         if production_id not in items:
             items[production_id] = {
                 "productionItemId": production_id, "legacyLinks": {},
-                "artifacts": {}, "metadata": {"title": str(production.get("title", "")), "description": "", "tags": [],
-                                               "index": known_order[production_id]},
+                "artifacts": {}, "metadata": {
+                    "title": str(production.get("title", "")), "description": "", "tags": [],
+                    "index": known_order[production_id],
+                    "topic": str(production.get("topic", "")),
+                    "direction": str(production.get("direction", "")),
+                    "angle": str(production.get("angle", "")),
+                    "topicFamily": str(production.get("topic_family", "")),
+                    "priority": int(production.get("publication_priority", 0) or 0),
+                },
                 "readiness": {"state": "DISCOVERED", "reasons": ["VIDEO_MISSING"]}, "jobIds": [], "updatedAt": _now(),
             }
             migrated_items += 1
         else:
-            items[production_id].setdefault("metadata", {}).setdefault("index", known_order[production_id])
+            metadata = items[production_id].setdefault("metadata", {})
+            metadata.setdefault("index", known_order[production_id])
+            metadata.setdefault("topic", str(production.get("topic", "")))
+            metadata.setdefault("direction", str(production.get("direction", "")))
+            metadata.setdefault("angle", str(production.get("angle", "")))
+            metadata.setdefault("topicFamily", str(production.get("topic_family", "")))
+            metadata.setdefault("priority", int(production.get("publication_priority", 0) or 0))
 
     # Older production batches did not have ProductionItems or publication
     # jobs at all: their durable identity lived in the montage queue index.
@@ -404,7 +417,35 @@ def _rule_allows_item(rule: dict[str, Any], item: dict[str, Any], fallback_order
         return False
     if order_end and order > order_end:
         return False
+
+    metadata = dict(item.get("metadata", {}) or {})
+    routing_text = " ".join(
+        str(metadata.get(field, ""))
+        for field in ("topic", "direction", "angle", "topicFamily")
+    ).casefold()
+    includes = [
+        str(value).casefold()
+        for value in rule.get("includeKeywords", [])
+        if str(value).strip()
+    ] if isinstance(rule.get("includeKeywords"), list) else []
+    excludes = [
+        str(value).casefold()
+        for value in rule.get("excludeKeywords", [])
+        if str(value).strip()
+    ] if isinstance(rule.get("excludeKeywords"), list) else []
+    if includes and not any(value in routing_text for value in includes):
+        return False
+    if excludes and any(value in routing_text for value in excludes):
+        return False
     return True
+
+
+def _item_priority(item: dict[str, Any]) -> int:
+    metadata = dict(item.get("metadata", {}) or {})
+    try:
+        return int(metadata.get("priority", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _fill_ratio(rule: dict[str, Any], used: dict[str, int]) -> float:
@@ -473,7 +514,11 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
     ]
     if any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
            for rule in active_rules):
-        candidates.sort(key=lambda pair: (-(_item_duration_seconds(pair[1]) or 0.0), item_order[pair[0]], pair[0]))
+        candidates.sort(key=lambda pair: (-(_item_duration_seconds(pair[1]) or 0.0), -_item_priority(pair[1]), item_order[pair[0]], pair[0]))
+
+    if not any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
+               for rule in active_rules):
+        candidates.sort(key=lambda pair: (-_item_priority(pair[1]), item_order[pair[0]], pair[0]))
 
     for production_id, item in candidates:
         available = [
@@ -507,7 +552,11 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
 
         chosen = min(
             pool,
-            key=lambda rule: (_fill_ratio(rule, used), rule_order[str(rule["channelId"])]),
+            key=lambda rule: (
+                _fill_ratio(rule, used),
+                -int(rule.get("channelPriority", 0) or 0),
+                rule_order[str(rule["channelId"])],
+            ),
         )
         channel_id = str(chosen["channelId"])
         used[channel_id] += 1
@@ -531,7 +580,19 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
             for row in channel_rows if bool(row.get("locked", False))
         }
         try:
-            slots = build_channel_schedule([str(row["productionItemId"]) for row in channel_rows], rule, manual_slots)
+            slots = build_channel_schedule(
+                [str(row["productionItemId"]) for row in channel_rows],
+                rule,
+                manual_slots,
+                item_topics={
+                    str(row["productionItemId"]): str(
+                        dict(items.get(str(row["productionItemId"]), {}).get("metadata", {}) or {}).get("topicFamily")
+                        or dict(items.get(str(row["productionItemId"]), {}).get("metadata", {}) or {}).get("topic")
+                        or ""
+                    ).strip()
+                    for row in channel_rows
+                },
+            )
         except ValueError as error:
             schedule_warnings.append({"channelId": channel_id, "message": str(error)})
             for row in channel_rows:
@@ -574,9 +635,13 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
         maximum = float(source.get("maxDurationSeconds", 0) or 0)
         order_start = int(source.get("orderStart", 0) or 0)
         order_end = int(source.get("orderEnd", 0) or 0)
+        channel_priority = int(source.get("channelPriority", 0) or 0)
+        max_per_hour = int(source.get("maxVideosPerHour", 0) or 0)
+        topic_cooldown = int(source.get("topicCooldownMinutes", 0) or 0)
     except (TypeError, ValueError) as error:
         raise ValueError("Квоты, интервалы и диапазоны должны быть числами") from error
-    if quota < 0 or daily_cap < 0 or minimum < 0 or maximum < 0 or order_start < 0 or order_end < 0:
+    if (quota < 0 or daily_cap < 0 or minimum < 0 or maximum < 0 or order_start < 0 or order_end < 0
+            or max_per_hour < 0 or topic_cooldown < 0):
         raise ValueError("Квоты и диапазоны не могут быть отрицательными")
     if maximum and maximum < minimum:
         raise ValueError("Некорректный диапазон длительности канала")
@@ -620,6 +685,16 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
         weekdays = sorted({int(day) for day in allowed_weekdays if 0 <= int(day) <= 6})
     else:
         weekdays = list(range(7))
+    include_keywords = [
+        " ".join(str(value).split()).casefold()
+        for value in source.get("includeKeywords", [])
+        if str(value).strip()
+    ] if isinstance(source.get("includeKeywords"), list) else []
+    exclude_keywords = [
+        " ".join(str(value).split()).casefold()
+        for value in source.get("excludeKeywords", [])
+        if str(value).strip()
+    ] if isinstance(source.get("excludeKeywords"), list) else []
     automation_source = dict(source.get("automation", {}) or {})
     automation = {
         "upload": True,
@@ -650,6 +725,11 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
         "maxDurationSeconds": maximum,
         "orderStart": order_start,
         "orderEnd": order_end,
+        "channelPriority": channel_priority,
+        "includeKeywords": include_keywords,
+        "excludeKeywords": exclude_keywords,
+        "maxVideosPerHour": max_per_hour,
+        "topicCooldownMinutes": topic_cooldown,
         "automation": automation,
     }
 
@@ -675,7 +755,12 @@ def _next_allowed_slot(candidate: datetime, rule: dict[str, Any], zone: ZoneInfo
         return current
 
 
-def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any], manual_slots: dict[str, str] | None = None) -> list[dict[str, str]]:
+def build_channel_schedule(
+    production_item_ids: list[str],
+    rule: dict[str, Any],
+    manual_slots: dict[str, str] | None = None,
+    item_topics: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
     """Build one independent channel schedule on the canonical 15-minute grid."""
     zone_name = str(rule.get("timezone", "")).strip() or "UTC"
     zone = ZoneInfo(zone_name)
@@ -703,7 +788,12 @@ def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any],
     result: list[dict[str, str]] = []
     overrides = dict(manual_slots or {})
     daily_cap = max(0, int(rule.get("dailyCap", 0) or 0))
+    max_per_hour = max(0, int(rule.get("maxVideosPerHour", 0) or 0))
+    topic_cooldown = max(0, int(rule.get("topicCooldownMinutes", 0) or 0))
+    topics = {str(key): str(value).strip().casefold() for key, value in dict(item_topics or {}).items()}
     daily_counts: dict[str, int] = {}
+    scheduled_points: list[datetime] = []
+    last_topic_slot: dict[str, datetime] = {}
     for production_item_id in production_item_ids:
         manual = str(overrides.get(production_item_id, "")).strip()
         if manual:
@@ -717,13 +807,37 @@ def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any],
             source = "manual"
         else:
             slot = _next_allowed_slot(candidate, rule, zone)
-            while daily_cap and daily_counts.get(slot.date().isoformat(), 0) >= daily_cap:
-                candidate = datetime.combine(
-                    (slot + timedelta(days=1)).date(),
-                    _clock(rule.get("publishWindowStart")) or time.min,
-                    tzinfo=zone,
-                )
-                slot = _next_allowed_slot(candidate, rule, zone)
+            while True:
+                if daily_cap and daily_counts.get(slot.date().isoformat(), 0) >= daily_cap:
+                    candidate = datetime.combine(
+                        (slot + timedelta(days=1)).date(),
+                        _clock(rule.get("publishWindowStart")) or time.min,
+                        tzinfo=zone,
+                    )
+                    slot = _next_allowed_slot(candidate, rule, zone)
+                    continue
+
+                if max_per_hour:
+                    recent = [point for point in scheduled_points if timedelta(0) <= slot - point < timedelta(hours=1)]
+                    if len(recent) >= max_per_hour:
+                        candidate = min(recent) + timedelta(hours=1)
+                        slot = _next_allowed_slot(candidate, rule, zone)
+                        continue
+
+                topic = topics.get(str(production_item_id), "")
+                previous_topic_slot = last_topic_slot.get(topic) if topic else None
+                if topic and topic_cooldown and previous_topic_slot:
+                    earliest = previous_topic_slot + timedelta(minutes=topic_cooldown)
+                    if slot < earliest:
+                        candidate = earliest
+                        # Keep the canonical 15-minute grid when a cooldown is
+                        # not itself a multiple of 15.
+                        remainder = candidate.minute % 15
+                        if remainder or candidate.second or candidate.microsecond:
+                            candidate = candidate.replace(second=0, microsecond=0) + timedelta(minutes=(15 - remainder) % 15)
+                        slot = _next_allowed_slot(candidate, rule, zone)
+                        continue
+                break
             if not _is_quarter_hour(slot):
                 raise ValueError("Расчётное время вышло за 15-минутную сетку.")
             source = "auto"
@@ -735,6 +849,10 @@ def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any],
         })
         daily_key = slot.date().isoformat()
         daily_counts[daily_key] = daily_counts.get(daily_key, 0) + 1
+        scheduled_points.append(slot)
+        topic = topics.get(str(production_item_id), "")
+        if topic:
+            last_topic_slot[topic] = slot
         candidate = slot + timedelta(minutes=interval)
     return result
 
