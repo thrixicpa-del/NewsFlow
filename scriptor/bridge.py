@@ -14952,7 +14952,7 @@ def run_publication_v2_studio(payload: dict) -> dict:
             if stage_state in terminal:
                 skipped += 1
                 continue
-            if kind in {"ads", "cards", "end-screen"} and str(dict(execution_steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper() != "SUCCESS":
+            if kind in {"ads", "post", "cards", "end-screen"} and str(dict(execution_steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper() != "SUCCESS":
                 skipped += 1
                 continue
             if kind == "ads" and not bool(ad_plan.get("monetizationEnabled")):
