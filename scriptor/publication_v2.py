@@ -79,18 +79,23 @@ def migrate_legacy_publication_data(settings: Any) -> PublicationMigrationReport
                    for item in getattr(settings, "idea_production_items", []) if isinstance(item, dict)
                    and str(item.get("id") or item.get("production_item_id") or "").strip()}
     known_by_title: dict[str, list[str]] = {}
-    for production_id, item in known_by_id.items():
+    known_order: dict[str, int] = {}
+    for position, (production_id, item) in enumerate(known_by_id.items(), start=1):
         known_by_title.setdefault(_normalise(item.get("title")), []).append(production_id)
+        known_order[production_id] = position
 
     migrated_items = migrated_jobs = missing_artifacts = ambiguous_jobs = 0
     for production_id, production in known_by_id.items():
         if production_id not in items:
             items[production_id] = {
                 "productionItemId": production_id, "legacyLinks": {},
-                "artifacts": {}, "metadata": {"title": str(production.get("title", "")), "description": "", "tags": []},
+                "artifacts": {}, "metadata": {"title": str(production.get("title", "")), "description": "", "tags": [],
+                                               "index": known_order[production_id]},
                 "readiness": {"state": "DISCOVERED", "reasons": ["VIDEO_MISSING"]}, "jobIds": [], "updatedAt": _now(),
             }
             migrated_items += 1
+        else:
+            items[production_id].setdefault("metadata", {}).setdefault("index", known_order[production_id])
 
     # Older production batches did not have ProductionItems or publication
     # jobs at all: their durable identity lived in the montage queue index.
@@ -227,45 +232,167 @@ def reconcile_publication_items(settings: Any) -> dict[str, Any]:
     return {"items": items, "counters": {"total": len(items), "videoReady": ready, "videoMissing": missing}}
 
 
-def build_distribution_preview(items: dict[str, dict], rules: list[dict], assignments: dict[str, dict]) -> dict[str, Any]:
-    """Return a deterministic non-mutating allocation preview.
+def _item_duration_seconds(item: dict[str, Any]) -> float | None:
+    metadata = dict(item.get("metadata", {}) or {})
+    video = dict(dict(item.get("artifacts", {}) or {}).get("video", {}) or {})
+    for raw in (
+        item.get("durationSeconds"),
+        metadata.get("durationSeconds"),
+        metadata.get("duration"),
+        video.get("durationSeconds"),
+        video.get("duration"),
+    ):
+        if raw in (None, "", 0, "0"):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
 
-    Locked/manual assignments consume only their own channel quota.  All
-    remaining rows are sorted by production ID unless a channel explicitly
-    asks for longest-first.
+
+def _item_order(item: dict[str, Any], fallback: int) -> int:
+    metadata = dict(item.get("metadata", {}) or {})
+    for raw in (metadata.get("index"), item.get("productionOrder"), item.get("index")):
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return fallback
+
+
+def _rule_allows_item(rule: dict[str, Any], item: dict[str, Any], fallback_order: int) -> bool:
+    duration = _item_duration_seconds(item)
+    minimum = max(0.0, float(rule.get("minDurationSeconds", 0) or 0))
+    maximum = max(0.0, float(rule.get("maxDurationSeconds", 0) or 0))
+    if minimum and (duration is None or duration < minimum):
+        return False
+    if maximum and (duration is None or duration > maximum):
+        return False
+
+    order = _item_order(item, fallback_order)
+    order_start = max(0, int(rule.get("orderStart", 0) or 0))
+    order_end = max(0, int(rule.get("orderEnd", 0) or 0))
+    if order_start and order < order_start:
+        return False
+    if order_end and order > order_end:
+        return False
+    return True
+
+
+def _fill_ratio(rule: dict[str, Any], used: dict[str, int]) -> float:
+    channel_id = str(rule.get("channelId", "")).strip()
+    quota = max(1, int(rule.get("quota", 0) or 0))
+    return used.get(channel_id, 0) / quota
+
+
+def build_distribution_preview(items: dict[str, dict], rules: list[dict], assignments: dict[str, dict]) -> dict[str, Any]:
+    """Return a deterministic, non-mutating smart allocation preview.
+
+    Manual/locked/confirmed assignments are immutable inputs. Auto allocation
+    respects auth, quotas, duration/order eligibility and the selected strategy.
     """
-    enabled = [dict(rule) for rule in rules if bool(rule.get("enabled", True)) and int(rule.get("quota", 0) or 0) > 0]
-    by_channel = {str(rule.get("channelId", "")).strip(): rule for rule in enabled if str(rule.get("channelId", "")).strip()}
+    active_rules: list[dict[str, Any]] = []
+    for raw_rule in rules:
+        rule = dict(raw_rule)
+        channel_id = str(rule.get("channelId", "")).strip()
+        quota = max(0, int(rule.get("quota", 0) or 0))
+        if not channel_id or not bool(rule.get("enabled", True)) or quota <= 0:
+            continue
+        if rule.get("oauthConnected") is False:
+            continue
+        if str(rule.get("distributionStrategy", "balanced")).strip() == "manual":
+            continue
+        rule["quota"] = quota
+        active_rules.append(rule)
+
+    by_channel = {str(rule["channelId"]): rule for rule in active_rules}
+    rule_order = {str(rule["channelId"]): index for index, rule in enumerate(active_rules)}
     used = {channel_id: 0 for channel_id in by_channel}
     rows: list[dict[str, Any]] = []
     assigned_ids: set[str] = set()
-    for production_id in sorted(items):
+
+    ordered_items = sorted(
+        items.items(),
+        key=lambda pair: (_item_order(pair[1], 10**9), pair[0]),
+    )
+    item_order = {production_id: position + 1 for position, (production_id, _item) in enumerate(ordered_items)}
+
+    for production_id, _item in ordered_items:
         assignment = dict(assignments.get(production_id, {}) or {})
         channel_id = str(assignment.get("channelId", "")).strip()
-        locked = bool(assignment.get("locked", False)) or str(assignment.get("source", "")) == "manual"
+        source = str(assignment.get("source", "")).strip()
+        locked = bool(assignment.get("locked", False)) or source in {"manual", "confirmed_snapshot"}
         if channel_id and locked:
             if channel_id in used:
                 used[channel_id] += 1
-            rows.append({"productionItemId": production_id, "channelId": channel_id, "source": assignment.get("source", "manual"),
-                         "locked": True, "reason": "manual_locked"})
+            rows.append({
+                "productionItemId": production_id,
+                "channelId": channel_id,
+                "source": source or "manual",
+                "locked": True,
+                "reason": "confirmed_snapshot" if source == "confirmed_snapshot" else "manual_locked",
+                "publishAt": str(assignment.get("publishAt", "") or ""),
+            })
             assigned_ids.add(production_id)
 
     candidates = [
-        (production_id, item) for production_id, item in items.items()
-        if production_id not in assigned_ids and str(item.get("readiness", {}).get("state", "")) == "VIDEO_READY"
+        (production_id, item) for production_id, item in ordered_items
+        if production_id not in assigned_ids
+        and str(dict(item.get("readiness", {}) or {}).get("state", "")) in {"VIDEO_READY", "PUBLICATION_READY"}
     ]
-    if any(str(rule.get("distributionStrategy", "")) == "longest_monetized" for rule in enabled):
-        candidates.sort(key=lambda pair: (-float(pair[1].get("durationSeconds", 0) or 0), pair[0]))
-    else:
-        candidates.sort(key=lambda pair: pair[0])
-    for production_id, _item in candidates:
-        chosen = next((rule for rule in enabled if used[str(rule["channelId"])] < int(rule["quota"])), None)
-        if chosen is None:
-            rows.append({"productionItemId": production_id, "channelId": "", "source": "", "locked": False, "reason": "quota_exhausted"})
+    if any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
+           for rule in active_rules):
+        candidates.sort(key=lambda pair: (-(_item_duration_seconds(pair[1]) or 0.0), item_order[pair[0]], pair[0]))
+
+    for production_id, item in candidates:
+        available = [
+            rule for rule in active_rules
+            if used[str(rule["channelId"])] < int(rule["quota"])
+            and _rule_allows_item(rule, item, item_order[production_id])
+        ]
+        if not available:
+            has_capacity = any(used[str(rule["channelId"])] < int(rule["quota"]) for rule in active_rules)
+            rows.append({
+                "productionItemId": production_id,
+                "channelId": "",
+                "source": "",
+                "locked": False,
+                "reason": "eligibility_mismatch" if has_capacity else "quota_exhausted",
+            })
             continue
+
+        monetized = [
+            rule for rule in available
+            if bool(rule.get("monetized"))
+            and str(rule.get("distributionStrategy", "")) == "longest_monetized"
+        ]
+        if monetized:
+            pool = monetized
+            reason = "longest_monetized"
+        else:
+            balanced = [rule for rule in available if str(rule.get("distributionStrategy", "balanced")) == "balanced"]
+            pool = balanced or available
+            reason = "balanced" if balanced else "ordered"
+
+        chosen = min(
+            pool,
+            key=lambda rule: (_fill_ratio(rule, used), rule_order[str(rule["channelId"])]),
+        )
         channel_id = str(chosen["channelId"])
         used[channel_id] += 1
-        rows.append({"productionItemId": production_id, "channelId": channel_id, "source": "auto", "locked": False, "reason": "auto"})
+        rows.append({
+            "productionItemId": production_id,
+            "channelId": channel_id,
+            "source": "auto",
+            "locked": False,
+            "reason": reason,
+        })
+
     schedule_warnings: list[dict[str, str]] = []
     for channel_id, rule in by_channel.items():
         if str(rule.get("publishMode", "")).strip() != "schedule":
@@ -274,7 +401,7 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
         if not channel_rows:
             continue
         manual_slots = {
-            str(row["productionItemId"]): str((assignments.get(str(row["productionItemId"]), {}) or {}).get("publishAt", "") or "").strip()
+            str(row["productionItemId"]): str((assignments.get(str(row["productionItemId"]), {}) or {}).get("publishAt", "") or row.get("publishAt", "") or "").strip()
             for row in channel_rows if bool(row.get("locked", False))
         }
         try:
@@ -291,13 +418,20 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
             row["timezone"] = slot["timezone"]
     return {"assignments": rows, "channelUsage": used, "scheduleWarnings": schedule_warnings}
 
-
 def _clock(value: object) -> time | None:
     clean = str(value or "").strip()
     if not clean:
         return None
     return time.fromisoformat(clean)
 
+
+def _is_quarter_hour(value: datetime) -> bool:
+    return value.minute % 15 == 0 and value.second == 0 and value.microsecond == 0
+
+
+def _validate_quarter_hour_clock(value: time | None, label: str) -> None:
+    if value is not None and (value.minute % 15 != 0 or value.second != 0 or value.microsecond != 0):
+        raise ValueError(f"{label} должно быть кратно 15 минутам (:00/:15/:30/:45).")
 
 def _next_allowed_slot(candidate: datetime, rule: dict[str, Any], zone: ZoneInfo) -> datetime:
     allowed = rule.get("allowedWeekdays")
@@ -321,7 +455,7 @@ def _next_allowed_slot(candidate: datetime, rule: dict[str, Any], zone: ZoneInfo
 
 
 def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any], manual_slots: dict[str, str] | None = None) -> list[dict[str, str]]:
-    """Build a timezone-aware schedule for exactly one channel without mutation."""
+    """Build one independent channel schedule on the canonical 15-minute grid."""
     zone_name = str(rule.get("timezone", "")).strip() or "UTC"
     zone = ZoneInfo(zone_name)
     first = str(rule.get("firstPublishAt", "")).strip()
@@ -335,9 +469,16 @@ def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any],
         candidate = candidate.replace(tzinfo=zone)
     else:
         candidate = candidate.astimezone(zone)
+    if not _is_quarter_hour(candidate):
+        raise ValueError("Первый выход должен быть кратен 15 минутам (:00/:15/:30/:45).")
+
     interval = int(rule.get("intervalMinutes", 0) or 0)
-    if interval < 1:
-        raise ValueError("Интервал между роликами должен быть положительным")
+    if interval < 15 or interval % 15 != 0:
+        raise ValueError("Интервал между роликами должен быть положительным и кратным 15 минутам.")
+
+    _validate_quarter_hour_clock(_clock(rule.get("publishWindowStart")), "Начало окна публикации")
+    _validate_quarter_hour_clock(_clock(rule.get("publishWindowEnd")), "Конец окна публикации")
+
     result: list[dict[str, str]] = []
     overrides = dict(manual_slots or {})
     daily_cap = max(0, int(rule.get("dailyCap", 0) or 0))
@@ -350,60 +491,105 @@ def build_channel_schedule(production_item_ids: list[str], rule: dict[str, Any],
                 slot = slot.replace(tzinfo=zone)
             else:
                 slot = slot.astimezone(zone)
+            if not _is_quarter_hour(slot):
+                raise ValueError("Ручное время должно быть кратно 15 минутам (:00/:15/:30/:45).")
             source = "manual"
         else:
             slot = _next_allowed_slot(candidate, rule, zone)
             while daily_cap and daily_counts.get(slot.date().isoformat(), 0) >= daily_cap:
-                candidate = datetime.combine((slot + timedelta(days=1)).date(), _clock(rule.get("publishWindowStart")) or time.min, tzinfo=zone)
+                candidate = datetime.combine(
+                    (slot + timedelta(days=1)).date(),
+                    _clock(rule.get("publishWindowStart")) or time.min,
+                    tzinfo=zone,
+                )
                 slot = _next_allowed_slot(candidate, rule, zone)
+            if not _is_quarter_hour(slot):
+                raise ValueError("Расчётное время вышло за 15-минутную сетку.")
             source = "auto"
-        result.append({"productionItemId": str(production_item_id), "publishAt": slot.isoformat(), "source": source,
-                       "timezone": zone.key})
+        result.append({
+            "productionItemId": str(production_item_id),
+            "publishAt": slot.isoformat(),
+            "source": source,
+            "timezone": zone.key,
+        })
         daily_key = slot.date().isoformat()
         daily_counts[daily_key] = daily_counts.get(daily_key, 0) + 1
         candidate = slot + timedelta(minutes=interval)
     return result
 
+def apply_bulk_schedule_range(
+    assignments: list[dict],
+    schedule: dict[str, Any],
+    channel_rules: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Apply one bulk window independently inside every selected channel.
 
-def apply_bulk_schedule_range(assignments: list[dict], schedule: dict[str, Any]) -> list[dict]:
-    """Return a non-mutating, evenly-spaced preview inside one operator range.
-
-    This is deliberately a preview helper: it never saves assignments, creates
-    snapshots, or starts a provider call.  Confirmation remains the only
-    persistent publication action.
+    The window limits each channel; it never flattens all channels into one
+    shared global sequence. Channel interval/timezone/window/day rules remain
+    authoritative, while explicit locked/manual slots are preserved.
     """
     date_value = str(schedule.get("date", "")).strip()
     start_value = str(schedule.get("startTime", "")).strip()
     end_value = str(schedule.get("endTime", "")).strip()
-    zone_name = str(schedule.get("timezone", "")).strip() or "UTC"
-    try:
-        zone = ZoneInfo(zone_name)
-        start = datetime.fromisoformat(f"{date_value}T{start_value}").replace(tzinfo=zone)
-        end = datetime.fromisoformat(f"{date_value}T{end_value}").replace(tzinfo=zone)
-    except Exception as error:
-        raise ValueError("Укажите корректные дату, начало, конец и часовой пояс диапазона.") from error
-    if end < start:
-        raise ValueError("Конец диапазона должен быть не раньше начала.")
+    fallback_zone_name = str(schedule.get("timezone", "")).strip() or "UTC"
+    if not date_value or not start_value or not end_value:
+        raise ValueError("Укажите дату, начало и конец массового диапазона.")
 
     result = [dict(row) for row in assignments]
-    scheduled_positions = [index for index, row in enumerate(result) if str(row.get("channelId", "")).strip()]
-    if not scheduled_positions:
-        return result
-    if len(scheduled_positions) == 1:
-        result[scheduled_positions[0]].update({"publishAt": start.isoformat(), "timezone": zone.key, "source": "bulk_range"})
-        return result
+    rules = dict(channel_rules or {})
+    positions_by_channel: dict[str, list[int]] = {}
+    for index, row in enumerate(result):
+        channel_id = str(row.get("channelId", "")).strip()
+        if channel_id and not bool(row.get("locked", False)):
+            positions_by_channel.setdefault(channel_id, []).append(index)
 
-    total_seconds = int((end - start).total_seconds())
-    denominator = len(scheduled_positions) - 1
-    for offset, position in enumerate(scheduled_positions):
-        seconds = round(total_seconds * offset / denominator)
-        result[position].update({"publishAt": (start + timedelta(seconds=seconds)).isoformat(), "timezone": zone.key,
-                                 "source": "bulk_range"})
+    for channel_id, positions in positions_by_channel.items():
+        rule = dict(rules.get(channel_id, {}) or {})
+        zone_name = str(rule.get("timezone", "")).strip() or fallback_zone_name
+        try:
+            zone = ZoneInfo(zone_name)
+            start = datetime.fromisoformat(f"{date_value}T{start_value}").replace(tzinfo=zone)
+            end = datetime.fromisoformat(f"{date_value}T{end_value}").replace(tzinfo=zone)
+        except Exception as error:
+            raise ValueError("Укажите корректные дату, начало, конец и часовой пояс диапазона.") from error
+        if end < start:
+            raise ValueError("Конец диапазона должен быть не раньше начала.")
+        if not _is_quarter_hour(start) or not _is_quarter_hour(end):
+            raise ValueError("Начало и конец массового диапазона должны быть кратны 15 минутам.")
+
+        interval = int(rule.get("intervalMinutes", 15) or 15)
+        if interval < 15 or interval % 15 != 0:
+            raise ValueError(f"Интервал канала {channel_id} должен быть кратен 15 минутам.")
+
+        bounded_rule = {
+            **rule,
+            "channelId": channel_id,
+            "timezone": zone.key,
+            "firstPublishAt": start.isoformat(),
+            "intervalMinutes": interval,
+        }
+        slots = build_channel_schedule(
+            [str(result[position]["productionItemId"]) for position in positions],
+            bounded_rule,
+        )
+        slots_by_id = {slot["productionItemId"]: slot for slot in slots}
+        for position in positions:
+            row = result[position]
+            slot = slots_by_id[str(row["productionItemId"])]
+            slot_time = datetime.fromisoformat(slot["publishAt"]).astimezone(zone)
+            if slot_time > end:
+                row["scheduleWarning"] = "Ролик не помещается в выбранный диапазон этого канала."
+                row.pop("publishAt", None)
+                continue
+            row.update({
+                "publishAt": slot["publishAt"],
+                "timezone": zone.key,
+                "source": "bulk_range",
+            })
     return result
 
-
 def validate_publication_schedule(assignments: list[dict], channel_rules: dict[str, dict]) -> list[dict[str, str]]:
-    """Return conflicts without correcting any explicit assignment in place."""
+    """Return schedule conflicts without mutating explicit operator choices."""
     conflicts: list[dict[str, str]] = []
     seen_slots: dict[tuple[str, str], str] = {}
     daily_counts: dict[tuple[str, str], int] = {}
@@ -421,6 +607,8 @@ def validate_publication_schedule(assignments: list[dict], channel_rules: dict[s
             conflicts.append({"kind": "invalid_timezone_or_time", "productionItemId": production_id, "channelId": channel_id})
             continue
         local_slot = slot.replace(tzinfo=zone) if slot.tzinfo is None else slot.astimezone(zone)
+        if not _is_quarter_hour(local_slot):
+            conflicts.append({"kind": "quarter_hour_required", "productionItemId": production_id, "channelId": channel_id})
         slot_key = (channel_id, local_slot.isoformat())
         if slot_key in seen_slots:
             conflicts.append({"kind": "duplicate_slot", "productionItemId": production_id, "channelId": channel_id})
@@ -433,15 +621,14 @@ def validate_publication_schedule(assignments: list[dict], channel_rules: dict[s
         start, end = _clock(rule.get("publishWindowStart")), _clock(rule.get("publishWindowEnd"))
         local_time = local_slot.timetz().replace(tzinfo=None)
         within_window = not start or not end or (start <= end and start <= local_time <= end) or (start > end and (local_time >= start or local_time <= end))
-        if not within_window and bool(assignment.get("locked", False)):
-            conflicts.append({"kind": "manual_outside_window", "productionItemId": production_id, "channelId": channel_id})
+        if not within_window:
+            conflicts.append({"kind": "outside_window", "productionItemId": production_id, "channelId": channel_id})
         daily_key = (channel_id, local_slot.date().isoformat())
         daily_counts[daily_key] = daily_counts.get(daily_key, 0) + 1
         daily_cap = max(0, int(rule.get("dailyCap", 0) or 0))
         if daily_cap and daily_counts[daily_key] > daily_cap:
             conflicts.append({"kind": "daily_cap_exceeded", "productionItemId": production_id, "channelId": channel_id})
     return conflicts
-
 
 def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, Any]:
     """Preflight one frozen snapshot without modifying its source data."""
