@@ -1643,6 +1643,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(
                      bridge,
                      "upload_private_video",
