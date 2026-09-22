@@ -1049,6 +1049,35 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             confirm_publication_snapshots(settings, [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-09-10T18:00:00+03:00"}],
                                           {"channel-a": {"privacy": "public", "publishMode": "schedule"}})
 
+    def test_preflight_rejects_video_replaced_after_snapshot_confirmation(self):
+        """Frozen input must detect a changed MP4 at the same path before irreversible upload."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "video.mp4"
+            video.write_bytes(b"original-video")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": "protected-token"},
+                youtube_publication_items={
+                    "pi-1": {
+                        "productionItemId": "pi-1",
+                        "metadata": {"title": "Ролик", "description": "Описание", "tags": ["тег"]},
+                        "artifacts": {"video": {"path": str(video), "exists": True}},
+                        "readiness": {"state": "VIDEO_READY", "contentReady": True},
+                    },
+                },
+            )
+            snapshot_id = confirm_publication_snapshots(
+                settings,
+                [{"productionItemId": "pi-1", "channelId": "channel-a"}],
+                {"channel-a": {"privacy": "private", "publishMode": "publish_now", "intervalMinutes": 15}},
+            )[0]
+            video.write_bytes(b"replacement-video-is-different")
+
+            preflight = validate_publication_snapshot(settings, snapshot_id)
+
+        self.assertFalse(preflight["ok"])
+        self.assertIn("VIDEO_STALE", {reason["kind"] for reason in preflight["reasons"]})
+
     def test_preflight_blocks_only_missing_or_invalid_snapshot_and_never_reopens_known_upload(self):
         """Preflight reports exact readiness reasons and treats an existing YouTube ID as immutable."""
         with TemporaryDirectory() as directory:
