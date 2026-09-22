@@ -439,6 +439,7 @@ class Settings:
     youtube_publication_migration_version: int = 0
     youtube_channel_publication_rules: dict[str, dict] = field(default_factory=dict)
     youtube_publication_v2_rule_presets: list[dict] = field(default_factory=list)
+    youtube_publication_plan_versions: list[dict] = field(default_factory=list)
     youtube_publication_assignments: dict[str, dict] = field(default_factory=dict)
     youtube_publication_queue_paused: bool = False
     # The allocation constructor is intentionally distinct from the time-grid
