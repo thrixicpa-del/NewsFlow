@@ -6,14 +6,18 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scriptor import bridge
-from scriptor import config
+from scriptor import bridge, config
 from scriptor.config import FastGenKey, OpenAIKey, Settings, WProjectKey
-from scriptor.youtube_oauth import youtube_oauth_scopes
-from scriptor.youtube_api import parse_analytics_rows, parse_current_channel, parse_google_account_email
-from scriptor.youtube_api import build_private_video_insert_body, normalize_youtube_tags
 from scriptor.runner import RunState
 from scriptor.youtube_allocation import allocate_ready_jobs, build_allocation_summary, recommend_quota
+from scriptor.youtube_api import (
+    build_private_video_insert_body,
+    normalize_youtube_tags,
+    parse_analytics_rows,
+    parse_current_channel,
+    parse_google_account_email,
+)
+from scriptor.youtube_oauth import youtube_oauth_scopes
 from scriptor.youtube_publisher import (
     AnalyticsMetricPoint,
     PublicationJob,
