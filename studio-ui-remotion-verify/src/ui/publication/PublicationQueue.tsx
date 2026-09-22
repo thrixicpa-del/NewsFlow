@@ -81,7 +81,7 @@ export function PublicationQueue({
   const allSelected = rows.length > 0 && rows.every((row) => selected.includes(row.snapshotId));
   const toggleAll = () => setSelected(allSelected ? [] : rows.map((row) => row.snapshotId));
   const toggle = (snapshotId: string) => setSelected((current) => current.includes(snapshotId) ? current.filter((id) => id !== snapshotId) : [...current, snapshotId]);
-  const actionIds = selected.length ? selected : undefined;
+  const actionIds = selected.length ? selected : [];
   const startScope = selected.length ? rows.filter((row) => selected.includes(row.snapshotId)) : rows;
   const hasUploadable = startScope.some((row) =>
     !row.youtubeVideoId && !row.active && uploadableStates.has(String(row.status || "").toUpperCase())
