@@ -85,12 +85,10 @@ describe("PublicationPage", () => {
 
     render(<PublicationPage data={semanticFixture} command={command} />);
 
-    expect(screen.getByText("MP4 готовы")).toBeInTheDocument();
-    expect(screen.getByText("84", { selector: ".nf-kpi b" })).toBeInTheDocument();
-    expect(screen.getByText("Новые packages")).toBeInTheDocument();
-    expect(screen.getByText("0", { selector: ".nf-kpi b" })).toBeInTheDocument();
-    expect(screen.getByText("Свободно по квотам")).toBeInTheDocument();
-    expect(screen.getByText("88", { selector: ".nf-kpi b" })).toBeInTheDocument();
+    const metricValue = (label: string) => screen.getByText(label).closest(".nf-kpi")?.querySelector("b");
+    expect(metricValue("MP4 готовы")).toHaveTextContent("84");
+    expect(metricValue("Новые packages")).toHaveTextContent("0");
+    expect(metricValue("Свободно по квотам")).toHaveTextContent("88");
   });
 
   it("shows snapshot-backed provenance for a publication receipt", () => {
