@@ -12,7 +12,7 @@ from scriptor import bridge
 from scriptor.config import Settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
-from scriptor.timeline import TimelineClip, TimelineProject
+from scriptor.timeline import GENERIC_VISUAL_QUERY, TimelineClip, TimelineProject
 from scriptor.voice_map import (
     VOICE_MAP_SCHEMA_VERSION,
     AlignmentResult,
@@ -578,6 +578,46 @@ class VoiceMapTests(unittest.TestCase):
         for previous, current in pairwise(scenes):
             self.assertAlmostEqual(previous["narration_end"], current["narration_start"], places=6)
         self.assertAlmostEqual(sum(scene["duration"] for scene in scenes), 14.4, places=6)
+
+    def test_generic_voice_segment_inherits_nearest_concrete_visual_intent(self):
+        payload = {
+            "schemaVersion": VOICE_MAP_SCHEMA_VERSION,
+            "productionItemId": "production:alpha",
+            "scriptSha256": "script-hash",
+            "audioSha256": "audio-hash",
+            "audioDuration": 12.0,
+            "title": "Вашингтон и Киев обсуждают условия поддержки",
+            "timingMode": "approximate",
+            "alignmentEngine": "newsflow-fallback",
+            "alignmentConfidence": 0.0,
+            "segments": [
+                {
+                    "id": 1, "start": 0.0, "end": 3.0, "duration": 3.0,
+                    "text": "Вашингтон обсуждает условия.",
+                    "visualQuery": "Washington White House US government",
+                },
+                {
+                    "id": 2, "start": 3.0, "end": 9.0, "duration": 6.0,
+                    "text": "И вот здесь начинается главный вопрос.",
+                    "visualQuery": GENERIC_VISUAL_QUERY,
+                },
+                {
+                    "id": 3, "start": 9.0, "end": 12.0, "duration": 3.0,
+                    "text": "Киев отвечает на новые условия.",
+                    "visualQuery": "Kyiv Ukraine government",
+                },
+            ],
+        }
+        status = type("Status", (), {
+            "state": "approximate", "path": str(self.root / "map.json"),
+            "reason": "", "data": payload,
+        })()
+
+        scenes, _ = bridge._voice_map_scenes(status)
+
+        self.assertEqual(len(scenes), 2)
+        self.assertEqual(scenes[0]["visual_query_en"], "Washington White House US government")
+        self.assertEqual(scenes[1]["visual_query_en"], "Kyiv Ukraine government")
 
     def test_6398_audio_uses_full_cutter_then_trimmed_terminal_footage(self):
         payload = {

@@ -115,12 +115,14 @@ from .thumbnail_prompt_v2 import (
     strip_legacy_thumbnail_phrases,
 )
 from .timeline import (
+    GENERIC_VISUAL_QUERY,
     TimelineClip,
     TimelineProject,
     agent_plan_prompt,
     align_timeline_to_audio,
     export_fcpxml,
     fallback_scene_plan,
+    fallback_visual_query,
     fit_scene_plan_to_voice_duration,
     parse_agent_scene_plan,
     probe_media_duration,
@@ -3648,6 +3650,24 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         raise ValueError("VoiceMap audio duration is invalid")
 
     visual_beat_count = max(1, math.ceil(audio_duration / _VOICE_MAP_CUTTER_TARGET_SECONDS))
+
+    def concrete_query(segment: dict) -> str:
+        return str(segment.get("visualQuery", "")).strip()
+
+    def resolved_query(segment: dict) -> str:
+        query = concrete_query(segment)
+        if query and query != GENERIC_VISUAL_QUERY:
+            return query
+        segment_index = segments.index(segment)
+        for distance in range(1, len(segments)):
+            for candidate_index in (segment_index - distance, segment_index + distance):
+                if 0 <= candidate_index < len(segments):
+                    candidate = concrete_query(segments[candidate_index])
+                    if candidate and candidate != GENERIC_VISUAL_QUERY:
+                        return candidate
+        topic_query = fallback_visual_query(str(payload.get("title", "")))
+        return topic_query or GENERIC_VISUAL_QUERY
+
     scenes: list[dict] = []
     for beat_index in range(visual_beat_count):
         beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
@@ -3685,10 +3705,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         duration = beat_end - beat_start
         scenes.append({
             "narration": " ".join(narration_parts).strip(),
-            "visual_query_en": (
-                str(dominant.get("visualQuery", "")).strip()
-                or "contextual news footage"
-            ),
+            "visual_query_en": resolved_query(dominant),
             "duration": duration,
             "minimum_footage_duration": duration,
             "voice_segment_id": int(dominant["id"]),
