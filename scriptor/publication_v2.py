@@ -35,7 +35,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _file_fingerprint(path_value: object) -> dict[str, int] | None:
+def publication_artifact_fingerprint(path_value: object) -> dict[str, int] | None:
     """Return a cheap immutable-input fingerprint without hashing large media files."""
     path = Path(str(path_value or "").strip())
     try:
@@ -1208,7 +1208,7 @@ def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, 
     execution = dict(executions.get(snapshot_id, {}) or {})
     reasons: list[dict[str, str]] = []
     video_path = str(snapshot.get("videoPath", "")).strip()
-    current_video_fingerprint = _file_fingerprint(video_path)
+    current_video_fingerprint = publication_artifact_fingerprint(video_path)
     if not video_path or current_video_fingerprint is None:
         reasons.append({"kind": "VIDEO_MISSING", "message": "MP4 из snapshot не найден. Связь с роликом сохранена для восстановления."})
     else:
@@ -1373,10 +1373,10 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
         duration_seconds = _item_duration_seconds(item)
         monetized = bool(rule.get("monetized", False))
         artifact_fingerprints: dict[str, dict[str, int]] = {}
-        video_fingerprint = _file_fingerprint(artifact.get("path", ""))
+        video_fingerprint = publication_artifact_fingerprint(artifact.get("path", ""))
         if video_fingerprint is not None:
             artifact_fingerprints["video"] = video_fingerprint
-        thumbnail_fingerprint = _file_fingerprint(thumbnail.get("path", ""))
+        thumbnail_fingerprint = publication_artifact_fingerprint(thumbnail.get("path", ""))
         if thumbnail_fingerprint is not None:
             artifact_fingerprints["thumbnail"] = thumbnail_fingerprint
         snapshot = {
