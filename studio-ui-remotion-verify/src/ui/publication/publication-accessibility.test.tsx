@@ -20,6 +20,16 @@ describe("Publication V2 accessibility", () => {
     expect(blocking.map((violation) => ({ id: violation.id, nodes: violation.nodes.map((node) => node.target) }))).toEqual([]);
   }, 15000);
 
+  it("gives each Videos expand button a row-specific accessible name", () => {
+    render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByRole("button", {
+        name: "Раскрыть детали Визуальный ролик 01 — массовая публикация",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps bulk controls reachable by accessible names and native controls", () => {
     render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
 
