@@ -14733,6 +14733,7 @@ def run_publication_v2_studio(payload: dict) -> dict:
             continue
 
         metadata = dict(snapshot_record.get("metadata", {}) or {})
+        automation = dict(snapshot_record.get("automation", {}) or {})
         try:
             duration = max(0.0, float(snapshot_record.get("durationSeconds") or 0))
         except (TypeError, ValueError):
@@ -14780,6 +14781,27 @@ def run_publication_v2_studio(payload: dict) -> dict:
             if kind not in requested_kinds:
                 continue
             stage = stage_map[kind]
+
+            policy_key = {"ads": "ads", "post": "post", "cards": "cards", "end-screen": "endScreen"}[kind]
+            # The frozen snapshot is authoritative after confirmation. Ads are
+            # mandatory for a channel frozen as monetized; other Studio
+            # automation follows the operator's per-channel snapshot policy.
+            if kind != "ads" and automation.get(policy_key) is False:
+                mark_publication_stage_not_required(
+                    settings, snapshot_id, stage,
+                    f"Этап {kind} выключен в подтверждённых правилах канала.",
+                    {"reason": "channel_policy"},
+                )
+                skipped += 1
+                continue
+            if kind == "ads" and not bool(snapshot_record.get("monetized")):
+                mark_publication_stage_not_required(
+                    settings, snapshot_id, stage,
+                    "Канал не отмечен как монетизированный.",
+                    {"mode": "NONE", "reason": "channel_not_monetized"},
+                )
+                skipped += 1
+                continue
             execution = dict(settings.youtube_publication_executions.get(snapshot_id, {}) or {})
             execution_steps = dict(execution.get("steps", {}) or {})
             stage_state = str(dict(execution_steps.get(stage, {}) or {}).get("status", "PENDING")).upper()
