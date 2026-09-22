@@ -8868,10 +8868,14 @@ def _parse_seo_json(raw: str) -> dict:
     if not isinstance(hashtags, list):
         hashtags = []
     clean_hashtags = []
+    seen_hashtags: set[str] = set()
     for item in hashtags:
         word = re.sub(r"[^\w-]", "", str(item).strip().lstrip("#").replace(" ", ""))
-        if word and word not in clean_hashtags:
-            clean_hashtags.append(f"#{word}")
+        hashtag = f"#{word}" if word else ""
+        identity = hashtag.casefold()
+        if hashtag and identity not in seen_hashtags:
+            clean_hashtags.append(hashtag)
+            seen_hashtags.add(identity)
     return {"title": str(value.get("title", "")).strip(),
             "description": str(value.get("description", "")).strip(),
             "hashtags": clean_hashtags,
