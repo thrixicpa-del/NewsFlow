@@ -511,6 +511,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_duration=lambda _item: 6.0,
             source_allowed=lambda _item: True,
             diversity_seed="topic-agnostic",
+            allow_project_reuse=False,
         )
         self.assertIsNotNone(choice)
         item, duration, _family, reused_flag = choice
@@ -521,6 +522,20 @@ class MontageQueueStateTests(unittest.TestCase):
     def test_visual_continuity_fallback_reuses_when_only_valid_family_remains(self):
         only = FootageItem("D:/used/family-a/clip.mp4", "used.mp4", tags=["anything"])
         family = bridge.source_family_identity_text(only.path, only.source_url)
+        blocked_reuse = bridge._select_visual_continuity_candidate(
+            [only],
+            required_duration=6.0,
+            project_used_paths={bridge._montage_clip_key(only.path)},
+            project_used_families={family},
+            recent_project_paths={bridge._montage_clip_key(only.path)},
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            diversity_seed="reuse-last",
+            allow_project_reuse=False,
+        )
+        self.assertIsNone(blocked_reuse)
+
         choice = bridge._select_visual_continuity_candidate(
             [only],
             required_duration=6.0,
@@ -531,6 +546,7 @@ class MontageQueueStateTests(unittest.TestCase):
             source_duration=lambda _item: 6.0,
             source_allowed=lambda _item: True,
             diversity_seed="reuse-last",
+            allow_project_reuse=True,
         )
         self.assertIsNotNone(choice)
         self.assertEqual(choice[0].path, only.path)
