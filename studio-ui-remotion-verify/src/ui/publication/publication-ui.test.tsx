@@ -57,6 +57,31 @@ describe("PublicationPage", () => {
     expect(screen.getByText("AUTO + MANUAL 39s")).toBeInTheDocument();
   });
 
+  it("does not offer a duplicate-prone retry for an upload with unknown outcome", () => {
+    const uncertainFixture = {
+      ...fixture,
+      publication: {
+        ...fixture.publication,
+        v2: {
+          ...fixture.publication.v2,
+          queue: [{
+            snapshotId: "snapshot-uncertain", productionItemId: "item-1", title: "Ролик 1",
+            channelId: "channel-1", currentStage: "VIDEO_UPLOAD", status: "USER_ACTION_REQUIRED",
+            active: false, youtubeVideoId: null, completion: { completed: 1, total: 12 },
+            steps: { VIDEO_UPLOAD: { status: "USER_ACTION_REQUIRED" } }, timeline: [],
+          }],
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+
+    render(<PublicationPage data={uncertainFixture} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByRole("button", { name: "Раскрыть ход публикации Ролик 1" }));
+
+    expect(screen.queryByRole("button", { name: /Повторить/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/сверьте канал/i)).toBeInTheDocument();
+  });
+
   it("keeps video-ready, new-package, and quota-slot counters semantically distinct", () => {
     const semanticFixture = {
       ...fixture,

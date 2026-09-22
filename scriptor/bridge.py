@@ -108,8 +108,8 @@ from .publication_v2 import (
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
-    resolve_publication_upload_title,
     release_execution,
+    resolve_publication_upload_title,
     retry_publication_stage,
     validate_publication_snapshot,
 )
@@ -14712,6 +14712,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
             except _BRIDGE_OPERATION_ERRORS as exc:
                 blocked.append((snapshot_id, str(exc)))
                 return
+        transport_started = False
         try:
             body = build_private_video_insert_body(
                 title=resolve_publication_upload_title(metadata), description=str(metadata.get("description", "")),
@@ -14720,6 +14721,9 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
                 privacy=str(snapshot_record.get("privacy", "private")),
             )
+            # Once insert is invoked, even a timeout cannot prove YouTube did
+            # not create a video. Require operator reconciliation, not retry.
+            transport_started = True
             result, refreshed = upload_private_video(validated_credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
                                                        thumbnail_path="")
             with lock:
@@ -14729,10 +14733,15 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 succeeded.append(snapshot_id)
         except _BRIDGE_OPERATION_ERRORS as exc:
             with lock:
-                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", classify_publication_error(exc), str(exc))
+                category = "USER_ACTION_REQUIRED" if transport_started else classify_publication_error(exc)
+                message = (
+                    "Исход загрузки на YouTube неизвестен. Сверьте канал перед повторной отправкой MP4."
+                    if transport_started else str(exc)
+                )
+                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", category, message)
                 release_execution(settings, snapshot_id, worker_id)
                 save_settings(settings)
-                failures.append((snapshot_id, str(exc)))
+                failures.append((snapshot_id, message))
 
     with ThreadPoolExecutor(max_workers=min(available, len(requested)), thread_name_prefix="newsflow-publication-v2") as executor:
         futures = [executor.submit(upload_one, position, snapshot_id) for position, snapshot_id in enumerate(requested)]

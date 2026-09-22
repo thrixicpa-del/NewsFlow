@@ -23,8 +23,8 @@ from scriptor.publication_v2 import (
     next_upload_candidates,
     normalize_channel_publication_rule,
     persist_publication_receipt,
-    publication_receipt,
     publication_queue_projection,
+    publication_receipt,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
@@ -1719,6 +1719,43 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"], "yt-new")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(upload.call_args.kwargs["thumbnail_path"], "")
+
+    def test_v2_upload_timeout_after_transport_requires_reconciliation_before_retry(self):
+        """A lost insert response cannot prove that YouTube did not create the video."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1", "channelId": "channel-a", "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                        "privacy": "private", "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1", "overallStatus": "READY", "youtubeVideoId": None,
+                        "activeLease": None, "steps": {"VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0}},
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test"}, {"token": "safe"})), \
+                 patch.object(bridge, "upload_private_video", side_effect=TimeoutError("response timed out")) as upload:
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        upload.assert_called_once()
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "USER_ACTION_REQUIRED")
+        self.assertIsNone(execution["activeLease"])
+        self.assertEqual(next_upload_candidates(settings), [])
+        with self.assertRaisesRegex(ValueError, "сверки"):
+            retry_publication_stage(settings, "snapshot-1", "VIDEO_UPLOAD")
 
     def test_v2_upload_uses_frozen_seo_title_and_keeps_source_title_as_identity_metadata(self):
         with TemporaryDirectory() as directory:

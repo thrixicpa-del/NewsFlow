@@ -141,6 +141,7 @@ export function PublicationQueue({
 
 export function PublicationExecutionDetails({ row, channelName, onRetry, onCancel, onThumbnail }: { row: QueueRow; channelName(id: string): string; onRetry(snapshotId: string, stage: string): void; onCancel(snapshotId: string): void; onThumbnail(snapshotId: string): void }) {
   const failed = Object.entries(row.steps).find(([, step]) => badStates.has(String(step.status)));
+  const uploadNeedsReconciliation = String(row.steps.VIDEO_UPLOAD?.status || "").toUpperCase() === "USER_ACTION_REQUIRED" && !row.youtubeVideoId;
   const thumbnailPending = Boolean(row.youtubeVideoId) && !terminalStates.has(String(row.steps.THUMBNAIL?.status || "").toUpperCase());
   return <div className="nf-queue-details">
     <div className="nf-detail-meta">
@@ -163,7 +164,8 @@ export function PublicationExecutionDetails({ row, channelName, onRetry, onCance
     </div>
     <PublicationTimeline events={row.timeline}/>
     <div className="nf-detail-actions">
-      {failed ? <UiButton variant="secondary" onClick={() => onRetry(row.snapshotId, failed[0])}><RefreshCw size={15}/>Повторить {stageLabel(failed[0])}</UiButton> : null}
+      {uploadNeedsReconciliation ? <p role="status">Исход загрузки неизвестен: сверьте канал в YouTube Studio перед любым повтором MP4.</p> : null}
+      {failed && !uploadNeedsReconciliation ? <UiButton variant="secondary" onClick={() => onRetry(row.snapshotId, failed[0])}><RefreshCw size={15}/>Повторить {stageLabel(failed[0])}</UiButton> : null}
       {thumbnailPending ? <UiButton variant="secondary" onClick={() => onThumbnail(row.snapshotId)}>Поставить обложку</UiButton> : null}
       <UiButton variant="destructive" onClick={() => onCancel(row.snapshotId)}>Отменить автоматизацию</UiButton>
     </div>
