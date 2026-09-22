@@ -10948,10 +10948,24 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             (category, _montage_level_score_floor("CATEGORY_MATCH", match_threshold)),
             (context, _montage_level_score_floor("SAFE_CONTEXT", match_threshold)),
         ]
-        # First search every semantic level for a safe non-adjacent source.
-        # Only when no such alternative exists may the immediate previous
-        # source be reused. This preserves A→B→A behavior without accepting
-        # candidates below the floor of their semantic level.
+        # Preserve uniqueness inside the current video before preserving
+        # uniqueness across older/batch videos.  A family already used by a
+        # different video is still a better fallback than repeating a family
+        # already visible in this video's own timeline.
+        for avoid_recent in (True, False):
+            for pool, minimum in reuse_ladder:
+                selected = choose(
+                    pool, minimum_score=minimum, allow_historical=True,
+                    allow_reserved=True, allow_project_reuse=False,
+                    avoid_recent=avoid_recent, level="SAFE_REUSE",
+                    skip_previous=True,
+                )
+                if selected:
+                    return selected
+
+        # Only after every semantically valid cross-video option is exhausted
+        # may the current project reuse one of its own sources.  Still avoid
+        # A→A whenever another valid used source exists.
         for skip_previous in (True, False):
             for avoid_recent in (True, False):
                 for pool, minimum in reuse_ladder:
