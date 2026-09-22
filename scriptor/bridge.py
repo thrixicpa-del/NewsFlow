@@ -171,6 +171,7 @@ from .youtube_api import (
     fetch_youtube_video_state,
     set_youtube_thumbnail,
     upload_private_video,
+    youtube_tag_character_length,
 )
 from .youtube_engagement import (
     build_engagement_plan,
@@ -8924,7 +8925,7 @@ def _limit_tags(tags: list[str], limit: int) -> list[str]:
         key = tag.casefold()
         if not tag or key in used:
             continue
-        candidate_length = sum(len(value) for value in result) + (2 * len(result)) + len(tag)
+        candidate_length = youtube_tag_character_length([*result, tag])
         if candidate_length > limit:
             continue
         result.append(tag)
