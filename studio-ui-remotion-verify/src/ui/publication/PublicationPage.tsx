@@ -23,6 +23,7 @@ type Preview = {
     reason: string;
     publishAt?: string;
     scheduleWarning?: string;
+    scheduleSuggestion?: string;
   }>;
 };
 type BulkSchedule = {
@@ -118,6 +119,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         reason: assignment.reason,
         publishAt: assignment.publishAt || "",
         warning: assignment.scheduleWarning || "",
+        suggestion: assignment.scheduleSuggestion || "",
       };
     }));
     setTab("distribution");
@@ -195,6 +197,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
           reason: String(assignment.reason || "restored_plan"),
           publishAt: String(assignment.publishAt || ""),
           warning: "",
+          suggestion: "",
         } satisfies DistributionRow;
       })
       .filter((row): row is DistributionRow => row !== null);
@@ -305,6 +308,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       reason: "confirmed_snapshot",
       publishAt: row.publishAt || "",
       warning: "",
+      suggestion: "",
     }));
 
   return <div className="nf-publication-page">
