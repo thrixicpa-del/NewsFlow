@@ -200,6 +200,33 @@ class PublicationV2DistributionTests(unittest.TestCase):
         ])
         self.assertEqual(settings.youtube_publication_assignments, {})
 
+
+    def test_bridge_auto_preview_excludes_orphan_channel_rule_when_real_channels_are_known(self):
+        """A stale rule for a removed/unconnected channel must never receive new auto assignments."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-good", "name": "Good"}],
+            youtube_oauth_tokens={"channel-good": "{\"token\": \"ok\"}"},
+            youtube_publication_items={
+                "pi-1": {
+                    "productionItemId": "pi-1",
+                    "metadata": {"index": 1},
+                    "readiness": {"state": "CONTENT_READY", "contentReady": True},
+                },
+            },
+            youtube_channel_publication_rules={
+                "channel-orphan": {"channelId": "channel-orphan", "enabled": True, "quota": 1, "distributionStrategy": "balanced"},
+                "channel-good": {"channelId": "channel-good", "enabled": True, "quota": 1, "distributionStrategy": "balanced"},
+            },
+        )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({})
+
+        rows = result["publicationPreview"]["assignments"]
+        self.assertEqual(rows[0]["channelId"], "channel-good")
+
     def test_preview_preserves_locked_assignment_and_allocates_only_remaining_ready_item(self):
         """Auto-distribution must not move a locked slot while filling visible channel quota."""
         items = {
