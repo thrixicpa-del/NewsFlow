@@ -200,7 +200,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
           suggestion: "",
         } satisfies DistributionRow;
       })
-      .filter((row): row is DistributionRow => row !== null);
+      .filter((row): row is NonNullable<typeof row> => row !== null);
     rememberDistribution(restored);
   };
 
