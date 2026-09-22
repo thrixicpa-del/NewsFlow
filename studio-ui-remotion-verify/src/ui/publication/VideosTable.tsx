@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { ChevronDown, ChevronRight, Filter, MoreHorizontal, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, Filter, Search } from "lucide-react";
 import { Badge, type BadgeTone } from "../components/badge";
 import { DataTable } from "../components/data-table";
 import { UiButton } from "../components/button";
@@ -22,7 +22,6 @@ export function VideosTable({ rows, onSelectionChange, onPriorityChange }: { row
     { accessorKey: "channelName", header: "Канал", cell: ({ row }) => <span>{row.original.channelName}</span> },
     { accessorKey: "publishAt", header: "Выход", cell: ({ row }) => <small>{row.original.publishAt || "—"}</small> },
     { accessorKey: "status", header: "Статус", cell: ({ row }) => <Badge tone={tone(row.original.status)}>{row.original.status}</Badge> },
-    { id: "actions", header: "", cell: () => <UiButton size="icon" variant="ghost" aria-label="Действия"><MoreHorizontal size={17} /></UiButton> },
   ], [expanded, filtered, onPriorityChange, onSelectionChange, selected]);
   const channels = [...new Map(rows.filter((row) => row.channelId).map((row) => [row.channelId, row.channelName])).entries()];
   return <section className="nf-workspace-panel"><div className="nf-table-toolbar"><label className="nf-search"><Search size={16}/><input aria-label="Поиск роликов" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по названию…" /></label><label><Filter size={14}/><select aria-label="Статус ролика" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Все статусы</option>{[...new Set(rows.map((row) => row.status))].map((value) => <option key={value}>{value}</option>)}</select></label><label><select aria-label="Канал ролика" value={channel} onChange={(event) => setChannel(event.target.value)}><option value="all">Все каналы</option>{channels.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select></label><span className="nf-selection-count">Выбрано: {selected.length}</span><UiButton variant="ghost" onClick={() => { setQuery(""); setStatus("all"); setChannel("all"); }}>Сбросить</UiButton></div>
