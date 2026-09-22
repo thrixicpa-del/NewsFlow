@@ -62,6 +62,18 @@ describe("visual fixtures", () => {
     expect(fallback.covers).toEqual([]);
   });
 
+  it("creates an 84-item Publication fixture with eight channels and ads states", () => {
+    const fixture = buildVisualFixture(fallback, "publication-84");
+
+    expect(Object.keys(fixture?.publication.v2?.items || {})).toHaveLength(84);
+    expect(fixture?.channels).toHaveLength(8);
+    expect(fixture?.publication.v2?.queue).toHaveLength(84);
+    expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "AUTO+MANUAL_39S")).toBe(true);
+    expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "AUTO_ONLY")).toBe(true);
+    expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "NONE")).toBe(true);
+    expect(fallback.channels).toEqual([]);
+  });
+
   it("creates 84-item Voice and Montage fixtures without changing the fallback", () => {
     const voice = buildVisualFixture(fallback, "voice-84");
     const montage = buildVisualFixture(fallback, "montage-84");
@@ -123,6 +135,7 @@ describe("visual fixtures", () => {
       { fixture: "covers-84", group: "ОБЛОЖКИ И ГЕНЕРАЦИИ", navigation: "Обложки YouTube", title: "Обложки YouTube" },
       { fixture: "voice-84", group: "ПРОИЗВОДСТВО", navigation: "Озвучка — очередь", title: "Очередь озвучки" },
       { fixture: "montage-84", group: "ПРОИЗВОДСТВО", navigation: "Монтаж", title: "Монтаж" },
+      { fixture: "publication-84", group: "ПУБЛИКАЦИЯ", navigation: "Публикация YouTube", title: "Публикация YouTube" },
     ] as const;
 
     for (const route of routes) {
