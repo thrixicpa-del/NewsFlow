@@ -87,11 +87,10 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     setDistribution(next);
   };
   const undoDistribution = () => {
-    setDistributionHistory((history) => {
-      if (!history.length) return history;
-      setDistribution(history[history.length - 1].map((row) => ({ ...row })));
-      return history.slice(0, -1);
-    });
+    if (!distributionHistory.length) return;
+    const previous = distributionHistory[distributionHistory.length - 1];
+    setDistribution(previous.map((row) => ({ ...row })));
+    setDistributionHistory(distributionHistory.slice(0, -1));
   };
 
   const buildPreview = async (range?: BulkSchedule) => {
