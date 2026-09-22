@@ -304,6 +304,61 @@ class PublicationV2DistributionTests(unittest.TestCase):
 
         self.assertEqual(preview["assignments"][0]["channelId"], "high")
 
+    def test_large_84_item_preview_is_deterministic_complete_and_quota_safe(self):
+        """Commercial bulk planning must not lose, duplicate or over-allocate items at realistic batch size."""
+        items = {
+            f"pi-{index:03}": {
+                "productionItemId": f"pi-{index:03}",
+                "metadata": {
+                    "index": index,
+                    "priority": 2 if index <= 8 else 0,
+                    "topicFamily": "economy" if index % 3 == 0 else "world",
+                },
+                "durationSeconds": 540 + (index % 7) * 30,
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            }
+            for index in range(1, 85)
+        }
+        rules = []
+        for index in range(8):
+            channel_id = f"channel-{index + 1}"
+            rules.append({
+                "channelId": channel_id,
+                "enabled": True,
+                "oauthConnected": True,
+                "quota": 11 if index < 4 else 10,
+                "monetized": index < 4,
+                "distributionStrategy": "longest_monetized" if index < 4 else "balanced",
+                "publishMode": "schedule",
+                "timezone": "Europe/Moscow" if index % 2 == 0 else "Europe/Warsaw",
+                "firstPublishAt": "2026-11-16T04:00:00",
+                "intervalMinutes": 15 if index % 2 == 0 else 30,
+                "allowedWeekdays": list(range(7)),
+                "publishWindowStart": "04:00",
+                "publishWindowEnd": "23:45",
+                "dailyCap": 24,
+            })
+
+        first = build_distribution_preview(items, rules, {})
+        second = build_distribution_preview(items, rules, {})
+
+        self.assertEqual(first, second)
+        rows = first["assignments"]
+        self.assertEqual(len(rows), 84)
+        self.assertEqual(len({row["productionItemId"] for row in rows}), 84)
+        self.assertTrue(all(row["channelId"] for row in rows))
+
+        quota_by_channel = {rule["channelId"]: rule["quota"] for rule in rules}
+        usage = {
+            channel_id: sum(1 for row in rows if row["channelId"] == channel_id)
+            for channel_id in quota_by_channel
+        }
+        self.assertEqual(sum(usage.values()), 84)
+        self.assertTrue(all(usage[channel_id] <= quota for channel_id, quota in quota_by_channel.items()))
+        self.assertTrue(all(datetime.fromisoformat(row["publishAt"]).minute in {0, 15, 30, 45} for row in rows))
+        self.assertEqual(first["scheduleWarnings"], [])
+
+
     def test_preview_resolves_per_channel_schedule_before_snapshot_confirmation(self):
         """A scheduled assignment must display its exact channel-local time in the dry run."""
         preview = build_distribution_preview(
