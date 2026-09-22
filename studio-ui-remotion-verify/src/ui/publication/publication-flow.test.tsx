@@ -80,6 +80,40 @@ describe("PublicationPage interactions", () => {
     ));
   });
 
+  it("disables header start when the current Videos selection has no uploadable snapshot", () => {
+    const data = {
+      ...base,
+      publication: {
+        ...base.publication,
+        v2: {
+          ...(base.publication as any).v2,
+          items: {
+            ...(base.publication as any).v2.items,
+            "item-uploaded": {
+              ...(base.publication as any).v2.items["item-uploaded"],
+              metadata: { title: "Заблокированный ролик" },
+            },
+          },
+          queue: (base.publication as any).v2.queue.map((row: any) => row.snapshotId === "snapshot-uploaded"
+            ? {
+                ...row,
+                title: "Заблокированный ролик",
+                youtubeVideoId: undefined,
+                currentStage: "AUTH_CHECK",
+                status: "AUTH_REQUIRED",
+                active: false,
+              }
+            : row),
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+
+    render(<PublicationPage data={data} command={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByLabelText("Выбрать Заблокированный ролик"));
+
+    expect(screen.getByRole("button", { name: "Старт готовых" })).toBeDisabled();
+  });
+
   it("starts only snapshots without a known YouTube video ID", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<PublicationPage data={base} command={command} />);
