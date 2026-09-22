@@ -853,6 +853,45 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertAlmostEqual(project.clips[-1].duration, 1.53, places=2)
         self.assertEqual(project.clips[-1].path, str(footage))
 
+    def test_voice_map_beat_uses_renderer_frame_padding_without_a_micro_tail(self):
+        """Renderer padding must not create a synthetic sub-frame VoiceMap beat."""
+        from scriptor.timeline import TimelineClip, TimelineProject
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            voice = root / "voice.mp3"
+            first = root / "first.mp4"
+            for path in (voice, first):
+                path.write_bytes(path.name.encode())
+            project = TimelineProject(
+                title="Тема",
+                voiceover_path=str(voice),
+                clips=[
+                    TimelineClip(
+                        str(first), "first", "query", duration=6.398,
+                        minimum_source_duration=6.0,
+                        voice_segment_id=29, narration_start=0.0, narration_end=6.398,
+                    ),
+                ],
+            )
+            with patch.object(bridge, "probe_media_duration", return_value=6.398), \
+                 patch.object(bridge, "_cached_or_probed_montage_duration", return_value=6.0), \
+                 patch.object(bridge, "_replacement_candidates_for_clip") as replacements:
+                appended = bridge._complete_project_visual_tail(
+                    project, object(), Settings(montage_auto_web=False),
+                )
+
+        self.assertEqual(appended, 0)
+        replacements.assert_not_called()
+        self.assertEqual(len(project.clips), 1)
+        self.assertEqual(project.clips[0].path, str(first))
+        self.assertEqual(project.clips[0].duration, 6.398)
+        self.assertEqual(project.clips[0].minimum_source_duration, 6.0)
+        self.assertEqual(project.clips[0].voice_segment_id, 29)
+        self.assertEqual(project.clips[0].narration_start, 0.0)
+        self.assertEqual(project.clips[0].narration_end, 6.398)
+        self.assertAlmostEqual(sum(clip.duration for clip in project.clips), 6.398, places=3)
+
     def test_clip_identity_is_case_insensitive_and_absolute(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "Shot.MP4"

@@ -3605,18 +3605,48 @@ def _ensure_ready_voice_maps(indices: list[int] | set[int]) -> None:
         _ensure_voice_map_for_scenario(index)
 
 
+_VOICE_MAP_CUTTER_TARGET_SECONDS = 6.0
+_VOICE_MAP_SINGLE_BEAT_MAX_SECONDS = 6.5
+
+
+def _voice_map_segment_visual_beats(segment: dict) -> list[dict]:
+    """Split one durable speech segment into balanced footage-sized beats."""
+    start = float(segment["start"])
+    end = float(segment["end"])
+    duration = float(segment["duration"])
+    beat_count = max(1, math.ceil(duration / _VOICE_MAP_SINGLE_BEAT_MAX_SECONDS))
+    words = str(segment["text"]).split()
+    beats = []
+    for index in range(beat_count):
+        beat_start = start + ((end - start) * index / beat_count)
+        beat_end = end if index == beat_count - 1 else start + ((end - start) * (index + 1) / beat_count)
+        word_start = len(words) * index // beat_count
+        word_end = len(words) * (index + 1) // beat_count
+        beats.append({
+            "narration": " ".join(words[word_start:word_end]),
+            "visual_query_en": str(segment["visualQuery"]),
+            "duration": beat_end - beat_start,
+            "minimum_footage_duration": min(
+                beat_end - beat_start, _VOICE_MAP_CUTTER_TARGET_SECONDS,
+            ),
+            "voice_segment_id": int(segment["id"]),
+            "narration_start": beat_start,
+            "narration_end": beat_end,
+            "visual_beat_index": index + 1,
+            "visual_beat_count": beat_count,
+        })
+    return beats
+
+
 def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     payload = status.data
     if status.state not in {"ready", "approximate"} or not payload:
         raise ValueError(status.reason or "VoiceMap is unavailable")
-    scenes = [{
-        "narration": str(segment["text"]),
-        "visual_query_en": str(segment["visualQuery"]),
-        "duration": float(segment["duration"]),
-        "voice_segment_id": int(segment["id"]),
-        "narration_start": float(segment["start"]),
-        "narration_end": float(segment["end"]),
-    } for segment in payload["segments"]]
+    scenes = [
+        beat
+        for segment in payload["segments"]
+        for beat in _voice_map_segment_visual_beats(segment)
+    ]
     provenance = {
         "alignmentMode": str(payload["timingMode"]),
         "voiceMapPath": status.path,
@@ -11213,10 +11243,15 @@ def prepare_montage(payload: dict) -> dict:
     reuse_pool: list[tuple[FootageItem, float, float, str, str]] = []
     reuse_cursor = 0
     for scene_number, scene in enumerate(scenes, 1):
+        required_source_duration = float(
+            scene.get("minimum_footage_duration", scene["duration"]),
+        )
         position_bucket = _montage_position_bucket(scene_number - 1, len(scenes))
         if fast_reuse and scene_number > unique_scene_count:
-            required_duration = float(scene["duration"])
-            eligible = [entry for entry in reuse_pool if entry[1] + 0.05 >= required_duration]
+            eligible = [
+                entry for entry in reuse_pool
+                if entry[1] + 0.05 >= required_source_duration
+            ]
             # At least the unique source selected for its own beat must fit;
             # this fallback only applies when a later beat is exceptionally
             # longer. It preserves narration timing rather than cloning a
@@ -11240,7 +11275,10 @@ def prepare_montage(payload: dict) -> dict:
                                       position_rotation_reason="быстрый режим: другой сегмент длинного источника",
                                       voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
                                       narration_start=float(scene.get("narration_start", 0.0) or 0.0),
-                                      narration_end=float(scene.get("narration_end", 0.0) or 0.0)))
+                                      narration_end=float(scene.get("narration_end", 0.0) or 0.0),
+                                      minimum_source_duration=required_source_duration,
+                                      visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
+                                      visual_beat_count=int(scene.get("visual_beat_count", 0) or 0)))
             if progress:
                 progress("Подбор футажей", f"Ротация {scene_number}/{len(scenes)}: {Path(selected.path).name}")
             continue
@@ -11284,7 +11322,7 @@ def prepare_montage(payload: dict) -> dict:
                     scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                     relaxed_hits=relaxed_hits, category_hits=category_hits,
                     safe_context_hits=safe_context_hits,
-                    required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
                     used_paths=used, used_families=used_families,
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -11318,7 +11356,7 @@ def prepare_montage(payload: dict) -> dict:
                         scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                         relaxed_hits=relaxed_hits, category_hits=category_hits,
                         safe_context_hits=safe_context_hits,
-                        required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                        required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
                         used_paths=used, used_families=used_families,
                         project_used_paths=project_used, project_used_families=project_used_families,
                         reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -11392,7 +11430,7 @@ def prepare_montage(payload: dict) -> dict:
                     scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                     relaxed_hits=relaxed_hits, category_hits=category_hits,
                     safe_context_hits=safe_context_hits,
-                    required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
                     used_paths=used, used_families=used_families,
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -11458,9 +11496,12 @@ def prepare_montage(payload: dict) -> dict:
                                   strict_rejection_reason=selection.strict_rejection_reason,
                                   voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
                                   narration_start=float(scene.get("narration_start", 0.0) or 0.0),
-                                  narration_end=float(scene.get("narration_end", 0.0) or 0.0)))
+                                  narration_end=float(scene.get("narration_end", 0.0) or 0.0),
+                                  minimum_source_duration=required_source_duration,
+                                  visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
+                                  visual_beat_count=int(scene.get("visual_beat_count", 0) or 0)))
         if fast_reuse:
-            reuse_pool.append((selected, max(float(scene["duration"]), selected_duration), score, source, source_family))
+            reuse_pool.append((selected, selected_duration, score, source, source_family))
         if progress:
             diagnostics = selection.diagnostics if selection else {}
             level = selection.fallback_level if selection else "LOCAL"
@@ -12054,7 +12095,8 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
             if _montage_item_is_excluded(item, excluded_paths, excluded_families):
                 continue
             available = _validated_montage_clip_duration(Path(item.path))
-            if available + 0.05 < float(clip.duration):
+            required = float(clip.minimum_source_duration or clip.duration)
+            if available + 0.05 < required:
                 continue
             replacement = replace(
                 clip,
@@ -12123,7 +12165,8 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
     # concat time. Reserve that deterministic frame budget with real footage
     # before FFmpeg starts; the audio mux still cuts the final output exactly
     # at the MP3, never by freezing the last image.
-    target = probe_media_duration(voice) + len(project.clips) / 30.0 + 0.05
+    narration_duration = probe_media_duration(voice)
+    target = narration_duration + len(project.clips) / 30.0 + 0.05
     # Most saved projects already cover their MP3.  Normalise their real
     # durations without an unnecessary vector-index query.
     duration_memo: dict[str, float] = {}
@@ -12142,12 +12185,28 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
             break
         available = max(0.0, duration_probe(Path(clip.path)) - max(0.0, float(clip.source_start)))
         requested = min(max(0.0, float(clip.duration)), remaining)
-        if available + 0.05 < requested:
+        required = min(
+            requested,
+            max(0.0, float(clip.minimum_source_duration or clip.duration)),
+        )
+        if available + 0.05 < required:
             preserved_valid = False
             break
         preserved.append(replace(clip, duration=requested))
         preserved_total += requested
     if preserved_valid and preserved:
+        # VoiceMap beats carry an explicit source-duration contract. Once
+        # those authored beats cover the narration, keep their exact speech
+        # boundaries: the proxy renderer already requests one extra frame and
+        # loops a bounded short moving source, while the final mux ends at the
+        # exact MP3 duration. A synthetic sub-frame tail would only pollute the
+        # visible timeline without adding coverage.
+        if (
+            preserved_total >= narration_duration - 0.05
+            and all(float(clip.minimum_source_duration) > 0.0 for clip in preserved)
+        ):
+            project.clips = preserved
+            return 0
         shortfall = target - preserved_total
         if shortfall > 0.05:
             final = preserved[-1]

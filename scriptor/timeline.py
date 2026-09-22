@@ -125,6 +125,9 @@ class TimelineClip:
     voice_segment_id: int = 0
     narration_start: float = 0.0
     narration_end: float = 0.0
+    minimum_source_duration: float = 0.0
+    visual_beat_index: int = 0
+    visual_beat_count: int = 0
 
 
 @dataclass

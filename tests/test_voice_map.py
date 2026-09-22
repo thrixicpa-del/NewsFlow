@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import Path
 from unittest.mock import patch
 
@@ -507,6 +508,188 @@ class VoiceMapTests(unittest.TestCase):
         self.assertEqual(restored.voice_map_provenance["voiceMapSchemaVersion"], VOICE_MAP_SCHEMA_VERSION)
         self.assertEqual(restored.voice_map_provenance["scriptSha256"], status.data["scriptSha256"])
         self.assertEqual(sum(clip.duration for clip in restored.clips), self.duration)
+
+    def test_voice_map_visual_beats_are_balanced_and_preserve_segment_timing(self):
+        cases = (
+            (6.0, 1),
+            (6.001, 1),
+            (6.398, 1),
+            (6.5, 1),
+            (6.501, 2),
+            (8.4, 2),
+            (12.0, 2),
+            (12.1, 2),
+            (13.0, 2),
+            (13.001, 3),
+            (19.237, 3),
+        )
+        for duration, expected_count in cases:
+            with self.subTest(duration=duration):
+                start = 17.25
+                payload = {
+                    "schemaVersion": VOICE_MAP_SCHEMA_VERSION,
+                    "productionItemId": "production:alpha",
+                    "scriptSha256": "script-hash",
+                    "audioSha256": "audio-hash",
+                    "timingMode": "approximate",
+                    "alignmentEngine": "newsflow-fallback",
+                    "alignmentConfidence": 0.0,
+                    "segments": [{
+                        "id": 29,
+                        "start": start,
+                        "end": start + duration,
+                        "duration": duration,
+                        "text": "Если Киев получает новые возможности, Москва ищет способ показать последствия.",
+                        "visualQuery": "Kyiv government, Moscow government",
+                    }],
+                }
+                status = type("Status", (), {
+                    "state": "approximate", "path": str(self.root / "map.json"),
+                    "reason": "Alignment model not configured", "data": payload,
+                })()
+
+                scenes, _provenance = bridge._voice_map_scenes(status)
+
+                self.assertEqual(len(scenes), expected_count)
+                self.assertEqual(scenes[0]["narration_start"], start)
+                self.assertAlmostEqual(scenes[-1]["narration_end"], start + duration, places=6)
+                self.assertAlmostEqual(sum(scene["duration"] for scene in scenes), duration, places=6)
+                self.assertTrue(all(scene["duration"] <= 6.5 for scene in scenes))
+                self.assertTrue(all(
+                    scene["minimum_footage_duration"] == min(scene["duration"], 6.0)
+                    for scene in scenes
+                ))
+                self.assertEqual({scene["voice_segment_id"] for scene in scenes}, {29})
+                self.assertEqual({scene["visual_query_en"] for scene in scenes}, {"Kyiv government, Moscow government"})
+                self.assertEqual(
+                    [scene["visual_beat_index"] for scene in scenes],
+                    list(range(1, expected_count + 1)),
+                )
+                self.assertEqual({scene["visual_beat_count"] for scene in scenes}, {expected_count})
+                self.assertEqual(
+                    " ".join(scene["narration"] for scene in scenes),
+                    payload["segments"][0]["text"],
+                )
+                for previous, current in pairwise(scenes):
+                    self.assertAlmostEqual(previous["narration_end"], current["narration_start"], places=6)
+                if expected_count > 1:
+                    self.assertLess(
+                        max(scene["duration"] for scene in scenes)
+                        - min(scene["duration"] for scene in scenes),
+                        0.002,
+                    )
+
+    def test_prepare_montage_keeps_6398_voice_segment_with_six_second_cutter_clip(self):
+        footage = self.root / "footage"
+        footage.mkdir()
+        source = footage / "rescue emergency aftermath.mp4"
+        tail = footage / "generic local footage.mp4"
+        source.write_bytes(b"immutable-video")
+        tail.write_bytes(b"immutable-tail-video")
+        source_before = {path: path.read_bytes() for path in (source, tail)}
+        settings = Settings(
+            footage_folders=[str(footage)],
+            montage_project_folder=str(self.root / "projects"),
+            montage_output_folder=str(self.root / "output"),
+            montage_auto_web=False,
+            montage_export_davinci_xml=False,
+            voice_scenario_outputs={"1": str(self.audio)},
+        )
+        job = Job(
+            ScenarioRequest(0, "Спасательная операция", "", "production:alpha"),
+            RunState.DONE,
+            "После удара спасатели прибыли на место и начали разбирать завалы.",
+            "",
+        )
+        payload = {
+            "schemaVersion": VOICE_MAP_SCHEMA_VERSION,
+            "productionItemId": "production:alpha",
+            "scenarioIndex": 0,
+            "title": "Спасательная операция",
+            "audioPath": str(self.audio),
+            "audioDuration": 6.398,
+            "scriptSha256": "script-hash",
+            "audioSha256": "audio-hash",
+            "timingMode": "approximate",
+            "alignmentEngine": "newsflow-fallback",
+            "alignmentConfidence": 0.0,
+            "segments": [{
+                "id": 29,
+                "start": 0.0,
+                "end": 6.398,
+                "duration": 6.398,
+                "text": job.result,
+                "visualQuery": "rescue emergency aftermath",
+            }],
+        }
+        status = type("Status", (), {
+            "state": "approximate", "label": "Приблизительный тайминг",
+            "path": str(self.root / "map.json"), "reason": "Alignment model not configured",
+            "data": payload, "reused": True,
+        })()
+        with (
+            patch.object(bridge, "load_settings", return_value=settings),
+            patch.object(bridge, "load_session", return_value=([job.request.title], [job])),
+            patch.object(bridge, "save_settings"),
+            patch.object(bridge, "snapshot", return_value={}),
+            patch.object(bridge, "app_data_root", return_value=self.root),
+            patch.object(bridge, "_ensure_voice_map_for_scenario", return_value=status),
+            patch.object(bridge, "_montage_screen_text_safe", return_value=True),
+            patch.object(bridge, "_semantic_clip_ok", return_value=True),
+            patch.object(bridge.ClipIndex, "count", return_value=0),
+            patch.object(bridge, "probe_media_duration", return_value=6.398),
+            patch.object(bridge, "probe_video_duration", return_value=6.0),
+        ):
+            result = bridge.prepare_montage({"scenarioIndex": 0})
+
+        project = TimelineProject.load(Path(result["preparedProject"]["path"]))
+        voiced = [clip for clip in project.clips if clip.voice_segment_id == 29]
+        self.assertEqual(len(voiced), 1)
+        self.assertAlmostEqual(voiced[0].duration, 6.398, places=6)
+        self.assertAlmostEqual(voiced[0].minimum_source_duration, 6.0, places=6)
+        self.assertEqual({clip.voice_segment_id for clip in voiced}, {29})
+        self.assertEqual({clip.visual_query_en for clip in voiced}, {"rescue emergency aftermath"})
+        self.assertEqual(voiced[0].narration_start, 0.0)
+        self.assertEqual(voiced[-1].narration_end, 6.398)
+        self.assertAlmostEqual(sum(clip.narration_end - clip.narration_start for clip in voiced), 6.398, places=6)
+        self.assertEqual(
+            {path: path.read_bytes() for path in (source, tail)},
+            source_before,
+        )
+
+        # Fast reuse must remember the physical six-second source, not the
+        # longer narration beat. Otherwise a later source_start can point
+        # beyond the usable tail of the immutable Cutter clip.
+        settings.montage_fast_reuse_enabled = True
+        settings.montage_unique_footage_percent = 25
+        payload["audioDuration"] = 14.398
+        payload["segments"].extend([
+            {
+                "id": 30, "start": 6.398, "end": 10.398, "duration": 4.0,
+                "text": "Следом идут общие кадры.", "visualQuery": "generic local footage",
+            },
+            {
+                "id": 31, "start": 10.398, "end": 14.398, "duration": 4.0,
+                "text": "Затем снова показывают спасателей.", "visualQuery": "rescue emergency aftermath",
+            },
+        ])
+        with (
+            patch.object(bridge, "load_settings", return_value=settings),
+            patch.object(bridge, "load_session", return_value=([job.request.title], [job])),
+            patch.object(bridge, "save_settings"),
+            patch.object(bridge, "snapshot", return_value={}),
+            patch.object(bridge, "app_data_root", return_value=self.root),
+            patch.object(bridge, "_ensure_voice_map_for_scenario", return_value=status),
+            patch.object(bridge, "_montage_screen_text_safe", return_value=True),
+            patch.object(bridge, "_semantic_clip_ok", return_value=True),
+            patch.object(bridge.ClipIndex, "count", return_value=0),
+            patch.object(bridge, "probe_media_duration", return_value=14.398),
+            patch.object(bridge, "probe_video_duration", return_value=6.0),
+            patch.object(bridge, "_montage_source_start", wraps=bridge._montage_source_start) as starts,
+        ):
+            bridge.prepare_montage({"scenarioIndex": 0})
+        self.assertGreaterEqual(len(starts.call_args_list), 3)
+        self.assertTrue(all(float(call.args[0]) <= 6.0 for call in starts.call_args_list))
 
     def test_prepare_montage_uses_voice_map_timing_instead_of_proportional_fitter(self):
         footage = self.root / "footage"
