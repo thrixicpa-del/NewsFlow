@@ -14238,8 +14238,21 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
             if str(rule.get("channelId", "")).strip() in selected_channels
         ]
 
+    selected_ids = {
+        str(value).strip()
+        for value in payload.get("productionItemIds", [])
+        if str(value).strip()
+    }
+    preview_items = (
+        {
+            production_id: item
+            for production_id, item in settings.youtube_publication_items.items()
+            if production_id in selected_ids
+        }
+        if selected_ids else settings.youtube_publication_items
+    )
     preview = build_distribution_preview(
-        settings.youtube_publication_items,
+        preview_items,
         rules,
         effective_assignments,
     )
@@ -14434,6 +14447,9 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
     for position, snapshot_id in enumerate(requested, start=1):
         snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
         execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+        thumbnail_state = str(dict(dict(execution.get("steps", {}) or {}).get("THUMBNAIL", {}) or {}).get("status", "")).upper()
+        if thumbnail_state in {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}:
+            continue
         video_id = str(execution.get("youtubeVideoId") or "").strip()
         channel_id = str(snapshot_record.get("channelId", "")).strip()
         thumbnail_path = str(snapshot_record.get("thumbnailPath", "")).strip()
