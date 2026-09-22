@@ -1800,6 +1800,83 @@ def fail_publication_stage(settings: Any, snapshot_id: str, stage: str, category
     settings.youtube_publication_executions = executions
 
 
+def resolve_uncertain_upload(
+    settings: Any,
+    snapshot_id: str,
+    outcome: str,
+    youtube_video_id: str = "",
+) -> None:
+    """Resolve an upload whose remote insert outcome could not be proven automatically."""
+    executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
+    execution = executions.get(snapshot_id)
+    if not execution:
+        raise ValueError("Publication execution не найден")
+    if str(execution.get("youtubeVideoId") or "").strip():
+        raise ValueError("YouTube ID уже сохранён; неопределённая загрузка уже разрешена")
+
+    steps = dict(execution.get("steps", {}) or {})
+    upload = dict(steps.get("VIDEO_UPLOAD", {}) or {})
+    if str(upload.get("status", "")).upper() != "USER_ACTION_REQUIRED":
+        raise ValueError("Явная сверка доступна только для неопределённой загрузки MP4")
+
+    normalized = str(outcome or "").strip().lower()
+    now = _now()
+    if normalized == "found":
+        video_id = str(youtube_video_id or "").strip()
+        if not video_id:
+            raise ValueError("Укажите YouTube video ID найденного ролика")
+        upload.update({
+            "status": "SUCCESS",
+            "finishedAt": now,
+            "error": None,
+            "providerResult": {"youtubeVideoId": video_id, "reconciledManually": True},
+            "progress": {"state": "complete"},
+        })
+        steps["VIDEO_UPLOAD"] = upload
+        execution.update({
+            "steps": steps,
+            "youtubeVideoId": video_id,
+            "youtubeVideoUrl": f"https://www.youtube.com/watch?v={video_id}",
+            "currentStage": "YOUTUBE_PROCESSING",
+            "overallStatus": "PROCESSING",
+            "uploadCompletedAt": execution.get("uploadCompletedAt") or now,
+            "activeLease": None,
+        })
+        execution.setdefault("timeline", []).append({
+            "at": now,
+            "stage": "VIDEO_UPLOAD",
+            "status": "SUCCESS",
+            "detail": f"Оператор подтвердил существующий YouTube ID: {video_id}",
+        })
+    elif normalized == "not_found":
+        upload.update({
+            "status": "RETRYING",
+            "finishedAt": now,
+            "error": None,
+            "providerResult": {"operatorConfirmedAbsent": True},
+            "progress": None,
+            "nextRetryAt": None,
+        })
+        steps["VIDEO_UPLOAD"] = upload
+        execution.update({
+            "steps": steps,
+            "currentStage": "VIDEO_UPLOAD",
+            "overallStatus": "RETRYING",
+            "activeLease": None,
+        })
+        execution.setdefault("timeline", []).append({
+            "at": now,
+            "stage": "VIDEO_UPLOAD",
+            "status": "RETRYING",
+            "detail": "Оператор проверил канал и подтвердил отсутствие ролика; повтор MP4 разрешён.",
+        })
+    else:
+        raise ValueError("Неизвестный результат сверки загрузки")
+
+    executions[snapshot_id] = execution
+    settings.youtube_publication_executions = executions
+
+
 def cancel_publication_execution(settings: Any, snapshot_id: str) -> None:
     """Stop a job without deleting a remotely known YouTube video."""
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
@@ -1807,6 +1884,9 @@ def cancel_publication_execution(settings: Any, snapshot_id: str) -> None:
     if not execution:
         raise ValueError("Publication execution не найден")
     has_video = bool(str(execution.get("youtubeVideoId") or "").strip())
+    upload_status = str(dict(execution.get("steps", {}) or {}).get("VIDEO_UPLOAD", {}).get("status", "")).upper()
+    if not has_video and upload_status == "USER_ACTION_REQUIRED":
+        raise ValueError("Неопределённую загрузку нельзя отменить до явной сверки YouTube")
     execution["activeLease"] = None
     execution["overallStatus"] = "AUTOMATION_CANCELLED" if has_video else "CANCELLED"
     execution["currentStage"] = "AUTOMATION_CANCELLED" if has_video else "CANCELLED"
