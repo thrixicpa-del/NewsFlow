@@ -58,6 +58,7 @@ export function DistributionHealth({ rows }: { rows: DistributionRow[] }) {
   const quota = unassigned.filter((row) => row.reason === "quota_exhausted").length;
   const eligibility = unassigned.filter((row) => row.reason === "eligibility_mismatch").length;
   const locked = rows.filter((row) => row.locked).length;
+  const suggestions = [...new Set(conflicts.map((row) => row.suggestion).filter(Boolean))];
   return <section className="nf-distribution-health" aria-label="Сводка распределения">
     <span><b>{assigned}</b> назначено</span>
     <span><b>{locked}</b> защищено</span>
@@ -66,5 +67,6 @@ export function DistributionHealth({ rows }: { rows: DistributionRow[] }) {
     {quota ? <small>Квота закончилась для {quota} роликов — увеличьте квоту или включите ещё канал.</small> : null}
     {eligibility ? <small>{eligibility} роликов не проходят диапазон номера/длительности — проверьте правила каналов.</small> : null}
     {conflicts.length ? <small>Конфликты расписания надо исправить до подтверждения.</small> : null}
+    {suggestions.map((suggestion) => <small key={suggestion} className="nf-health-suggestion">Предложение: {suggestion}</small>)}
   </section>;
 }
