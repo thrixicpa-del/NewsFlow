@@ -5311,9 +5311,9 @@ def _current_seo_queue_indices(settings: Settings, titles: list[str], jobs: list
     """Return only SEO rows that belong to the active scenario batch."""
 
     current_ids = {
-        str(job.request.production_item_id).strip()
+        identity
         for job in jobs
-        if str(job.request.production_item_id).strip()
+        if (identity := str(getattr(job.request, "production_item_id", "") or "").strip())
     }
     current_titles = {
         " ".join(str(title).split()).casefold()
