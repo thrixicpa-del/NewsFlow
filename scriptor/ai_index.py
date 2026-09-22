@@ -89,6 +89,7 @@ _SCREEN_TEXT_ENGLISH_QUERIES = (
 _SCREEN_TEXT_INTERSTITIAL_QUERIES = (
     "full screen title card interstitial educational slate bumper graphic with large centered text or branding",
     "full screen program title explainer slate logo bumper presentation slide instead of natural video footage",
+    "full screen Russian or Ukrainian Cyrillic title card educational interstitial slate with large centered text",
 )
 _SCREEN_TEXT_POSITIVE_QUERIES = (
     *_SCREEN_TEXT_ENGLISH_QUERIES,
