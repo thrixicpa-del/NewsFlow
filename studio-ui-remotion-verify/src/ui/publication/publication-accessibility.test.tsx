@@ -58,6 +58,17 @@ describe("Publication V2 accessibility", () => {
     expect(screen.getByRole("button", { name: "Запустить очередь" })).toBeDisabled();
   });
 
+  it("gives each queue expand button a row-specific accessible name", () => {
+    render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+
+    expect(
+      screen.getByRole("button", {
+        name: "Раскрыть ход публикации Визуальный ролик 01 — массовая публикация",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("exposes queue selection and ads status without mouse-only actions", () => {
     render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
     fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
