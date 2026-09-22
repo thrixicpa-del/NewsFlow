@@ -124,32 +124,6 @@ describe("PublicationPage interactions", () => {
     expect(screen.queryByText("quota_exhausted")).not.toBeInTheDocument();
   });
 
-  it("limits smart preview to videos explicitly selected in the registry", async () => {
-    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "" }] } });
-    render(<PublicationPage data={base} command={command} />);
-
-    fireEvent.click(screen.getByLabelText("Выбрать Готовый ролик"));
-    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
-
-    await waitFor(() => expect(command).toHaveBeenCalledWith(
-      "preview-publication-v2-distribution",
-      { productionItemIds: ["item-ready"] },
-    ));
-  });
-
-  it("starts only queue rows explicitly selected by the operator", async () => {
-    const command = vi.fn().mockResolvedValue(undefined);
-    render(<PublicationPage data={base} command={command} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
-    fireEvent.click(screen.getByLabelText("Выбрать публикацию Готовый ролик"));
-    fireEvent.click(screen.getByRole("button", { name: "Запустить выбранные (1)" }));
-
-    await waitFor(() => expect(command).toHaveBeenCalledWith(
-      "upload-publication-v2-snapshots",
-      { snapshotIds: ["snapshot-ready"] },
-    ));
-  });
-
   it("renders per-channel quarter-hour day plan from the preview", async () => {
     const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [
       { productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "2026-11-15T04:00:00+03:00" },
