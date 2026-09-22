@@ -82,8 +82,9 @@ export function PublicationQueue({
   const toggleAll = () => setSelected(allSelected ? [] : rows.map((row) => row.snapshotId));
   const toggle = (snapshotId: string) => setSelected((current) => current.includes(snapshotId) ? current.filter((id) => id !== snapshotId) : [...current, snapshotId]);
   const actionIds = selected.length ? selected : [];
-  const startScope = selected.length ? rows.filter((row) => selected.includes(row.snapshotId)) : rows;
-  const hasUploadable = startScope.some((row) =>
+  const actionScope = selected.length ? rows.filter((row) => selected.includes(row.snapshotId)) : rows;
+  const hasKnownYoutube = actionScope.some((row) => Boolean(row.youtubeVideoId));
+  const hasUploadable = actionScope.some((row) =>
     !row.youtubeVideoId && !row.active && uploadableStates.has(String(row.status || "").toUpperCase())
   );
   const channelProgress = [...new Set(rows.map((row) => row.channelId).filter(Boolean))].map((channelId) => {
@@ -127,8 +128,8 @@ export function PublicationQueue({
       <span>Ошибки: <b>{counters.errors}</b></span>
       <span>Выбрано: <b>{selected.length || "все"}</b></span>
       <div>
-        <UiButton variant="secondary" onClick={() => onReconcile(actionIds)}><RefreshCw size={15}/>Проверить YouTube</UiButton>
-        <UiButton variant="secondary" disabled={continuing} onClick={() => onContinue(actionIds)}><RefreshCw size={15}/>{continuing ? "Оформление…" : selected.length ? "Продолжить выбранные" : "Продолжить оформление"}</UiButton>
+        <UiButton variant="secondary" disabled={!hasKnownYoutube} onClick={() => onReconcile(actionIds)}><RefreshCw size={15}/>Проверить YouTube</UiButton>
+        <UiButton variant="secondary" disabled={continuing || !hasKnownYoutube} onClick={() => onContinue(actionIds)}><RefreshCw size={15}/>{continuing ? "Оформление…" : selected.length ? "Продолжить выбранные" : "Продолжить оформление"}</UiButton>
         <UiButton variant={paused ? "primary" : "secondary"} onClick={onPause}>{paused ? <Play size={15}/> : <Pause size={15}/>}{paused ? "Продолжить" : "Пауза"}</UiButton>
         <UiButton variant="primary" disabled={paused || starting || !hasUploadable} onClick={() => onStart(actionIds)}><Upload size={15}/>{starting ? "Запуск…" : selected.length ? `Запустить выбранные (${selected.length})` : "Запустить очередь"}</UiButton>
       </div>
