@@ -217,6 +217,55 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(rows["pi-2"]["channelId"], "channel-a")
         self.assertEqual(assignments["pi-1"]["channelId"], "channel-b")
 
+    def test_topic_routing_and_priority_are_deterministic(self):
+        items = {
+            "pi-economy": {
+                "productionItemId": "pi-economy",
+                "metadata": {"index": 1, "topic": "Европа экономика", "direction": "Европа", "priority": 8},
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            },
+            "pi-sport": {
+                "productionItemId": "pi-sport",
+                "metadata": {"index": 2, "topic": "Европа спорт", "direction": "Европа", "priority": 1},
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            },
+        }
+        rules = [
+            {
+                "channelId": "economy", "enabled": True, "oauthConnected": True, "quota": 2,
+                "distributionStrategy": "balanced", "channelPriority": 10,
+                "includeKeywords": ["экономика"], "excludeKeywords": ["спорт"],
+            },
+            {
+                "channelId": "general", "enabled": True, "oauthConnected": True, "quota": 2,
+                "distributionStrategy": "balanced", "channelPriority": 0,
+            },
+        ]
+
+        preview = build_distribution_preview(items, rules, {})
+        rows = {row["productionItemId"]: row for row in preview["assignments"]}
+
+        self.assertEqual(rows["pi-economy"]["channelId"], "economy")
+        self.assertEqual(rows["pi-sport"]["channelId"], "general")
+
+    def test_channel_priority_breaks_equal_balance_ties(self):
+        preview = build_distribution_preview(
+            {
+                "pi": {
+                    "productionItemId": "pi",
+                    "metadata": {"index": 1},
+                    "readiness": {"state": "CONTENT_READY", "contentReady": True},
+                },
+            },
+            [
+                {"channelId": "low", "enabled": True, "oauthConnected": True, "quota": 3, "distributionStrategy": "balanced", "channelPriority": 0},
+                {"channelId": "high", "enabled": True, "oauthConnected": True, "quota": 3, "distributionStrategy": "balanced", "channelPriority": 20},
+            ],
+            {},
+        )
+
+        self.assertEqual(preview["assignments"][0]["channelId"], "high")
+
     def test_preview_resolves_per_channel_schedule_before_snapshot_confirmation(self):
         """A scheduled assignment must display its exact channel-local time in the dry run."""
         preview = build_distribution_preview(
@@ -431,6 +480,40 @@ class PublicationV2SchedulerTests(unittest.TestCase):
 
         self.assertEqual([slot["publishAt"] for slot in slots], [
             "2026-09-10T18:00:00+02:00", "2026-09-10T21:00:00+02:00", "2026-09-11T09:00:00+02:00",
+        ])
+
+    def test_scheduler_respects_max_per_hour_and_explicit_topic_cooldown(self):
+        hourly = build_channel_schedule(
+            ["pi-1", "pi-2", "pi-3"],
+            {
+                "channelId": "channel-a",
+                "firstPublishAt": "2026-09-10T04:00:00+03:00",
+                "intervalMinutes": 15,
+                "timezone": "Europe/Minsk",
+                "maxVideosPerHour": 2,
+            },
+        )
+        self.assertEqual([slot["publishAt"] for slot in hourly], [
+            "2026-09-10T04:00:00+03:00",
+            "2026-09-10T04:15:00+03:00",
+            "2026-09-10T05:00:00+03:00",
+        ])
+
+        cooldown = build_channel_schedule(
+            ["pi-a", "pi-b", "pi-c"],
+            {
+                "channelId": "channel-a",
+                "firstPublishAt": "2026-09-10T04:00:00+03:00",
+                "intervalMinutes": 15,
+                "timezone": "Europe/Minsk",
+                "topicCooldownMinutes": 45,
+            },
+            item_topics={"pi-a": "iran", "pi-b": "iran", "pi-c": "europe"},
+        )
+        self.assertEqual([slot["publishAt"] for slot in cooldown], [
+            "2026-09-10T04:00:00+03:00",
+            "2026-09-10T04:45:00+03:00",
+            "2026-09-10T05:00:00+03:00",
         ])
 
     def test_scheduler_respects_daily_cap_before_allocating_next_day_slot(self):
