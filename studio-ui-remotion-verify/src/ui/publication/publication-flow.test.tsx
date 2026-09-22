@@ -55,6 +55,31 @@ describe("PublicationPage interactions", () => {
     ));
   });
 
+  it("lets the operator set item priority and any IANA channel timezone", async () => {
+    const command = vi.fn().mockResolvedValue(base);
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.change(screen.getByLabelText("Приоритет Готовый ролик"), { target: { value: "7" } });
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "set-publication-v2-item-priority",
+      { productionItemId: "item-ready", priority: 7 },
+    ));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
+    fireEvent.click(screen.getByRole("button", { name: "Действия канала Первый канал" }));
+    fireEvent.change(screen.getByLabelText("Timezone канала"), { target: { value: "America/New_York" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-publication-v2-rules",
+      expect.objectContaining({
+        rules: expect.objectContaining({
+          "channel-a": expect.objectContaining({ timezone: "America/New_York" }),
+        }),
+      }),
+    ));
+  });
+
   it("starts only snapshots without a known YouTube video ID", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<PublicationPage data={base} command={command} />);
