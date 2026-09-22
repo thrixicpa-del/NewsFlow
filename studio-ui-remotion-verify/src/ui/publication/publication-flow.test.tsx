@@ -14,6 +14,7 @@ const base = {
       { snapshotId: "snapshot-ready", productionItemId: "item-ready", title: "Готовый ролик", channelId: "channel-a", currentStage: "WAITING", status: "WAITING", active: false, completion: { completed: 0, total: 8 }, steps: {} },
       { snapshotId: "snapshot-uploaded", productionItemId: "item-uploaded", title: "Уже загруженный ролик", channelId: "channel-a", currentStage: "THUMBNAIL", status: "PARTIAL", active: false, youtubeVideoId: "yt-123", completion: { completed: 4, total: 8 }, steps: { VIDEO_UPLOAD: { status: "SUCCESS" }, THUMBNAIL: { status: "FAILED" } } },
     ], counters: {}, paused: false, uploadConcurrency: 6, channelRules: {}, assignments: {},
+    rulePresets: [{ name: "Будни", rules: { "channel-a": { channelId: "channel-a", enabled: true, quota: 3, monetized: true, distributionStrategy: "balanced", privacy: "private", publishMode: "schedule", timezone: "Europe/Minsk", firstPublishAt: "2026-11-15T04:00:00+03:00", intervalMinutes: 15, allowedWeekdays: [0,1,2,3,4,5,6], publishWindowStart: "04:00", publishWindowEnd: "10:00", dailyCap: 8, minDurationSeconds: 0, maxDurationSeconds: 0, orderStart: 1, orderEnd: 20, automation: { upload: true, metadata: true, thumbnail: true, ads: true, post: true, cards: true, endScreen: true } } } }],
   } },
 } as unknown as NewsFlowSnapshot;
 
@@ -31,6 +32,23 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByText(/:00 \/ :15 \/ :30 \/ :45/)).toBeInTheDocument();
     expect(screen.getByText("Реклама / монетизация")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeInTheDocument();
+  });
+
+  it("applies and saves named channel-rule presets through the command contract", async () => {
+    const command = vi.fn().mockResolvedValue(base);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
+
+    fireEvent.change(screen.getByLabelText("Пресет правил каналов"), { target: { value: "Будни" } });
+    fireEvent.click(screen.getByRole("button", { name: "Применить" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("apply-publication-v2-rule-preset", { name: "Будни" }));
+
+    fireEvent.change(screen.getByLabelText("Название нового пресета"), { target: { value: "Мой план" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить текущие" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-publication-v2-rule-preset",
+      expect.objectContaining({ name: "Мой план" }),
+    ));
   });
 
   it("starts only snapshots without a known YouTube video ID", async () => {
@@ -139,6 +157,31 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByRole("columnheader", { name: "04:00" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "04:15" })).toBeInTheDocument();
     expect(screen.getByText("Готовый ролик", { selector: ".nf-day-plan td span" })).toBeInTheDocument();
+  });
+
+  it("can undo a manual distribution edit before confirmation", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "2026-11-15T04:00:00+03:00" }] } });
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Распределение" })).toHaveAttribute("aria-selected", "true"));
+
+    const channelSelect = screen.getByLabelText("Канал для Готовый ролик");
+    fireEvent.change(channelSelect, { target: { value: "" } });
+    expect(channelSelect).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "Отменить изменение" }));
+    expect(channelSelect).toHaveValue("channel-a");
+  });
+
+  it("shows the preview in a 15-minute day-plan grid", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "2026-11-15T04:15:00+03:00" }] } });
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Распределение" })).toHaveAttribute("aria-selected", "true"));
+    fireEvent.click(screen.getByRole("tab", { name: "План дня" }));
+
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "04:15" })).toBeInTheDocument();
+    expect(screen.getByText("Готовый ролик")).toBeInTheDocument();
   });
 
   it("blocks confirmation in the UI when preview reports a scheduling conflict", async () => {
