@@ -14823,12 +14823,28 @@ def run_publication_v2_studio(payload: dict) -> dict:
                     raise StudioAutomationError(f"Studio не подтвердил этап {kind}.")
                 provider_result: dict = {"kind": kind}
                 if kind == "ads":
+                    actual_ads = dict((task.get("_studioResults") or {}).get("ads") or {})
                     provider_result.update({
-                        "mode": str(ad_plan.get("mode", "AUTO_ONLY")),
-                        "automaticSlotsEnabled": bool(ad_plan.get("automaticSlotsEnabled")),
-                        "manualSlotsSeconds": list(ad_plan.get("manualSlotsSeconds") or []),
+                        "mode": str(actual_ads.get("mode", "NONE")),
+                        "automaticSlotsEnabled": bool(actual_ads.get("automatic")),
+                        "manualSlotsSeconds": list(actual_ads.get("manualSlots") or ad_plan.get("manualSlotsSeconds") or []),
+                        "confirmedManualSlotsSeconds": list(actual_ads.get("confirmedManualSlots") or []),
                         "midRollEligible": bool(ad_plan.get("midRollEligible")),
+                        "manualMidrollApplicable": bool(actual_ads.get("manualMidrollApplicable")),
                     })
+                    if bool(actual_ads.get("manualMidrollApplicable")) and not bool(actual_ads.get("manual")):
+                        fail_publication_stage(
+                            settings, snapshot_id, stage, "RETRYABLE",
+                            "Автоматическая реклама включена, но не все ручные 39-секундные слоты подтверждены.",
+                        )
+                        current_execution = settings.youtube_publication_executions[snapshot_id]
+                        current_ads = dict(current_execution.get("steps", {}).get("ADS", {}) or {})
+                        current_ads["providerResult"] = provider_result
+                        current_execution["steps"]["ADS"] = current_ads
+                        release_execution(settings, snapshot_id, worker_id)
+                        save_settings(settings)
+                        failed += 1
+                        break
                 elif kind == "post":
                     provider_result.update({"publishAt": task["publishAt"], "videoUrl": video_url})
                 elif kind == "cards":
