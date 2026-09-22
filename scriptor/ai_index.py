@@ -77,14 +77,14 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
 SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 4
+SCREEN_TEXT_CLASSIFIER_VERSION = 6
 # Restore the NewsFlow 2.1.136 contract: ordinary Cyrillic/Russian lettering is
 # allowed. Montage blocks prominent English/Latin lettering and, separately,
 # full-screen title/interstitial slates in any language.
 _SCREEN_TEXT_ENGLISH_QUERIES = (
-    "video frame with prominent English words Latin alphabet captions subtitles lower third or text overlay",
-    "news broadcast frame with readable English headline ticker labels or Latin alphabet on screen words",
-    "sign billboard poster computer screen or document with readable English or Latin alphabet writing",
+    "readable English or Latin alphabet typography over natural video footage: captions subtitles lower third headline ticker labels or text overlay",
+    "large prominent single English or Latin alphabet word or short phrase used as a title graphic banner centered overlay or lower third over video footage",
+    "sign billboard poster computer screen or document where readable English or Latin alphabet writing is a dominant visible element",
 )
 _SCREEN_TEXT_INTERSTITIAL_QUERIES = (
     "full screen title card interstitial educational slate bumper graphic with large centered text or branding",
@@ -96,10 +96,23 @@ _SCREEN_TEXT_POSITIVE_QUERIES = (
     *_SCREEN_TEXT_INTERSTITIAL_QUERIES,
 )
 _SCREEN_TEXT_NEGATIVE_QUERIES = (
-    "natural documentary video frame without English or Latin alphabet captions; Cyrillic writing may be present",
-    "natural news b roll with people buildings vehicles and no English overlay or full screen title card",
-    "real world footage with Russian or Ukrainian Cyrillic writing but no English Latin alphabet overlay",
+    "natural documentary video frame without readable English or Latin alphabet captions; Cyrillic writing may be present",
+    "natural news b roll with people buildings vehicles and no readable English overlay or full screen title card",
+    "clean studio presenter interview or press conference shot with no readable English Latin alphabet overlay lower third headline or title graphic",
+    "real world footage with Russian or Ukrainian Cyrillic writing but no readable English Latin alphabet overlay",
 )
+# Stable NewsFlow 2.1.136 coarse gate. The persisted clip embedding is the
+# normalized mean of the 15% / 50% / 85% frame embeddings. Batch screening
+# blocks only a clear English/Latin-text signal and otherwise keeps footage
+# usable; obvious per-frame title/interstitial evidence can still be blocked
+# during indexing by the stricter high-confidence gate below.
+_SCREEN_TEXT_COARSE_POSITIVE_QUERY = (
+    "a video frame with prominent English words, Latin alphabet captions, subtitles or text overlay"
+)
+_SCREEN_TEXT_COARSE_NEGATIVE_QUERY = (
+    "a documentary video frame with no readable writing or text overlay"
+)
+_SCREEN_TEXT_COARSE_MARGIN = 0.012
 _SCREEN_TEXT_SAFE_MARGIN = 0.015
 _SCREEN_TEXT_OBVIOUS_MARGIN = 0.060
 SCREEN_ELIGIBILITY_SAFE = "SAFE"
@@ -1035,7 +1048,9 @@ class ClipIndex:
             if persisted == 1:
                 self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_BLOCKED
                 return SCREEN_ELIGIBILITY_BLOCKED
-            if persisted == -1:
+            # A shallow all-clear must not suppress a later deep inspection:
+            # sparse lower-thirds and end cards can fall between five samples.
+            if persisted == -1 and not deep:
                 self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_SAFE
                 return SCREEN_ELIGIBILITY_SAFE
             if not deep:
@@ -1059,20 +1074,32 @@ class ClipIndex:
             else SCREEN_ELIGIBILITY_UNCERTAIN
         )
         self._screen_text_state_cache[(resolved, bool(deep))] = eligibility
-        if state in {-1, 1}:
+        # A BLOCKED verdict remains blocking at either sampling depth.  SAFE is
+        # deliberately depth-specific so a deep request can inspect all frames.
+        if state == 1:
             self._screen_text_state_cache[(resolved, not bool(deep))] = eligibility
         return eligibility
 
     def screen_text_safe(self, path: str | Path) -> bool:
-        """Compatibility helper: deep-check ambiguity; reject only BLOCKED."""
-        return self.screen_text_eligibility(path, deep=True) != SCREEN_ELIGIBILITY_BLOCKED
+        """Compatibility helper: reject only an explicit current BLOCKED verdict."""
+        return self.screen_text_eligibility(path, deep=False) != SCREEN_ELIGIBILITY_BLOCKED
 
     def classify_english_screen_text(self) -> dict[str, int]:
-        """Persist v4 English/interstitial SAFE/BLOCKED/UNCERTAIN states."""
+        """Persist the conservative 2.1.136-style clip-level text verdict.
+
+        The stored clip embedding already averages the 15% / 50% / 85%
+        indexing frames, so the maintenance pass does not reopen media. Only
+        a clear English/Latin-text signal is blocked; every other current row
+        remains usable instead of being removed from normal Montage selection
+        merely because CLIP is uncertain.
+        """
+        import numpy as np
+
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT path FROM clips
-                   WHERE english_text_version < ? ORDER BY path""",
+                """SELECT path,embedding FROM clips
+                   WHERE embedding IS NOT NULL AND english_text_version < ?
+                   ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
         if not rows:
@@ -1083,17 +1110,40 @@ class ClipIndex:
             stats = self.screen_text_stats()
             return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
                     "uncertain": stats["unchecked"]}
-        blocked = safe = uncertain = checked = 0
+
+        positive, negative = self._query_vectors([
+            _SCREEN_TEXT_COARSE_POSITIVE_QUERY,
+            _SCREEN_TEXT_COARSE_NEGATIVE_QUERY,
+        ])
+        updates: list[tuple[int, int, str]] = []
+        blocked = safe = 0
         for row in rows:
-            eligibility = self.screen_text_eligibility(row["path"], deep=False)
-            checked += 1
-            blocked += int(eligibility == SCREEN_ELIGIBILITY_BLOCKED)
-            safe += int(eligibility == SCREEN_ELIGIBILITY_SAFE)
-            uncertain += int(eligibility == SCREEN_ELIGIBILITY_UNCERTAIN)
-        return {"checked": checked, "blocked": blocked, "safe": safe, "uncertain": uncertain}
+            vector = np.frombuffer(row["embedding"], dtype=np.float32)
+            if vector.size != positive.size:
+                continue
+            is_blocked = (
+                float(np.dot(vector, positive))
+                >= float(np.dot(vector, negative)) + _SCREEN_TEXT_COARSE_MARGIN
+            )
+            updates.append((
+                1 if is_blocked else -1,
+                SCREEN_TEXT_CLASSIFIER_VERSION,
+                row["path"],
+            ))
+            blocked += int(is_blocked)
+            safe += int(not is_blocked)
+
+        if updates:
+            with self._lock, self._connect() as connection:
+                connection.executemany(
+                    "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
+                    updates,
+                )
+            self._invalidate_search_cache()
+        return {"checked": len(updates), "blocked": blocked, "safe": safe, "uncertain": 0}
 
     def screen_text_stats(self) -> dict[str, int]:
-        """Count only current-v4 verdicts; stale v3 blocks become uncertain."""
+        """Count only current classifier verdicts; stale rows remain unchecked."""
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT english_text,english_text_version,COUNT(*) AS amount
