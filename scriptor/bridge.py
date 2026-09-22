@@ -14323,6 +14323,112 @@ def delete_publication_v2_rule_preset(payload: dict) -> dict:
             "message": f"Пресет «{name}» удалён."}}
 
 
+def save_publication_v2_plan_version(payload: dict) -> dict:
+    """Persist one editable distribution draft for restart-safe comparison/restore."""
+    name = " ".join(str(payload.get("name", "")).split())
+    assignments = payload.get("assignments") if isinstance(payload.get("assignments"), list) else []
+    if not name:
+        raise ValueError("Укажите название версии плана.")
+    normalized = [
+        {
+            "productionItemId": str(item.get("productionItemId", "")).strip(),
+            "channelId": str(item.get("channelId", "")).strip(),
+            "publishAt": str(item.get("publishAt", "")).strip(),
+            "source": str(item.get("source", "")).strip() or "auto",
+            "locked": bool(item.get("locked", False)),
+            "reason": str(item.get("reason", "")).strip(),
+        }
+        for item in assignments
+        if isinstance(item, dict) and str(item.get("productionItemId", "")).strip()
+    ]
+    if not normalized:
+        raise ValueError("В текущем preview нет назначений для сохранения.")
+    settings = load_settings()
+    now = datetime.now().astimezone().isoformat()
+    version_id = f"plan:{uuid.uuid4().hex}"
+    versions = [
+        dict(item) for item in (settings.youtube_publication_plan_versions or [])
+        if isinstance(item, dict)
+    ]
+    versions.append({
+        "id": version_id,
+        "name": name,
+        "createdAt": now,
+        "assignments": normalized,
+    })
+    settings.youtube_publication_plan_versions = versions[-50:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-plan-save",
+        "count": len(normalized),
+        "id": version_id,
+        "message": f"Версия плана «{name}» сохранена.",
+    }}
+
+
+def restore_publication_v2_plan_version(payload: dict) -> dict:
+    """Restore only mutable draft assignments; frozen snapshots always win."""
+    version_id = str(payload.get("id", "")).strip()
+    if not version_id:
+        raise ValueError("Выберите версию плана.")
+    settings = load_settings()
+    version = next((
+        dict(item) for item in (settings.youtube_publication_plan_versions or [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip() == version_id
+    ), None)
+    if version is None:
+        raise ValueError("Версия плана не найдена.")
+    frozen_ids = {
+        str(snapshot.get("productionItemId", "")).strip()
+        for snapshot in (settings.youtube_publication_snapshots or {}).values()
+        if isinstance(snapshot, dict) and str(snapshot.get("productionItemId", "")).strip()
+    }
+    restored = skipped = 0
+    assignments = dict(settings.youtube_publication_assignments or {})
+    for source in version.get("assignments", []) if isinstance(version.get("assignments"), list) else []:
+        if not isinstance(source, dict):
+            continue
+        production_id = str(source.get("productionItemId", "")).strip()
+        if not production_id:
+            continue
+        if production_id in frozen_ids:
+            skipped += 1
+            continue
+        assignments[production_id] = dict(source)
+        restored += 1
+    settings.youtube_publication_assignments = assignments
+    save_settings(settings)
+    message = f"Восстановлено назначений: {restored}."
+    if skipped:
+        message += f" Frozen snapshots не изменены: {skipped}."
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-plan-restore",
+        "count": restored,
+        "skipped": skipped,
+        "message": message,
+    }}
+
+
+def delete_publication_v2_plan_version(payload: dict) -> dict:
+    version_id = str(payload.get("id", "")).strip()
+    if not version_id:
+        raise ValueError("Выберите версию плана.")
+    settings = load_settings()
+    before = len(settings.youtube_publication_plan_versions or [])
+    settings.youtube_publication_plan_versions = [
+        dict(item) for item in (settings.youtube_publication_plan_versions or [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip() != version_id
+    ]
+    if len(settings.youtube_publication_plan_versions) == before:
+        raise ValueError("Версия плана не найдена.")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-plan-delete",
+        "count": 1,
+        "message": "Версия плана удалена.",
+    }}
+
+
 def preview_publication_v2_distribution(payload: dict) -> dict:
     settings = load_settings()
     reconcile_publication_items(settings)
