@@ -233,6 +233,7 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
     uploadConcurrency: Math.max(1, Number(rawV2.uploadConcurrency || data.publication.uploadConcurrency) || 1),
     paused: Boolean(rawV2.paused),
     counters: record(rawV2.counters) as Record<string, number>,
+    newPackages: Array.isArray((data.publication as any).readyOutputs) ? (data.publication as any).readyOutputs.length : 0,
   };
 }
 
