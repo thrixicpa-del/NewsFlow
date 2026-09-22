@@ -55,6 +55,7 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
         "preview_publication_v2_distribution", "scriptor.publication_v2", _NO_LEGACY,
     ),
     "migrate-publication-v2": CommandRegistration("migrate_publication_v2", "scriptor.publication_v2", _NO_LEGACY),
+    "run-publication-v2-studio": CommandRegistration("run_publication_v2_studio", "scriptor.youtube_studio + scriptor.publication_v2", _NO_LEGACY),
 }
 
 
