@@ -95,7 +95,7 @@ describe("PublicationPage", () => {
     render(<PublicationPage data={fixture} command={command} />);
 
     expect(screen.getByText(/Ролик 1:/)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByLabelText("Раскрыть детали")[0]);
+    fireEvent.click(screen.getByRole("button", { name: /^Раскрыть детали Ролик 1:/ }));
 
     expect(screen.getByText("ProductionItem ID")).toBeInTheDocument();
     expect(screen.getByText("item-1")).toBeInTheDocument();
