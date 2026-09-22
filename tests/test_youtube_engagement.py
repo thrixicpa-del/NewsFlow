@@ -8,7 +8,6 @@ from scriptor.config import Settings
 from scriptor import bridge
 from scriptor.youtube_engagement import (
     build_ad_plan,
-    build_ad_plan,
     build_engagement_plan,
     new_engagement_state,
     transition_engagement_step,
@@ -54,7 +53,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
         self.assertEqual(short["manualSlotsSeconds"], [])
         self.assertTrue(short["automaticSlotsEnabled"])
 
-        self.assertEqual(long["mode"], "AUTO+MANUAL_39S")
+        self.assertEqual(long["mode"], "AUTO+MANUAL")
         self.assertTrue(long["monetizationEnabled"])
         self.assertTrue(long["midRollEligible"])
         self.assertEqual(long["manualSlotsSeconds"][:3], [39, 78, 117])
