@@ -11748,7 +11748,7 @@ def prepare_montage(payload: dict) -> dict:
                     position_bucket=position_bucket,
                     batch_family_buckets=family_buckets,
                     diversity_seed=f"{titles[scenario_index]}|{scenario_index}|neutral-rescue",
-                    allow_safe_reuse=True,
+                    allow_safe_reuse=False,
                     allow_below_threshold=True,
                 )
                 selected = selection.item
