@@ -186,6 +186,47 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(row["hashtags"], [])
         self.assertEqual(row["tags"], [])
 
+    def test_seo_format_instruction_uses_exact_configured_hashtag_count(self):
+        instruction = bridge._seo_format_instruction(9)
+
+        self.assertIn("ровно 9", instruction)
+        self.assertNotIn("3–5", instruction)
+
+    def test_auto_pipeline_generates_tags_after_seo_stage(self):
+        job = SimpleNamespace(
+            request=SimpleNamespace(index=0),
+            state=RunState.DONE,
+            result="Готовый сценарий",
+        )
+        settings = Settings(
+            seo_queue=[{
+                "source_title": "Тема",
+                "status": "Готово",
+                "description": "Готовое SEO описание",
+                "tags": [],
+                "tags_status": "Ожидают",
+            }],
+            auto_pipeline_stages={
+                "scenarios": False,
+                "covers": False,
+                "seo": True,
+                "voice": False,
+                "montage": False,
+                "package": False,
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+             patch.object(bridge, "transfer_scenarios"), \
+             patch.object(bridge, "generate_seo") as generate_seo_mock, \
+             patch.object(bridge, "generate_tags", return_value={}) as generate_tags_mock, \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.run_auto_pipeline({"enabled": True, "stages": settings.auto_pipeline_stages})
+
+        generate_seo_mock.assert_not_called()
+        generate_tags_mock.assert_called_once_with({"indices": [0], "chatUrl": ""})
+
     def test_allocation_channel_exposes_assigned_video_names_and_durations(self):
         """The allocation screen needs readable assignments, not opaque IDs."""
         settings = Settings(youtube_publication_jobs=[
