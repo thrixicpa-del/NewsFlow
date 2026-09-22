@@ -637,7 +637,15 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
         for rule in rules
         if str(rule.get("channelId", "")).strip()
     }
-    validation_conflicts = validate_publication_schedule(rows, validation_rules)
+    item_topics = {
+        str(production_id): str(
+            dict(item.get("metadata", {}) or {}).get("topicFamily")
+            or dict(item.get("metadata", {}) or {}).get("topic")
+            or ""
+        ).strip()
+        for production_id, item in items.items()
+    }
+    validation_conflicts = validate_publication_schedule(rows, validation_rules, item_topics=item_topics)
     conflicts_by_item: dict[str, list[str]] = {}
     suggestions_by_item: dict[str, list[str]] = {}
     for conflict in validation_conflicts:
@@ -967,6 +975,7 @@ def apply_bulk_schedule_range(
     assignments: list[dict],
     schedule: dict[str, Any],
     channel_rules: dict[str, dict] | None = None,
+    item_topics: dict[str, str] | None = None,
 ) -> list[dict]:
     """Apply one bulk window independently inside every selected channel.
 
@@ -1014,9 +1023,12 @@ def apply_bulk_schedule_range(
             "firstPublishAt": start.isoformat(),
             "intervalMinutes": interval,
         }
+        channel_item_ids = [str(result[position]["productionItemId"]) for position in positions]
+        topics = dict(item_topics or {})
         slots = build_channel_schedule(
-            [str(result[position]["productionItemId"]) for position in positions],
+            channel_item_ids,
             bounded_rule,
+            item_topics={production_id: str(topics.get(production_id, "")) for production_id in channel_item_ids},
         )
         slots_by_id = {slot["productionItemId"]: slot for slot in slots}
         for position in positions:
@@ -1034,11 +1046,21 @@ def apply_bulk_schedule_range(
             })
     return result
 
-def validate_publication_schedule(assignments: list[dict], channel_rules: dict[str, dict]) -> list[dict[str, str]]:
+def validate_publication_schedule(
+    assignments: list[dict],
+    channel_rules: dict[str, dict],
+    item_topics: dict[str, str] | None = None,
+) -> list[dict[str, str]]:
     """Return schedule conflicts without mutating explicit operator choices."""
     conflicts: list[dict[str, str]] = []
     seen_slots: dict[tuple[str, str], str] = {}
     daily_counts: dict[tuple[str, str], int] = {}
+    valid_slots_by_channel: dict[str, list[tuple[datetime, str]]] = {}
+    topics = {
+        str(production_id): str(topic or "").strip().casefold()
+        for production_id, topic in dict(item_topics or {}).items()
+    }
+
     for assignment in assignments:
         production_id = str(assignment.get("productionItemId", "")).strip()
         channel_id = str(assignment.get("channelId", "")).strip()
@@ -1053,6 +1075,7 @@ def validate_publication_schedule(assignments: list[dict], channel_rules: dict[s
             conflicts.append({"kind": "invalid_timezone_or_time", "productionItemId": production_id, "channelId": channel_id})
             continue
         local_slot = slot.replace(tzinfo=zone) if slot.tzinfo is None else slot.astimezone(zone)
+        valid_slots_by_channel.setdefault(channel_id, []).append((local_slot, production_id))
         if not _is_quarter_hour(local_slot):
             conflicts.append({"kind": "quarter_hour_required", "productionItemId": production_id, "channelId": channel_id})
         slot_key = (channel_id, local_slot.isoformat())
@@ -1081,7 +1104,46 @@ def validate_publication_schedule(assignments: list[dict], channel_rules: dict[s
         daily_cap = max(0, int(rule.get("dailyCap", 0) or 0))
         if daily_cap and daily_counts[daily_key] > daily_cap:
             conflicts.append({"kind": "daily_cap_exceeded", "productionItemId": production_id, "channelId": channel_id})
+
+    # These constraints are rolling/order-dependent, so validate them after
+    # sorting by the channel-local timestamp. Manual row order in the UI must
+    # not change whether a conflict is detected.
+    for channel_id, slot_rows in valid_slots_by_channel.items():
+        rule = dict(channel_rules.get(channel_id, {}) or {})
+        ordered = sorted(slot_rows, key=lambda pair: (pair[0], pair[1]))
+        max_per_hour = max(0, int(rule.get("maxVideosPerHour", 0) or 0))
+        topic_cooldown = max(0, int(rule.get("topicCooldownMinutes", 0) or 0))
+        previous_points: list[datetime] = []
+        last_topic_slot: dict[str, datetime] = {}
+
+        for slot, production_id in ordered:
+            if max_per_hour:
+                previous_points = [
+                    point for point in previous_points
+                    if timedelta(0) <= slot - point < timedelta(hours=1)
+                ]
+                if len(previous_points) >= max_per_hour:
+                    conflicts.append({
+                        "kind": "max_videos_per_hour",
+                        "productionItemId": production_id,
+                        "channelId": channel_id,
+                    })
+            previous_points.append(slot)
+
+            topic = topics.get(production_id, "")
+            previous_topic = last_topic_slot.get(topic) if topic else None
+            if topic and topic_cooldown and previous_topic is not None:
+                if slot - previous_topic < timedelta(minutes=topic_cooldown):
+                    conflicts.append({
+                        "kind": "topic_cooldown",
+                        "productionItemId": production_id,
+                        "channelId": channel_id,
+                    })
+            if topic:
+                last_topic_slot[topic] = slot
+
     return conflicts
+
 
 def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, Any]:
     """Preflight one frozen snapshot without modifying its source data."""
@@ -1169,13 +1231,21 @@ def _refresh_execution_overall_status(settings: Any, snapshot_id: str, execution
 
 def confirm_publication_snapshots(settings: Any, assignments: list[dict], channel_rules: dict[str, dict]) -> list[str]:
     """Freeze explicit valid assignments once; repeat confirmation is idempotent."""
-    conflicts = validate_publication_schedule(assignments, channel_rules)
+    items = dict(getattr(settings, "youtube_publication_items", {}) or {})
+    item_topics = {
+        str(production_id): str(
+            dict(item.get("metadata", {}) or {}).get("topicFamily")
+            or dict(item.get("metadata", {}) or {}).get("topic")
+            or ""
+        ).strip()
+        for production_id, item in items.items()
+    }
+    conflicts = validate_publication_schedule(assignments, channel_rules, item_topics=item_topics)
     if conflicts:
         kinds = ", ".join(sorted({str(conflict["kind"]) for conflict in conflicts}))
         raise ValueError(f"Расписание содержит конфликты: {kinds}")
     snapshots = dict(getattr(settings, "youtube_publication_snapshots", {}) or {})
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
-    items = dict(getattr(settings, "youtube_publication_items", {}) or {})
     created: list[str] = []
     existing_by_item = {str(snapshot.get("productionItemId", "")): snapshot_id for snapshot_id, snapshot in snapshots.items()}
     for assignment in assignments:
