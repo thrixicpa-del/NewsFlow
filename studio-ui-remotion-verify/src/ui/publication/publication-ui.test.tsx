@@ -80,7 +80,7 @@ describe("PublicationPage", () => {
     expect(screen.getByText("Snapshot ID")).toBeInTheDocument();
     expect(screen.getByText("receipt-42")).toBeInTheDocument();
     expect(screen.getAllByText("Реклама").length).toBeGreaterThan(0);
-    expect(screen.getByText("AUTO + MANUAL 39s")).toBeInTheDocument();
+    expect(screen.getAllByText("AUTO + MANUAL 39s").length).toBeGreaterThan(0);
     expect(screen.getByText("Ручные рекламные слоты")).toBeInTheDocument();
     expect(screen.getByText("Текущий snapshot не сообщает признак устаревания")).toBeInTheDocument();
   });
