@@ -246,6 +246,7 @@ def reconcile_publication_items(settings: Any) -> dict[str, Any]:
     counters = {
         "total": len(items),
         "videoReady": 0,
+        "videoMissing": 0,
         "contentReady": 0,
         "publicationReady": 0,
         "needsAttention": 0,
@@ -360,6 +361,7 @@ def reconcile_publication_items(settings: Any) -> dict[str, Any]:
         items[production_id] = item
 
         counters["videoReady"] += int(video_exists)
+        counters["videoMissing"] += int(not video_exists)
         counters["contentReady"] += int(content_ready)
         counters["publicationReady"] += int(publication_ready)
         counters["needsAttention"] += int(bool(reasons))
@@ -1002,15 +1004,18 @@ def _normalize_publish_at(value: object, rule: dict[str, Any]) -> str | None:
     raw = str(value or "").strip()
     if not raw:
         return None
+    zone_name = str(rule.get("timezone", "") or "").strip()
     try:
         point = datetime.fromisoformat(raw)
-        zone = ZoneInfo(str(rule.get("timezone", "") or "UTC"))
+        zone = ZoneInfo(zone_name or "UTC")
     except (ValueError, ZoneInfoNotFoundError) as error:
         raise ValueError("Некорректное время публикации или timezone канала") from error
     if point.tzinfo is None:
         point = point.replace(tzinfo=zone)
-    else:
+    elif zone_name:
         point = point.astimezone(zone)
+    # When the rule has no explicit timezone, preserve the operator-provided
+    # offset instead of silently rewriting the immutable audit snapshot to UTC.
     if not _is_quarter_hour(point):
         raise ValueError("Время публикации должно быть кратно 15 минутам")
     return point.isoformat()
