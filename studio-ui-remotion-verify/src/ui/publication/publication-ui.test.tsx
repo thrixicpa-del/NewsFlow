@@ -25,7 +25,13 @@ const fixture = {
         readiness: { state: index === 1 ? "VIDEO_MISSING" : "VIDEO_READY" },
         artifacts: { video: { path: `D:/videos/${index + 1}.mp4`, exists: index !== 1 } },
       }])),
-      queue: [],
+      queue: [{
+        snapshotId: "snapshot-ads", productionItemId: "item-1", title: "Ролик 1", channelId: "channel-1",
+        currentStage: "ADS", status: "FORMATTING", active: false, youtubeVideoId: "yt-1",
+        completion: { completed: 4, total: 12 },
+        steps: { ADS: { status: "SUCCESS", providerResult: { mode: "AUTO+MANUAL_39S" } } },
+        timeline: [],
+      }],
       counters: { total: 84, ready: 83 },
       paused: false,
       uploadConcurrency: 6,
@@ -46,6 +52,9 @@ describe("PublicationPage", () => {
     expect(screen.getByRole("tab", { name: "Каналы" })).toBeInTheDocument();
     expect(screen.getByText(/Ролик 1:/)).toBeInTheDocument();
     expect(screen.getByText("MP4 отсутствует")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    expect(screen.getByRole("columnheader", { name: "Реклама" })).toBeInTheDocument();
+    expect(screen.getByText("AUTO + MANUAL 39s")).toBeInTheDocument();
   });
 
   it("shows snapshot-backed provenance for a publication receipt", () => {
