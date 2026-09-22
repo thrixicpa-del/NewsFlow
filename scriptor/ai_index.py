@@ -77,14 +77,14 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
 SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 4
+SCREEN_TEXT_CLASSIFIER_VERSION = 5
 # Restore the NewsFlow 2.1.136 contract: ordinary Cyrillic/Russian lettering is
 # allowed. Montage blocks prominent English/Latin lettering and, separately,
 # full-screen title/interstitial slates in any language.
 _SCREEN_TEXT_ENGLISH_QUERIES = (
-    "video frame with prominent English words Latin alphabet captions subtitles lower third or text overlay",
-    "news broadcast frame with readable English headline ticker labels or Latin alphabet on screen words",
-    "sign billboard poster computer screen or document with readable English or Latin alphabet writing",
+    "readable English or Latin alphabet typography over natural video footage: captions subtitles lower third headline ticker labels or text overlay",
+    "large prominent single English or Latin alphabet word or short phrase used as a title graphic banner centered overlay or lower third over video footage",
+    "sign billboard poster computer screen or document where readable English or Latin alphabet writing is a dominant visible element",
 )
 _SCREEN_TEXT_INTERSTITIAL_QUERIES = (
     "full screen title card interstitial educational slate bumper graphic with large centered text or branding",
@@ -96,9 +96,10 @@ _SCREEN_TEXT_POSITIVE_QUERIES = (
     *_SCREEN_TEXT_INTERSTITIAL_QUERIES,
 )
 _SCREEN_TEXT_NEGATIVE_QUERIES = (
-    "natural documentary video frame without English or Latin alphabet captions; Cyrillic writing may be present",
-    "natural news b roll with people buildings vehicles and no English overlay or full screen title card",
-    "real world footage with Russian or Ukrainian Cyrillic writing but no English Latin alphabet overlay",
+    "natural documentary video frame without readable English or Latin alphabet captions; Cyrillic writing may be present",
+    "natural news b roll with people buildings vehicles and no readable English overlay or full screen title card",
+    "clean studio presenter interview or press conference shot with no readable English Latin alphabet overlay lower third headline or title graphic",
+    "real world footage with Russian or Ukrainian Cyrillic writing but no readable English Latin alphabet overlay",
 )
 _SCREEN_TEXT_SAFE_MARGIN = 0.015
 _SCREEN_TEXT_OBVIOUS_MARGIN = 0.060
