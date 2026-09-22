@@ -63,10 +63,20 @@ class ClipIndexTests(unittest.TestCase):
 
     def test_screen_text_gate_covers_cyrillic_and_interstitial_title_cards(self):
         queries = " ".join(_SCREEN_TEXT_POSITIVE_QUERIES).casefold()
-        self.assertGreaterEqual(SCREEN_TEXT_CLASSIFIER_VERSION, 3)
+        self.assertGreaterEqual(SCREEN_TEXT_CLASSIFIER_VERSION, 5)
         self.assertIn("cyrillic", queries)
         self.assertIn("title card", queries)
         self.assertIn("interstitial", queries)
+
+    def test_screen_text_prompt_calibration_separates_clean_presenter_from_latin_title_graphic(self):
+        positive = " ".join(_SCREEN_TEXT_POSITIVE_QUERIES).casefold()
+        negative = " ".join(_SCREEN_TEXT_NEGATIVE_QUERIES).casefold()
+
+        self.assertNotIn("news broadcast frame", positive)
+        self.assertIn("single english", positive)
+        self.assertIn("title graphic", positive)
+        self.assertIn("studio presenter", negative)
+        self.assertIn("no readable english", negative)
 
     def test_neutral_filenames_retrieve_by_visual_meaning_after_deep_enrichment(self):
         class CategoryImageEmbedding:
@@ -534,15 +544,8 @@ class ClipIndexTests(unittest.TestCase):
             clip.write_bytes(b"video")
             index = ClipIndex(root / "index.sqlite3")
             query_vectors = np.asarray(
-                [
-                    [1.0, 0.0],
-                    [1.0, 0.0],
-                    [1.0, 0.0],
-                    [1.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 1.0],
-                ],
+                [[1.0, 0.0]] * len(_SCREEN_TEXT_POSITIVE_QUERIES)
+                + [[0.0, 1.0]] * len(_SCREEN_TEXT_NEGATIVE_QUERIES),
                 dtype=np.float32,
             )
             with patch.object(index, "_models", return_value=(TextImageEmbedding(), object())), \
@@ -582,7 +585,7 @@ class ClipIndexTests(unittest.TestCase):
                     elif value in negative:
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
                     else:
-                        raise AssertionError(f"Unexpected V4 query: {query!r}")
+                        raise AssertionError(f"Unexpected screen-text query: {query!r}")
 
         class TextFrameIndex(ClipIndex):
             @staticmethod
