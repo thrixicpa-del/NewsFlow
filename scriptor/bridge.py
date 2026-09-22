@@ -14168,10 +14168,58 @@ def save_publication_v2_rules(payload: dict) -> dict:
 def preview_publication_v2_distribution(payload: dict) -> dict:
     settings = load_settings()
     reconcile_publication_items(settings)
-    rules = [dict(rule) for rule in settings.youtube_channel_publication_rules.values()]
+
+    rules: list[dict] = []
+    known_channel_ids = {
+        str(item.get("profile_id") or item.get("id") or "").strip()
+        for item in getattr(settings, "analytics_channels", [])
+        if isinstance(item, dict)
+    }
+    for raw_rule in settings.youtube_channel_publication_rules.values():
+        rule = dict(raw_rule)
+        channel_id = str(rule.get("channelId", "")).strip()
+        if channel_id in known_channel_ids:
+            rule["oauthConnected"] = bool(str((settings.youtube_oauth_tokens or {}).get(channel_id, "")).strip())
+        rules.append(rule)
+
+    # A confirmed snapshot is immutable planning input. Re-previewing must not
+    # move it to another channel/time even when the saved mutable assignment is
+    # absent or stale.
+    effective_assignments = {
+        str(production_id): dict(assignment)
+        for production_id, assignment in (settings.youtube_publication_assignments or {}).items()
+        if isinstance(assignment, dict)
+    }
+    executions = dict(settings.youtube_publication_executions or {})
+    for snapshot_id, snapshot_record in (settings.youtube_publication_snapshots or {}).items():
+        if not isinstance(snapshot_record, dict):
+            continue
+        production_id = str(snapshot_record.get("productionItemId", "")).strip()
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        if not production_id or not channel_id:
+            continue
+        execution = dict(executions.get(snapshot_id, {}) or {})
+        if str(execution.get("overallStatus", "")).upper() in {"CANCELLED", "AUTOMATION_CANCELLED"}:
+            continue
+        effective_assignments[production_id] = {
+            "productionItemId": production_id,
+            "channelId": channel_id,
+            "publishAt": str(
+                execution.get("confirmedPublishAt")
+                or snapshot_record.get("requestedPublishAt")
+                or ""
+            ),
+            "source": "confirmed_snapshot",
+            "locked": True,
+        }
+
     bulk_schedule = payload.get("bulkSchedule") if isinstance(payload.get("bulkSchedule"), dict) else None
     if bulk_schedule is not None:
-        selected_channels = {str(value).strip() for value in bulk_schedule.get("channelIds", []) if str(value).strip()}
+        selected_channels = {
+            str(value).strip()
+            for value in bulk_schedule.get("channelIds", [])
+            if str(value).strip()
+        }
         if not selected_channels:
             raise ValueError("Выберите хотя бы один канал для массового диапазона.")
         try:
@@ -14179,15 +14227,38 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
         except (TypeError, ValueError) as error:
             raise ValueError("Укажите положительный лимит роликов на канал.") from error
         rules = [
-            {**rule, "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel)}
+            {
+                **rule,
+                "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel),
+            }
             for rule in rules
             if str(rule.get("channelId", "")).strip() in selected_channels
         ]
-    preview = build_distribution_preview(settings.youtube_publication_items,
-                                         rules,
-                                         settings.youtube_publication_assignments)
+
+    preview = build_distribution_preview(
+        settings.youtube_publication_items,
+        rules,
+        effective_assignments,
+    )
     if bulk_schedule is not None:
-        preview["assignments"] = apply_bulk_schedule_range(preview["assignments"], bulk_schedule)
+        preview["assignments"] = apply_bulk_schedule_range(
+            preview["assignments"],
+            bulk_schedule,
+            {
+                str(rule.get("channelId", "")).strip(): dict(rule)
+                for rule in rules
+                if str(rule.get("channelId", "")).strip()
+            },
+        )
+        preview["scheduleWarnings"] = [
+            {
+                "productionItemId": str(row.get("productionItemId", "")),
+                "channelId": str(row.get("channelId", "")),
+                "message": str(row.get("scheduleWarning", "")),
+            }
+            for row in preview["assignments"]
+            if str(row.get("scheduleWarning", "")).strip()
+        ]
     return {**snapshot(), "publicationPreview": preview}
 
 
