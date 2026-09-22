@@ -12,7 +12,7 @@ export type ChannelRule = {
   privacy: "private" | "unlisted" | "public"; publishMode: "schedule" | "publish_now"; timezone: string; firstPublishAt: string; intervalMinutes: number;
   allowedWeekdays: number[]; publishWindowStart: string; publishWindowEnd: string; dailyCap: number; minDurationSeconds: number; maxDurationSeconds: number;
   orderStart: number; orderEnd: number; channelPriority: number; maxVideosPerHour: number; topicCooldownMinutes: number;
-  includeKeywords: string[]; excludeKeywords: string[];
+  includeKeywords: string[]; excludeKeywords: string[]; blackoutPeriods: Array<{ start: string; end: string; label?: string }>;
   automation: { upload: boolean; metadata: boolean; thumbnail: boolean; ads: boolean; post: boolean; cards: boolean; endScreen: boolean };
 };
 
