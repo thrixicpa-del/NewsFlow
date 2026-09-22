@@ -39,14 +39,13 @@ def _eligible_catalog(job: Mapping[str, object], catalog: Sequence[Mapping[str, 
     )
 
 
-def build_ad_plan(duration_seconds: float, *, monetized: bool, interval_seconds: int = 39) -> dict:
-    """Build the Studio monetization/ad plan without touching YouTube.
-
-    Monetization is enabled for every upload on a channel explicitly marked
-    monetized. YouTube only permits mid-roll slots on videos of at least
-    eight minutes, so shorter videos truthfully use AUTO_ONLY.
-    """
-
+def build_ad_plan(
+    duration_seconds: float,
+    *,
+    monetized: bool,
+    interval_seconds: int = 39,
+) -> dict:
+    """Build the canonical Studio monetization plan without touching YouTube."""
     try:
         duration = max(0, int(float(duration_seconds or 0)))
         interval = int(interval_seconds)
@@ -56,68 +55,36 @@ def build_ad_plan(duration_seconds: float, *, monetized: bool, interval_seconds:
         raise ValueError("Интервал рекламных слотов должен быть положительным")
     if not monetized:
         return {
+            "enabled": False,
             "mode": "NONE",
             "monetizationEnabled": False,
-            "midRollEligible": False,
-            "automaticSlotsEnabled": False,
-            "manualSlotsSeconds": [],
-        }
-
-    midroll_eligible = duration >= 8 * 60
-    manual_slots = (
-        [second for second in range(interval, duration, interval) if second + 15 <= duration]
-        if midroll_eligible else []
-    )
-    return {
-        "mode": "AUTO+MANUAL_39S" if midroll_eligible and manual_slots else "AUTO_ONLY",
-        "monetizationEnabled": True,
-        "midRollEligible": midroll_eligible,
-        "automaticSlotsEnabled": True,
-        "manualSlotsSeconds": manual_slots,
-    }
-
-
-def build_ads_plan(
-    duration_seconds: float,
-    *,
-    monetized: bool,
-    interval_seconds: int = 39,
-) -> dict:
-    """Build the intended Studio monetization state without touching YouTube.
-
-    YouTube permits mid-roll ad slots only on videos that are at least eight
-    minutes long. Monetized channels still request ordinary monetization for
-    shorter videos; only the manual mid-roll sub-step becomes not applicable.
-    """
-    try:
-        duration = max(0, int(float(duration_seconds or 0)))
-    except (TypeError, ValueError):
-        duration = 0
-    interval = int(interval_seconds)
-    if interval < 1:
-        raise ValueError("Интервал рекламных слотов должен быть положительным")
-    if not monetized:
-        return {
-            "enabled": False,
             "automatic": False,
+            "automaticSlotsEnabled": False,
             "manual": False,
-            "mode": "NONE",
             "manualMidrollApplicable": False,
+            "midRollEligible": False,
             "manualSlots": [],
+            "manualSlotsSeconds": [],
             "intervalSeconds": interval,
         }
+
     applicable = duration >= 8 * 60
     slots = [
         second for second in range(interval, duration, interval)
         if applicable and second + 15 <= duration
     ]
+    mode = "AUTO+MANUAL" if applicable else "AUTO_ONLY"
     return {
         "enabled": True,
+        "mode": mode,
+        "monetizationEnabled": True,
         "automatic": True,
+        "automaticSlotsEnabled": True,
         "manual": applicable,
-        "mode": "AUTO+MANUAL" if applicable else "AUTO_ONLY",
         "manualMidrollApplicable": applicable,
+        "midRollEligible": applicable,
         "manualSlots": slots,
+        "manualSlotsSeconds": slots,
         "intervalSeconds": interval,
     }
 
