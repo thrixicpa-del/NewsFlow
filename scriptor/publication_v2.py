@@ -1090,6 +1090,40 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
     settings.youtube_publication_executions = executions
 
 
+def begin_publication_stage(settings: Any, snapshot_id: str, worker_id: str, stage: str) -> None:
+    """Lease and mark one downstream stage RUNNING before a side effect starts."""
+
+    normalized = str(stage).strip().upper()
+    if normalized not in _STAGES or normalized in {"AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION", "TAGS"}:
+        raise ValueError("Этот этап нельзя запускать через Studio stage helper")
+    if not claim_execution(settings, snapshot_id, worker_id):
+        raise ValueError("Этот publication snapshot уже выполняется другим worker")
+    executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
+    execution = executions[snapshot_id]
+    steps = dict(execution.get("steps", {}) or {})
+    step = dict(steps.get(normalized, {}) or _step())
+    if str(step.get("status", "")).upper() in {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}:
+        release_execution(settings, snapshot_id, worker_id)
+        raise ValueError("Готовый этап нельзя запускать повторно без явного reset")
+    now = _now()
+    step.update({
+        "status": "RUNNING",
+        "startedAt": now,
+        "finishedAt": None,
+        "attempts": int(step.get("attempts", 0) or 0) + 1,
+        "error": None,
+    })
+    steps[normalized] = step
+    execution["steps"] = steps
+    execution["currentStage"] = normalized
+    execution["overallStatus"] = "FORMATTING"
+    execution.setdefault("timeline", []).append({
+        "at": now, "stage": normalized, "status": "RUNNING", "detail": "Этап начат",
+    })
+    executions[snapshot_id] = execution
+    settings.youtube_publication_executions = executions
+
+
 def mark_publication_stage_not_required(
     settings: Any,
     snapshot_id: str,
