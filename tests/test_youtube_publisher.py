@@ -278,6 +278,28 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(body["snippet"]["tags"], ["первый"])
         self.assertLessEqual(len(",".join(body["snippet"]["tags"])), 500)
 
+    def test_upload_body_rejects_description_over_youtube_utf8_byte_limit(self):
+        with self.assertRaisesRegex(ValueError, "5000 байт"):
+            build_private_video_insert_body(
+                title="Тема",
+                description="я" * 2501,
+                tags=[],
+            )
+
+    def test_upload_body_rejects_forbidden_angle_brackets_in_metadata(self):
+        with self.assertRaisesRegex(ValueError, "Заголовок"):
+            build_private_video_insert_body(
+                title="Тема <черновик>",
+                description="Описание",
+                tags=[],
+            )
+        with self.assertRaisesRegex(ValueError, "Описание"):
+            build_private_video_insert_body(
+                title="Тема",
+                description="Описание <черновик>",
+                tags=[],
+            )
+
     def test_upload_body_keeps_explicit_supported_privacy_for_confirmed_snapshot(self):
         """Publication V2 resolves privacy into its immutable snapshot before upload."""
         body = build_private_video_insert_body(
