@@ -24,11 +24,11 @@ from . import bridge
 from . import config as config_module
 from . import timeline as timeline_module
 from .ai_index import (
+    _SCREEN_TEXT_POSITIVE_QUERIES,
     SCREEN_ELIGIBILITY_BLOCKED,
     SCREEN_ELIGIBILITY_SAFE,
     SCREEN_ELIGIBILITY_UNCERTAIN,
     SCREEN_TEXT_CLASSIFIER_VERSION,
-    _SCREEN_TEXT_POSITIVE_QUERIES,
     ClipIndex,
 )
 from .bridge import _semantic_clip_ok
