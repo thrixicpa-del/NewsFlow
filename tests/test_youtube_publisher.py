@@ -425,6 +425,17 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(manual_ad_break_checklist(118), ["00:39", "01:18"])
         self.assertEqual(manual_ad_break_checklist(39), [])
 
+    def test_youtube_upload_body_appends_unique_hashtags_to_description(self):
+        body = build_private_video_insert_body(
+            title="Заголовок",
+            description="Описание #news",
+            tags=["news"],
+            hashtags=["#news", "#world", "world"],
+        )
+
+        self.assertEqual(body["snippet"]["description"], "Описание #news\n\n#world")
+        self.assertEqual(body["snippet"]["tags"], ["news"])
+
     def test_youtube_upload_body_is_private_and_carries_ready_package_metadata(self):
         body = build_private_video_insert_body(
             title="Ормуз: риски для торговли",
