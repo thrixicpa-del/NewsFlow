@@ -664,6 +664,56 @@ class PublicationV2PresetTests(unittest.TestCase):
         self.assertEqual(restored.youtube_publication_v2_rule_presets, settings.youtube_publication_v2_rule_presets)
 
 
+    def test_restore_plan_version_can_reuse_item_after_preupload_cancellation_but_not_after_upload(self):
+        """Only pre-upload CANCELLED releases a frozen item back to mutable planning."""
+        plan = {
+            "id": "plan:test",
+            "name": "Восстановить",
+            "assignments": [{
+                "productionItemId": "pi-1",
+                "channelId": "channel-new",
+                "publishAt": "2026-09-22T18:15:00+03:00",
+                "source": "auto",
+                "locked": False,
+            }],
+        }
+        settings = Settings(
+            youtube_publication_plan_versions=[plan],
+            youtube_publication_assignments={
+                "pi-1": {"productionItemId": "pi-1", "channelId": "channel-old", "source": "auto", "locked": False},
+            },
+            youtube_publication_snapshots={
+                "snap-old": {"id": "snap-old", "productionItemId": "pi-1", "channelId": "channel-old"},
+            },
+            youtube_publication_executions={
+                "snap-old": {"snapshotId": "snap-old", "overallStatus": "CANCELLED", "youtubeVideoId": None},
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {"v2": {}}}):
+            restored = bridge.restore_publication_v2_plan_version({"id": "plan:test"})
+
+        self.assertEqual(restored["operationResult"]["count"], 1)
+        self.assertEqual(restored["operationResult"]["skipped"], 0)
+        self.assertEqual(settings.youtube_publication_assignments["pi-1"]["channelId"], "channel-new")
+
+        settings.youtube_publication_assignments["pi-1"]["channelId"] = "channel-old"
+        settings.youtube_publication_executions["snap-old"] = {
+            "snapshotId": "snap-old",
+            "overallStatus": "AUTOMATION_CANCELLED",
+            "youtubeVideoId": "yt-existing",
+        }
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {"v2": {}}}):
+            protected = bridge.restore_publication_v2_plan_version({"id": "plan:test"})
+
+        self.assertEqual(protected["operationResult"]["count"], 0)
+        self.assertEqual(protected["operationResult"]["skipped"], 1)
+        self.assertEqual(settings.youtube_publication_assignments["pi-1"]["channelId"], "channel-old")
+
+
     def test_plan_versions_survive_settings_restart(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
