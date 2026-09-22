@@ -170,6 +170,15 @@ describe("PublicationPage interactions", () => {
     ));
   });
 
+  it("disables reconcile and continue actions when the selected Queue rows have no YouTube ID", () => {
+    render(<PublicationPage data={base} command={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByLabelText("Выбрать публикацию Готовый ролик"));
+
+    expect(screen.getByRole("button", { name: "Проверить YouTube" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Продолжить выбранные" })).toBeDisabled();
+  });
+
   it("starts only explicitly selected queue snapshots", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<PublicationPage data={base} command={command} />);
