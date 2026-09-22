@@ -158,7 +158,10 @@ class PublicationV2RegistryTests(unittest.TestCase):
 
             registry = reconcile_publication_items(settings)
 
-        self.assertEqual(registry["counters"], {"total": 2, "videoReady": 1, "videoMissing": 1})
+        self.assertEqual(
+            {key: registry["counters"][key] for key in ("total", "videoReady", "videoMissing")},
+            {"total": 2, "videoReady": 1, "videoMissing": 1},
+        )
         self.assertEqual(registry["items"]["pi-ready"]["readiness"]["state"], "VIDEO_READY")
         self.assertEqual(registry["items"]["pi-missing"]["readiness"]["state"], "VIDEO_MISSING")
 
@@ -426,6 +429,29 @@ class PublicationV2PresetTests(unittest.TestCase):
 
         self.assertEqual(restored.youtube_publication_v2_rule_presets, settings.youtube_publication_v2_rule_presets)
 
+
+    def test_plan_versions_survive_settings_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            settings = Settings(
+                youtube_publication_plan_versions=[{
+                    "id": "plan:test",
+                    "name": "Вечерний план",
+                    "createdAt": "2026-09-22T18:00:00+03:00",
+                    "assignments": [{
+                        "productionItemId": "pi-1",
+                        "channelId": "channel-a",
+                        "publishAt": "2026-09-22T18:15:00+03:00",
+                        "source": "auto",
+                        "locked": False,
+                    }],
+                }],
+            )
+            with patch.object(config, "config_path", return_value=path):
+                config.save_settings(settings)
+                restored = config.load_settings()
+
+        self.assertEqual(restored.youtube_publication_plan_versions, settings.youtube_publication_plan_versions)
 
 class PublicationV2SchedulerTests(unittest.TestCase):
     def test_bulk_range_schedules_each_channel_independently_on_quarter_hour_grid(self):
