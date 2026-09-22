@@ -34,6 +34,30 @@ describe("Publication V2 accessibility", () => {
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeEnabled();
   });
 
+  it("disables queue start when every snapshot is already uploaded or otherwise non-uploadable", () => {
+    const currentV2 = (fixture.publication as any).v2 || {};
+    const uploadedOnly = {
+      ...fixture,
+      publication: {
+        ...fixture.publication,
+        v2: {
+          ...currentV2,
+          queue: (currentV2.queue || []).map((row: any, index: number) => ({
+            ...row,
+            youtubeVideoId: row.youtubeVideoId || `yt-existing-${index}`,
+            active: false,
+            status: "DONE",
+          })),
+        },
+      },
+    } as NewsFlowSnapshot;
+
+    render(<PublicationPage data={uploadedOnly} command={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+
+    expect(screen.getByRole("button", { name: "Запустить очередь" })).toBeDisabled();
+  });
+
   it("exposes queue selection and ads status without mouse-only actions", () => {
     render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
     fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
