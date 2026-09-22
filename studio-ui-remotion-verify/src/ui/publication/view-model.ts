@@ -184,6 +184,13 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
       finalStatus: text(receipt.finalStatus),
       completion: `${Object.values(stages).filter((state) => ["SUCCESS", "SKIPPED", "NOT_REQUIRED"].includes(text(state))).length}/${Object.keys(stages).length}`,
       duration: text(receipt.totalDuration || "—"),
+      ads: {
+        status: text(record(receipt.ads).status),
+        mode: text(record(receipt.ads).mode),
+        automatic: Boolean(record(receipt.ads).automatic),
+        manualSlotsSeconds: Array.isArray(record(receipt.ads).manualSlotsSeconds) ? record(receipt.ads).manualSlotsSeconds.map(Number) : [],
+        confirmedManualSlotsSeconds: Array.isArray(record(receipt.ads).confirmedManualSlotsSeconds) ? record(receipt.ads).confirmedManualSlotsSeconds.map(Number) : [],
+      },
       stages: Object.fromEntries(Object.entries(stages).map(([key, value]) => [key, text(value)])),
     };
   });
