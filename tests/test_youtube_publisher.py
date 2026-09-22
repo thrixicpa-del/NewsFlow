@@ -283,8 +283,8 @@ class PublicationJobTests(unittest.TestCase):
             tags=["первый", "первый", "x" * 498, "лишний"],
         )
 
-        self.assertEqual(body["snippet"]["tags"], ["первый"])
-        self.assertLessEqual(len(",".join(body["snippet"]["tags"])), 500)
+        self.assertEqual(body["snippet"]["tags"], ["первый", "лишний"])
+        self.assertLessEqual(bridge.youtube_tag_character_length(body["snippet"]["tags"]), 500)
 
     def test_upload_body_rejects_description_over_youtube_utf8_byte_limit(self):
         with self.assertRaisesRegex(ValueError, "5000 байт"):
