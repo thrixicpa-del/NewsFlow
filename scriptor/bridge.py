@@ -14429,6 +14429,33 @@ def delete_publication_v2_plan_version(payload: dict) -> dict:
     }}
 
 
+def set_publication_v2_item_priority(payload: dict) -> dict:
+    """Persist an operator priority on one durable PublicationItem."""
+    production_id = str(payload.get("productionItemId", "")).strip()
+    if not production_id:
+        raise ValueError("Укажите ProductionItem ID.")
+    try:
+        priority = int(payload.get("priority", 0) or 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Приоритет ролика должен быть целым числом.") from error
+    priority = max(-10, min(10, priority))
+    settings = load_settings()
+    reconcile_publication_items(settings)
+    item = dict((settings.youtube_publication_items or {}).get(production_id, {}) or {})
+    if not item:
+        raise ValueError("PublicationItem не найден.")
+    metadata = dict(item.get("metadata", {}) or {})
+    metadata["priority"] = priority
+    item["metadata"] = metadata
+    item["updatedAt"] = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_items[production_id] = item
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-priority", "count": 1,
+        "message": "Приоритет ролика сохранён.",
+    }}
+
+
 def preview_publication_v2_distribution(payload: dict) -> dict:
     settings = load_settings()
     reconcile_publication_items(settings)
