@@ -7,6 +7,7 @@ from scriptor import config
 from scriptor.config import Settings
 from scriptor import bridge
 from scriptor.youtube_engagement import (
+    build_ad_plan,
     build_engagement_plan,
     new_engagement_state,
     transition_engagement_step,
@@ -14,6 +15,27 @@ from scriptor.youtube_engagement import (
 
 
 class YouTubeEngagementPlanTests(unittest.TestCase):
+    def test_ad_plan_always_monetizes_monetized_channel_and_uses_manual_39s_only_when_midroll_is_eligible(self):
+        short = build_ad_plan(420, monetized=True, interval_seconds=39)
+        long = build_ad_plan(600, monetized=True, interval_seconds=39)
+        off = build_ad_plan(600, monetized=False, interval_seconds=39)
+
+        self.assertEqual(short["mode"], "AUTO_ONLY")
+        self.assertTrue(short["monetizationEnabled"])
+        self.assertFalse(short["midRollEligible"])
+        self.assertEqual(short["manualSlotsSeconds"], [])
+        self.assertTrue(short["automaticSlotsEnabled"])
+
+        self.assertEqual(long["mode"], "AUTO+MANUAL_39S")
+        self.assertTrue(long["monetizationEnabled"])
+        self.assertTrue(long["midRollEligible"])
+        self.assertEqual(long["manualSlotsSeconds"][:3], [39, 78, 117])
+        self.assertTrue(long["automaticSlotsEnabled"])
+
+        self.assertEqual(off["mode"], "NONE")
+        self.assertFalse(off["monetizationEnabled"])
+        self.assertEqual(off["manualSlotsSeconds"], [])
+
     def test_long_video_uses_relevant_then_latest_public_video_for_cards(self):
         plan = build_engagement_plan(
             {
