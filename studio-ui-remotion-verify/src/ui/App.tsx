@@ -8362,7 +8362,7 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
             />
           </label>
           <small>
-            Сейчас: до {tagCharLimit || "—"} символов вместе с разделителями.
+            Сейчас: до {tagCharLimit || "—"} символов по правилам YouTube; запятые и кавычки для тегов с пробелами учитываются.
           </small>
           <Button onClick={save}>Применить</Button>
           <Button
