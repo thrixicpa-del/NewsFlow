@@ -326,6 +326,43 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(row["channelId"], "free")
         self.assertEqual(row["reason"], "balanced")
 
+    def test_preview_explains_blackout_conflict_before_confirmation(self):
+        items = {
+            "pi-1": {
+                "productionItemId": "pi-1",
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            },
+        }
+        rules = [{
+            "channelId": "channel-a",
+            "enabled": True,
+            "oauthConnected": True,
+            "quota": 1,
+            "distributionStrategy": "balanced",
+            "publishMode": "schedule",
+            "timezone": "Europe/Moscow",
+            "firstPublishAt": "2026-09-25T18:00:00+03:00",
+            "intervalMinutes": 15,
+            "blackoutPeriods": [{
+                "start": "2026-09-25T18:00:00+03:00",
+                "end": "2026-09-25T19:00:00+03:00",
+            }],
+        }]
+
+        preview = build_distribution_preview(items, rules, {
+            "pi-1": {
+                "productionItemId": "pi-1",
+                "channelId": "channel-a",
+                "publishAt": "2026-09-25T18:15:00+03:00",
+                "source": "manual",
+                "locked": True,
+            },
+        })
+
+        row = preview["assignments"][0]
+        self.assertIn("blackout", row["scheduleWarning"].casefold())
+        self.assertIn("перенесите", row["scheduleSuggestion"].casefold())
+
     def test_bridge_preview_preserves_confirmed_snapshot_as_locked_and_does_not_redistribute_it(self):
         """Confirmed/scheduled work must never be moved by an ordinary auto-preview."""
         settings = Settings(
