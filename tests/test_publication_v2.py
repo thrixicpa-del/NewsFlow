@@ -327,12 +327,14 @@ class PublicationV2RuleTests(unittest.TestCase):
             "intervalMinutes": 45, "timezone": "Europe/Minsk",
             "orderStart": 1, "orderEnd": 20,
             "minDurationSeconds": 300, "maxDurationSeconds": 1200,
-            "automation": {"ads": True, "post": False},
+            "automation": {"upload": False, "metadata": False, "ads": False, "post": False},
         })
 
         self.assertEqual(rule["intervalMinutes"], 45)
         self.assertEqual((rule["orderStart"], rule["orderEnd"]), (1, 20))
         self.assertTrue(rule["monetized"])
+        self.assertTrue(rule["automation"]["upload"])
+        self.assertTrue(rule["automation"]["metadata"])
         self.assertTrue(rule["automation"]["ads"])
         self.assertFalse(rule["automation"]["post"])
 
