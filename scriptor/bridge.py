@@ -11105,7 +11105,9 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
                                         project_used_families: set[str],
                                         recent_project_paths: set[str],
                                         source_exists, source_duration, source_allowed,
-                                        diversity_seed: str) -> tuple[FootageItem, float, str, bool] | None:
+                                        diversity_seed: str,
+                                        allow_project_reuse: bool = True,
+                                        ) -> tuple[FootageItem, float, str, bool] | None:
     """Choose any technically valid footage when semantic matching is exhausted.
 
     This layer is intentionally topic-agnostic. It exists to keep a montage
@@ -11140,6 +11142,8 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
             continue
         family = source_family_identity_text(item.path, item.source_url)
         reused = key in project_used_paths or family in project_used_families
+        if reused and not allow_project_reuse:
+            continue
         return item, duration, family, reused
     return None
 
@@ -11812,6 +11816,62 @@ def prepare_montage(payload: dict) -> dict:
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
 
+        # Topic-agnostic continuity comes before current-video reuse.
+        # If semantic matching is exhausted, a new technically valid family is
+        # preferable to repeating footage already visible in this timeline.
+        if selected is None:
+            try:
+                indexed_continuity = index.all_items(exclude_english_text=True)
+            except (OSError, RuntimeError, ValueError):
+                indexed_continuity = []
+            continuity_items = list({
+                _montage_clip_key(item.path): item
+                for item in [*indexed_continuity, *local_items]
+            }.values())
+            continuity = _select_visual_continuity_candidate(
+                continuity_items,
+                required_duration=required_source_duration,
+                project_used_paths=project_used,
+                project_used_families=project_used_families,
+                recent_project_paths=recent_project_paths,
+                source_exists=source_exists,
+                source_duration=verified_duration,
+                source_allowed=lambda item: _montage_screen_text_safe(
+                    index, item, allow_uncertain=True,
+                ),
+                diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
+                allow_project_reuse=False,
+            )
+            if continuity is not None:
+                selected, selected_duration, candidate_family, reused_candidate = continuity
+                score = 0.0
+                selection = MontageCandidateSelection(
+                    selected,
+                    selected_duration,
+                    0.0,
+                    "VISUAL_CONTINUITY_FALLBACK",
+                    False,
+                    {
+                        "candidates_retrieved": len(continuity_items),
+                        "hard_valid": 1,
+                        "strict_accepted": 0,
+                        "rejected_threshold": 0,
+                        "rejected_reservation": 0,
+                        "rejected_diversity": 0,
+                        "rejected_missing": 0,
+                        "rejected_duration": 0,
+                        "rejected_safety": 0,
+                    },
+                    source_family=candidate_family,
+                    reused=reused_candidate,
+                    position_bucket=position_bucket,
+                    position_rotation_reason=(
+                        "визуальная непрерывность: смысловые варианты исчерпаны; "
+                        "выбран новый технически пригодный футаж"
+                    ),
+                )
+                source = f"{selected.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
+
         if selected is None:
             fallback_started = time.perf_counter()
             reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
@@ -11843,11 +11903,7 @@ def prepare_montage(payload: dict) -> dict:
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         if selected is None:
-            # Absolute visual-continuity fallback. At this point all semantic
-            # ladders are exhausted, so topic/geography relevance is no longer
-            # allowed to abort an otherwise renderable project. English/Latin
-            # overlays, full-screen title/interstitial slates, missing files
-            # and insufficient physical duration remain hard technical blocks.
+            if selected is None:
             try:
                 indexed_continuity = index.all_items(exclude_english_text=True)
             except (OSError, RuntimeError, ValueError):
@@ -11867,7 +11923,8 @@ def prepare_montage(payload: dict) -> dict:
                 source_allowed=lambda item: _montage_screen_text_safe(
                     index, item, allow_uncertain=True,
                 ),
-                diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
+                diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity-reuse",
+                allow_project_reuse=True,
             )
             if continuity is not None:
                 selected, selected_duration, candidate_family, reused_candidate = continuity
@@ -11878,25 +11935,13 @@ def prepare_montage(payload: dict) -> dict:
                     0.0,
                     "VISUAL_CONTINUITY_FALLBACK",
                     False,
-                    {
-                        "candidates_retrieved": len(continuity_items),
-                        "hard_valid": 1,
-                        "strict_accepted": 0,
-                        "rejected_threshold": 0,
-                        "rejected_reservation": 0,
-                        "rejected_diversity": 0,
-                        "rejected_missing": 0,
-                        "rejected_duration": 0,
-                        "rejected_safety": 0,
-                    },
+                    {"candidates_retrieved": len(continuity_items), "hard_valid": 1},
                     source_family=candidate_family,
                     reused=reused_candidate,
                     position_bucket=position_bucket,
                     position_rotation_reason=(
-                        "визуальная непрерывность: смысловые варианты исчерпаны; "
-                        "выбран новый технически пригодный футаж"
-                        if not reused_candidate
-                        else "визуальная непрерывность: новых пригодных family не осталось"
+                        "визуальная непрерывность: новых пригодных family не осталось; "
+                        "использован технически пригодный повтор"
                     ),
                 )
                 source = f"{selected.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
