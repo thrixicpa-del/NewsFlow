@@ -10,10 +10,10 @@ from unittest.mock import patch
 import numpy as np
 
 from scriptor.ai_index import (
+    _SCREEN_TEXT_POSITIVE_QUERIES,
     SCREEN_TEXT_CLASSIFIER_VERSION,
     SEMANTIC_INDEX_VERSION,
     SEMANTIC_TAG_LABELS,
-    _SCREEN_TEXT_POSITIVE_QUERIES,
     ClipIndex,
     _SearchCorpus,
     discover_video_paths,
@@ -532,6 +532,8 @@ class ClipIndexTests(unittest.TestCase):
             index = ClipIndex(root / "index.sqlite3")
             query_vectors = np.asarray(
                 [
+                    [1.0, 0.0],
+                    [1.0, 0.0],
                     [1.0, 0.0],
                     [1.0, 0.0],
                     [1.0, 0.0],

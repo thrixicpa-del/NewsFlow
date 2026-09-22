@@ -3640,7 +3640,7 @@ def _voice_map_overlap_text(segment: dict, beat_start: float, beat_end: float) -
         ratio = max(0.0, min(1.0, (moment - segment_start) / duration))
         if ratio >= 1.0 - 1e-9:
             return len(words)
-        return max(0, min(len(words), int(math.floor(ratio * len(words) + 1e-9))))
+        return max(0, min(len(words), math.floor(ratio * len(words) + 1e-9)))
 
     first = word_boundary(overlap_start)
     last = word_boundary(overlap_end)
@@ -10327,8 +10327,8 @@ _MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ukraine", ("ukraine", "kyiv", "kiev", "zelensk", "odesa", "donbas", "pokrovsk",
                  "украин", "киев", "зеленск", "одесс", "донбасс", "покровск",
                  "ukraine-government-kyiv")),
-    ("russia", ("russia", "moscow", "kremlin", "putin", "росси", "москв", "кремл", "путин",
-                "russia-government-moscow")),
+    ("russia", ("russia", "moscow", "kremlin", "putin", "sevastopol", "fsb", "росси", "москв", "кремл", "путин",
+                "севастопол", "фсб", "russia-government-moscow")),
     ("eu", ("european union", "brussels", "eu parliament", "europe", "евросоюз", "брюссел",
             "европ", "eu-institutions")),
     ("iran", ("iran", "tehran", "persian", "иран", "тегеран", "персид", "iran-government-tehran")),
@@ -10336,6 +10336,14 @@ _MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                  "armenia-government-yerevan")),
     ("azerbaijan", ("azerbaijan", "baku", "aliyev", "азербайдж", "баку", "алиев",
                     "azerbaijan-government-baku")),
+)
+
+# Country-level identity is not enough for an explicitly named government
+# city.  These are only known contradictory locations; neutral Ukraine B-roll
+# remains eligible when no incompatible city is claimed by its provenance.
+_MONTAGE_EXACT_LOCATION_CONFLICTS = (
+    (("kyiv", "kiev", "ukraine government", "ukrainian government", "киев"),
+     ("druzhkivka", "kramatorsk", "дружков", "краматорск")),
 )
 
 _MONTAGE_SEMANTIC_RULES = (
@@ -10384,6 +10392,15 @@ def _montage_entity_conflict(scene_query: str, candidate_metadata: str) -> bool:
     requested = _montage_entity_groups(scene_query)
     candidate = _montage_entity_groups(candidate_metadata)
     return bool(requested and candidate and requested.isdisjoint(candidate))
+
+
+def _montage_exact_location_conflict(scene_query: str, candidate_metadata: str) -> bool:
+    query = str(scene_query or "").casefold()
+    candidate = str(candidate_metadata or "").casefold()
+    return any(
+        _has_any(query, requested_terms) and _has_any(candidate, contradictory_terms)
+        for requested_terms, contradictory_terms in _MONTAGE_EXACT_LOCATION_CONFLICTS
+    )
 
 
 def _montage_has_war_action(value: str) -> bool:
@@ -10443,6 +10460,8 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
         if _has_any(query, requested_names) and _has_any(haystack, contradictory_names):
             return False
     if _montage_entity_conflict(query, haystack):
+        return False
+    if _montage_exact_location_conflict(query, haystack):
         return False
     expected_semantic_tags: set[str] = set()
     for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:

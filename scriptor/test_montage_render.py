@@ -23,7 +23,7 @@ import numpy as np
 from . import bridge
 from . import config as config_module
 from . import timeline as timeline_module
-from .ai_index import ClipIndex
+from .ai_index import _SCREEN_TEXT_POSITIVE_QUERIES, ClipIndex
 from .bridge import _semantic_clip_ok
 from .config import Settings, _exclusive_settings_write
 from .cutter import cut_single_clip
@@ -299,6 +299,26 @@ class MontageRenderTests(unittest.TestCase):
         )
         self.assertFalse(_semantic_clip_ok("Strait of Hormuz oil tanker Persian Gulf", ukraine_clip))
 
+    def test_topic_guard_rejects_sevastopol_footage_for_washington(self):
+        """A named Russian location cannot stand in for a Washington government scene."""
+        sevastopol_clip = FootageItem(
+            path=r"D:\footage\Задержания\Севастополе вскрыта агентурная сеть\clip.mp4",
+            name="clip.mp4",
+            tags=["sevastopol", "press-conference", "military-drone"],
+        )
+        self.assertFalse(_semantic_clip_ok(
+            "Washington DC White House US government officials", sevastopol_clip,
+        ))
+
+    def test_topic_guard_rejects_druzhkivka_footage_for_kyiv_government(self):
+        """A named frontline city is not neutral Kyiv-government B-roll."""
+        druzhkivka_clip = FootageItem(
+            path=r"D:\footage\Украина\Дружковка Краматорск FPV дроны\clip.mp4",
+            name="clip.mp4",
+            tags=["ukraine-government-kyiv", "emergency-aftermath", "druzhkivka", "kramatorsk"],
+        )
+        self.assertFalse(_semantic_clip_ok("Kyiv Ukraine government city", druzhkivka_clip))
+
     def test_fast_title_only_planner_uses_mp3_timing_and_topic(self):
         plan = title_only_scene_plan("Иран — Ормузский пролив и нефтяные танкеры", 10.0)
         self.assertGreaterEqual(len(plan), 2)
@@ -321,11 +341,7 @@ class MontageRenderTests(unittest.TestCase):
                 queries = value if isinstance(value, list) else [value]
                 for query in queries:
                     lowered = str(query).casefold()
-                    if (
-                        "readable english" in lowered
-                        or "english headline" in lowered
-                        or "sign billboard" in lowered
-                    ):
+                    if lowered in {item.casefold() for item in _SCREEN_TEXT_POSITIVE_QUERIES}:
                         yield np.asarray([1.0, 0.0], dtype=np.float32)
                     else:
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
