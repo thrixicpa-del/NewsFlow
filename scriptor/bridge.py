@@ -11151,11 +11151,14 @@ def _montage_screen_text_state(index, item: FootageItem, *, deep: bool = False) 
 
 
 def _montage_screen_text_safe(index, item: FootageItem, *, allow_uncertain: bool = False) -> bool:
-    """Require a deep V4 verdict before admitting a montage candidate."""
-    state = _montage_screen_text_state(index, item, deep=True)
-    if state == SCREEN_ELIGIBILITY_BLOCKED:
-        return False
-    return state == SCREEN_ELIGIBILITY_SAFE or allow_uncertain
+    """Match 2.1.136 semantics: reject only an explicit current text block.
+
+    Ambiguous/unverified footage stays available to normal semantic/diversity
+    selection instead of forcing the timeline into weaker fallback footage.
+    The allow_uncertain argument is retained for call-site compatibility.
+    """
+    del allow_uncertain
+    return _montage_screen_text_state(index, item, deep=False) != SCREEN_ELIGIBILITY_BLOCKED
 
 
 def _select_visual_continuity_candidate(items: list[FootageItem], *,
