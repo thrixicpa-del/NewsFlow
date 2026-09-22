@@ -14672,7 +14672,8 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 return
             if not preflight["ok"]:
                 first = preflight["reasons"][0]
-                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", str(first["kind"]), str(first["message"]))
+                failed_stage = "AUTH_CHECK" if str(first["kind"]).upper() == "AUTH_REQUIRED" else "VIDEO_UPLOAD"
+                fail_publication_stage(settings, snapshot_id, failed_stage, str(first["kind"]), str(first["message"]))
                 save_settings(settings)
                 blocked.append((snapshot_id, str(first["message"])))
                 return

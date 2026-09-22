@@ -1106,7 +1106,7 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             video = root / "video.mp4"
             video.write_bytes(b"original-video")
             settings = Settings(
-                youtube_oauth_tokens={"channel-a": "protected-token"},
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
                 youtube_publication_items={
                     "pi-1": {
                         "productionItemId": "pi-1",
@@ -1133,33 +1133,34 @@ class PublicationV2SnapshotTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             video = Path(directory) / "video.mp4"
             video.write_bytes(b"mp4")
-            settings = Settings(
-                youtube_oauth_tokens={"channel-a": "not-json"},
-                youtube_publication_snapshots={
-                    "snapshot-1": {
-                        "id": "snapshot-1",
-                        "channelId": "channel-a",
-                        "videoPath": str(video),
-                        "metadata": {"title": "Ролик"},
-                        "privacy": "private",
-                        "publishMode": "publish_now",
+            for stored_oauth in ("not-json", "{}", '{"garbage":1}'):
+                settings = Settings(
+                    youtube_oauth_tokens={"channel-a": stored_oauth},
+                    youtube_publication_snapshots={
+                        "snapshot-1": {
+                            "id": "snapshot-1",
+                            "channelId": "channel-a",
+                            "videoPath": str(video),
+                            "metadata": {"title": "Ролик"},
+                            "privacy": "private",
+                            "publishMode": "publish_now",
+                        },
                     },
-                },
-                youtube_publication_executions={
-                    "snapshot-1": {
-                        "snapshotId": "snapshot-1",
-                        "overallStatus": "READY",
-                        "youtubeVideoId": None,
-                        "activeLease": None,
-                        "steps": {"AUTH_CHECK": {"status": "PENDING"}, "VIDEO_UPLOAD": {"status": "PENDING"}},
+                    youtube_publication_executions={
+                        "snapshot-1": {
+                            "snapshotId": "snapshot-1",
+                            "overallStatus": "READY",
+                            "youtubeVideoId": None,
+                            "activeLease": None,
+                            "steps": {"AUTH_CHECK": {"status": "PENDING"}, "VIDEO_UPLOAD": {"status": "PENDING"}},
+                        },
                     },
-                },
-            )
+                )
 
-            preflight = validate_publication_snapshot(settings, "snapshot-1")
-
-        self.assertFalse(preflight["ok"])
-        self.assertIn("AUTH_REQUIRED", {reason["kind"] for reason in preflight["reasons"]})
+                with self.subTest(stored_oauth=stored_oauth):
+                    preflight = validate_publication_snapshot(settings, "snapshot-1")
+                    self.assertFalse(preflight["ok"])
+                    self.assertIn("AUTH_REQUIRED", {reason["kind"] for reason in preflight["reasons"]})
 
     def test_preflight_blocks_only_missing_or_invalid_snapshot_and_never_reopens_known_upload(self):
         """Preflight reports exact readiness reasons and treats an existing YouTube ID as immutable."""
@@ -1167,7 +1168,7 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             root = Path(directory)
             video = root / "video.mp4"
             video.write_bytes(b"mp4")
-            settings = Settings(youtube_oauth_tokens={"channel-a": "protected-token"}, youtube_publication_snapshots={
+            settings = Settings(youtube_oauth_tokens={"channel-a": '{"token":"safe"}'}, youtube_publication_snapshots={
                 "snapshot-1": {"id": "snapshot-1", "channelId": "channel-a", "videoPath": str(video),
                                "metadata": {"title": "Ролик"}, "privacy": "private", "publishMode": "publish_now"},
             }, youtube_publication_executions={"snapshot-1": {"youtubeVideoId": "yt-existing"}})
