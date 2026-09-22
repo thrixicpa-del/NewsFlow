@@ -86,6 +86,75 @@ class SeoTagsContractTests(TestCase):
         )
         self.assertEqual(parsed["hashtags"], ["#Ормуз", "#танкеры"])
 
+    def test_current_seo_scope_excludes_historical_rows(self):
+        current_job = bridge.Job(
+            bridge.ScenarioRequest(0, "Текущая тема", "", "production-current"),
+            RunState.DONE,
+            "Текущий сценарий",
+            "",
+        )
+        settings = Settings(seo_queue=[
+            {
+                "production_item_id": "production-old",
+                "source_title": "Старая тема",
+                "status": "Ожидает",
+            },
+            {
+                "production_item_id": "production-current",
+                "source_title": "Текущая тема",
+                "status": "Ожидает",
+            },
+            {
+                "source_title": "Legacy не текущая",
+                "status": "Ожидает",
+            },
+        ])
+
+        self.assertEqual(
+            bridge._current_seo_queue_indices(settings, ["Текущая тема"], [current_job]),
+            [1],
+        )
+
+    def test_removing_scenario_prunes_only_its_seo_row(self):
+        first = bridge.Job(
+            bridge.ScenarioRequest(0, "Первая тема", "", "production-one"),
+            RunState.DONE,
+            "Первый сценарий",
+            "",
+        )
+        second = bridge.Job(
+            bridge.ScenarioRequest(1, "Вторая тема", "", "production-two"),
+            RunState.DONE,
+            "Второй сценарий",
+            "",
+        )
+        settings = Settings(seo_queue=[
+            {
+                "production_item_id": "production-one",
+                "source_title": "Первая тема",
+                "status": "Готово",
+            },
+            {
+                "production_item_id": "production-two",
+                "source_title": "Вторая тема",
+                "status": "Готово",
+            },
+        ])
+        with patch.object(bridge, "load_session", return_value=(
+                ["Первая тема", "Вторая тема"], [first, second],
+             )), \
+             patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "save_session"), \
+             patch.object(bridge, "remove_voice_map"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.remove_scenarios_command({"indices": [0]})
+
+        self.assertEqual(
+            [row["production_item_id"] for row in settings.seo_queue],
+            ["production-two"],
+        )
+
     def test_auto_pipeline_generates_tags_after_seo_stage(self):
         job = SimpleNamespace(
             request=SimpleNamespace(index=0),
