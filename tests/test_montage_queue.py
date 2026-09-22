@@ -474,6 +474,27 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(rescued.item.path, candidate.path)
         self.assertEqual(rescued.fallback_level, "STRICT_MATCH")
 
+    def test_final_thematic_rescue_relaxes_taxonomy_but_not_geography(self):
+        stale_tag = FootageItem(
+            "D:/library/washington-building.mp4",
+            "Washington government building exterior.mp4",
+            tags=["factory-industry"],
+        )
+        sevastopol = FootageItem(
+            "D:/library/sevastopol.mp4",
+            "Sevastopol government building.mp4",
+            tags=["factory-industry", "sevastopol"],
+        )
+        query = "Washington DC White House US government officials"
+
+        self.assertFalse(bridge._semantic_clip_ok(query, stale_tag))
+        self.assertTrue(bridge._semantic_clip_ok(
+            query, stale_tag, allow_thematic_mismatch=True,
+        ))
+        self.assertFalse(bridge._semantic_clip_ok(
+            query, sevastopol, allow_thematic_mismatch=True,
+        ))
+
     def test_normalized_montage_query_deduplicates_and_removes_generic_phrases(self):
         normalized = bridge._normalized_montage_visual_query(
             "international news, documentary footage, oil tanker refinery oil terminal, "
