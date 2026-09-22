@@ -358,7 +358,35 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertNotEqual(rows["pi-new"]["productionItemId"], "pi-confirmed")
 
 
-class PublicationV2RuleTests(unittest.TestCase):
+class PublicationV2RuleTests(unittest.TestCase):    def test_channel_rule_normalizes_blackout_periods(self):
+        rule = normalize_channel_publication_rule({
+            "channelId": "channel-a",
+            "quota": 1,
+            "intervalMinutes": 15,
+            "timezone": "Europe/Moscow",
+            "blackoutPeriods": [{
+                "start": "2026-09-25T18:00",
+                "end": "2026-09-25T19:00",
+                "label": "Техническое окно",
+            }],
+        })
+
+        self.assertEqual(rule["blackoutPeriods"], [{
+            "start": "2026-09-25T18:00:00+03:00",
+            "end": "2026-09-25T19:00:00+03:00",
+            "label": "Техническое окно",
+        }])
+
+        with self.assertRaisesRegex(ValueError, "blackout"):
+            normalize_channel_publication_rule({
+                "channelId": "channel-a",
+                "quota": 1,
+                "intervalMinutes": 15,
+                "timezone": "Europe/Moscow",
+                "blackoutPeriods": [{"start": "2026-09-25T19:00", "end": "2026-09-25T18:00"}],
+            })
+
+
     def test_channel_rule_rejects_non_quarter_hour_interval_and_reversed_ranges(self):
         with self.assertRaisesRegex(ValueError, "15"):
             normalize_channel_publication_rule({
@@ -541,6 +569,50 @@ class PublicationV2SchedulerTests(unittest.TestCase):
             "2026-09-10T04:45:00+03:00",
             "2026-09-10T05:00:00+03:00",
         ])
+
+    def test_scheduler_skips_explicit_blackout_period(self):
+        slots = build_channel_schedule(
+            ["pi-1", "pi-2", "pi-3"],
+            {
+                "channelId": "channel-a",
+                "firstPublishAt": "2026-09-25T17:45:00+03:00",
+                "intervalMinutes": 15,
+                "timezone": "Europe/Moscow",
+                "blackoutPeriods": [{
+                    "start": "2026-09-25T18:00:00+03:00",
+                    "end": "2026-09-25T19:00:00+03:00",
+                    "label": "Техническое окно",
+                }],
+            },
+        )
+
+        self.assertEqual([slot["publishAt"] for slot in slots], [
+            "2026-09-25T17:45:00+03:00",
+            "2026-09-25T19:00:00+03:00",
+            "2026-09-25T19:15:00+03:00",
+        ])
+
+    def test_manual_slot_inside_blackout_is_a_confirmation_conflict(self):
+        conflicts = validate_publication_schedule(
+            [{
+                "productionItemId": "pi-1",
+                "channelId": "channel-a",
+                "publishAt": "2026-09-25T18:15:00+03:00",
+                "locked": True,
+            }],
+            {
+                "channel-a": {
+                    "timezone": "Europe/Moscow",
+                    "blackoutPeriods": [{
+                        "start": "2026-09-25T18:00:00+03:00",
+                        "end": "2026-09-25T19:00:00+03:00",
+                    }],
+                },
+            },
+        )
+
+        self.assertIn("blackout_period", {conflict["kind"] for conflict in conflicts})
+
 
     def test_scheduler_respects_daily_cap_before_allocating_next_day_slot(self):
         """Daily quota is a hard calendar constraint, not a display-only counter."""
