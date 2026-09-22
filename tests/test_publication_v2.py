@@ -1582,6 +1582,58 @@ class PublicationV2BridgeTests(unittest.TestCase):
         validate_auth.assert_called_once()
         upload.assert_not_called()
 
+    def test_v2_upload_blocks_oauth_bound_to_different_youtube_channel(self):
+        """A valid OAuth token for another YouTube channel must never receive this snapshot."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-expected", "name": "Expected"}],
+                youtube_oauth_tokens={"channel-a": '{"token":"safe","refresh_token":"refresh"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "READY",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "steps": {
+                            "AUTH_CHECK": {"status": "PENDING"},
+                            "VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0},
+                        },
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(
+                     bridge,
+                     "fetch_current_channel",
+                     return_value=(
+                         {"channelId": "UC-other", "name": "Other", "subscribers": 0, "viewsTotal": 0},
+                         {"token": "safe", "refresh_token": "refresh"},
+                     ),
+                 ), \
+                 patch.object(bridge, "upload_private_video") as upload:
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["steps"]["AUTH_CHECK"]["status"], "AUTH_REQUIRED")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "PENDING")
+        upload.assert_not_called()
+
     def test_v2_upload_persists_running_state_then_keeps_returned_youtube_id_before_downstream_work(self):
         """Bridge upload uses a frozen snapshot and cannot lose the YouTube ID to a later thumbnail failure."""
         with TemporaryDirectory() as directory:
