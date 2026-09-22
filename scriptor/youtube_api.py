@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 YOUTUBE_TAG_CHARACTER_LIMIT = 500
@@ -204,11 +205,63 @@ def parse_current_channel(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+YOUTUBE_DESCRIPTION_BYTE_LIMIT = 5000
+
+
+def compose_youtube_description(
+    description: str,
+    hashtags: Iterable[object] = (),
+    *,
+    byte_limit: int = YOUTUBE_DESCRIPTION_BYTE_LIMIT,
+) -> str:
+    """Append unique whole hashtags without exceeding YouTube's UTF-8 byte limit."""
+
+    if byte_limit < 1:
+        raise ValueError("Лимит описания YouTube должен быть положительным")
+    base = str(description or "").strip()
+    if "<" in base or ">" in base:
+        raise ValueError("Описание YouTube не может содержать символы < или >")
+    if len(base.encode("utf-8")) > byte_limit:
+        raise ValueError(f"Описание YouTube превышает {byte_limit} байт")
+
+    existing = {
+        token.casefold()
+        for token in re.findall(r"(?<!\w)#[^\s#]+", base)
+    }
+    clean: list[str] = []
+    seen = set(existing)
+    for raw in hashtags:
+        token = "".join(str(raw or "").strip().split())
+        if not token:
+            continue
+        if not token.startswith("#"):
+            token = f"#{token}"
+        if token in {"#", "##"}:
+            continue
+        identity = token.casefold()
+        if identity in seen:
+            continue
+        candidate_tags = " ".join([*clean, token])
+        candidate = base
+        if candidate_tags:
+            candidate = f"{base}\n\n{candidate_tags}" if base else candidate_tags
+        if len(candidate.encode("utf-8")) > byte_limit:
+            continue
+        clean.append(token)
+        seen.add(identity)
+
+    suffix = " ".join(clean)
+    if not suffix:
+        return base
+    return f"{base}\n\n{suffix}" if base else suffix
+
+
 def build_private_video_insert_body(
     *,
     title: str,
     description: str,
     tags: list[str],
+    hashtags: list[str] | None = None,
     publish_at: str = "",
     privacy: str = "private",
 ) -> dict[str, Any]:
@@ -222,6 +275,8 @@ def build_private_video_insert_body(
         raise ValueError("Некорректный privacy режим YouTube")
     if publish_at and resolved_privacy != "private":
         raise ValueError("Запланированная публикация YouTube должна начинаться в режиме private")
+    description_text = compose_youtube_description(description, hashtags or [])
+
     status: dict[str, Any] = {"privacyStatus": resolved_privacy, "selfDeclaredMadeForKids": False}
     if publish_at:
         scheduled = datetime.fromisoformat(publish_at)
@@ -231,7 +286,7 @@ def build_private_video_insert_body(
     return {
         "snippet": {
             "title": clean_title,
-            "description": str(description),
+            "description": description_text,
             "tags": normalize_youtube_tags(tags),
         },
         "status": status,
@@ -265,6 +320,7 @@ def upload_private_video(
     video_path: str,
     body: dict[str, Any],
     thumbnail_path: str = "",
+    on_insert_started: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Upload one NewsFlow package using an explicitly authorised channel.
 
@@ -287,11 +343,14 @@ def upload_private_video(
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
     youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
-    response = youtube.videos().insert(
+    request = youtube.videos().insert(
         part="snippet,status",
         body=body,
         media_body=MediaFileUpload(str(source), mimetype="video/mp4", resumable=True),
-    ).execute()
+    )
+    if on_insert_started is not None:
+        on_insert_started()
+    response = request.execute()
     video_id = str(response.get("id", "")).strip() if isinstance(response, dict) else ""
     if not video_id:
         raise RuntimeError("YouTube не вернул ID после загрузки ролика")

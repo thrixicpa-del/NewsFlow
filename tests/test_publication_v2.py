@@ -21,12 +21,15 @@ from scriptor.publication_v2 import (
     fail_publication_stage,
     migrate_legacy_publication_data,
     next_upload_candidates,
+    normalize_channel_publication_rule,
     persist_publication_receipt,
+    publication_queue_projection,
     publication_receipt,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
     release_execution,
+    resolve_uncertain_upload,
     retry_publication_stage,
     validate_publication_schedule,
     validate_publication_snapshot,
@@ -157,9 +160,40 @@ class PublicationV2RegistryTests(unittest.TestCase):
 
             registry = reconcile_publication_items(settings)
 
-        self.assertEqual(registry["counters"], {"total": 2, "videoReady": 1, "videoMissing": 1})
+        self.assertEqual(
+            {key: registry["counters"][key] for key in ("total", "videoReady", "videoMissing")},
+            {"total": 2, "videoReady": 1, "videoMissing": 1},
+        )
         self.assertEqual(registry["items"]["pi-ready"]["readiness"]["state"], "VIDEO_READY")
         self.assertEqual(registry["items"]["pi-missing"]["readiness"]["state"], "VIDEO_MISSING")
+
+
+    def test_queue_projection_exposes_registry_and_quota_counters_separately(self):
+        settings = Settings(
+            youtube_publication_items={
+                f"pi-{index}": {
+                    "productionItemId": f"pi-{index}",
+                    "readiness": {
+                        "state": "VIDEO_READY",
+                        "videoReady": True,
+                        "contentReady": True,
+                        "publicationReady": False,
+                    },
+                }
+                for index in range(84)
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 44},
+                "channel-b": {"channelId": "channel-b", "enabled": True, "quota": 44},
+            },
+        )
+
+        projection = publication_queue_projection(settings)
+
+        self.assertEqual(
+            {key: projection["counters"][key] for key in ("total", "videoReady", "assigned", "unassigned", "quotaSlotsRemaining")},
+            {"total": 84, "videoReady": 84, "assigned": 0, "unassigned": 84, "quotaSlotsRemaining": 88},
+        )
 
 
 class PublicationV2DistributionTests(unittest.TestCase):
@@ -172,6 +206,14 @@ class PublicationV2DistributionTests(unittest.TestCase):
     def test_bridge_bulk_range_preview_filters_channels_and_does_not_persist_assignments(self):
         """Range controls are a dry run until the operator explicitly confirms it."""
         settings = Settings(
+            analytics_channels=[
+                {"profile_id": "channel-a", "name": "A"},
+                {"profile_id": "channel-b", "name": "B"},
+            ],
+            youtube_oauth_tokens={
+                "channel-a": "{\"token\": \"a\"}",
+                "channel-b": "{\"token\": \"b\"}",
+            },
             youtube_publication_items={
                 f"pi-{index}": {"productionItemId": f"pi-{index}", "readiness": {"state": "VIDEO_READY"}}
                 for index in range(3)
@@ -192,9 +234,36 @@ class PublicationV2DistributionTests(unittest.TestCase):
         rows = result["publicationPreview"]["assignments"]
         self.assertEqual([row["channelId"] for row in rows], ["channel-b", "channel-b", ""])
         self.assertEqual([row.get("publishAt", "") for row in rows[:2]], [
-            "2026-11-15T04:00:00+03:00", "2026-11-15T10:00:00+03:00",
+            "2026-11-15T04:00:00+03:00", "2026-11-15T04:15:00+03:00",
         ])
         self.assertEqual(settings.youtube_publication_assignments, {})
+
+
+    def test_bridge_auto_preview_excludes_orphan_channel_rule_when_real_channels_are_known(self):
+        """A stale rule for a removed/unconnected channel must never receive new auto assignments."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-good", "name": "Good"}],
+            youtube_oauth_tokens={"channel-good": "{\"token\": \"ok\"}"},
+            youtube_publication_items={
+                "pi-1": {
+                    "productionItemId": "pi-1",
+                    "metadata": {"index": 1},
+                    "readiness": {"state": "CONTENT_READY", "contentReady": True},
+                },
+            },
+            youtube_channel_publication_rules={
+                "channel-orphan": {"channelId": "channel-orphan", "enabled": True, "quota": 1, "distributionStrategy": "balanced"},
+                "channel-good": {"channelId": "channel-good", "enabled": True, "quota": 1, "distributionStrategy": "balanced"},
+            },
+        )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({})
+
+        rows = result["publicationPreview"]["assignments"]
+        self.assertEqual(rows[0]["channelId"], "channel-good")
 
     def test_preview_preserves_locked_assignment_and_allocates_only_remaining_ready_item(self):
         """Auto-distribution must not move a locked slot while filling visible channel quota."""
@@ -216,6 +285,110 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(rows["pi-2"]["channelId"], "channel-a")
         self.assertEqual(assignments["pi-1"]["channelId"], "channel-b")
 
+    def test_topic_routing_and_priority_are_deterministic(self):
+        items = {
+            "pi-economy": {
+                "productionItemId": "pi-economy",
+                "metadata": {"index": 1, "topic": "Европа экономика", "direction": "Европа", "priority": 8},
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            },
+            "pi-sport": {
+                "productionItemId": "pi-sport",
+                "metadata": {"index": 2, "topic": "Европа спорт", "direction": "Европа", "priority": 1},
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            },
+        }
+        rules = [
+            {
+                "channelId": "economy", "enabled": True, "oauthConnected": True, "quota": 2,
+                "distributionStrategy": "balanced", "channelPriority": 10,
+                "includeKeywords": ["экономика"], "excludeKeywords": ["спорт"],
+            },
+            {
+                "channelId": "general", "enabled": True, "oauthConnected": True, "quota": 2,
+                "distributionStrategy": "balanced", "channelPriority": 0,
+            },
+        ]
+
+        preview = build_distribution_preview(items, rules, {})
+        rows = {row["productionItemId"]: row for row in preview["assignments"]}
+
+        self.assertEqual(rows["pi-economy"]["channelId"], "economy")
+        self.assertEqual(rows["pi-sport"]["channelId"], "general")
+
+    def test_channel_priority_breaks_equal_balance_ties(self):
+        preview = build_distribution_preview(
+            {
+                "pi": {
+                    "productionItemId": "pi",
+                    "metadata": {"index": 1},
+                    "readiness": {"state": "CONTENT_READY", "contentReady": True},
+                },
+            },
+            [
+                {"channelId": "low", "enabled": True, "oauthConnected": True, "quota": 3, "distributionStrategy": "balanced", "channelPriority": 0},
+                {"channelId": "high", "enabled": True, "oauthConnected": True, "quota": 3, "distributionStrategy": "balanced", "channelPriority": 20},
+            ],
+            {},
+        )
+
+        self.assertEqual(preview["assignments"][0]["channelId"], "high")
+
+    def test_large_84_item_preview_is_deterministic_complete_and_quota_safe(self):
+        """Commercial bulk planning must not lose, duplicate or over-allocate items at realistic batch size."""
+        items = {
+            f"pi-{index:03}": {
+                "productionItemId": f"pi-{index:03}",
+                "metadata": {
+                    "index": index,
+                    "priority": 2 if index <= 8 else 0,
+                    "topicFamily": "economy" if index % 3 == 0 else "world",
+                },
+                "durationSeconds": 540 + (index % 7) * 30,
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            }
+            for index in range(1, 85)
+        }
+        rules = []
+        for index in range(8):
+            channel_id = f"channel-{index + 1}"
+            rules.append({
+                "channelId": channel_id,
+                "enabled": True,
+                "oauthConnected": True,
+                "quota": 11 if index < 4 else 10,
+                "monetized": index < 4,
+                "distributionStrategy": "longest_monetized" if index < 4 else "balanced",
+                "publishMode": "schedule",
+                "timezone": "Europe/Moscow" if index % 2 == 0 else "Europe/Warsaw",
+                "firstPublishAt": "2026-11-16T04:00:00",
+                "intervalMinutes": 15 if index % 2 == 0 else 30,
+                "allowedWeekdays": list(range(7)),
+                "publishWindowStart": "04:00",
+                "publishWindowEnd": "23:45",
+                "dailyCap": 24,
+            })
+
+        first = build_distribution_preview(items, rules, {})
+        second = build_distribution_preview(items, rules, {})
+
+        self.assertEqual(first, second)
+        rows = first["assignments"]
+        self.assertEqual(len(rows), 84)
+        self.assertEqual(len({row["productionItemId"] for row in rows}), 84)
+        self.assertTrue(all(row["channelId"] for row in rows))
+
+        quota_by_channel = {rule["channelId"]: rule["quota"] for rule in rules}
+        usage = {
+            channel_id: sum(1 for row in rows if row["channelId"] == channel_id)
+            for channel_id in quota_by_channel
+        }
+        self.assertEqual(sum(usage.values()), 84)
+        self.assertTrue(all(usage[channel_id] <= quota for channel_id, quota in quota_by_channel.items()))
+        self.assertTrue(all(datetime.fromisoformat(row["publishAt"]).minute in {0, 15, 30, 45} for row in rows))
+        self.assertEqual(first["scheduleWarnings"], [])
+
+
     def test_preview_resolves_per_channel_schedule_before_snapshot_confirmation(self):
         """A scheduled assignment must display its exact channel-local time in the dry run."""
         preview = build_distribution_preview(
@@ -228,27 +401,414 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(preview["assignments"][0]["publishAt"], "2026-09-10T18:00:00+03:00")
 
 
-class PublicationV2SchedulerTests(unittest.TestCase):
-    def test_bulk_range_evenly_spreads_selected_assignments_across_the_operator_window(self):
-        """The preview must create distinct, inclusive range slots without persisting anything."""
-        assignments = [
-            {"productionItemId": f"pi-{index:02}", "channelId": f"channel-{index % 3}", "source": "auto",
-             "locked": False, "reason": "auto"}
-            for index in range(12)
+    def test_longest_monetized_uses_monetized_eligible_channel_and_duration_bounds(self):
+        """Longest-first must actually prefer monetized eligible channels, not merely sort the videos."""
+        items = {
+            "pi-long": {"productionItemId": "pi-long", "metadata": {"index": 1}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 900},
+            "pi-mid": {"productionItemId": "pi-mid", "metadata": {"index": 2}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 600},
+            "pi-short": {"productionItemId": "pi-short", "metadata": {"index": 3}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 300},
+        }
+        rules = [
+            {"channelId": "regular", "enabled": True, "oauthConnected": True, "quota": 2, "monetized": False,
+             "distributionStrategy": "longest_monetized"},
+            {"channelId": "money", "enabled": True, "oauthConnected": True, "quota": 1, "monetized": True,
+             "distributionStrategy": "longest_monetized", "minDurationSeconds": 500, "maxDurationSeconds": 1200},
         ]
 
-        scheduled = apply_bulk_schedule_range(assignments, {
-            "date": "2026-11-15", "startTime": "04:00", "endTime": "10:00",
-            "timezone": "Europe/Minsk",
+        preview = build_distribution_preview(items, rules, {})
+
+        rows = {row["productionItemId"]: row for row in preview["assignments"]}
+        self.assertEqual(rows["pi-long"]["channelId"], "money")
+        self.assertEqual(rows["pi-mid"]["channelId"], "regular")
+        self.assertEqual(rows["pi-short"]["channelId"], "regular")
+        self.assertEqual(rows["pi-long"]["reason"], "longest_monetized")
+
+    def test_longest_monetized_returns_remaining_items_to_their_normal_order(self):
+        """After monetized quota is filled, regular channels keep their own ordered strategy."""
+        items = {
+            "pi-1": {"productionItemId": "pi-1", "metadata": {"index": 1}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 1000},
+            "pi-2": {"productionItemId": "pi-2", "metadata": {"index": 2}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 100},
+            "pi-3": {"productionItemId": "pi-3", "metadata": {"index": 3}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 900},
+            "pi-4": {"productionItemId": "pi-4", "metadata": {"index": 4}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 800},
+        }
+        rules = [
+            {"channelId": "money", "enabled": True, "oauthConnected": True, "quota": 1, "monetized": True,
+             "distributionStrategy": "longest_monetized", "publishMode": "publish_now"},
+            {"channelId": "regular", "enabled": True, "oauthConnected": True, "quota": 3, "monetized": False,
+             "distributionStrategy": "ordered", "publishMode": "schedule", "timezone": "UTC",
+             "firstPublishAt": "2026-09-10T10:00:00+00:00", "intervalMinutes": 15},
+        ]
+
+        preview = build_distribution_preview(items, rules, {})
+        rows = {row["productionItemId"]: row for row in preview["assignments"]}
+
+        self.assertEqual(rows["pi-1"]["channelId"], "money")
+        self.assertEqual(rows["pi-2"]["publishAt"], "2026-09-10T10:00:00+00:00")
+        self.assertEqual(rows["pi-3"]["publishAt"], "2026-09-10T10:15:00+00:00")
+        self.assertEqual(rows["pi-4"]["publishAt"], "2026-09-10T10:30:00+00:00")
+
+    def test_balanced_distribution_uses_fill_ratio_and_skips_auth_invalid_channels(self):
+        """Balanced allocation must fill the least-used eligible channel and ignore auth-invalid channels."""
+        items = {
+            "locked-1": {"productionItemId": "locked-1", "readiness": {"state": "VIDEO_READY"}},
+            "locked-2": {"productionItemId": "locked-2", "readiness": {"state": "VIDEO_READY"}},
+            "new": {"productionItemId": "new", "readiness": {"state": "VIDEO_READY"}},
+        }
+        rules = [
+            {"channelId": "auth-bad", "enabled": True, "oauthConnected": False, "quota": 4, "distributionStrategy": "balanced"},
+            {"channelId": "busy", "enabled": True, "oauthConnected": True, "quota": 4, "distributionStrategy": "balanced"},
+            {"channelId": "free", "enabled": True, "oauthConnected": True, "quota": 4, "distributionStrategy": "balanced"},
+        ]
+        assignments = {
+            "locked-1": {"productionItemId": "locked-1", "channelId": "busy", "source": "manual", "locked": True},
+            "locked-2": {"productionItemId": "locked-2", "channelId": "busy", "source": "manual", "locked": True},
+        }
+
+        preview = build_distribution_preview(items, rules, assignments)
+
+        row = next(item for item in preview["assignments"] if item["productionItemId"] == "new")
+        self.assertEqual(row["channelId"], "free")
+        self.assertEqual(row["reason"], "balanced")
+
+    def test_preview_explains_blackout_conflict_before_confirmation(self):
+        items = {
+            "pi-1": {
+                "productionItemId": "pi-1",
+                "readiness": {"state": "CONTENT_READY", "contentReady": True},
+            },
+        }
+        rules = [{
+            "channelId": "channel-a",
+            "enabled": True,
+            "oauthConnected": True,
+            "quota": 1,
+            "distributionStrategy": "balanced",
+            "publishMode": "schedule",
+            "timezone": "Europe/Moscow",
+            "firstPublishAt": "2026-09-25T18:00:00+03:00",
+            "intervalMinutes": 15,
+            "blackoutPeriods": [{
+                "start": "2026-09-25T18:00:00+03:00",
+                "end": "2026-09-25T19:00:00+03:00",
+            }],
+        }]
+
+        preview = build_distribution_preview(items, rules, {
+            "pi-1": {
+                "productionItemId": "pi-1",
+                "channelId": "channel-a",
+                "publishAt": "2026-09-25T18:15:00+03:00",
+                "source": "manual",
+                "locked": True,
+            },
         })
 
-        slots = [datetime.fromisoformat(row["publishAt"]) for row in scheduled]
-        self.assertEqual(slots[0].isoformat(), "2026-11-15T04:00:00+03:00")
-        self.assertEqual(slots[-1].isoformat(), "2026-11-15T10:00:00+03:00")
-        intervals = [int((slots[index + 1] - slots[index]).total_seconds()) for index in range(len(slots) - 1)]
-        self.assertEqual(len(set(intervals)), 2)
-        self.assertLessEqual(max(intervals) - min(intervals), 1)
-        self.assertTrue(all(row["source"] == "bulk_range" for row in scheduled))
+        row = preview["assignments"][0]
+        self.assertIn("blackout", row["scheduleWarning"].casefold())
+        self.assertIn("перенесите", row["scheduleSuggestion"].casefold())
+
+    def test_bridge_preview_keeps_uploaded_automation_cancelled_snapshot_frozen(self):
+        """Stopping downstream automation must not release an already uploaded video for redistribution."""
+        settings = Settings(
+            analytics_channels=[
+                {"profile_id": "channel-a", "name": "A"},
+                {"profile_id": "channel-b", "name": "B"},
+            ],
+            youtube_oauth_tokens={
+                "channel-a": "{\"token\": \"a\"}",
+                "channel-b": "{\"token\": \"b\"}",
+            },
+            youtube_publication_items={
+                "pi-uploaded": {"productionItemId": "pi-uploaded", "readiness": {"state": "VIDEO_READY"}},
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 1},
+                "channel-b": {"channelId": "channel-b", "enabled": True, "quota": 1},
+            },
+            youtube_publication_snapshots={
+                "snap-uploaded": {
+                    "id": "snap-uploaded",
+                    "productionItemId": "pi-uploaded",
+                    "channelId": "channel-b",
+                    "requestedPublishAt": "2026-11-15T04:00:00+03:00",
+                },
+            },
+            youtube_publication_executions={
+                "snap-uploaded": {
+                    "snapshotId": "snap-uploaded",
+                    "productionItemId": "pi-uploaded",
+                    "overallStatus": "AUTOMATION_CANCELLED",
+                    "youtubeVideoId": "yt-existing",
+                    "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}},
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({})
+
+        row = result["publicationPreview"]["assignments"][0]
+        self.assertEqual(row["channelId"], "channel-b")
+        self.assertTrue(row["locked"])
+        self.assertEqual(row["reason"], "confirmed_snapshot")
+
+    def test_bridge_preview_preserves_confirmed_snapshot_as_locked_and_does_not_redistribute_it(self):
+        """Confirmed/scheduled work must never be moved by an ordinary auto-preview."""
+        settings = Settings(
+            analytics_channels=[
+                {"profile_id": "channel-a", "name": "A"},
+                {"profile_id": "channel-b", "name": "B"},
+            ],
+            youtube_oauth_tokens={
+                "channel-a": "{\"token\": \"a\"}",
+                "channel-b": "{\"token\": \"b\"}",
+            },
+            youtube_publication_items={
+                "pi-confirmed": {"productionItemId": "pi-confirmed", "readiness": {"state": "VIDEO_READY"}},
+                "pi-new": {"productionItemId": "pi-new", "readiness": {"state": "VIDEO_READY"}},
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 2},
+                "channel-b": {"channelId": "channel-b", "enabled": True, "quota": 2},
+            },
+            youtube_publication_snapshots={
+                "snap-1": {"id": "snap-1", "productionItemId": "pi-confirmed", "channelId": "channel-b",
+                           "requestedPublishAt": "2026-11-15T04:00:00+03:00"},
+            },
+            youtube_publication_executions={
+                "snap-1": {"snapshotId": "snap-1", "productionItemId": "pi-confirmed", "overallStatus": "SCHEDULED",
+                           "youtubeVideoId": None, "steps": {}},
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({})
+
+        rows = {row["productionItemId"]: row for row in result["publicationPreview"]["assignments"]}
+        self.assertEqual(rows["pi-confirmed"]["channelId"], "channel-b")
+        self.assertTrue(rows["pi-confirmed"]["locked"])
+        self.assertEqual(rows["pi-confirmed"]["reason"], "confirmed_snapshot")
+        self.assertNotEqual(rows["pi-new"]["productionItemId"], "pi-confirmed")
+
+
+class PublicationV2RuleTests(unittest.TestCase):
+    def test_channel_rule_normalizes_blackout_periods(self):
+        rule = normalize_channel_publication_rule({
+            "channelId": "channel-a",
+            "quota": 1,
+            "intervalMinutes": 15,
+            "timezone": "Europe/Moscow",
+            "blackoutPeriods": [{
+                "start": "2026-09-25T18:00",
+                "end": "2026-09-25T19:00",
+                "label": "Техническое окно",
+            }],
+        })
+
+        self.assertEqual(rule["blackoutPeriods"], [{
+            "start": "2026-09-25T18:00:00+03:00",
+            "end": "2026-09-25T19:00:00+03:00",
+            "label": "Техническое окно",
+        }])
+
+        with self.assertRaisesRegex(ValueError, "blackout"):
+            normalize_channel_publication_rule({
+                "channelId": "channel-a",
+                "quota": 1,
+                "intervalMinutes": 15,
+                "timezone": "Europe/Moscow",
+                "blackoutPeriods": [{"start": "2026-09-25T19:00", "end": "2026-09-25T18:00"}],
+            })
+
+
+    def test_channel_rule_rejects_non_quarter_hour_interval_and_reversed_ranges(self):
+        with self.assertRaisesRegex(ValueError, "15"):
+            normalize_channel_publication_rule({
+                "channelId": "channel-a", "enabled": True, "quota": 3,
+                "publishMode": "schedule", "timezone": "Europe/Minsk",
+                "intervalMinutes": 17,
+            })
+        with self.assertRaisesRegex(ValueError, "диапазон"):
+            normalize_channel_publication_rule({
+                "channelId": "channel-a", "enabled": True, "quota": 3,
+                "intervalMinutes": 15, "orderStart": 20, "orderEnd": 10,
+            })
+
+    def test_channel_rule_freezes_explicit_ads_and_range_policy(self):
+        rule = normalize_channel_publication_rule({
+            "channelId": "channel-a", "enabled": True, "quota": 8, "monetized": True,
+            "distributionStrategy": "longest_monetized",
+            "intervalMinutes": 45, "timezone": "Europe/Minsk",
+            "orderStart": 1, "orderEnd": 20,
+            "minDurationSeconds": 300, "maxDurationSeconds": 1200,
+            "automation": {"upload": False, "metadata": False, "ads": False, "post": False},
+        })
+
+        self.assertEqual(rule["intervalMinutes"], 45)
+        self.assertEqual((rule["orderStart"], rule["orderEnd"]), (1, 20))
+        self.assertTrue(rule["monetized"])
+        self.assertTrue(rule["automation"]["upload"])
+        self.assertTrue(rule["automation"]["metadata"])
+        self.assertTrue(rule["automation"]["ads"])
+        self.assertFalse(rule["automation"]["post"])
+
+
+class PublicationV2PresetTests(unittest.TestCase):
+    def test_rule_preset_save_apply_delete_round_trip(self):
+        settings = Settings()
+        rules = {
+            "channel-a": {
+                "channelId": "channel-a", "enabled": True, "quota": 4, "intervalMinutes": 30,
+                "timezone": "Europe/Minsk", "orderStart": 1, "orderEnd": 20,
+                "automation": {"post": False},
+            },
+        }
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {"v2": {}}}):
+            bridge.save_publication_v2_rule_preset({"name": "Будни", "rules": rules})
+            settings.youtube_channel_publication_rules = {}
+            bridge.apply_publication_v2_rule_preset({"name": "Будни"})
+            applied = settings.youtube_channel_publication_rules["channel-a"]
+            self.assertEqual(applied["quota"], 4)
+            self.assertEqual(applied["intervalMinutes"], 30)
+            self.assertEqual((applied["orderStart"], applied["orderEnd"]), (1, 20))
+            self.assertFalse(applied["automation"]["post"])
+            bridge.delete_publication_v2_rule_preset({"name": "Будни"})
+
+        self.assertEqual(settings.youtube_publication_v2_rule_presets, [])
+
+    def test_rule_presets_survive_settings_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            settings = Settings(youtube_publication_v2_rule_presets=[{
+                "name": "Срочные",
+                "rules": {"channel-a": {"channelId": "channel-a", "quota": 2, "intervalMinutes": 15}},
+            }])
+            with patch.object(config, "config_path", return_value=path):
+                config.save_settings(settings)
+                restored = config.load_settings()
+
+        self.assertEqual(restored.youtube_publication_v2_rule_presets, settings.youtube_publication_v2_rule_presets)
+
+
+    def test_restore_plan_version_can_reuse_item_after_preupload_cancellation_but_not_after_upload(self):
+        """Only pre-upload CANCELLED releases a frozen item back to mutable planning."""
+        plan = {
+            "id": "plan:test",
+            "name": "Восстановить",
+            "assignments": [{
+                "productionItemId": "pi-1",
+                "channelId": "channel-new",
+                "publishAt": "2026-09-22T18:15:00+03:00",
+                "source": "auto",
+                "locked": False,
+            }],
+        }
+        settings = Settings(
+            youtube_publication_plan_versions=[plan],
+            youtube_publication_assignments={
+                "pi-1": {"productionItemId": "pi-1", "channelId": "channel-old", "source": "auto", "locked": False},
+            },
+            youtube_publication_snapshots={
+                "snap-old": {"id": "snap-old", "productionItemId": "pi-1", "channelId": "channel-old"},
+            },
+            youtube_publication_executions={
+                "snap-old": {"snapshotId": "snap-old", "overallStatus": "CANCELLED", "youtubeVideoId": None},
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {"v2": {}}}):
+            restored = bridge.restore_publication_v2_plan_version({"id": "plan:test"})
+
+        self.assertEqual(restored["operationResult"]["count"], 1)
+        self.assertEqual(restored["operationResult"]["skipped"], 0)
+        self.assertEqual(settings.youtube_publication_assignments["pi-1"]["channelId"], "channel-new")
+
+        settings.youtube_publication_assignments["pi-1"]["channelId"] = "channel-old"
+        settings.youtube_publication_executions["snap-old"] = {
+            "snapshotId": "snap-old",
+            "overallStatus": "AUTOMATION_CANCELLED",
+            "youtubeVideoId": "yt-existing",
+        }
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {"v2": {}}}):
+            protected = bridge.restore_publication_v2_plan_version({"id": "plan:test"})
+
+        self.assertEqual(protected["operationResult"]["count"], 0)
+        self.assertEqual(protected["operationResult"]["skipped"], 1)
+        self.assertEqual(settings.youtube_publication_assignments["pi-1"]["channelId"], "channel-old")
+
+
+    def test_plan_versions_survive_settings_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            settings = Settings(
+                youtube_publication_plan_versions=[{
+                    "id": "plan:test",
+                    "name": "Вечерний план",
+                    "createdAt": "2026-09-22T18:00:00+03:00",
+                    "assignments": [{
+                        "productionItemId": "pi-1",
+                        "channelId": "channel-a",
+                        "publishAt": "2026-09-22T18:15:00+03:00",
+                        "source": "auto",
+                        "locked": False,
+                    }],
+                }],
+            )
+            with patch.object(config, "config_path", return_value=path):
+                config.save_settings(settings)
+                restored = config.load_settings()
+
+        self.assertEqual(restored.youtube_publication_plan_versions, settings.youtube_publication_plan_versions)
+
+class PublicationV2SchedulerTests(unittest.TestCase):
+    def test_bulk_range_schedules_each_channel_independently_on_quarter_hour_grid(self):
+        """A bulk window is a per-channel boundary, never one global timeline shared by every channel."""
+        assignments = [
+            {"productionItemId": "a-1", "channelId": "channel-a", "source": "auto", "locked": False, "reason": "auto"},
+            {"productionItemId": "b-1", "channelId": "channel-b", "source": "auto", "locked": False, "reason": "auto"},
+            {"productionItemId": "a-2", "channelId": "channel-a", "source": "auto", "locked": False, "reason": "auto"},
+            {"productionItemId": "b-2", "channelId": "channel-b", "source": "auto", "locked": False, "reason": "auto"},
+        ]
+        rules = {
+            "channel-a": {"channelId": "channel-a", "timezone": "Europe/Minsk", "intervalMinutes": 15},
+            "channel-b": {"channelId": "channel-b", "timezone": "Europe/Minsk", "intervalMinutes": 30},
+        }
+
+        scheduled = apply_bulk_schedule_range(assignments, {
+            "date": "2026-11-15", "startTime": "04:00", "endTime": "05:00",
+            "timezone": "Europe/Minsk",
+        }, rules)
+
+        by_id = {row["productionItemId"]: row["publishAt"] for row in scheduled}
+        self.assertEqual(by_id, {
+            "a-1": "2026-11-15T04:00:00+03:00",
+            "a-2": "2026-11-15T04:15:00+03:00",
+            "b-1": "2026-11-15T04:00:00+03:00",
+            "b-2": "2026-11-15T04:30:00+03:00",
+        })
+        self.assertTrue(all(datetime.fromisoformat(value).minute in {0, 15, 30, 45} for value in by_id.values()))
+
+    def test_scheduler_rejects_non_quarter_hour_start_or_interval(self):
+        """All automatic slots must stay on :00/:15/:30/:45 so UI and backend cannot disagree."""
+        with self.assertRaisesRegex(ValueError, "15"):
+            build_channel_schedule(
+                ["pi-1"],
+                {"channelId": "channel-a", "firstPublishAt": "2026-09-10T04:07:00+03:00",
+                 "intervalMinutes": 15, "timezone": "Europe/Minsk"},
+            )
+        with self.assertRaisesRegex(ValueError, "15"):
+            build_channel_schedule(
+                ["pi-1"],
+                {"channelId": "channel-a", "firstPublishAt": "2026-09-10T04:00:00+03:00",
+                 "intervalMinutes": 20, "timezone": "Europe/Minsk"},
+            )
 
     def test_scheduler_moves_next_slot_to_next_day_when_interval_leaves_publication_window(self):
         """A naive interval-only scheduler would incorrectly publish this third item at midnight."""
@@ -261,6 +821,139 @@ class PublicationV2SchedulerTests(unittest.TestCase):
         self.assertEqual([slot["publishAt"] for slot in slots], [
             "2026-09-10T18:00:00+02:00", "2026-09-10T21:00:00+02:00", "2026-09-11T09:00:00+02:00",
         ])
+
+    def test_scheduler_respects_max_per_hour_and_explicit_topic_cooldown(self):
+        hourly = build_channel_schedule(
+            ["pi-1", "pi-2", "pi-3"],
+            {
+                "channelId": "channel-a",
+                "firstPublishAt": "2026-09-10T04:00:00+03:00",
+                "intervalMinutes": 15,
+                "timezone": "Europe/Minsk",
+                "maxVideosPerHour": 2,
+            },
+        )
+        self.assertEqual([slot["publishAt"] for slot in hourly], [
+            "2026-09-10T04:00:00+03:00",
+            "2026-09-10T04:15:00+03:00",
+            "2026-09-10T05:00:00+03:00",
+        ])
+
+        cooldown = build_channel_schedule(
+            ["pi-a", "pi-b", "pi-c"],
+            {
+                "channelId": "channel-a",
+                "firstPublishAt": "2026-09-10T04:00:00+03:00",
+                "intervalMinutes": 15,
+                "timezone": "Europe/Minsk",
+                "topicCooldownMinutes": 45,
+            },
+            item_topics={"pi-a": "iran", "pi-b": "iran", "pi-c": "europe"},
+        )
+        self.assertEqual([slot["publishAt"] for slot in cooldown], [
+            "2026-09-10T04:00:00+03:00",
+            "2026-09-10T04:45:00+03:00",
+            "2026-09-10T05:00:00+03:00",
+        ])
+
+    def test_scheduler_skips_explicit_blackout_period(self):
+        slots = build_channel_schedule(
+            ["pi-1", "pi-2", "pi-3"],
+            {
+                "channelId": "channel-a",
+                "firstPublishAt": "2026-09-25T17:45:00+03:00",
+                "intervalMinutes": 15,
+                "timezone": "Europe/Moscow",
+                "blackoutPeriods": [{
+                    "start": "2026-09-25T18:00:00+03:00",
+                    "end": "2026-09-25T19:00:00+03:00",
+                    "label": "Техническое окно",
+                }],
+            },
+        )
+
+        self.assertEqual([slot["publishAt"] for slot in slots], [
+            "2026-09-25T17:45:00+03:00",
+            "2026-09-25T19:00:00+03:00",
+            "2026-09-25T19:15:00+03:00",
+        ])
+
+    def test_manual_slot_inside_blackout_is_a_confirmation_conflict(self):
+        conflicts = validate_publication_schedule(
+            [{
+                "productionItemId": "pi-1",
+                "channelId": "channel-a",
+                "publishAt": "2026-09-25T18:15:00+03:00",
+                "locked": True,
+            }],
+            {
+                "channel-a": {
+                    "timezone": "Europe/Moscow",
+                    "blackoutPeriods": [{
+                        "start": "2026-09-25T18:00:00+03:00",
+                        "end": "2026-09-25T19:00:00+03:00",
+                    }],
+                },
+            },
+        )
+
+        self.assertIn("blackout_period", {conflict["kind"] for conflict in conflicts})
+
+
+    def test_manual_schedule_rejects_hourly_cap_and_topic_cooldown_conflicts(self):
+        assignments = [
+            {"productionItemId": "pi-a1", "channelId": "channel-a", "publishAt": "2026-09-25T04:00:00+03:00", "locked": True},
+            {"productionItemId": "pi-a2", "channelId": "channel-a", "publishAt": "2026-09-25T04:15:00+03:00", "locked": True},
+            {"productionItemId": "pi-b", "channelId": "channel-a", "publishAt": "2026-09-25T04:30:00+03:00", "locked": True},
+        ]
+        conflicts = validate_publication_schedule(
+            assignments,
+            {
+                "channel-a": {
+                    "timezone": "Europe/Moscow",
+                    "maxVideosPerHour": 2,
+                    "topicCooldownMinutes": 45,
+                },
+            },
+            item_topics={"pi-a1": "iran", "pi-a2": "iran", "pi-b": "europe"},
+        )
+
+        kinds_by_item = {
+            production_id: {item["kind"] for item in conflicts if item["productionItemId"] == production_id}
+            for production_id in ("pi-a1", "pi-a2", "pi-b")
+        }
+        self.assertIn("topic_cooldown", kinds_by_item["pi-a2"])
+        self.assertIn("max_videos_per_hour", kinds_by_item["pi-b"])
+
+    def test_bulk_range_preserves_topic_cooldown_per_channel(self):
+        assignments = [
+            {"productionItemId": "pi-a1", "channelId": "channel-a", "source": "auto", "locked": False},
+            {"productionItemId": "pi-a2", "channelId": "channel-a", "source": "auto", "locked": False},
+        ]
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-09-25",
+                "startTime": "04:00",
+                "endTime": "05:00",
+                "timezone": "Europe/Moscow",
+            },
+            {
+                "channel-a": {
+                    "channelId": "channel-a",
+                    "timezone": "Europe/Moscow",
+                    "intervalMinutes": 15,
+                    "topicCooldownMinutes": 45,
+                },
+            },
+            item_topics={"pi-a1": "iran", "pi-a2": "iran"},
+        )
+
+        self.assertEqual(
+            [row["publishAt"] for row in scheduled],
+            ["2026-09-25T04:00:00+03:00", "2026-09-25T04:45:00+03:00"],
+        )
+
 
     def test_scheduler_respects_daily_cap_before_allocating_next_day_slot(self):
         """Daily quota is a hard calendar constraint, not a display-only counter."""
@@ -281,7 +974,56 @@ class PublicationV2SchedulerTests(unittest.TestCase):
             {"productionItemId": "pi-2", "channelId": "channel-a", "publishAt": "2026-09-10T08:00:00+03:00", "locked": True},
         ], {"channel-a": {"timezone": "Europe/Minsk", "publishWindowStart": "09:00", "publishWindowEnd": "21:00", "dailyCap": 3}})
 
-        self.assertEqual({conflict["kind"] for conflict in conflicts}, {"manual_outside_window", "duplicate_slot"})
+        self.assertEqual({conflict["kind"] for conflict in conflicts}, {"outside_window", "duplicate_slot"})
+
+
+class PublicationV2StateIntegrityTests(unittest.TestCase):
+    def test_later_success_cannot_hide_an_existing_downstream_failure(self):
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snap": {"id": "snap", "productionItemId": "pi", "publishMode": "publish_now"},
+            },
+            youtube_publication_executions={
+                "snap": {
+                    "snapshotId": "snap", "productionItemId": "pi", "youtubeVideoId": "yt-1",
+                    "activeLease": {"workerId": "worker"},
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "THUMBNAIL": {"status": "FAILED"},
+                        "ADS": {"status": "RUNNING"},
+                    },
+                },
+            },
+        )
+
+        complete_publication_stage(settings, "snap", "worker", "ADS", {"mode": "AUTO_ONLY"})
+
+        self.assertEqual(settings.youtube_publication_executions["snap"]["overallStatus"], "PARTIAL")
+        self.assertEqual(settings.youtube_publication_executions["snap"]["steps"]["THUMBNAIL"]["status"], "FAILED")
+        self.assertEqual(settings.youtube_publication_executions["snap"]["steps"]["ADS"]["status"], "SUCCESS")
+
+    def test_scheduled_terminal_execution_remains_scheduled_instead_of_becoming_done(self):
+        steps = {
+            name: {"status": "SUCCESS"}
+            for name in ("AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION", "TAGS", "THUMBNAIL", "ADS", "POST", "CARDS", "END_SCREEN")
+        }
+        steps["SCHEDULE"] = {"status": "RUNNING"}
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snap": {"id": "snap", "productionItemId": "pi", "publishMode": "schedule",
+                         "requestedPublishAt": "2026-11-15T04:00:00+03:00"},
+            },
+            youtube_publication_executions={
+                "snap": {
+                    "snapshotId": "snap", "productionItemId": "pi", "youtubeVideoId": "yt-1",
+                    "activeLease": {"workerId": "worker"}, "steps": steps,
+                },
+            },
+        )
+
+        complete_publication_stage(settings, "snap", "worker", "SCHEDULE", {"verified": True})
+
+        self.assertEqual(settings.youtube_publication_executions["snap"]["overallStatus"], "SCHEDULED")
 
 
 class PublicationV2SnapshotTests(unittest.TestCase):
@@ -306,6 +1048,76 @@ class PublicationV2SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["requestedPublishAt"], "2026-09-10T18:00:00+02:00")
         self.assertTrue(snapshot["idempotencyKey"])
 
+    def test_cancelled_preupload_snapshot_can_be_reconfirmed_without_mutating_old_snapshot(self):
+        """Cancel before transport releases planning while preserving the immutable old confirmation."""
+        settings = Settings(youtube_publication_items={
+            "pi-1": {
+                "productionItemId": "pi-1",
+                "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                "artifacts": {"video": {"path": "D:/out.mp4", "exists": True}},
+                "readiness": {"state": "VIDEO_READY", "contentReady": True},
+            },
+        })
+        rules = {"channel-a": {"privacy": "private", "publishMode": "schedule", "timezone": "UTC", "intervalMinutes": 15}}
+
+        first = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-09-10T10:00:00+00:00"}],
+            rules,
+        )[0]
+        cancel_publication_execution(settings, first)
+        second = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-09-10T11:00:00+00:00"}],
+            rules,
+        )[0]
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(settings.youtube_publication_snapshots[first]["requestedPublishAt"], "2026-09-10T10:00:00+00:00")
+        self.assertEqual(settings.youtube_publication_executions[first]["overallStatus"], "CANCELLED")
+        self.assertEqual(settings.youtube_publication_snapshots[second]["requestedPublishAt"], "2026-09-10T11:00:00+00:00")
+        self.assertEqual(settings.youtube_publication_executions[second]["overallStatus"], "SCHEDULED")
+
+    def test_manual_datetime_local_is_frozen_with_channel_timezone_offset(self):
+        settings = Settings(youtube_publication_items={
+            "pi-1": {"productionItemId": "pi-1", "metadata": {"title": "Выпуск"},
+                     "artifacts": {"video": {"path": "D:/out.mp4", "exists": True}},
+                     "readiness": {"state": "VIDEO_READY"}},
+        })
+        created = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-11-15T04:15:00"}],
+            {"channel-a": {"privacy": "private", "publishMode": "schedule", "timezone": "Europe/Minsk",
+                           "intervalMinutes": 15}},
+        )
+
+        self.assertEqual(
+            settings.youtube_publication_snapshots[created[0]]["requestedPublishAt"],
+            "2026-11-15T04:15:00+03:00",
+        )
+
+    def test_snapshot_freezes_current_cta_for_later_studio_post(self):
+        settings = Settings(
+            seo_call_to_action="CTA at confirmation",
+            youtube_publication_items={
+                "pi-1": {
+                    "productionItemId": "pi-1",
+                    "metadata": {"title": "Выпуск"},
+                    "artifacts": {"video": {"path": "D:/out.mp4", "exists": True}},
+                    "readiness": {"state": "VIDEO_READY"},
+                },
+            },
+        )
+        created = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a"}],
+            {"channel-a": {"privacy": "private", "publishMode": "publish_now", "intervalMinutes": 15}},
+        )
+        settings.seo_call_to_action = "CTA changed later"
+
+        snapshot = settings.youtube_publication_snapshots[created[0]]
+        self.assertEqual(snapshot["communityPost"]["callToAction"], "CTA at confirmation")
+
     def test_scheduled_snapshot_rejects_non_private_initial_privacy_before_transport(self):
         """YouTube schedule semantics require a private draft, so reject invalid input before any upload."""
         settings = Settings(youtube_publication_items={
@@ -317,13 +1129,76 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             confirm_publication_snapshots(settings, [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-09-10T18:00:00+03:00"}],
                                           {"channel-a": {"privacy": "public", "publishMode": "schedule"}})
 
+    def test_preflight_rejects_video_replaced_after_snapshot_confirmation(self):
+        """Frozen input must detect a changed MP4 at the same path before irreversible upload."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "video.mp4"
+            video.write_bytes(b"original-video")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_items={
+                    "pi-1": {
+                        "productionItemId": "pi-1",
+                        "metadata": {"title": "Ролик", "description": "Описание", "tags": ["тег"]},
+                        "artifacts": {"video": {"path": str(video), "exists": True}},
+                        "readiness": {"state": "VIDEO_READY", "contentReady": True},
+                    },
+                },
+            )
+            snapshot_id = confirm_publication_snapshots(
+                settings,
+                [{"productionItemId": "pi-1", "channelId": "channel-a"}],
+                {"channel-a": {"privacy": "private", "publishMode": "publish_now", "intervalMinutes": 15}},
+            )[0]
+            video.write_bytes(b"replacement-video-is-different")
+
+            preflight = validate_publication_snapshot(settings, snapshot_id)
+
+        self.assertFalse(preflight["ok"])
+        self.assertIn("VIDEO_STALE", {reason["kind"] for reason in preflight["reasons"]})
+
+    def test_preflight_rejects_malformed_oauth_payload_as_auth_required(self):
+        """A stored token string is not a valid auth check until its payload is structurally usable."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "video.mp4"
+            video.write_bytes(b"mp4")
+            for stored_oauth in ("not-json", "{}", '{"garbage":1}'):
+                settings = Settings(
+                    youtube_oauth_tokens={"channel-a": stored_oauth},
+                    youtube_publication_snapshots={
+                        "snapshot-1": {
+                            "id": "snapshot-1",
+                            "channelId": "channel-a",
+                            "videoPath": str(video),
+                            "metadata": {"title": "Ролик"},
+                            "privacy": "private",
+                            "publishMode": "publish_now",
+                        },
+                    },
+                    youtube_publication_executions={
+                        "snapshot-1": {
+                            "snapshotId": "snapshot-1",
+                            "overallStatus": "READY",
+                            "youtubeVideoId": None,
+                            "activeLease": None,
+                            "steps": {"AUTH_CHECK": {"status": "PENDING"}, "VIDEO_UPLOAD": {"status": "PENDING"}},
+                        },
+                    },
+                )
+
+                with self.subTest(stored_oauth=stored_oauth):
+                    preflight = validate_publication_snapshot(settings, "snapshot-1")
+                    self.assertFalse(preflight["ok"])
+                    self.assertIn("AUTH_REQUIRED", {reason["kind"] for reason in preflight["reasons"]})
+
     def test_preflight_blocks_only_missing_or_invalid_snapshot_and_never_reopens_known_upload(self):
         """Preflight reports exact readiness reasons and treats an existing YouTube ID as immutable."""
         with TemporaryDirectory() as directory:
             root = Path(directory)
             video = root / "video.mp4"
             video.write_bytes(b"mp4")
-            settings = Settings(youtube_oauth_tokens={"channel-a": "protected-token"}, youtube_publication_snapshots={
+            settings = Settings(youtube_oauth_tokens={"channel-a": '{"token":"safe"}'}, youtube_publication_snapshots={
                 "snapshot-1": {"id": "snapshot-1", "channelId": "channel-a", "videoPath": str(video),
                                "metadata": {"title": "Ролик"}, "privacy": "private", "publishMode": "publish_now"},
             }, youtube_publication_executions={"snapshot-1": {"youtubeVideoId": "yt-existing"}})
@@ -371,6 +1246,50 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         settings.youtube_publication_queue_paused = True
         self.assertEqual(next_upload_candidates(settings), [])
 
+    def test_verified_youtube_description_includes_frozen_hashtags(self):
+        """Readback compares the exact final description sent to YouTube, including hashtags."""
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "metadata": {
+                        "title": "Выпуск",
+                        "description": "Описание",
+                        "tags": ["тег"],
+                        "hashtags": ["#NewsFlow", "#Новости"],
+                    },
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "overallStatus": "PROCESSING",
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "RUNNING"},
+                        "DESCRIPTION": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+
+        reconcile_youtube_video_state(settings, "snapshot-1", {
+            "snippet": {
+                "title": "Выпуск",
+                "description": "Описание\n\n#NewsFlow #Новости",
+                "tags": ["тег"],
+            },
+            "status": {"privacyStatus": "private"},
+            "processingDetails": {"processingStatus": "succeeded"},
+        })
+
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["DESCRIPTION"]["status"],
+            "SUCCESS",
+        )
+
     def test_verified_youtube_state_completes_only_confirmed_metadata_and_keeps_unverified_stage_honest(self):
         """Verification confirms only API evidence; absent thumbnail proof is not reported as success."""
         settings = Settings(youtube_publication_snapshots={
@@ -392,6 +1311,56 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(steps["TAGS"]["status"], "SUCCESS")
         self.assertEqual(steps["THUMBNAIL"]["status"], "PENDING")
 
+    def test_youtube_readback_verifies_frozen_seo_title_instead_of_source_title(self):
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "metadata": {
+                        "title": "Исходное название сценария",
+                        "seoTitle": "SEO-заголовок для YouTube",
+                        "description": "Описание",
+                        "tags": ["тег"],
+                    },
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "overallStatus": "PROCESSING",
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "RUNNING"},
+                        "TITLE": {"status": "PENDING"},
+                        "DESCRIPTION": {"status": "PENDING"},
+                        "TAGS": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+
+        reconcile_youtube_video_state(
+            settings,
+            "snapshot-1",
+            {
+                "snippet": {
+                    "title": "SEO-заголовок для YouTube",
+                    "description": "Описание",
+                    "tags": ["тег"],
+                },
+                "processingDetails": {"processingStatus": "succeeded"},
+                "status": {"privacyStatus": "private"},
+            },
+        )
+
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["TITLE"]["status"],
+            "SUCCESS",
+        )
+
+
     def test_cancel_after_youtube_id_stops_automation_without_deleting_or_reuploading_video(self):
         """Cancellation after transport is a downstream stop, never a YouTube deletion."""
         settings = Settings(youtube_publication_executions={
@@ -405,6 +1374,37 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(execution["youtubeVideoId"], "yt-1")
         self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(execution["overallStatus"], "AUTOMATION_CANCELLED")
+
+    def test_receipt_preserves_explicit_cancelled_status_with_pending_stages(self):
+        """History must show cancellation itself, not collapse it into generic PARTIAL."""
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-pre": {"id": "snapshot-pre", "productionItemId": "pi-pre", "channelId": "channel-a", "metadata": {"title": "Pre"}},
+                "snapshot-post": {"id": "snapshot-post", "productionItemId": "pi-post", "channelId": "channel-a", "metadata": {"title": "Post"}},
+            },
+            youtube_publication_executions={
+                "snapshot-pre": {
+                    "snapshotId": "snapshot-pre",
+                    "youtubeVideoId": None,
+                    "overallStatus": "READY",
+                    "activeLease": None,
+                    "steps": {"VIDEO_UPLOAD": {"status": "PENDING"}, "TITLE": {"status": "PENDING"}},
+                },
+                "snapshot-post": {
+                    "snapshotId": "snapshot-post",
+                    "youtubeVideoId": "yt-existing",
+                    "overallStatus": "UPLOADED",
+                    "activeLease": None,
+                    "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}, "TITLE": {"status": "PENDING"}},
+                },
+            },
+        )
+
+        cancel_publication_execution(settings, "snapshot-pre")
+        cancel_publication_execution(settings, "snapshot-post")
+
+        self.assertEqual(publication_receipt(settings, "snapshot-pre")["finalStatus"], "CANCELLED")
+        self.assertEqual(publication_receipt(settings, "snapshot-post")["finalStatus"], "AUTOMATION_CANCELLED")
 
     def test_release_lease_and_receipt_preserve_known_video_identity_across_restart_projection(self):
         """A receipt must use the existing YouTube identity and expose unverified stages honestly."""
@@ -462,6 +1462,37 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(uploaded["overallStatus"], "PARTIAL")
         self.assertIsNone(uploaded["activeLease"])
 
+    def test_interrupted_unknown_upload_cannot_be_retried_into_duplicate_transport(self):
+        """Unknown interrupted transport must stay blocked until explicit reconciliation, never ordinary retry."""
+        settings = Settings(
+            youtube_publication_upload_concurrency=1,
+            youtube_publication_executions={
+                "snapshot-interrupted": {
+                    "snapshotId": "snapshot-interrupted",
+                    "overallStatus": "UPLOADING",
+                    "youtubeVideoId": None,
+                    "activeLease": {"workerId": "crashed-worker"},
+                    "steps": {"VIDEO_UPLOAD": {"status": "RUNNING", "attempts": 1}},
+                },
+            },
+        )
+
+        reconcile_publication_executions(settings)
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-interrupted"]["steps"]["VIDEO_UPLOAD"]["status"],
+            "USER_ACTION_REQUIRED",
+        )
+        self.assertEqual(next_upload_candidates(settings), [])
+
+        with self.assertRaisesRegex(ValueError, "сверк|reconcil|прерван"):
+            retry_publication_stage(settings, "snapshot-interrupted", "VIDEO_UPLOAD")
+
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-interrupted"]["steps"]["VIDEO_UPLOAD"]["status"],
+            "USER_ACTION_REQUIRED",
+        )
+        self.assertEqual(next_upload_candidates(settings), [])
+
     def test_upload_attempt_persists_lease_before_transport_and_known_id_exits_upload_queue(self):
         """The transport handoff must be crash-safe before network I/O and immutable after YouTube answers."""
         settings = Settings(youtube_publication_executions={
@@ -515,6 +1546,155 @@ class PublicationV2ExecutionTests(unittest.TestCase):
 
 
 class PublicationV2BridgeTests(unittest.TestCase):
+    def test_v2_upload_records_invalid_oauth_on_auth_stage_before_transport(self):
+        """Malformed credentials must fail AUTH_CHECK before the MP4 transport becomes RUNNING."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": "not-json"},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "READY",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "steps": {
+                            "AUTH_CHECK": {"status": "PENDING"},
+                            "VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0},
+                        },
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
+                 patch.object(bridge, "upload_private_video") as upload:
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["steps"]["AUTH_CHECK"]["status"], "AUTH_REQUIRED")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "PENDING")
+        upload.assert_not_called()
+
+    def test_v2_upload_provider_auth_failure_stays_on_auth_check_before_transport(self):
+        """Provider-side invalid_grant must block before VIDEO_UPLOAD becomes RUNNING."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe","refresh_token":"refresh"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "READY",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "steps": {
+                            "AUTH_CHECK": {"status": "PENDING"},
+                            "VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0},
+                        },
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", side_effect=RuntimeError("invalid_grant")) as validate_auth, \
+                 patch.object(
+                     bridge,
+                     "upload_private_video",
+                     return_value=(
+                         {"videoId": "yt-should-not-exist", "videoUrl": "https://youtu.be/yt-should-not-exist", "privacyStatus": "private"},
+                         {"token": "refreshed"},
+                     ),
+                 ) as upload:
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["steps"]["AUTH_CHECK"]["status"], "AUTH_REQUIRED")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "PENDING")
+        self.assertIsNone(execution["youtubeVideoId"])
+        validate_auth.assert_called_once()
+        upload.assert_not_called()
+
+    def test_v2_upload_blocks_oauth_bound_to_different_youtube_channel(self):
+        """A valid OAuth token for another YouTube channel must never receive this snapshot."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-expected", "name": "Expected"}],
+                youtube_oauth_tokens={"channel-a": '{"token":"safe","refresh_token":"refresh"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "READY",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "steps": {
+                            "AUTH_CHECK": {"status": "PENDING"},
+                            "VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0},
+                        },
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(
+                     bridge,
+                     "fetch_current_channel",
+                     return_value=(
+                         {"channelId": "UC-other", "name": "Other", "subscribers": 0, "viewsTotal": 0},
+                         {"token": "safe", "refresh_token": "refresh"},
+                     ),
+                 ), \
+                 patch.object(bridge, "upload_private_video") as upload:
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["steps"]["AUTH_CHECK"]["status"], "AUTH_REQUIRED")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "PENDING")
+        upload.assert_not_called()
+
     def test_v2_upload_persists_running_state_then_keeps_returned_youtube_id_before_downstream_work(self):
         """Bridge upload uses a frozen snapshot and cannot lose the YouTube ID to a later thumbnail failure."""
         with TemporaryDirectory() as directory:
@@ -531,6 +1711,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings") as save, \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(bridge, "upload_private_video", return_value=({"videoId": "yt-new", "videoUrl": "https://youtu.be/yt-new", "privacyStatus": "private"}, {"token": "refreshed"})) as upload:
                 result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
 
@@ -539,6 +1720,132 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"], "yt-new")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(upload.call_args.kwargs["thumbnail_path"], "")
+
+    def test_v2_upload_timeout_after_transport_requires_reconciliation_before_retry(self):
+        """A lost insert response cannot prove that YouTube did not create the video."""
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1", "channelId": "channel-a", "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                        "privacy": "private", "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1", "overallStatus": "READY", "youtubeVideoId": None,
+                        "activeLease": None, "steps": {"VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0}},
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test"}, {"token": "safe"})), \
+                 patch.object(bridge, "upload_private_video") as upload:
+                def timeout_after_insert(*_args, **kwargs):
+                    callback = kwargs.get("on_insert_started")
+                    if callback:
+                        callback()
+                    raise TimeoutError("response timed out")
+
+                upload.side_effect = timeout_after_insert
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        upload.assert_called_once()
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "USER_ACTION_REQUIRED")
+        self.assertIsNone(execution["activeLease"])
+        self.assertEqual(next_upload_candidates(settings), [])
+        with self.assertRaisesRegex(ValueError, "сверки"):
+            retry_publication_stage(settings, "snapshot-1", "VIDEO_UPLOAD")
+        with self.assertRaisesRegex(ValueError, "сверки YouTube"):
+            cancel_publication_execution(settings, "snapshot-1")
+
+        resolve_uncertain_upload(settings, "snapshot-1", "not_found")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "RETRYING")
+        self.assertEqual(next_upload_candidates(settings), ["snapshot-1"])
+
+    def test_uncertain_upload_can_adopt_a_manually_verified_youtube_id(self):
+        settings = Settings(
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "overallStatus": "USER_ACTION_REQUIRED",
+                    "youtubeVideoId": None,
+                    "activeLease": None,
+                    "steps": {"VIDEO_UPLOAD": {"status": "USER_ACTION_REQUIRED", "attempts": 1}},
+                    "timeline": [],
+                },
+            },
+        )
+
+        resolve_uncertain_upload(settings, "snapshot-1", "found", "yt-verified-1")
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(execution["youtubeVideoId"], "yt-verified-1")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
+        self.assertEqual(execution["currentStage"], "YOUTUBE_PROCESSING")
+        self.assertEqual(next_upload_candidates(settings), [])
+
+    def test_v2_upload_uses_frozen_seo_title_and_keeps_source_title_as_identity_metadata(self):
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {
+                            "title": "Исходное название сценария",
+                            "seoTitle": "SEO-заголовок для YouTube",
+                            "description": "SEO-описание",
+                            "tags": ["тег"],
+                            "hashtags": ["#новости"],
+                        },
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "READY",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "steps": {"VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0}},
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
+                 patch.object(
+                     bridge,
+                     "upload_private_video",
+                     return_value=(
+                         {"videoId": "yt-new", "videoUrl": "https://youtu.be/yt-new", "privacyStatus": "private"},
+                         {"token": "refreshed"},
+                     ),
+                 ) as upload:
+                bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        body = upload.call_args.kwargs["body"]
+        self.assertEqual(body["snippet"]["title"], "SEO-заголовок для YouTube")
+        self.assertEqual(
+            settings.youtube_publication_snapshots["snapshot-1"]["metadata"]["title"],
+            "Исходное название сценария",
+        )
+
 
     def test_v2_upload_queue_drains_requested_batch_without_exceeding_configured_transport_workers(self):
         """Finished transports free their slot so the next requested snapshot starts in the same queue run."""
@@ -564,6 +1871,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(bridge, "upload_private_video", side_effect=lambda *args, **kwargs: next(responses)) as upload:
                 result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1", "snapshot-2"]})
 
@@ -589,6 +1897,290 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"], "yt-1")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["TITLE"]["status"], "SUCCESS")
+
+    def test_v2_studio_waits_for_processing_before_ads_editor_steps(self):
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1", "productionItemId": "pi-1", "channelId": "channel-a",
+                    "durationSeconds": 600, "monetized": True,
+                    "adPolicy": {"enabled": True, "manualIntervalSeconds": 39, "automaticSlotsEnabled": True},
+                    "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1", "productionItemId": "pi-1", "youtubeVideoId": "yt-new",
+                    "youtubeVideoUrl": "https://youtu.be/yt-new", "overallStatus": "PROCESSING",
+                    "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "RUNNING"},
+                        "ADS": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "_youtube_channel_profile_dir", return_value=Path("C:/profiles/channel-a")), \
+             patch.object(bridge, "execute_studio_task") as execute:
+            result = bridge.run_publication_v2_studio({"snapshotIds": ["snapshot-1"], "steps": ["ads"]})
+
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["skipped"], 1)
+        self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["ADS"]["status"], "PENDING")
+        execute.assert_not_called()
+
+    def test_v2_studio_waits_for_processing_before_community_post(self):
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "productionItemId": "pi-1",
+                    "channelId": "channel-a",
+                    "durationSeconds": 300,
+                    "monetized": False,
+                    "automation": {"post": True},
+                    "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "productionItemId": "pi-1",
+                    "youtubeVideoId": "yt-new",
+                    "youtubeVideoUrl": "https://youtu.be/yt-new",
+                    "overallStatus": "PROCESSING",
+                    "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "RUNNING"},
+                        "POST": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "_youtube_channel_profile_dir", return_value=Path("C:/profiles/channel-a")), \
+             patch.object(bridge, "execute_studio_task") as execute:
+            result = bridge.run_publication_v2_studio({
+                "snapshotIds": ["snapshot-1"],
+                "steps": ["post"],
+            })
+
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["skipped"], 1)
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["POST"]["status"],
+            "PENDING",
+        )
+        execute.assert_not_called()
+
+
+    def test_v2_studio_honors_frozen_non_ads_automation_policy(self):
+        """Confirmed channel policy disables cards/end-screen without changing completed upload."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1", "productionItemId": "pi-1", "channelId": "channel-a",
+                    "durationSeconds": 600, "monetized": True,
+                    "automation": {"post": True, "cards": False, "endScreen": False, "ads": True},
+                    "adPolicy": {"enabled": True, "manualIntervalSeconds": 39, "automaticSlotsEnabled": True},
+                    "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1", "productionItemId": "pi-1",
+                    "youtubeVideoId": "yt-existing", "overallStatus": "FORMATTING", "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "SUCCESS"},
+                        "CARDS": {"status": "PENDING"},
+                        "END_SCREEN": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "execute_studio_task") as execute:
+            result = bridge.run_publication_v2_studio({
+                "snapshotIds": ["snapshot-1"],
+                "steps": ["cards", "end-screen"],
+            })
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["failed"], 0)
+        self.assertEqual(result["operationResult"]["skipped"], 2)
+        self.assertEqual(execution["steps"]["CARDS"]["status"], "NOT_REQUIRED")
+        self.assertEqual(execution["steps"]["END_SCREEN"]["status"], "NOT_REQUIRED")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
+        execute.assert_not_called()
+
+    def test_v2_studio_partial_ads_preserves_auto_mode_and_never_reuploads_mp4(self):
+        """AUTO success plus incomplete manual slots stays retryable without reopening VIDEO_UPLOAD."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_items={
+                "pi-1": {"productionItemId": "pi-1", "durationSeconds": 600},
+            },
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1", "productionItemId": "pi-1", "channelId": "channel-a",
+                    "durationSeconds": 600, "monetized": True,
+                    "adPolicy": {"enabled": True, "manualIntervalSeconds": 39, "automaticSlotsEnabled": True},
+                    "automation": {"ads": True},
+                    "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1", "productionItemId": "pi-1",
+                    "youtubeVideoId": "yt-existing", "youtubeVideoUrl": "https://youtu.be/yt-existing",
+                    "overallStatus": "FORMATTING", "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "SUCCESS"},
+                        "ADS": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+
+        def partial_ads(task, **_kwargs):
+            task["_studioResults"] = {
+                "ads": {
+                    "mode": "AUTO_ONLY",
+                    "automatic": True,
+                    "manual": False,
+                    "manualMidrollApplicable": True,
+                    "manualSlots": [39, 78, 117],
+                    "confirmedManualSlots": [39],
+                },
+            }
+            return ["ads"]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "_youtube_channel_profile_dir", return_value=Path("C:/profiles/channel-a")), \
+             patch.object(bridge, "execute_studio_task", side_effect=partial_ads):
+            result = bridge.run_publication_v2_studio({"snapshotIds": ["snapshot-1"], "steps": ["ads"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["youtubeVideoId"], "yt-existing")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
+        self.assertEqual(execution["steps"]["ADS"]["status"], "FAILED")
+        self.assertEqual(execution["steps"]["ADS"]["providerResult"]["mode"], "AUTO_ONLY")
+        self.assertEqual(execution["steps"]["ADS"]["providerResult"]["confirmedManualSlotsSeconds"], [39])
+
+    def test_v2_studio_uses_prior_public_v2_video_for_cards_without_reupload(self):
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_snapshots={
+                "snapshot-old": {
+                    "id": "snapshot-old", "productionItemId": "pi-old", "channelId": "channel-a",
+                    "durationSeconds": 500, "metadata": {"title": "Старый"}, "publishMode": "publish_now",
+                },
+                "snapshot-new": {
+                    "id": "snapshot-new", "productionItemId": "pi-new", "channelId": "channel-a",
+                    "durationSeconds": 600, "metadata": {"title": "Новый", "description": "Описание"},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-old": {
+                    "snapshotId": "snapshot-old", "productionItemId": "pi-old", "youtubeVideoId": "yt-old",
+                    "youtubePrivacyStatus": "public", "actualPublishedAt": "2026-09-21T10:00:00+00:00",
+                    "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}},
+                },
+                "snapshot-new": {
+                    "snapshotId": "snapshot-new", "productionItemId": "pi-new", "youtubeVideoId": "yt-new",
+                    "youtubeVideoUrl": "https://youtu.be/yt-new", "overallStatus": "FORMATTING",
+                    "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "SUCCESS"},
+                        "CARDS": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "_youtube_channel_profile_dir", return_value=Path("C:/profiles/channel-a")), \
+             patch.object(bridge, "execute_studio_task", return_value=["cards"]) as execute:
+            result = bridge.run_publication_v2_studio({"snapshotIds": ["snapshot-new"], "steps": ["cards"]})
+
+        self.assertEqual(result["operationResult"]["count"], 1)
+        task = execute.call_args.args[0]
+        self.assertEqual(task["plan"]["cards"][0]["videoId"], "yt-old")
+        execution = settings.youtube_publication_executions["snapshot-new"]
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
+        self.assertEqual(execution["steps"]["CARDS"]["status"], "SUCCESS")
+
+    def test_v2_thumbnail_rejects_cover_replaced_after_snapshot_confirmation(self):
+        """Frozen thumbnail identity must be checked before any Studio/API mutation."""
+        with TemporaryDirectory() as directory:
+            cover = Path(directory) / "cover.png"
+            cover.write_bytes(b"original-cover")
+            frozen = {"sizeBytes": cover.stat().st_size, "mtimeNs": cover.stat().st_mtime_ns}
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "thumbnailPath": str(cover),
+                        "artifactFingerprints": {"thumbnail": frozen},
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "youtubeVideoId": "yt-1",
+                        "overallStatus": "FORMATTING",
+                        "activeLease": None,
+                        "steps": {
+                            "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                            "THUMBNAIL": {"status": "PENDING"},
+                        },
+                    },
+                },
+            )
+            cover.write_bytes(b"replacement-cover-is-different")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "set_youtube_thumbnail", return_value={"credentials": {"token": "refreshed"}, "response": {}}) as set_thumbnail:
+                result = bridge.run_publication_v2_thumbnails({"snapshotIds": ["snapshot-1"]})
+
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["THUMBNAIL"]["status"],
+            "USER_ACTION_REQUIRED",
+        )
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"],
+            "SUCCESS",
+        )
+        set_thumbnail.assert_not_called()
 
     def test_v2_thumbnail_command_runs_only_for_known_video_without_reopening_upload(self):
         """A thumbnail retry calls the independent thumbnail API and leaves VIDEO_UPLOAD successful."""

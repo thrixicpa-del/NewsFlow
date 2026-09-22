@@ -11,7 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          lfs: true
       - uses: actions/setup-python@v6
         with: { python-version: '3.12' }
       - uses: pnpm/action-setup@v4
@@ -24,6 +26,9 @@ jobs:
       - run: pwsh -NoProfile -File scripts/release-lint.ps1
       - run: pwsh -NoProfile -File scripts/audit-python-dependencies.ps1
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
       - run: pnpm typecheck

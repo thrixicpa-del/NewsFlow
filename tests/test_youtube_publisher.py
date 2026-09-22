@@ -17,6 +17,7 @@ from scriptor.youtube_allocation import (
 )
 from scriptor.youtube_api import (
     build_private_video_insert_body,
+    compose_youtube_description,
     normalize_youtube_tags,
     parse_analytics_rows,
     parse_current_channel,
@@ -424,6 +425,47 @@ class PublicationJobTests(unittest.TestCase):
     def test_manual_ad_break_checklist_is_every_39_seconds_without_crossing_video_end(self):
         self.assertEqual(manual_ad_break_checklist(118), ["00:39", "01:18"])
         self.assertEqual(manual_ad_break_checklist(39), [])
+
+    def test_youtube_upload_body_appends_unique_hashtags_to_description(self):
+        body = build_private_video_insert_body(
+            title="Заголовок",
+            description="Описание #news",
+            tags=["news"],
+            hashtags=["#news", "#world", "world"],
+        )
+
+        self.assertEqual(body["snippet"]["description"], "Описание #news\n\n#world")
+        self.assertEqual(body["snippet"]["tags"], ["news"])
+
+    def test_youtube_description_appends_unique_hashtags_without_splitting_utf8_budget(self):
+        description = "Описание ролика #новости"
+        value = compose_youtube_description(
+            description,
+            ["#новости", "#мир", "экономика"],
+        )
+        self.assertEqual(value, "Описание ролика #новости\n\n#мир #экономика")
+
+        almost_full = "я" * 2498
+        bounded = compose_youtube_description(almost_full, ["#длинныйхэштег"])
+        self.assertEqual(bounded, almost_full)
+        self.assertLessEqual(len(bounded.encode("utf-8")), 5000)
+
+        with self.assertRaisesRegex(ValueError, "5000"):
+            compose_youtube_description("я" * 2501, [])
+
+    def test_youtube_upload_body_carries_seo_hashtags_in_description(self):
+        body = build_private_video_insert_body(
+            title="Ормуз: риски для торговли",
+            description="Описание из SEO-пакета",
+            tags=["Ормуз", "танкеры"],
+            hashtags=["#Ормуз", "#новости"],
+            publish_at="2026-08-30T04:00:00+00:00",
+        )
+
+        self.assertEqual(
+            body["snippet"]["description"],
+            "Описание из SEO-пакета\n\n#Ормуз #новости",
+        )
 
     def test_youtube_upload_body_is_private_and_carries_ready_package_metadata(self):
         body = build_private_video_insert_body(
@@ -911,6 +953,7 @@ class PublicationJobTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "chrome_path", return_value=Path("C:/Chrome/chrome.exe")), \
                  patch.object(bridge, "authorize_desktop_channel", return_value={"refresh_token": "secret", "token": "short"}), \
                  patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-real", "name": "Реальный канал", "thumbnailUrl": "https://i.ytimg.com/real.jpg", "subscribers": 15, "viewsTotal": 120}, {"refresh_token": "secret", "token": "refreshed"})):
                 bridge.connect_youtube_channel({"index": 0, "includeMonetary": True})
@@ -935,6 +978,7 @@ class PublicationJobTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "chrome_path", return_value=Path("C:/Chrome/chrome.exe")), \
                  patch.object(bridge, "authorize_desktop_channel", return_value={"token": "short"}), \
                  patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-real", "name": "Реальный канал", "subscribers": 15, "viewsTotal": 120}, {"token": "fresh"})):
                 bridge.connect_youtube_channel({"index": 0})

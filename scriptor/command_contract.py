@@ -54,7 +54,18 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "preview-publication-v2-distribution": CommandRegistration(
         "preview_publication_v2_distribution", "scriptor.publication_v2", _NO_LEGACY,
     ),
+    "set-publication-v2-item-priority": CommandRegistration("set_publication_v2_item_priority", "scriptor.publication_v2", _NO_LEGACY),
     "migrate-publication-v2": CommandRegistration("migrate_publication_v2", "scriptor.publication_v2", _NO_LEGACY),
+    "save-publication-v2-rule-preset": CommandRegistration("save_publication_v2_rule_preset", "scriptor.publication_v2", _NO_LEGACY),
+    "save-publication-v2-plan-version": CommandRegistration("save_publication_v2_plan_version", "scriptor.publication_v2", _NO_LEGACY),
+    "restore-publication-v2-plan-version": CommandRegistration("restore_publication_v2_plan_version", "scriptor.publication_v2", _NO_LEGACY),
+    "delete-publication-v2-plan-version": CommandRegistration("delete_publication_v2_plan_version", "scriptor.publication_v2", _NO_LEGACY),
+    "apply-publication-v2-rule-preset": CommandRegistration("apply_publication_v2_rule_preset", "scriptor.publication_v2", _NO_LEGACY),
+    "delete-publication-v2-rule-preset": CommandRegistration("delete_publication_v2_rule_preset", "scriptor.publication_v2", _NO_LEGACY),
+    "run-publication-v2-studio": CommandRegistration("run_publication_v2_studio", "scriptor.youtube_studio + scriptor.publication_v2", _NO_LEGACY),
+    "resolve-publication-v2-uncertain-upload": CommandRegistration(
+        "resolve_publication_v2_uncertain_upload", "scriptor.publication_v2 + scriptor.youtube_api", _NO_LEGACY,
+    ),
 }
 
 

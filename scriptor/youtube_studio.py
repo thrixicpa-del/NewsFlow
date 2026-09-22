@@ -33,6 +33,14 @@ def studio_editor_url(video_id: str) -> str:
     return f"https://studio.youtube.com/video/{value}/editor"
 
 
+def studio_monetization_url(video_id: str) -> str:
+    """Build the Studio monetization route for one uploaded video."""
+    value = str(video_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", value):
+        raise StudioAutomationError("Некорректный идентификатор ролика для монетизации Studio.")
+    return f"https://studio.youtube.com/video/{value}/monetization"
+
+
 def studio_details_url(video_id: str) -> str:
     """Build the Studio details route used before opening the editor tab."""
 
@@ -140,11 +148,25 @@ def _wait_for_studio_shell(page, *, timeout_seconds: int = 25) -> None:
 
 
 def planned_studio_actions(task: Mapping[str, object], *, action_kinds: set[str] | None = None) -> list[dict]:
-    """Return only non-terminal actions, in safe post → cards → end-screen order."""
+    """Return only non-terminal actions in safe ads → post → cards → end-screen order."""
 
     plan = dict(task.get("plan") or {})
     draft = dict(task.get("postDraft") or {})
     actions: list[dict] = []
+    ads_state = dict(task.get("ads") or {})
+    ads_plan = dict(plan.get("ads") or {})
+    if (
+        (action_kinds is None or "ads" in action_kinds)
+        and str(ads_state.get("status", "pending")) not in _TERMINAL
+        and bool(ads_plan.get("monetizationEnabled"))
+    ):
+        actions.append({
+            "kind": "ads",
+            "mode": str(ads_plan.get("mode", "AUTO_ONLY")),
+            "midRollEligible": bool(ads_plan.get("midRollEligible")),
+            "automaticSlotsEnabled": bool(ads_plan.get("automaticSlotsEnabled", True)),
+            "manualSlotsSeconds": [int(value) for value in list(ads_plan.get("manualSlotsSeconds") or [])],
+        })
     if (action_kinds is None or "post" in action_kinds) and str(dict(task.get("post") or {}).get("status", "pending")) not in _TERMINAL and draft.get("text"):
         actions.append({"kind": "post", "text": str(draft.get("text", "")),
                         "videoUrl": str(draft.get("videoUrl", "")),
@@ -226,14 +248,173 @@ def _publish_scheduled_post(page, action: Mapping[str, object]) -> None:
         composer.press("Enter")
         composer.press_sequentially(video_url)
         page.wait_for_timeout(1_000)
+    publish_at = str(action.get("publishAt", "")).strip()
     _click_text(page, [r"опубликовать", r"publish"])
+    if not publish_at:
+        return
     _click_text(page, [r"запланир", r"schedule"])
-    date, clock = _parse_schedule(str(action.get("publishAt", "")))
+    date, clock = _parse_schedule(publish_at)
     date_input = _first(page, ["input[type='date']", "input[aria-label*='дата' i]", "input[aria-label*='date' i]"])
     time_input = _first(page, ["input[type='time']", "input[aria-label*='время' i]", "input[aria-label*='time' i]"])
     date_input.fill(date)
     time_input.fill(clock)
     _click_text(page, [r"запланир", r"schedule"])
+
+
+def _nearby_checkbox_state(page, labels: list[str]) -> bool | None:
+    """Read a visible Studio checkbox/switch state by nearby text."""
+
+    value = page.locator("body").evaluate("""(patterns) => {
+      const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
+      const needles = patterns.map((value) => normalize(value));
+      const labels = Array.from(document.querySelectorAll('label,*')).filter((node) => {
+        if (!visible(node)) return false;
+        const text = normalize(node.innerText || node.textContent);
+        return needles.some((needle) => needle && text.includes(needle));
+      });
+      for (const label of labels) {
+        let root = label;
+        for (let level = 0; level < 6 && root; level += 1, root = root.parentElement) {
+          const control = Array.from(root.querySelectorAll('input[type="checkbox"],[role="checkbox"],[role="switch"]')).find(visible);
+          if (!control) continue;
+          return control.matches('input') ? Boolean(control.checked) : control.getAttribute('aria-checked') === 'true';
+        }
+      }
+      return null;
+    }""", labels)
+    return value if isinstance(value, bool) else None
+
+
+def _set_nearby_checkbox(page, labels: list[str], checked: bool = True) -> bool:
+    """Set and then read back one Studio checkbox/switch; never infer success."""
+
+    current = _nearby_checkbox_state(page, labels)
+    if current is None:
+        return False
+    if current != checked:
+        clicked = bool(page.locator("body").evaluate("""([patterns, desired]) => {
+          const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
+          const needles = patterns.map((value) => normalize(value));
+          const labels = Array.from(document.querySelectorAll('label,*')).filter((node) => {
+            if (!visible(node)) return false;
+            const text = normalize(node.innerText || node.textContent);
+            return needles.some((needle) => needle && text.includes(needle));
+          });
+          for (const label of labels) {
+            let root = label;
+            for (let level = 0; level < 6 && root; level += 1, root = root.parentElement) {
+              const control = Array.from(root.querySelectorAll('input[type="checkbox"],[role="checkbox"],[role="switch"]')).find(visible);
+              if (!control) continue;
+              const value = control.matches('input') ? Boolean(control.checked) : control.getAttribute('aria-checked') === 'true';
+              if (value !== desired) control.click();
+              return true;
+            }
+          }
+          return false;
+        }""", [labels, checked]))
+        if not clicked:
+            return False
+        page.wait_for_timeout(300)
+    return _nearby_checkbox_state(page, labels) is checked
+
+
+def _format_ad_slot(seconds: int) -> str:
+    value = max(0, int(seconds))
+    hours, remainder = divmod(value, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
+def _apply_ads(page, action: Mapping[str, object]) -> dict:
+    """Apply monetization and return only state confirmed in Studio UI."""
+
+    video_id = str(action.get("videoId", "")).strip()
+    page.goto(studio_details_url(video_id), wait_until="domcontentloaded", timeout=120_000)
+    _wait_for_studio_shell(page)
+    _click_text(page, [r"^монетизац", r"^moneti[sz]ation$"])
+
+    # Enable video monetization. We only continue when the page remains on the
+    # monetization surface after choosing ON; absence of recognizable controls
+    # is a retryable Studio adapter failure, never a fabricated success.
+    control = _first(page, ["select", "[role='combobox']"])
+    try:
+        control.click()
+        _click_text(page, [r"^вкл", r"^on$"])
+        page.wait_for_timeout(300)
+    except Exception as exc:
+        raise StudioAutomationError("Studio не подтвердил включение монетизации.") from exc
+
+    manual_applicable = bool(action.get("midRollEligible"))
+    planned_slots = [int(value) for value in list(action.get("manualSlotsSeconds") or [])]
+
+    if not manual_applicable:
+        _click_text(page, [r"сохранить", r"save"])
+        return {
+            "mode": "AUTO_ONLY",
+            "automatic": True,
+            "manual": False,
+            "manualMidrollApplicable": False,
+            "manualSlots": [],
+            "confirmedManualSlots": [],
+        }
+
+    if not _set_nearby_checkbox(
+        page,
+        ["показывать рекламу в середине видео", "show mid-roll ads during my video"],
+        True,
+    ):
+        raise StudioAutomationError("Studio не подтвердил переключатель mid-roll рекламы для подходящего ролика.")
+
+    _click_text(page, [r"выбрать.*реклам", r"manage.*ad.*slots"])
+    automatic = True
+    if bool(action.get("automaticSlotsEnabled", True)):
+        automatic = _set_nearby_checkbox(page, ["автоматическ", "automatic ad slots"], True)
+        if not automatic:
+            raise StudioAutomationError("Studio не подтвердил автоматические рекламные места.")
+
+    confirmed: list[int] = []
+    visible_text = " ".join(page.locator("body").inner_text(timeout=3_000).split())
+    for seconds in planned_slots:
+        marker = _format_ad_slot(seconds)
+        if marker not in visible_text:
+            try:
+                _click_text(page, [r"добавить.*реклам", r"insert.*ad.*slot", r"add.*ad.*slot"])
+                field = _first(page, [
+                    "input[aria-label*='время' i]",
+                    "input[aria-label*='time' i]",
+                    "input[type='text']",
+                ])
+                field.fill(marker)
+                try:
+                    field.press("Enter")
+                except Exception:
+                    pass
+                page.wait_for_timeout(200)
+                visible_text = " ".join(page.locator("body").inner_text(timeout=3_000).split())
+            except StudioAutomationError:
+                # Keep checking the rest impossible; preserve exact partial
+                # evidence and let V2 retry only ADS later.
+                break
+        if marker in visible_text:
+            confirmed.append(seconds)
+
+    try:
+        _click_text(page, [r"продолж", r"continue"])
+    except StudioAutomationError:
+        pass
+    _click_text(page, [r"сохранить", r"save"])
+
+    manual_complete = len(confirmed) == len(planned_slots)
+    return {
+        "mode": "AUTO+MANUAL" if automatic and manual_complete else ("AUTO_ONLY" if automatic else "NONE"),
+        "automatic": automatic,
+        "manual": manual_complete,
+        "manualMidrollApplicable": True,
+        "manualSlots": planned_slots,
+        "confirmedManualSlots": confirmed,
+    }
 
 
 def _apply_cards(page, action: Mapping[str, object]) -> None:
@@ -338,7 +519,13 @@ def execute_studio_task(
         page.goto(f"https://studio.youtube.com/channel/{youtube_channel_id}", wait_until="domcontentloaded", timeout=120_000)
         _wait_for_studio_shell(page)
         for action in actions:
-            if action["kind"] == "post":
+            if action["kind"] == "ads":
+                ad_result = _apply_ads(page, {**action, "videoId": str(task.get("videoId", ""))})
+                if isinstance(task, dict):
+                    studio_results = dict(task.get("_studioResults") or {})
+                    studio_results["ads"] = ad_result
+                    task["_studioResults"] = studio_results
+            elif action["kind"] == "post":
                 _publish_scheduled_post(page, action)
             elif action["kind"] == "cards":
                 _open_video_editor(page, str(task.get("videoId", "")))

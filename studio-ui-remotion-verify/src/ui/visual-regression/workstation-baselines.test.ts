@@ -1,5 +1,13 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { workstationBaselineCases } from "./workstation-baselines";
+
+function hasApprovedPng(filePath: string) {
+  if (!existsSync(filePath)) return false;
+  return readFileSync(filePath).subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+}
 
 describe("workstation visual baseline matrix", () => {
   it("covers the required production workspaces without production data", () => {
@@ -25,6 +33,10 @@ describe("workstation visual baseline matrix", () => {
       "montage-configuration",
       "publication-empty",
       "publication-paused",
+      "publication-84",
+      "publication-narrow",
+      "publication-day-plan",
+      "publication-queue-ads",
       "publication-receipt",
       "analytics-oauth-waiting",
       "sidebar-collapsed",
@@ -35,8 +47,29 @@ describe("workstation visual baseline matrix", () => {
     expect(workstationBaselineCases.every((item) => item.dataRoot === "disposable")).toBe(true);
   });
 
-  it("declares a real narrow Topics viewport instead of relying on a scaled desktop capture", () => {
+  it("declares real narrow viewports instead of relying on scaled desktop captures", () => {
     const narrowTopics = workstationBaselineCases.find((item) => item.id === "topics-narrow");
+    const narrowPublication = workstationBaselineCases.find((item) => item.id === "publication-narrow");
     expect(narrowTopics).toMatchObject({ page: "ideas", dataRoot: "disposable", viewport: { width: 390, height: 844 } });
+    expect(narrowPublication).toMatchObject({ page: "publication", dataRoot: "disposable", fixture: "publication-84", viewport: { width: 390, height: 844 } });
+  });
+
+  it("requires an approved PNG for every release visual baseline case", () => {
+    const approvedRoot = resolve(process.cwd(), "tests", "visual-baselines", "approved");
+    const missing = workstationBaselineCases
+      .filter((item) => !hasApprovedPng(resolve(approvedRoot, `${item.id}.png`)))
+      .map((item) => item.id);
+    expect(missing).toEqual([]);
+  });
+
+  it("rejects a Git LFS pointer as an approved visual baseline", () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "newsflow-visual-lfs-pointer-"));
+    const pointerPath = join(fixtureRoot, "baseline.png");
+    try {
+      writeFileSync(pointerPath, "version https://git-lfs.github.com/spec/v1\noid sha256:fixture\nsize 131\n");
+      expect(hasApprovedPng(pointerPath)).toBe(false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });

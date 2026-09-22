@@ -438,6 +438,8 @@ class Settings:
     youtube_publication_receipts: dict[str, dict] = field(default_factory=dict)
     youtube_publication_migration_version: int = 0
     youtube_channel_publication_rules: dict[str, dict] = field(default_factory=dict)
+    youtube_publication_v2_rule_presets: list[dict] = field(default_factory=list)
+    youtube_publication_plan_versions: list[dict] = field(default_factory=list)
     youtube_publication_assignments: dict[str, dict] = field(default_factory=dict)
     youtube_publication_queue_paused: bool = False
     # The allocation constructor is intentionally distinct from the time-grid
@@ -1109,6 +1111,10 @@ def load_settings() -> Settings:
             youtube_publication_migration_version=max(0, int(data.get("youtube_publication_migration_version", 0))),
             youtube_channel_publication_rules={str(key): dict(value) for key, value in data.get("youtube_channel_publication_rules", {}).items()
                                                if isinstance(key, str) and isinstance(value, dict)},
+            youtube_publication_v2_rule_presets=[dict(item) for item in data.get("youtube_publication_v2_rule_presets", [])
+                                                 if isinstance(item, dict)][-100:],
+            youtube_publication_plan_versions=[dict(item) for item in data.get("youtube_publication_plan_versions", [])
+                                               if isinstance(item, dict)][-50:],
             youtube_publication_assignments={str(key): dict(value) for key, value in data.get("youtube_publication_assignments", {}).items()
                                              if isinstance(key, str) and isinstance(value, dict)},
             youtube_publication_queue_paused=bool(data.get("youtube_publication_queue_paused", False)),
@@ -1547,6 +1553,8 @@ def save_settings(settings: Settings):
         "youtube_publication_receipts": settings.youtube_publication_receipts,
         "youtube_publication_migration_version": settings.youtube_publication_migration_version,
         "youtube_channel_publication_rules": settings.youtube_channel_publication_rules,
+        "youtube_publication_v2_rule_presets": settings.youtube_publication_v2_rule_presets[-100:],
+        "youtube_publication_plan_versions": settings.youtube_publication_plan_versions[-50:],
         "youtube_publication_assignments": settings.youtube_publication_assignments,
         "youtube_publication_queue_paused": settings.youtube_publication_queue_paused,
         "youtube_publication_allocation_profiles": settings.youtube_publication_allocation_profiles,

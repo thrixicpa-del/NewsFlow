@@ -39,3 +39,9 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("windows-latest", workflow)
         self.assertIn("pnpm build:web", workflow)
         self.assertNotIn("package:release", workflow)
+
+    def test_ci_lanes_fetch_lfs_backed_visual_baselines(self):
+        for workflow_name in ("ci.yml", "windows-native.yml"):
+            workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            checkout_step = workflow.split("- uses: actions/checkout@v6", maxsplit=1)[1].split("\n      - uses:", maxsplit=1)[0]
+            self.assertIn("lfs: true", checkout_step)

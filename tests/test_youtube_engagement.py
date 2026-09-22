@@ -7,13 +7,62 @@ from scriptor import config
 from scriptor.config import Settings
 from scriptor import bridge
 from scriptor.youtube_engagement import (
+    build_ad_plan,
     build_engagement_plan,
     new_engagement_state,
     transition_engagement_step,
 )
 
 
+class YouTubeEngagementAdsPlanTests(unittest.TestCase):
+    def test_monetized_long_video_requests_auto_and_39_second_manual_slots(self):
+        plan = build_ad_plan(8 * 60 + 30, monetized=True)
+
+        self.assertEqual(plan["mode"], "AUTO+MANUAL")
+        self.assertTrue(plan["automatic"])
+        self.assertTrue(plan["manual"])
+        self.assertEqual(plan["manualSlots"][:3], [39, 78, 117])
+        self.assertTrue(all(slot % 39 == 0 for slot in plan["manualSlots"]))
+
+    def test_monetized_short_video_keeps_monetization_but_midroll_is_not_applicable(self):
+        plan = build_ad_plan(7 * 60 + 59, monetized=True)
+
+        self.assertEqual(plan["mode"], "AUTO_ONLY")
+        self.assertTrue(plan["automatic"])
+        self.assertFalse(plan["manual"])
+        self.assertFalse(plan["manualMidrollApplicable"])
+        self.assertEqual(plan["manualSlots"], [])
+
+    def test_non_monetized_channel_has_no_ads_stage(self):
+        plan = build_ad_plan(900, monetized=False)
+
+        self.assertEqual(plan["mode"], "NONE")
+        self.assertFalse(plan["enabled"])
+        self.assertEqual(plan["manualSlots"], [])
+
+
 class YouTubeEngagementPlanTests(unittest.TestCase):
+    def test_ad_plan_always_monetizes_monetized_channel_and_uses_manual_39s_only_when_midroll_is_eligible(self):
+        short = build_ad_plan(420, monetized=True, interval_seconds=39)
+        long = build_ad_plan(600, monetized=True, interval_seconds=39)
+        off = build_ad_plan(600, monetized=False, interval_seconds=39)
+
+        self.assertEqual(short["mode"], "AUTO_ONLY")
+        self.assertTrue(short["monetizationEnabled"])
+        self.assertFalse(short["midRollEligible"])
+        self.assertEqual(short["manualSlotsSeconds"], [])
+        self.assertTrue(short["automaticSlotsEnabled"])
+
+        self.assertEqual(long["mode"], "AUTO+MANUAL")
+        self.assertTrue(long["monetizationEnabled"])
+        self.assertTrue(long["midRollEligible"])
+        self.assertEqual(long["manualSlotsSeconds"][:3], [39, 78, 117])
+        self.assertTrue(long["automaticSlotsEnabled"])
+
+        self.assertEqual(off["mode"], "NONE")
+        self.assertFalse(off["monetizationEnabled"])
+        self.assertEqual(off["manualSlotsSeconds"], [])
+
     def test_long_video_uses_relevant_then_latest_public_video_for_cards(self):
         plan = build_engagement_plan(
             {
@@ -70,6 +119,20 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             transition_engagement_step(completed, "post", "pending")
+
+
+    def test_ads_are_a_resumable_engagement_step_with_explicit_mode(self):
+        state = new_engagement_state("job-a", "channel-a")
+        self.assertEqual(state["ads"]["mode"], "PENDING")
+        completed = transition_engagement_step(
+            state, "ads", "done",
+            mode="AUTO+MANUAL", automatic=True, manual=True,
+            manualSlots=[39, 78], manualMidrollApplicable=True,
+        )
+        self.assertEqual(completed["ads"]["status"], "done")
+        self.assertEqual(completed["ads"]["mode"], "AUTO+MANUAL")
+        with self.assertRaises(ValueError):
+            transition_engagement_step(completed, "ads", "running")
 
     def test_policies_and_engagement_tasks_survive_settings_restart(self):
         with TemporaryDirectory() as directory:

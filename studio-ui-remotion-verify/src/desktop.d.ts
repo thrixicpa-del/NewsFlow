@@ -74,14 +74,39 @@ interface NewsFlowSnapshot {
       updatedAt: string;
     };
     v2?: {
-      items: Record<string, { productionItemId?: string; metadata?: { title?: string; description?: string; tags?: string[]; duration?: number; index?: number }; readiness?: { state?: string; reasons?: string[] }; artifacts?: { video?: { path?: string; exists?: boolean; duration?: number } } }>;
-      queue: Array<{ snapshotId: string; productionItemId: string; title: string; channelId: string; publishAt?: string; privacy: 'private' | 'unlisted' | 'public'; publishMode: string; youtubeVideoId?: string; youtubeVideoUrl?: string; currentStage: string; status: string; active: boolean; completion: { completed: number; total: number }; steps: Record<string, { status?: string; error?: unknown; detail?: string; startedAt?: string; finishedAt?: string; durationSeconds?: number }>; timeline?: Array<{ at?: string; stage?: string; status?: string; detail?: string }> }>;
+      items: Record<string, {
+        productionItemId?: string;
+        durationSeconds?: number;
+        metadata?: { title?: string; seoTitle?: string; description?: string; tags?: string[]; hashtags?: string[]; duration?: number; durationSeconds?: number; index?: number; seoStatus?: string; tagsStatus?: string };
+        readiness?: { state?: string; reasons?: string[]; videoReady?: boolean; contentReady?: boolean; publicationReady?: boolean };
+        artifacts?: {
+          video?: { path?: string; exists?: boolean; duration?: number; durationSeconds?: number };
+          thumbnail?: { path?: string; exists?: boolean };
+          audio?: { path?: string; exists?: boolean };
+        };
+      }>;
+      queue: Array<{
+        snapshotId: string; productionItemId: string; title: string; channelId: string; publishAt?: string;
+        privacy: 'private' | 'unlisted' | 'public'; publishMode: string; youtubeVideoId?: string; youtubeVideoUrl?: string;
+        currentStage: string; status: string; active: boolean;
+        ads?: { status?: string; mode?: string; automatic?: boolean; manualSlotsSeconds?: number[]; confirmedManualSlotsSeconds?: number[] };
+        completion: { completed: number; total: number };
+        steps: Record<string, { status?: string; error?: unknown; detail?: string; startedAt?: string; finishedAt?: string; durationSeconds?: number; providerResult?: Record<string, unknown>; progress?: Record<string, unknown> }>;
+        timeline?: Array<{ at?: string; stage?: string; status?: string; detail?: string }>;
+      }>;
       counters: Record<string, number>;
       paused: boolean;
       uploadConcurrency: number;
       channelRules: Record<string, Record<string, unknown>>;
+      rulePresets?: Array<{ name: string; rules?: Record<string, Record<string, unknown>> }>;
+      planVersions?: Array<{ id: string; name: string; createdAt?: string; assignments?: Array<Record<string, unknown>> }>;
       assignments: Record<string, Record<string, unknown>>;
-      receipts?: Record<string, { productionItemId?: string; title?: string; channelId?: string; youtubeVideoId?: string; youtubeVideoUrl?: string; requestedPublishAt?: string; confirmedPublishAt?: string; finalStatus?: string; totalDuration?: string; stages?: Record<string, string> }>;
+      receipts?: Record<string, {
+        productionItemId?: string; title?: string; channelId?: string; youtubeVideoId?: string; youtubeVideoUrl?: string;
+        requestedPublishAt?: string; confirmedPublishAt?: string; finalStatus?: string; totalDuration?: string;
+        ads?: { status?: string; mode?: string; automatic?: boolean; manualSlotsSeconds?: number[]; confirmedManualSlotsSeconds?: number[]; midRollEligible?: boolean };
+        stages?: Record<string, string>;
+      }>;
     };
   };
   analytics: {

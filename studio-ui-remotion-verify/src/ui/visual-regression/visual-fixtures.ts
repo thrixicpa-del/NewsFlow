@@ -1,10 +1,10 @@
-export type VisualFixtureName = "task-states" | "covers-84" | "voice-84" | "montage-84" | "publication-receipt" | "analytics-oauth-waiting" | "metadata-ready";
+export type VisualFixtureName = "task-states" | "covers-84" | "voice-84" | "montage-84" | "publication-84" | "publication-receipt" | "analytics-oauth-waiting" | "metadata-ready";
 
 export function buildVisualFixture(
   base: NewsFlowSnapshot,
   fixtureName: string | null,
 ): NewsFlowSnapshot | null {
-  if (!(["task-states", "covers-84", "voice-84", "montage-84", "publication-receipt", "analytics-oauth-waiting", "metadata-ready"] as const).includes(fixtureName as VisualFixtureName)) return null;
+  if (!(["task-states", "covers-84", "voice-84", "montage-84", "publication-84", "publication-receipt", "analytics-oauth-waiting", "metadata-ready"] as const).includes(fixtureName as VisualFixtureName)) return null;
 
   const fixture = structuredClone(base);
   if (fixtureName === "analytics-oauth-waiting") {
@@ -22,6 +22,140 @@ export function buildVisualFixture(
     }];
     return fixture;
   }
+  if (fixtureName === "publication-84") {
+    fixture.channels = Array.from({ length: 8 }, (_, index) => ({
+      id: `visual-channel-${index + 1}`,
+      channel: `visual-channel-${index + 1}`,
+      name: `Канал ${index + 1}`,
+      subscribers: String(12500 + index * 1750),
+      status: index === 7 ? "Требует OAuth" : "Подключён",
+      oauthConnected: index !== 7,
+      monetaryAccess: index < 4,
+      viewsHour: "—",
+      views48h: "—",
+    }));
+
+    const channelRules = Object.fromEntries(fixture.channels.map((channel, index) => {
+      const channelId = String(channel.id);
+      return [channelId, {
+        channelId,
+        enabled: true,
+        quota: index < 4 ? 12 : 10,
+        monetized: index < 4,
+        distributionStrategy: index < 4 ? "longest_monetized" : "balanced",
+        privacy: "private",
+        publishMode: "schedule",
+        timezone: "Europe/Minsk",
+        firstPublishAt: "2026-11-15T04:00:00+03:00",
+        intervalMinutes: index % 2 === 0 ? 15 : 30,
+        allowedWeekdays: [0, 1, 2, 3, 4, 5, 6],
+        publishWindowStart: "04:00",
+        publishWindowEnd: "10:00",
+        dailyCap: 16,
+        minDurationSeconds: 0,
+        maxDurationSeconds: 0,
+        orderStart: 0,
+        orderEnd: 0,
+        automation: { upload: true, metadata: true, thumbnail: true, ads: true, post: true, cards: true, endScreen: true },
+      }];
+    }));
+
+    const items: Record<string, any> = {};
+    const assignments: Record<string, any> = {};
+    const queue: any[] = [];
+    for (let index = 0; index < 84; index += 1) {
+      const number = index + 1;
+      const productionItemId = `visual-publication-${String(number).padStart(3, "0")}`;
+      const channelIndex = index % fixture.channels.length;
+      const channelId = `visual-channel-${channelIndex + 1}`;
+      const cycle = Math.floor(index / fixture.channels.length);
+      const minuteOfDay = 4 * 60 + cycle * 15;
+      const clock = `${String(Math.floor(minuteOfDay / 60)).padStart(2, "0")}:${String(minuteOfDay % 60).padStart(2, "0")}`;
+      const publishAt = `2026-11-15T${clock}:00+03:00`;
+      const durationSeconds = index % 3 === 0 ? 620 : index % 3 === 1 ? 455 : 780;
+      const monetized = channelIndex < 4;
+      const uploaded = index < 48;
+      const failedAds = index === 13;
+      const adsMode = monetized ? (durationSeconds >= 480 ? "AUTO+MANUAL" : "AUTO_ONLY") : "NONE";
+      const adsStatus = failedAds ? "FAILED" : monetized && uploaded ? "SUCCESS" : monetized ? "PENDING" : "NOT_REQUIRED";
+      const overallStatus = failedAds ? "PARTIAL" : index < 24 ? "DONE" : uploaded ? "FORMATTING" : "WAITING";
+      const currentStage = failedAds ? "ADS" : index < 24 ? "DONE" : uploaded ? "ADS" : "VIDEO_UPLOAD";
+      const title = `Визуальный ролик ${String(number).padStart(2, "0")} — массовая публикация`;
+
+      items[productionItemId] = {
+        productionItemId,
+        metadata: {
+          index: number,
+          title,
+          seoTitle: `SEO: ${title}`,
+          description: `Тестовое описание ролика ${number}.`,
+          tags: ["newsflow", "visual", `video-${number}`],
+          hashtags: ["#NewsFlow", "#Visual"],
+          seoStatus: "Готово",
+          tagsStatus: "Готово",
+        },
+        artifacts: {
+          video: { path: `C:/visual-fixture/video-${number}.mp4`, exists: true, durationSeconds },
+          thumbnail: { path: `C:/visual-fixture/cover-${number}.png`, exists: true },
+        },
+        durationSeconds,
+        readiness: { state: "PUBLICATION_READY", videoReady: true, contentReady: true, publicationReady: true, reasons: [] },
+      };
+      assignments[productionItemId] = {
+        productionItemId, channelId, publishAt, source: "auto", locked: false,
+      };
+      queue.push({
+        snapshotId: `visual-snapshot-${number}`,
+        productionItemId,
+        title,
+        channelId,
+        publishAt,
+        privacy: "private",
+        publishMode: "schedule",
+        youtubeVideoId: uploaded ? `visual-yt-${number}` : undefined,
+        youtubeVideoUrl: uploaded ? `https://youtube.example/watch?v=visual-yt-${number}` : undefined,
+        currentStage,
+        status: overallStatus,
+        active: index === 31,
+        ads: { status: adsStatus, mode: adsStatus === "SUCCESS" || adsStatus === "NOT_REQUIRED" ? adsMode : "" },
+        completion: { completed: index < 24 ? 12 : uploaded ? 7 : 0, total: 12 },
+        steps: {
+          AUTH_CHECK: { status: uploaded ? "SUCCESS" : "PENDING" },
+          VIDEO_UPLOAD: { status: uploaded ? "SUCCESS" : "PENDING" },
+          YOUTUBE_PROCESSING: { status: uploaded ? "SUCCESS" : "PENDING" },
+          TITLE: { status: uploaded ? "SUCCESS" : "PENDING" },
+          DESCRIPTION: { status: uploaded ? "SUCCESS" : "PENDING" },
+          TAGS: { status: uploaded ? "SUCCESS" : "PENDING" },
+          THUMBNAIL: { status: index < 30 ? "SUCCESS" : uploaded ? "PENDING" : "PENDING" },
+          ADS: {
+            status: adsStatus,
+            providerResult: { mode: adsMode, automaticSlotsEnabled: monetized, manualSlotsSeconds: adsMode === "AUTO+MANUAL" ? [39, 78, 117] : [] },
+            error: failedAds ? { category: "RETRYABLE", message: "Тестовая ошибка Studio" } : undefined,
+          },
+          POST: { status: index < 24 ? "SUCCESS" : "PENDING" },
+          CARDS: { status: index < 24 ? "SUCCESS" : "PENDING" },
+          END_SCREEN: { status: index < 24 ? "SUCCESS" : "PENDING" },
+          SCHEDULE: { status: index < 24 ? "SUCCESS" : "PENDING" },
+        },
+        timeline: [],
+      });
+    }
+
+    fixture.publication.v2 = {
+      items,
+      counters: { total: 84, PUBLICATION_READY: 84, DONE: 24, FORMATTING: 23, PARTIAL: 1, WAITING: 36 },
+      paused: false,
+      uploadConcurrency: 6,
+      channelRules,
+      assignments,
+      rulePresets: [],
+      queue,
+      receipts: {},
+    };
+    fixture.counts = { ...fixture.counts, scripts: 84, voice: 84, montage: 84 };
+    return fixture;
+  }
+
   if (fixtureName === "publication-receipt") {
     fixture.publication.v2 = {
       items: {},
@@ -40,7 +174,8 @@ export function buildVisualFixture(
           confirmedPublishAt: "2026-09-15T12:02:00Z",
           finalStatus: "DONE",
           totalDuration: "01:00",
-          stages: { VIDEO_UPLOAD: "SUCCESS", TITLE: "SUCCESS", SCHEDULE: "SUCCESS" },
+          ads: { status: "SUCCESS", mode: "AUTO+MANUAL", automatic: true, manualSlotsSeconds: [39, 78], confirmedManualSlotsSeconds: [39, 78] },
+          stages: { VIDEO_UPLOAD: "SUCCESS", ADS: "SUCCESS", TITLE: "SUCCESS", SCHEDULE: "SUCCESS" },
         },
       },
     };

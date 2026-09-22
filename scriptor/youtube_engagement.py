@@ -12,7 +12,7 @@ from typing import Mapping, Sequence
 
 
 _TERMINAL_STATUSES = {"scheduled", "done", "failed", "skipped"}
-_VALID_STEPS = {"post", "cards", "endScreen"}
+_VALID_STEPS = {"post", "cards", "endScreen", "ads"}
 _VALID_STATUSES = {"pending", "running", "scheduled", "done", "failed", "skipped"}
 
 
@@ -37,6 +37,56 @@ def _eligible_catalog(job: Mapping[str, object], catalog: Sequence[Mapping[str, 
         eligible,
         key=lambda item: (-float(item.get("score", 0) or 0), str(item.get("publishedAt", ""))),
     )
+
+
+def build_ad_plan(
+    duration_seconds: float,
+    *,
+    monetized: bool,
+    interval_seconds: int = 39,
+) -> dict:
+    """Build the canonical Studio monetization plan without touching YouTube."""
+    try:
+        duration = max(0, int(float(duration_seconds or 0)))
+        interval = int(interval_seconds)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Длительность и интервал рекламы должны быть числами") from error
+    if interval < 1:
+        raise ValueError("Интервал рекламных слотов должен быть положительным")
+    if not monetized:
+        return {
+            "enabled": False,
+            "mode": "NONE",
+            "monetizationEnabled": False,
+            "automatic": False,
+            "automaticSlotsEnabled": False,
+            "manual": False,
+            "manualMidrollApplicable": False,
+            "midRollEligible": False,
+            "manualSlots": [],
+            "manualSlotsSeconds": [],
+            "intervalSeconds": interval,
+        }
+
+    applicable = duration >= 8 * 60
+    slots = [
+        second for second in range(interval, duration, interval)
+        if applicable and second + 15 <= duration
+    ]
+    mode = "AUTO+MANUAL" if applicable else "AUTO_ONLY"
+    return {
+        "enabled": True,
+        "mode": mode,
+        "monetizationEnabled": True,
+        "automatic": True,
+        "automaticSlotsEnabled": True,
+        "manual": applicable,
+        "manualMidrollApplicable": applicable,
+        "midRollEligible": applicable,
+        "manualSlots": slots,
+        "manualSlotsSeconds": slots,
+        "intervalSeconds": interval,
+    }
 
 
 def build_engagement_plan(
@@ -88,6 +138,8 @@ def new_engagement_state(job_id: str, channel_id: str) -> dict:
         "post": {"status": "pending"},
         "cards": {"status": "pending"},
         "endScreen": {"status": "pending"},
+        "ads": {"status": "pending", "mode": "PENDING", "automatic": False, "manual": False,
+                "manualSlots": [], "manualMidrollApplicable": None},
         "attempts": [],
     }
 

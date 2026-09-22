@@ -89,6 +89,7 @@ from .observability import start_action_trace
 from .openai_client import HybridTextPool, OpenAIAPIError
 from .publication_v2 import (
     apply_bulk_schedule_range,
+    begin_publication_stage,
     begin_upload_attempt,
     build_distribution_preview,
     cancel_publication_execution,
@@ -98,13 +99,18 @@ from .publication_v2 import (
     complete_upload_attempt,
     confirm_publication_snapshots,
     fail_publication_stage,
+    frozen_artifact_matches,
+    mark_publication_stage_not_required,
     migrate_legacy_publication_data,
+    normalize_channel_publication_rule,
     persist_publication_receipt,
     publication_queue_projection,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
     release_execution,
+    resolve_publication_upload_title,
+    resolve_uncertain_upload,
     retry_publication_stage,
     validate_publication_snapshot,
 )
@@ -173,6 +179,7 @@ from .youtube_api import (
     upload_private_video,
 )
 from .youtube_engagement import (
+    build_ad_plan,
     build_engagement_plan,
     new_engagement_state,
     transition_engagement_step,
@@ -1260,6 +1267,7 @@ def _youtube_engagement_policy(settings: Settings, channel_id: str) -> dict:
         "postsEnabled": bool(selected.get("postsEnabled", True)),
         "cardsEnabled": bool(selected.get("cardsEnabled", True)),
         "endScreensEnabled": bool(selected.get("endScreensEnabled", True)),
+        "adsEnabled": bool(selected.get("adsEnabled", True)),
     }
 
 
@@ -1342,6 +1350,13 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
         for item in settings.youtube_publication_jobs
     ]
     plan = build_engagement_plan(record, catalog, [])
+    channel_rule = dict((settings.youtube_channel_publication_rules or {}).get(channel_id, {}) or {})
+    monetized = bool(channel_rule.get("monetized", False))
+    plan["ads"] = build_ad_plan(
+        float(record.get("durationSeconds", 0) or 0),
+        monetized=monetized and policy["adsEnabled"],
+        interval_seconds=39,
+    )
     state = new_engagement_state(job_id, channel_id)
     state.update({
         "videoId": str(record.get("videoId", "")).strip(),
@@ -1359,6 +1374,19 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
         state["cards"] = {"status": "skipped", "reason": "Карточки выключены в правилах канала"}
     if not policy["endScreensEnabled"]:
         state["endScreen"] = {"status": "skipped", "reason": "Конечные заставки выключены в правилах канала"}
+    ads_plan = dict(plan.get("ads") or {})
+    if not policy["adsEnabled"]:
+        state["ads"] = {"status": "skipped", "mode": "NONE", "reason": "Автоматизация рекламы выключена в правилах канала"}
+    elif not bool(ads_plan.get("enabled")):
+        state["ads"] = {"status": "skipped", "mode": "NONE", "reason": "Канал не отмечен монетизированным"}
+    else:
+        state["ads"].update({
+            "mode": "PENDING",
+            "automatic": False,
+            "manual": False,
+            "manualMidrollApplicable": bool(ads_plan.get("manualMidrollApplicable")),
+            "manualSlots": list(ads_plan.get("manualSlots") or []),
+        })
     settings.youtube_engagement_tasks.append(state)
     return state
 
@@ -13433,6 +13461,53 @@ def save_youtube_engagement_policy(payload: dict) -> dict:
     }}
 
 
+def _queue_publication_v2_engagement_task(settings: Settings, snapshot_id: str) -> dict | None:
+    """Adopt one uploaded V2 snapshot into the existing resumable Studio queue."""
+    snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+    execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+    video_id = str(execution.get("youtubeVideoId") or "").strip()
+    if not snapshot_record or not video_id:
+        return None
+    steps = dict(execution.get("steps", {}) or {})
+    processing = str(dict(steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper()
+    if processing != "SUCCESS":
+        return None
+
+    production_id = str(snapshot_record.get("productionItemId", "")).strip()
+    item = dict((settings.youtube_publication_items or {}).get(production_id, {}) or {})
+    metadata = dict(snapshot_record.get("metadata", {}) or {})
+    duration = (
+        item.get("durationSeconds")
+        or dict(dict(item.get("artifacts", {}) or {}).get("video", {}) or {}).get("durationSeconds")
+        or metadata.get("durationSeconds")
+        or 0
+    )
+    record = {
+        "id": snapshot_id,
+        "productionItemId": production_id,
+        "title": str(metadata.get("title", "")).strip(),
+        "channelId": str(snapshot_record.get("channelId", "")).strip(),
+        "videoId": video_id,
+        "videoUrl": str(execution.get("youtubeVideoUrl") or "").strip(),
+        "publishAt": str(snapshot_record.get("requestedPublishAt") or "").strip(),
+        "durationSeconds": float(duration or 0),
+        "seoDescription": str(metadata.get("description", "")).strip(),
+        "youtubePrivacyStatus": str(snapshot_record.get("privacy", "private")),
+    }
+    post_text = "\n\n".join(value for value in (
+        str(metadata.get("description", "")).strip(),
+        str(execution.get("youtubeVideoUrl") or "").strip(),
+    ) if value)
+    post_draft = {
+        "text": post_text,
+        "status": "prepared" if post_text else "needs-text",
+        "publishAt": record["publishAt"],
+        "videoUrl": record["videoUrl"],
+        "requiresManualConfirmation": False,
+    }
+    return _queue_youtube_engagement_task(settings, record, post_draft)
+
+
 def run_youtube_engagement(payload: dict) -> dict:
     """Run selected queued Studio tasks in their own channel Chrome profiles.
 
@@ -13446,7 +13521,7 @@ def run_youtube_engagement(payload: dict) -> dict:
     if not requested:
         raise ValueError("Выберите хотя бы одно задание Studio.")
     requested_steps = {str(item).strip() for item in payload.get("steps", []) if str(item).strip()}
-    unknown_steps = requested_steps - {"post", "cards", "end-screen"}
+    unknown_steps = requested_steps - {"post", "ads", "cards", "end-screen"}
     if unknown_steps:
         raise ValueError("Выбраны неизвестные действия Studio.")
     settings = load_settings()
@@ -13476,6 +13551,24 @@ def run_youtube_engagement(payload: dict) -> dict:
             for item in completed:
                 if item == "post":
                     task = transition_engagement_step(task, "post", "scheduled")
+                elif item == "ads":
+                    ads_result = dict((task.get("_studioResults") or {}).get("ads") or {})
+                    manual_applicable = bool(ads_result.get("manualMidrollApplicable"))
+                    manual_complete = bool(ads_result.get("manual"))
+                    if manual_applicable and not manual_complete:
+                        current_ads = dict(task.get("ads") or {})
+                        current_ads.update({
+                            **ads_result,
+                            "status": "pending",
+                            "mode": "AUTO_ONLY" if ads_result.get("automatic") else "NONE",
+                            "reason": "Автоматическая реклама подтверждена, ручные 39-секундные слоты требуют повтора.",
+                        })
+                        task["ads"] = current_ads
+                    else:
+                        task = transition_engagement_step(
+                            task, "ads", "done",
+                            **ads_result,
+                        )
                 elif item == "cards":
                     task = transition_engagement_step(task, "cards", "done")
                 elif item == "end-screen":
@@ -14094,7 +14187,7 @@ def upload_publication_jobs(payload: dict) -> dict:
         job = _publication_job_from_record(item)
         credentials = json.loads(settings.youtube_oauth_tokens[job.channel_id])
         body = build_private_video_insert_body(
-            title=job.title, description=job.seo_description, tags=job.tags,
+            title=job.title, description=job.seo_description, tags=job.tags, hashtags=job.hashtags,
             publish_at=job.publish_at.isoformat() if job.publish_at else "",
         )
         result, refreshed_credentials = upload_private_video(
@@ -14159,19 +14252,281 @@ def migrate_publication_v2(payload: dict) -> dict:
 def save_publication_v2_rules(payload: dict) -> dict:
     settings = load_settings()
     rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
-    settings.youtube_channel_publication_rules = {str(channel_id): dict(rule) for channel_id, rule in rules.items()
-                                                  if isinstance(rule, dict) and str(channel_id).strip()}
+    normalized: dict[str, dict] = {}
+    for channel_id, raw_rule in rules.items():
+        if not isinstance(raw_rule, dict) or not str(channel_id).strip():
+            continue
+        rule = normalize_channel_publication_rule({**raw_rule, "channelId": str(channel_id).strip()})
+        normalized[str(channel_id).strip()] = rule
+    settings.youtube_channel_publication_rules = normalized
     save_settings(settings)
     return snapshot()
+
+
+def save_publication_v2_rule_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Укажите название пресета Publication V2.")
+    raw_rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
+    if not raw_rules:
+        raise ValueError("В пресете нет правил каналов.")
+    normalized = {
+        str(channel_id).strip(): normalize_channel_publication_rule({**dict(rule), "channelId": str(channel_id).strip()})
+        for channel_id, rule in raw_rules.items()
+        if isinstance(rule, dict) and str(channel_id).strip()
+    }
+    if not normalized:
+        raise ValueError("В пресете нет корректных правил каналов.")
+    settings = load_settings()
+    presets = [
+        dict(item) for item in (settings.youtube_publication_v2_rule_presets or [])
+        if isinstance(item, dict) and str(item.get("name", "")).casefold() != name.casefold()
+    ]
+    presets.append({"name": name, "rules": normalized, "updatedAt": datetime.now().astimezone().isoformat()})
+    settings.youtube_publication_v2_rule_presets = presets[-50:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-preset-save", "count": 1,
+            "message": f"Пресет «{name}» сохранён."}}
+
+
+def apply_publication_v2_rule_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Выберите пресет Publication V2.")
+    settings = load_settings()
+    preset = next((dict(item) for item in (settings.youtube_publication_v2_rule_presets or [])
+                   if isinstance(item, dict) and str(item.get("name", "")).casefold() == name.casefold()), None)
+    if preset is None:
+        raise ValueError("Пресет Publication V2 не найден.")
+    rules = dict(preset.get("rules", {}) or {})
+    settings.youtube_channel_publication_rules = {
+        str(channel_id): normalize_channel_publication_rule({**dict(rule), "channelId": str(channel_id)})
+        for channel_id, rule in rules.items() if isinstance(rule, dict)
+    }
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-preset-apply",
+            "count": len(settings.youtube_channel_publication_rules),
+            "message": f"Пресет «{name}» применён."}}
+
+
+def delete_publication_v2_rule_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Выберите пресет Publication V2.")
+    settings = load_settings()
+    before = len(settings.youtube_publication_v2_rule_presets or [])
+    settings.youtube_publication_v2_rule_presets = [
+        dict(item) for item in (settings.youtube_publication_v2_rule_presets or [])
+        if isinstance(item, dict) and str(item.get("name", "")).casefold() != name.casefold()
+    ]
+    if len(settings.youtube_publication_v2_rule_presets) == before:
+        raise ValueError("Пресет Publication V2 не найден.")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-preset-delete", "count": 1,
+            "message": f"Пресет «{name}» удалён."}}
+
+
+def save_publication_v2_plan_version(payload: dict) -> dict:
+    """Persist one editable distribution draft for restart-safe comparison/restore."""
+    name = " ".join(str(payload.get("name", "")).split())
+    assignments = payload.get("assignments") if isinstance(payload.get("assignments"), list) else []
+    if not name:
+        raise ValueError("Укажите название версии плана.")
+    normalized = [
+        {
+            "productionItemId": str(item.get("productionItemId", "")).strip(),
+            "channelId": str(item.get("channelId", "")).strip(),
+            "publishAt": str(item.get("publishAt", "")).strip(),
+            "source": str(item.get("source", "")).strip() or "auto",
+            "locked": bool(item.get("locked", False)),
+            "reason": str(item.get("reason", "")).strip(),
+        }
+        for item in assignments
+        if isinstance(item, dict) and str(item.get("productionItemId", "")).strip()
+    ]
+    if not normalized:
+        raise ValueError("В текущем preview нет назначений для сохранения.")
+    settings = load_settings()
+    now = datetime.now().astimezone().isoformat()
+    version_id = f"plan:{uuid.uuid4().hex}"
+    versions = [
+        dict(item) for item in (settings.youtube_publication_plan_versions or [])
+        if isinstance(item, dict)
+    ]
+    versions.append({
+        "id": version_id,
+        "name": name,
+        "createdAt": now,
+        "assignments": normalized,
+    })
+    settings.youtube_publication_plan_versions = versions[-50:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-plan-save",
+        "count": len(normalized),
+        "id": version_id,
+        "message": f"Версия плана «{name}» сохранена.",
+    }}
+
+
+def _publication_execution_blocks_planning(execution: dict) -> bool:
+    """Only a pre-upload cancellation releases the ProductionItem back to planning."""
+    state = dict(execution or {})
+    status = str(state.get("overallStatus", "")).upper()
+    has_video = bool(str(state.get("youtubeVideoId") or "").strip())
+    return not (status == "CANCELLED" and not has_video)
+
+
+def restore_publication_v2_plan_version(payload: dict) -> dict:
+    """Restore mutable draft assignments while active or known-video snapshots stay frozen."""
+    version_id = str(payload.get("id", "")).strip()
+    if not version_id:
+        raise ValueError("Выберите версию плана.")
+    settings = load_settings()
+    version = next((
+        dict(item) for item in (settings.youtube_publication_plan_versions or [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip() == version_id
+    ), None)
+    if version is None:
+        raise ValueError("Версия плана не найдена.")
+    executions = dict(settings.youtube_publication_executions or {})
+    frozen_ids = {
+        str(snapshot.get("productionItemId", "")).strip()
+        for snapshot_id, snapshot in (settings.youtube_publication_snapshots or {}).items()
+        if isinstance(snapshot, dict)
+        and str(snapshot.get("productionItemId", "")).strip()
+        and _publication_execution_blocks_planning(dict(executions.get(snapshot_id, {}) or {}))
+    }
+    restored = skipped = 0
+    assignments = dict(settings.youtube_publication_assignments or {})
+    for source in version.get("assignments", []) if isinstance(version.get("assignments"), list) else []:
+        if not isinstance(source, dict):
+            continue
+        production_id = str(source.get("productionItemId", "")).strip()
+        if not production_id:
+            continue
+        if production_id in frozen_ids:
+            skipped += 1
+            continue
+        assignments[production_id] = dict(source)
+        restored += 1
+    settings.youtube_publication_assignments = assignments
+    save_settings(settings)
+    message = f"Восстановлено назначений: {restored}."
+    if skipped:
+        message += f" Frozen snapshots не изменены: {skipped}."
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-plan-restore",
+        "count": restored,
+        "skipped": skipped,
+        "message": message,
+    }}
+
+
+def delete_publication_v2_plan_version(payload: dict) -> dict:
+    version_id = str(payload.get("id", "")).strip()
+    if not version_id:
+        raise ValueError("Выберите версию плана.")
+    settings = load_settings()
+    before = len(settings.youtube_publication_plan_versions or [])
+    settings.youtube_publication_plan_versions = [
+        dict(item) for item in (settings.youtube_publication_plan_versions or [])
+        if isinstance(item, dict) and str(item.get("id", "")).strip() != version_id
+    ]
+    if len(settings.youtube_publication_plan_versions) == before:
+        raise ValueError("Версия плана не найдена.")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-plan-delete",
+        "count": 1,
+        "message": "Версия плана удалена.",
+    }}
+
+
+def set_publication_v2_item_priority(payload: dict) -> dict:
+    """Persist an operator priority on one durable PublicationItem."""
+    production_id = str(payload.get("productionItemId", "")).strip()
+    if not production_id:
+        raise ValueError("Укажите ProductionItem ID.")
+    try:
+        priority = int(payload.get("priority", 0) or 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Приоритет ролика должен быть целым числом.") from error
+    priority = max(-10, min(10, priority))
+    settings = load_settings()
+    reconcile_publication_items(settings)
+    item = dict((settings.youtube_publication_items or {}).get(production_id, {}) or {})
+    if not item:
+        raise ValueError("PublicationItem не найден.")
+    metadata = dict(item.get("metadata", {}) or {})
+    metadata["priority"] = priority
+    item["metadata"] = metadata
+    item["updatedAt"] = datetime.now().astimezone().isoformat()
+    settings.youtube_publication_items[production_id] = item
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-priority", "count": 1,
+        "message": "Приоритет ролика сохранён.",
+    }}
 
 
 def preview_publication_v2_distribution(payload: dict) -> dict:
     settings = load_settings()
     reconcile_publication_items(settings)
-    rules = [dict(rule) for rule in settings.youtube_channel_publication_rules.values()]
+
+    rules: list[dict] = []
+    known_channel_ids = {
+        str(item.get("profile_id") or item.get("id") or "").strip()
+        for item in getattr(settings, "analytics_channels", [])
+        if isinstance(item, dict)
+    }
+    for raw_rule in settings.youtube_channel_publication_rules.values():
+        rule = dict(raw_rule)
+        channel_id = str(rule.get("channelId", "")).strip()
+        rule["oauthConnected"] = (
+            channel_id in known_channel_ids
+            and bool(str((settings.youtube_oauth_tokens or {}).get(channel_id, "")).strip())
+        )
+        rules.append(rule)
+
+    # A confirmed snapshot is immutable planning input. Re-previewing must not
+    # move it to another channel/time even when the saved mutable assignment is
+    # absent or stale.
+    effective_assignments = {
+        str(production_id): dict(assignment)
+        for production_id, assignment in (settings.youtube_publication_assignments or {}).items()
+        if isinstance(assignment, dict)
+    }
+    executions = dict(settings.youtube_publication_executions or {})
+    for snapshot_id, snapshot_record in (settings.youtube_publication_snapshots or {}).items():
+        if not isinstance(snapshot_record, dict):
+            continue
+        production_id = str(snapshot_record.get("productionItemId", "")).strip()
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        if not production_id or not channel_id:
+            continue
+        execution = dict(executions.get(snapshot_id, {}) or {})
+        if not _publication_execution_blocks_planning(execution):
+            continue
+        effective_assignments[production_id] = {
+            "productionItemId": production_id,
+            "channelId": channel_id,
+            "publishAt": str(
+                execution.get("confirmedPublishAt")
+                or snapshot_record.get("requestedPublishAt")
+                or ""
+            ),
+            "source": "confirmed_snapshot",
+            "locked": True,
+        }
+
     bulk_schedule = payload.get("bulkSchedule") if isinstance(payload.get("bulkSchedule"), dict) else None
     if bulk_schedule is not None:
-        selected_channels = {str(value).strip() for value in bulk_schedule.get("channelIds", []) if str(value).strip()}
+        selected_channels = {
+            str(value).strip()
+            for value in bulk_schedule.get("channelIds", [])
+            if str(value).strip()
+        }
         if not selected_channels:
             raise ValueError("Выберите хотя бы один канал для массового диапазона.")
         try:
@@ -14179,15 +14534,59 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
         except (TypeError, ValueError) as error:
             raise ValueError("Укажите положительный лимит роликов на канал.") from error
         rules = [
-            {**rule, "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel)}
+            {
+                **rule,
+                "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel),
+            }
             for rule in rules
             if str(rule.get("channelId", "")).strip() in selected_channels
         ]
-    preview = build_distribution_preview(settings.youtube_publication_items,
-                                         rules,
-                                         settings.youtube_publication_assignments)
+
+    selected_ids = {
+        str(value).strip()
+        for value in payload.get("productionItemIds", [])
+        if str(value).strip()
+    }
+    preview_items = (
+        {
+            production_id: item
+            for production_id, item in settings.youtube_publication_items.items()
+            if production_id in selected_ids
+        }
+        if selected_ids else settings.youtube_publication_items
+    )
+    preview = build_distribution_preview(
+        preview_items,
+        rules,
+        effective_assignments,
+    )
     if bulk_schedule is not None:
-        preview["assignments"] = apply_bulk_schedule_range(preview["assignments"], bulk_schedule)
+        preview["assignments"] = apply_bulk_schedule_range(
+            preview["assignments"],
+            bulk_schedule,
+            {
+                str(rule.get("channelId", "")).strip(): dict(rule)
+                for rule in rules
+                if str(rule.get("channelId", "")).strip()
+            },
+            item_topics={
+                str(production_id): str(
+                    dict(item.get("metadata", {}) or {}).get("topicFamily")
+                    or dict(item.get("metadata", {}) or {}).get("topic")
+                    or ""
+                ).strip()
+                for production_id, item in settings.youtube_publication_items.items()
+            },
+        )
+        preview["scheduleWarnings"] = [
+            {
+                "productionItemId": str(row.get("productionItemId", "")),
+                "channelId": str(row.get("channelId", "")),
+                "message": str(row.get("scheduleWarning", "")),
+            }
+            for row in preview["assignments"]
+            if str(row.get("scheduleWarning", "")).strip()
+        ]
     return {**snapshot(), "publicationPreview": preview}
 
 
@@ -14207,6 +14606,35 @@ def confirm_publication_v2_distribution(payload: dict) -> dict:
 def retry_publication_v2_stage(payload: dict) -> dict:
     settings = load_settings()
     retry_publication_stage(settings, str(payload.get("snapshotId", "")), str(payload.get("stage", "")))
+    save_settings(settings)
+    return snapshot()
+
+
+def resolve_publication_v2_uncertain_upload(payload: dict) -> dict:
+    """Apply one explicit operator decision after an upload with unknown remote outcome."""
+    settings = load_settings()
+    snapshot_id = str(payload.get("snapshotId", "")).strip()
+    outcome = str(payload.get("outcome", "")).strip().lower()
+    video_id = str(payload.get("youtubeVideoId", "")).strip()
+
+    if outcome == "found":
+        snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+        if not snapshot_record:
+            raise ValueError("Publication snapshot не найден")
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        credentials = json.loads((settings.youtube_oauth_tokens or {}).get(channel_id, ""))
+        profile, refreshed = fetch_current_channel(credentials)
+        video, refreshed = fetch_youtube_video_state(refreshed, video_id)
+        owner_channel_id = str(dict(profile or {}).get("channelId", "")).strip()
+        video_channel_id = str(dict(video.get("snippet", {}) or {}).get("channelId", "")).strip()
+        if not owner_channel_id or video_channel_id != owner_channel_id:
+            raise ValueError("Указанный YouTube ID не принадлежит подключённому каналу")
+        resolve_uncertain_upload(settings, snapshot_id, outcome, video_id)
+        reconcile_youtube_video_state(settings, snapshot_id, video)
+        settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
+    else:
+        resolve_uncertain_upload(settings, snapshot_id, outcome, video_id)
+
     save_settings(settings)
     return snapshot()
 
@@ -14274,10 +14702,38 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 return
             if not preflight["ok"]:
                 first = preflight["reasons"][0]
-                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", str(first["kind"]), str(first["message"]))
+                failed_stage = "AUTH_CHECK" if str(first["kind"]).upper() == "AUTH_REQUIRED" else "VIDEO_UPLOAD"
+                fail_publication_stage(settings, snapshot_id, failed_stage, str(first["kind"]), str(first["message"]))
                 save_settings(settings)
                 blocked.append((snapshot_id, str(first["message"])))
                 return
+            snapshot_record = dict(snapshots[snapshot_id])
+            metadata = dict(snapshot_record.get("metadata", {}) or {})
+            channel_id = str(snapshot_record.get("channelId", "")).strip()
+            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
+        try:
+            profile, validated_credentials = fetch_current_channel(credentials)
+        except _BRIDGE_OPERATION_ERRORS as exc:
+            with lock:
+                fail_publication_stage(settings, snapshot_id, "AUTH_CHECK", classify_publication_error(exc), str(exc))
+                save_settings(settings)
+                blocked.append((snapshot_id, str(exc)))
+            return
+        configured_channel = next((
+            dict(channel or {}) for channel in settings.analytics_channels
+            if str(dict(channel or {}).get("profile_id", "")).strip() == channel_id
+        ), {})
+        expected_youtube_channel_id = str(configured_channel.get("channel_id", "")).strip()
+        actual_youtube_channel_id = str(dict(profile or {}).get("channelId", "")).strip()
+        if expected_youtube_channel_id and actual_youtube_channel_id != expected_youtube_channel_id:
+            message = "OAuth подключён к другому YouTube-каналу. Переподключите выбранный канал."
+            with lock:
+                fail_publication_stage(settings, snapshot_id, "AUTH_CHECK", "AUTH_REQUIRED", message)
+                save_settings(settings)
+                blocked.append((snapshot_id, message))
+            return
+        with lock:
+            settings.youtube_oauth_tokens[channel_id] = json.dumps(validated_credentials, ensure_ascii=False)
             try:
                 begin_upload_attempt(settings, snapshot_id, worker_id)
                 # This is the durable crash/restart boundary: the RUNNING
@@ -14286,19 +14742,26 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
             except _BRIDGE_OPERATION_ERRORS as exc:
                 blocked.append((snapshot_id, str(exc)))
                 return
-            snapshot_record = dict(snapshots[snapshot_id])
-            metadata = dict(snapshot_record.get("metadata", {}) or {})
-            channel_id = str(snapshot_record.get("channelId", "")).strip()
+        transport_started = False
         try:
-            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
             body = build_private_video_insert_body(
-                title=str(metadata.get("title", "")), description=str(metadata.get("description", "")),
+                title=resolve_publication_upload_title(metadata), description=str(metadata.get("description", "")),
                 tags=[str(value) for value in metadata.get("tags", []) if str(value).strip()],
+                hashtags=[str(value) for value in metadata.get("hashtags", []) if str(value).strip()],
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
                 privacy=str(snapshot_record.get("privacy", "private")),
             )
-            result, refreshed = upload_private_video(credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
-                                                       thumbnail_path="")
+            def mark_transport_started() -> None:
+                nonlocal transport_started
+                transport_started = True
+
+            result, refreshed = upload_private_video(
+                validated_credentials,
+                video_path=str(snapshot_record.get("videoPath", "")),
+                body=body,
+                thumbnail_path="",
+                on_insert_started=mark_transport_started,
+            )
             with lock:
                 complete_upload_attempt(settings, snapshot_id, worker_id, result)
                 settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
@@ -14306,10 +14769,15 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 succeeded.append(snapshot_id)
         except _BRIDGE_OPERATION_ERRORS as exc:
             with lock:
-                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", classify_publication_error(exc), str(exc))
+                category = "USER_ACTION_REQUIRED" if transport_started else classify_publication_error(exc)
+                message = (
+                    "Исход загрузки на YouTube неизвестен. Сверьте канал перед повторной отправкой MP4."
+                    if transport_started else str(exc)
+                )
+                fail_publication_stage(settings, snapshot_id, "VIDEO_UPLOAD", category, message)
                 release_execution(settings, snapshot_id, worker_id)
                 save_settings(settings)
-                failures.append((snapshot_id, str(exc)))
+                failures.append((snapshot_id, message))
 
     with ThreadPoolExecutor(max_workers=min(available, len(requested)), thread_name_prefix="newsflow-publication-v2") as executor:
         futures = [executor.submit(upload_one, position, snapshot_id) for position, snapshot_id in enumerate(requested)]
@@ -14340,6 +14808,7 @@ def reconcile_publication_v2_youtube(payload: dict) -> dict:
             video, refreshed = fetch_youtube_video_state(credentials, video_id)
             reconcile_youtube_video_state(settings, snapshot_id, video)
             settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
+            _queue_publication_v2_engagement_task(settings, snapshot_id)
             confirmed += 1
         except _BRIDGE_OPERATION_ERRORS as exc:
             fail_publication_stage(settings, snapshot_id, "YOUTUBE_PROCESSING", classify_publication_error(exc), str(exc))
@@ -14360,6 +14829,9 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
     for position, snapshot_id in enumerate(requested, start=1):
         snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
         execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+        thumbnail_state = str(dict(dict(execution.get("steps", {}) or {}).get("THUMBNAIL", {}) or {}).get("status", "")).upper()
+        if thumbnail_state in {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}:
+            continue
         video_id = str(execution.get("youtubeVideoId") or "").strip()
         channel_id = str(snapshot_record.get("channelId", "")).strip()
         thumbnail_path = str(snapshot_record.get("thumbnailPath", "")).strip()
@@ -14369,6 +14841,13 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
         if not thumbnail_path or not Path(thumbnail_path).is_file():
             fail_publication_stage(settings, snapshot_id, "THUMBNAIL", "USER_ACTION_REQUIRED", "Файл обложки не найден; загрузка MP4 сохранена.")
             failures.append((snapshot_id, "Файл обложки не найден."))
+            continue
+        if not frozen_artifact_matches(snapshot_record, "thumbnail", thumbnail_path):
+            fail_publication_stage(
+                settings, snapshot_id, "THUMBNAIL", "USER_ACTION_REQUIRED",
+                "Файл обложки изменился после подтверждения snapshot; загрузка MP4 сохранена.",
+            )
+            failures.append((snapshot_id, "Файл обложки изменился после подтверждения snapshot."))
             continue
         worker_id = f"publication-v2-thumbnail-{uuid.uuid4().hex[:8]}-{position}"
         if not claim_execution(settings, snapshot_id, worker_id):
@@ -14395,6 +14874,270 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
             failures.append((snapshot_id, str(exc)))
     return {**snapshot(), "operationResult": {"kind": "publication-v2-thumbnail", "count": succeeded,
             "failed": len(failures), "message": f"Обложки установлены: {succeeded}. Ошибок: {len(failures)}."}}
+
+
+
+
+def run_publication_v2_studio(payload: dict) -> dict:
+    """Continue selected V2 snapshots through confirmed Studio-only stages.
+
+    Every action is leased and persisted independently, so a failed card/end
+    screen/ads/post attempt never reopens VIDEO_UPLOAD or another completed
+    irreversible stage.
+    """
+
+    requested = list(dict.fromkeys(
+        str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()
+    ))
+    if not requested:
+        raise ValueError("Выберите хотя бы один snapshot для оформления в Studio.")
+    requested_kinds = {
+        str(value).strip().casefold()
+        for value in payload.get("steps", [])
+        if str(value).strip()
+    }
+    allowed_kinds = {"ads", "post", "cards", "end-screen"}
+    if requested_kinds - allowed_kinds:
+        raise ValueError("Выбраны неизвестные этапы Studio V2.")
+    if not requested_kinds:
+        requested_kinds = set(allowed_kinds)
+
+    settings = load_settings()
+    channels = {
+        str(item.get("profile_id", "")).strip(): dict(item)
+        for item in settings.analytics_channels
+        if isinstance(item, dict)
+    }
+    snapshots = dict(settings.youtube_publication_snapshots or {})
+    executions = dict(settings.youtube_publication_executions or {})
+
+    catalog = [
+        {
+            "videoId": str(item.get("videoId", "")).strip(),
+            "channelId": str(item.get("channelId", "")).strip(),
+            "privacyStatus": str(item.get("youtubePrivacyStatus", "")).strip(),
+            "publishedAt": str(item.get("publishAt", "")).strip(),
+            "score": item.get("engagementScore", 0),
+        }
+        for item in settings.youtube_publication_jobs
+        if isinstance(item, dict) and str(item.get("videoId", "")).strip()
+    ]
+    for known_snapshot_id, known_snapshot in snapshots.items():
+        known_execution = dict(executions.get(known_snapshot_id, {}) or {})
+        known_video_id = str(known_execution.get("youtubeVideoId") or "").strip()
+        if not known_video_id:
+            continue
+        catalog.append({
+            "videoId": known_video_id,
+            "channelId": str(dict(known_snapshot or {}).get("channelId", "")).strip(),
+            "privacyStatus": str(known_execution.get("youtubePrivacyStatus") or "").strip(),
+            "publishedAt": str(known_execution.get("actualPublishedAt") or known_execution.get("confirmedPublishAt") or "").strip(),
+            "score": 0,
+        })
+
+    succeeded = failed = skipped = 0
+    stage_map = {"ads": "ADS", "post": "POST", "cards": "CARDS", "end-screen": "END_SCREEN"}
+    terminal = {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}
+
+    for snapshot_id in requested:
+        snapshot_record = dict(snapshots.get(snapshot_id, {}) or {})
+        execution = dict(executions.get(snapshot_id, {}) or {})
+        if not snapshot_record or not execution:
+            failed += 1
+            continue
+        video_id = str(execution.get("youtubeVideoId") or "").strip()
+        if not video_id:
+            fail_publication_stage(
+                settings, snapshot_id, "ADS", "USER_ACTION_REQUIRED",
+                "Studio-оформление нельзя запускать до подтверждённого YouTube video ID.",
+            )
+            failed += 1
+            continue
+
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        channel = channels.get(channel_id)
+        if not channel or not str(channel.get("channel_id", "")).strip():
+            fail_publication_stage(
+                settings, snapshot_id, "ADS", "USER_ACTION_REQUIRED",
+                "Для Studio-оформления не найден подтверждённый YouTube-канал.",
+            )
+            failed += 1
+            continue
+
+        metadata = dict(snapshot_record.get("metadata", {}) or {})
+        automation = dict(snapshot_record.get("automation", {}) or {})
+        try:
+            duration = max(0.0, float(snapshot_record.get("durationSeconds") or 0))
+        except (TypeError, ValueError):
+            duration = 0.0
+        ad_policy = dict(snapshot_record.get("adPolicy", {}) or {})
+        ad_plan = build_ad_plan(
+            duration,
+            monetized=bool(snapshot_record.get("monetized")) and bool(ad_policy.get("enabled", True)),
+            interval_seconds=max(1, int(ad_policy.get("manualIntervalSeconds", 39) or 39)),
+        )
+        engagement_plan = build_engagement_plan(
+            {
+                "id": snapshot_id,
+                "channelId": channel_id,
+                "videoId": video_id,
+                "durationSeconds": duration,
+            },
+            catalog,
+            [],
+        )
+        video_url = str(execution.get("youtubeVideoUrl") or "").strip() or f"https://www.youtube.com/watch?v={video_id}"
+        description = re.sub(r"(?<!\w)#[^\s#]+", "", str(metadata.get("description", ""))).strip()
+        community_post = dict(snapshot_record.get("communityPost", {}) or {})
+        cta = re.sub(r"(?<!\w)#[^\s#]+", "", str(community_post.get("callToAction", "") or "")).strip()
+        post_text = "\n\n".join(value for value in (description, cta, video_url) if value)
+
+        steps_now = dict((settings.youtube_publication_executions.get(snapshot_id, {}) or {}).get("steps", {}) or {})
+        task = {
+            "videoId": video_id,
+            "channelId": channel_id,
+            "publishAt": str(snapshot_record.get("requestedPublishAt") or ""),
+            "ads": {"status": "done" if str(dict(steps_now.get("ADS", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "post": {"status": "done" if str(dict(steps_now.get("POST", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "cards": {"status": "done" if str(dict(steps_now.get("CARDS", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "endScreen": {"status": "done" if str(dict(steps_now.get("END_SCREEN", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "postDraft": {"text": post_text, "videoUrl": video_url},
+            "plan": {
+                "ads": ad_plan,
+                "cards": list(engagement_plan.get("cards") or []),
+                "endScreen": dict(engagement_plan.get("endScreen") or {}),
+            },
+        }
+
+        for kind in ("ads", "post", "cards", "end-screen"):
+            if kind not in requested_kinds:
+                continue
+            stage = stage_map[kind]
+
+            policy_key = {"ads": "ads", "post": "post", "cards": "cards", "end-screen": "endScreen"}[kind]
+            # The frozen snapshot is authoritative after confirmation. Ads are
+            # mandatory for a channel frozen as monetized; other Studio
+            # automation follows the operator's per-channel snapshot policy.
+            if kind != "ads" and automation.get(policy_key) is False:
+                mark_publication_stage_not_required(
+                    settings, snapshot_id, stage,
+                    f"Этап {kind} выключен в подтверждённых правилах канала.",
+                    {"reason": "channel_policy"},
+                )
+                skipped += 1
+                continue
+            if kind == "ads" and not bool(snapshot_record.get("monetized")):
+                mark_publication_stage_not_required(
+                    settings, snapshot_id, stage,
+                    "Канал не отмечен как монетизированный.",
+                    {"mode": "NONE", "reason": "channel_not_monetized"},
+                )
+                skipped += 1
+                continue
+            execution = dict(settings.youtube_publication_executions.get(snapshot_id, {}) or {})
+            execution_steps = dict(execution.get("steps", {}) or {})
+            stage_state = str(dict(execution_steps.get(stage, {}) or {}).get("status", "PENDING")).upper()
+            if stage_state in terminal:
+                skipped += 1
+                continue
+            if kind in {"ads", "post", "cards", "end-screen"} and str(dict(execution_steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper() != "SUCCESS":
+                skipped += 1
+                continue
+            if kind == "ads" and not bool(ad_plan.get("monetizationEnabled")):
+                mark_publication_stage_not_required(settings, snapshot_id, stage, "Канал не отмечен как монетизированный.",
+                                                    {"mode": "NONE"})
+                skipped += 1
+                continue
+            if kind == "post" and not post_text:
+                mark_publication_stage_not_required(settings, snapshot_id, stage, "Нет текста для Community post.")
+                skipped += 1
+                continue
+            if kind == "cards" and not list(engagement_plan.get("cards") or []):
+                mark_publication_stage_not_required(settings, snapshot_id, stage, "Нет другого публичного ролика для безопасной подсказки.")
+                skipped += 1
+                continue
+            end_screen = dict(engagement_plan.get("endScreen") or {})
+            if kind == "end-screen" and str(end_screen.get("status", "")) == "skipped":
+                mark_publication_stage_not_required(settings, snapshot_id, stage,
+                                                    str(end_screen.get("reason") or "Конечная заставка недоступна."))
+                skipped += 1
+                continue
+
+            worker_id = f"publication-v2-studio-{kind}-{uuid.uuid4().hex[:8]}"
+            try:
+                begin_publication_stage(settings, snapshot_id, worker_id, stage)
+                save_settings(settings)
+                completed = execute_studio_task(
+                    task,
+                    profile_dir=_youtube_channel_profile_dir(channel_id),
+                    youtube_channel_id=str(channel.get("channel_id", "")).strip(),
+                    action_kinds={kind},
+                )
+                if kind not in completed:
+                    raise StudioAutomationError(f"Studio не подтвердил этап {kind}.")
+                provider_result: dict = {"kind": kind}
+                if kind == "ads":
+                    actual_ads = dict((task.get("_studioResults") or {}).get("ads") or {})
+                    provider_result.update({
+                        "mode": str(actual_ads.get("mode", "NONE")),
+                        "automaticSlotsEnabled": bool(actual_ads.get("automatic")),
+                        "manualSlotsSeconds": list(actual_ads.get("manualSlots") or ad_plan.get("manualSlotsSeconds") or []),
+                        "confirmedManualSlotsSeconds": list(actual_ads.get("confirmedManualSlots") or []),
+                        "midRollEligible": bool(ad_plan.get("midRollEligible")),
+                        "manualMidrollApplicable": bool(actual_ads.get("manualMidrollApplicable")),
+                    })
+                    if bool(actual_ads.get("manualMidrollApplicable")) and not bool(actual_ads.get("manual")):
+                        fail_publication_stage(
+                            settings, snapshot_id, stage, "RETRYABLE",
+                            "Автоматическая реклама включена, но не все ручные 39-секундные слоты подтверждены.",
+                        )
+                        current_execution = settings.youtube_publication_executions[snapshot_id]
+                        current_ads = dict(current_execution.get("steps", {}).get("ADS", {}) or {})
+                        current_ads["providerResult"] = provider_result
+                        current_execution["steps"]["ADS"] = current_ads
+                        release_execution(settings, snapshot_id, worker_id)
+                        save_settings(settings)
+                        failed += 1
+                        break
+                elif kind == "post":
+                    provider_result.update({"publishAt": task["publishAt"], "videoUrl": video_url})
+                elif kind == "cards":
+                    provider_result.update({"count": len(list(engagement_plan.get("cards") or [])),
+                                            "cards": list(engagement_plan.get("cards") or [])})
+                elif kind == "end-screen":
+                    provider_result.update({"startSeconds": end_screen.get("startSeconds"),
+                                            "items": list(end_screen.get("items") or [])})
+                complete_publication_stage(settings, snapshot_id, worker_id, stage, provider_result)
+                save_settings(settings)
+                succeeded += 1
+            except StudioAutomationError as exc:
+                fail_publication_stage(settings, snapshot_id, stage, "RETRYABLE", str(exc))
+                release_execution(settings, snapshot_id, worker_id)
+                save_settings(settings)
+                failed += 1
+                break
+            except _BRIDGE_OPERATION_ERRORS as exc:
+                fail_publication_stage(settings, snapshot_id, stage, classify_publication_error(exc), str(exc))
+                release_execution(settings, snapshot_id, worker_id)
+                save_settings(settings)
+                failed += 1
+                break
+
+        execution = dict(settings.youtube_publication_executions.get(snapshot_id, {}) or {})
+        if str(execution.get("overallStatus", "")).upper() in {"DONE", "SCHEDULED"}:
+            persist_publication_receipt(settings, snapshot_id)
+
+    save_settings(settings)
+    return {
+        **snapshot(),
+        "operationResult": {
+            "kind": "publication-v2-studio",
+            "count": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "message": f"Studio-этапов подтверждено: {succeeded}; ошибок: {failed}; пропущено: {skipped}.",
+        },
+    }
 
 
 def run_auto_pipeline(payload: dict) -> dict:
@@ -15233,12 +15976,28 @@ def main() -> None:
             result = migrate_publication_v2(payload if isinstance(payload, dict) else {})
         elif command == "save-publication-v2-rules":
             result = save_publication_v2_rules(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-v2-rule-preset":
+            result = save_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
+        elif command == "apply-publication-v2-rule-preset":
+            result = apply_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-publication-v2-rule-preset":
+            result = delete_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-v2-plan-version":
+            result = save_publication_v2_plan_version(payload if isinstance(payload, dict) else {})
+        elif command == "restore-publication-v2-plan-version":
+            result = restore_publication_v2_plan_version(payload if isinstance(payload, dict) else {})
+        elif command == "delete-publication-v2-plan-version":
+            result = delete_publication_v2_plan_version(payload if isinstance(payload, dict) else {})
+        elif command == "set-publication-v2-item-priority":
+            result = set_publication_v2_item_priority(payload if isinstance(payload, dict) else {})
         elif command == "preview-publication-v2-distribution":
             result = preview_publication_v2_distribution(payload if isinstance(payload, dict) else {})
         elif command == "confirm-publication-v2-distribution":
             result = confirm_publication_v2_distribution(payload if isinstance(payload, dict) else {})
         elif command == "retry-publication-v2-stage":
             result = retry_publication_v2_stage(payload if isinstance(payload, dict) else {})
+        elif command == "resolve-publication-v2-uncertain-upload":
+            result = resolve_publication_v2_uncertain_upload(payload if isinstance(payload, dict) else {})
         elif command == "set-publication-v2-paused":
             result = set_publication_v2_paused(payload if isinstance(payload, dict) else {})
         elif command == "cancel-publication-v2-execution":
@@ -15251,6 +16010,8 @@ def main() -> None:
             result = reconcile_publication_v2_youtube(payload if isinstance(payload, dict) else {})
         elif command == "run-publication-v2-thumbnails":
             result = run_publication_v2_thumbnails(payload if isinstance(payload, dict) else {})
+        elif command == "run-publication-v2-studio":
+            result = run_publication_v2_studio(payload if isinstance(payload, dict) else {})
         elif command == "run-auto-pipeline":
             result = run_auto_pipeline(payload if isinstance(payload, dict) else {})
         elif command == "generate-media":
