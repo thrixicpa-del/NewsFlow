@@ -14367,8 +14367,16 @@ def save_publication_v2_plan_version(payload: dict) -> dict:
     }}
 
 
+def _publication_execution_blocks_planning(execution: dict) -> bool:
+    """Only a pre-upload cancellation releases the ProductionItem back to planning."""
+    state = dict(execution or {})
+    status = str(state.get("overallStatus", "")).upper()
+    has_video = bool(str(state.get("youtubeVideoId") or "").strip())
+    return not (status == "CANCELLED" and not has_video)
+
+
 def restore_publication_v2_plan_version(payload: dict) -> dict:
-    """Restore only mutable draft assignments; frozen snapshots always win."""
+    """Restore mutable draft assignments while active or known-video snapshots stay frozen."""
     version_id = str(payload.get("id", "")).strip()
     if not version_id:
         raise ValueError("Выберите версию плана.")
@@ -14379,10 +14387,13 @@ def restore_publication_v2_plan_version(payload: dict) -> dict:
     ), None)
     if version is None:
         raise ValueError("Версия плана не найдена.")
+    executions = dict(settings.youtube_publication_executions or {})
     frozen_ids = {
         str(snapshot.get("productionItemId", "")).strip()
-        for snapshot in (settings.youtube_publication_snapshots or {}).values()
-        if isinstance(snapshot, dict) and str(snapshot.get("productionItemId", "")).strip()
+        for snapshot_id, snapshot in (settings.youtube_publication_snapshots or {}).items()
+        if isinstance(snapshot, dict)
+        and str(snapshot.get("productionItemId", "")).strip()
+        and _publication_execution_blocks_planning(dict(executions.get(snapshot_id, {}) or {}))
     }
     restored = skipped = 0
     assignments = dict(settings.youtube_publication_assignments or {})
@@ -14493,9 +14504,7 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
         if not production_id or not channel_id:
             continue
         execution = dict(executions.get(snapshot_id, {}) or {})
-        status = str(execution.get("overallStatus", "")).upper()
-        has_video = bool(str(execution.get("youtubeVideoId") or "").strip())
-        if status == "CANCELLED" and not has_video:
+        if not _publication_execution_blocks_planning(execution):
             continue
         effective_assignments[production_id] = {
             "productionItemId": production_id,
