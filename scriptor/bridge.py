@@ -14540,6 +14540,18 @@ def run_publication_v2_studio(payload: dict) -> dict:
         for item in settings.youtube_publication_jobs
         if isinstance(item, dict) and str(item.get("videoId", "")).strip()
     ]
+    for known_snapshot_id, known_snapshot in snapshots.items():
+        known_execution = dict(executions.get(known_snapshot_id, {}) or {})
+        known_video_id = str(known_execution.get("youtubeVideoId") or "").strip()
+        if not known_video_id:
+            continue
+        catalog.append({
+            "videoId": known_video_id,
+            "channelId": str(dict(known_snapshot or {}).get("channelId", "")).strip(),
+            "privacyStatus": str(known_execution.get("youtubePrivacyStatus") or "").strip(),
+            "publishedAt": str(known_execution.get("actualPublishedAt") or known_execution.get("confirmedPublishAt") or "").strip(),
+            "score": 0,
+        })
 
     succeeded = failed = skipped = 0
     stage_map = {"ads": "ADS", "post": "POST", "cards": "CARDS", "end-screen": "END_SCREEN"}
@@ -14619,8 +14631,12 @@ def run_publication_v2_studio(payload: dict) -> dict:
                 continue
             stage = stage_map[kind]
             execution = dict(settings.youtube_publication_executions.get(snapshot_id, {}) or {})
-            stage_state = str(dict(dict(execution.get("steps", {}) or {}).get(stage, {}) or {}).get("status", "PENDING")).upper()
+            execution_steps = dict(execution.get("steps", {}) or {})
+            stage_state = str(dict(execution_steps.get(stage, {}) or {}).get("status", "PENDING")).upper()
             if stage_state in terminal:
+                skipped += 1
+                continue
+            if kind in {"ads", "cards", "end-screen"} and str(dict(execution_steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper() != "SUCCESS":
                 skipped += 1
                 continue
             if kind == "ads" and not bool(ad_plan.get("monetizationEnabled")):
