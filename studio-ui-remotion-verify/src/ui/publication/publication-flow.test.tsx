@@ -261,6 +261,40 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByText("Готовый ролик")).toBeInTheDocument();
   });
 
+  it("stays on Distribution when confirmation returns no state after a command failure", async () => {
+    const command = vi.fn().mockImplementation((name) => {
+      if (name === "preview-publication-v2-distribution") {
+        return Promise.resolve({
+          ...base,
+          publicationPreview: {
+            assignments: [{
+              productionItemId: "item-ready",
+              channelId: "channel-a",
+              source: "auto",
+              locked: false,
+              reason: "balanced",
+              publishAt: "2026-11-15T04:00:00+03:00",
+            }],
+          },
+        });
+      }
+      if (name === "confirm-publication-v2-distribution") return Promise.resolve(undefined);
+      return Promise.resolve(undefined);
+    });
+
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+    const confirm = await screen.findByRole("button", { name: "Подтвердить назначения" });
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "confirm-publication-v2-distribution",
+      expect.any(Object),
+    ));
+    expect(screen.getByRole("tab", { name: "Распределение" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Очередь" })).toHaveAttribute("aria-selected", "false");
+  });
+
   it("does not submit distribution confirmation twice while the first confirm is pending", async () => {
     const releases: Array<() => void> = [];
     const command = vi.fn().mockImplementation((name) => {
