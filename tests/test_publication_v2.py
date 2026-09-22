@@ -652,6 +652,61 @@ class PublicationV2SchedulerTests(unittest.TestCase):
         self.assertIn("blackout_period", {conflict["kind"] for conflict in conflicts})
 
 
+    def test_manual_schedule_rejects_hourly_cap_and_topic_cooldown_conflicts(self):
+        assignments = [
+            {"productionItemId": "pi-a1", "channelId": "channel-a", "publishAt": "2026-09-25T04:00:00+03:00", "locked": True},
+            {"productionItemId": "pi-a2", "channelId": "channel-a", "publishAt": "2026-09-25T04:15:00+03:00", "locked": True},
+            {"productionItemId": "pi-b", "channelId": "channel-a", "publishAt": "2026-09-25T04:30:00+03:00", "locked": True},
+        ]
+        conflicts = validate_publication_schedule(
+            assignments,
+            {
+                "channel-a": {
+                    "timezone": "Europe/Moscow",
+                    "maxVideosPerHour": 2,
+                    "topicCooldownMinutes": 45,
+                },
+            },
+            item_topics={"pi-a1": "iran", "pi-a2": "iran", "pi-b": "europe"},
+        )
+
+        kinds_by_item = {
+            production_id: {item["kind"] for item in conflicts if item["productionItemId"] == production_id}
+            for production_id in ("pi-a1", "pi-a2", "pi-b")
+        }
+        self.assertIn("topic_cooldown", kinds_by_item["pi-a2"])
+        self.assertIn("max_videos_per_hour", kinds_by_item["pi-b"])
+
+    def test_bulk_range_preserves_topic_cooldown_per_channel(self):
+        assignments = [
+            {"productionItemId": "pi-a1", "channelId": "channel-a", "source": "auto", "locked": False},
+            {"productionItemId": "pi-a2", "channelId": "channel-a", "source": "auto", "locked": False},
+        ]
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-09-25",
+                "startTime": "04:00",
+                "endTime": "05:00",
+                "timezone": "Europe/Moscow",
+            },
+            {
+                "channel-a": {
+                    "channelId": "channel-a",
+                    "timezone": "Europe/Moscow",
+                    "intervalMinutes": 15,
+                    "topicCooldownMinutes": 45,
+                },
+            },
+            item_topics={"pi-a1": "iran", "pi-a2": "iran"},
+        )
+
+        self.assertEqual(
+            [row["publishAt"] for row in scheduled],
+            ["2026-09-25T04:00:00+03:00", "2026-09-25T04:45:00+03:00"],
+        )
+
+
     def test_scheduler_respects_daily_cap_before_allocating_next_day_slot(self):
         """Daily quota is a hard calendar constraint, not a display-only counter."""
         slots = build_channel_schedule(
