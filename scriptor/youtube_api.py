@@ -8,7 +8,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-
 YOUTUBE_TAG_CHARACTER_LIMIT = 500
 YOUTUBE_DESCRIPTION_BYTE_LIMIT = 5000
 
