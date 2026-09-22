@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { workstationBaselineCases } from "./workstation-baselines";
 
@@ -49,9 +49,9 @@ describe("workstation visual baseline matrix", () => {
   });
 
   it("requires an approved PNG for every release visual baseline case", () => {
-    const approvedRoot = new URL("../../../tests/visual-baselines/approved/", import.meta.url);
+    const approvedRoot = resolve(process.cwd(), "tests", "visual-baselines", "approved");
     const missing = workstationBaselineCases
-      .filter((item) => !existsSync(fileURLToPath(new URL(`${item.id}.png`, approvedRoot))))
+      .filter((item) => !existsSync(resolve(approvedRoot, `${item.id}.png`)))
       .map((item) => item.id);
     expect(missing).toEqual([]);
   });
