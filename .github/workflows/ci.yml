@@ -26,7 +26,14 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
-      - run: python tests/run_isolated.py tests.test_seo_tags_contract tests.test_youtube_publisher tests.test_seo
+      - run: >-
+          python tests/run_isolated.py
+          tests.test_seo_tags_contract
+          tests.test_youtube_publisher.PublicationJobTests.test_result_package_keeps_scenario_title_separate_from_seo_metadata
+          tests.test_youtube_publisher.PublicationJobTests.test_publication_queue_reads_all_metadata_from_ready_result_package
+          tests.test_youtube_publisher.PublicationJobTests.test_youtube_upload_body_is_private_and_carries_ready_package_metadata
+          tests.test_youtube_publisher.PublicationJobTests.test_upload_tags_keep_whole_unique_values_within_youtube_five_hundred_character_limit
+          tests.test_youtube_publisher.PublicationJobTests.test_upload_body_normalizes_tags_before_youtube_receives_them
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-seo-publication-boundary
       - run: python -m py_compile scriptor/bridge.py scriptor/config.py scriptor/youtube_api.py tests/test_youtube_publisher.py tests/test_seo_tags_contract.py
