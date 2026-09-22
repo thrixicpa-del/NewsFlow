@@ -15,7 +15,7 @@ class YouTubeStudioActionsTests(unittest.TestCase):
             "endScreen": {"status": "pending"},
             "postDraft": {"text": "Описание", "videoUrl": "https://www.youtube.com/watch?v=current"},
             "plan": {
-                "ads": {"mode": "AUTO+MANUAL_39S", "monetizationEnabled": True, "midRollEligible": True,
+                "ads": {"mode": "AUTO+MANUAL", "monetizationEnabled": True, "midRollEligible": True,
                         "automaticSlotsEnabled": True, "manualSlotsSeconds": [39, 78]},
                 "cards": [{"videoId": "previous", "atSeconds": 210}],
                 "endScreen": {"startSeconds": 580, "items": [{"kind": "subscribe"}]},
@@ -23,11 +23,11 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         })
 
         self.assertEqual([item["kind"] for item in actions], ["ads", "post", "cards", "end-screen"])
-        self.assertEqual(actions[0]["mode"], "AUTO+MANUAL_39S")
+        self.assertEqual(actions[0]["mode"], "AUTO+MANUAL")
         self.assertEqual(actions[0]["manualSlotsSeconds"], [39, 78])
-        self.assertEqual(actions[0]["videoUrl"], "https://www.youtube.com/watch?v=current")
-        self.assertEqual(actions[1]["cards"][0]["atSeconds"], 210)
-        self.assertEqual(actions[2]["startSeconds"], 580)
+        self.assertEqual(actions[1]["videoUrl"], "https://www.youtube.com/watch?v=current")
+        self.assertEqual(actions[2]["cards"][0]["atSeconds"], 210)
+        self.assertEqual(actions[3]["startSeconds"], 580)
 
     def test_pending_monetization_action_is_planned_with_manual_slots(self):
         actions = planned_studio_actions({
@@ -37,14 +37,14 @@ class YouTubeStudioActionsTests(unittest.TestCase):
             "endScreen": {"status": "skipped"},
             "postDraft": {},
             "plan": {"ads": {
-                "enabled": True, "automatic": True, "manual": True,
-                "mode": "AUTO+MANUAL", "manualMidrollApplicable": True,
-                "manualSlots": [39, 78],
+                "enabled": True, "monetizationEnabled": True,
+                "automaticSlotsEnabled": True, "midRollEligible": True,
+                "mode": "AUTO+MANUAL", "manualSlotsSeconds": [39, 78],
             }},
         })
 
         self.assertEqual([item["kind"] for item in actions], ["ads"])
-        self.assertEqual(actions[0]["manualSlots"], [39, 78])
+        self.assertEqual(actions[0]["manualSlotsSeconds"], [39, 78])
 
     def test_terminal_or_skipped_steps_are_not_repeated(self):
         self.assertEqual(planned_studio_actions({
