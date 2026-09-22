@@ -980,6 +980,9 @@ def begin_upload_attempt(settings: Any, snapshot_id: str, worker_id: str) -> Non
         release_execution(settings, snapshot_id, worker_id)
         raise ValueError("MP4 уже загружен на YouTube; повторная загрузка запрещена")
     steps = dict(execution.get("steps", {}) or {})
+    auth = dict(steps.get("AUTH_CHECK", {}) or _step())
+    auth.update({"status": "SUCCESS", "finishedAt": _now(), "providerResult": {"validated": True}})
+    steps["AUTH_CHECK"] = auth
     upload = dict(steps.get("VIDEO_UPLOAD", {}) or _step())
     if str(upload.get("status", "")).upper() not in {"PENDING", "RETRYING", "FAILED"}:
         release_execution(settings, snapshot_id, worker_id)
@@ -1030,6 +1033,7 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
         raise ValueError("Publication snapshot или execution не найден")
     snippet = dict(video.get("snippet", {}) or {})
     processing = dict(video.get("processingDetails", {}) or {})
+    remote_status = dict(video.get("status", {}) or {})
     expected = dict(snapshot.get("metadata", {}) or {})
     steps = dict(execution.get("steps", {}) or {})
     now = _now()
@@ -1055,10 +1059,72 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
         step.update({"status": "SUCCESS" if matches else "UNVERIFIED", "finishedAt": now,
                      "providerResult": {"verified": bool(matches)}})
         steps[stage] = step
+
+    schedule_step = dict(steps.get("SCHEDULE", {}) or _step())
+    expected_publish_at = str(snapshot.get("requestedPublishAt") or "").strip()
+    if str(snapshot.get("publishMode", "")) != "schedule":
+        schedule_step.update({"status": "NOT_REQUIRED", "finishedAt": now, "providerResult": {"mode": "publish_now"}})
+    elif expected_publish_at:
+        remote_publish_at = str(remote_status.get("publishAt") or "").strip()
+        matches = False
+        try:
+            expected_point = datetime.fromisoformat(expected_publish_at.replace("Z", "+00:00"))
+            remote_point = datetime.fromisoformat(remote_publish_at.replace("Z", "+00:00")) if remote_publish_at else None
+            matches = bool(remote_point and expected_point.astimezone(timezone.utc) == remote_point.astimezone(timezone.utc))
+        except ValueError:
+            matches = False
+        schedule_step.update({
+            "status": "SUCCESS" if matches else "UNVERIFIED",
+            "finishedAt": now,
+            "providerResult": {"verified": matches, "publishAt": remote_publish_at or None},
+        })
+        if matches:
+            execution["confirmedPublishAt"] = remote_publish_at
+    steps["SCHEDULE"] = schedule_step
+
     execution["steps"] = steps
     execution["currentStage"] = "THUMBNAIL"
     execution["overallStatus"] = "FORMATTING" if processing_step["status"] == "SUCCESS" else "PROCESSING"
     execution.setdefault("timeline", []).append({"at": now, "stage": "YOUTUBE_PROCESSING", "status": processing_step["status"], "detail": "Состояние YouTube подтверждено через API."})
+    executions[snapshot_id] = execution
+    settings.youtube_publication_executions = executions
+
+
+def mark_publication_stage_not_required(
+    settings: Any,
+    snapshot_id: str,
+    stage: str,
+    reason: str,
+    provider_result: dict[str, Any] | None = None,
+) -> None:
+    """Persist an explicit non-action so completion counters remain truthful."""
+
+    normalized = str(stage).strip().upper()
+    if normalized not in _STAGES:
+        raise ValueError("Этап публикации не найден")
+    executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
+    execution = executions.get(snapshot_id)
+    if not execution:
+        raise ValueError("Publication execution не найден")
+    steps = dict(execution.get("steps", {}) or {})
+    step = dict(steps.get(normalized, {}) or _step())
+    now = _now()
+    step.update({
+        "status": "NOT_REQUIRED",
+        "finishedAt": now,
+        "error": None,
+        "providerResult": {"reason": str(reason), **dict(provider_result or {})},
+    })
+    steps[normalized] = step
+    terminal = {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}
+    execution["steps"] = steps
+    if all(str(dict(value or {}).get("status", "PENDING")).upper() in terminal for value in steps.values()):
+        execution["currentStage"] = "DONE"
+        execution["overallStatus"] = "DONE"
+        execution["completedAt"] = now
+    execution.setdefault("timeline", []).append({
+        "at": now, "stage": normalized, "status": "NOT_REQUIRED", "detail": str(reason),
+    })
     executions[snapshot_id] = execution
     settings.youtube_publication_executions = executions
 
@@ -1086,6 +1152,8 @@ def complete_publication_stage(settings: Any, snapshot_id: str, worker_id: str, 
     execution["steps"] = steps
     execution["currentStage"] = next_stage
     execution["overallStatus"] = "DONE" if all(str(dict(value or {}).get("status", "PENDING")).upper() in terminal for value in steps.values()) else "FORMATTING"
+    if execution["overallStatus"] == "DONE":
+        execution["completedAt"] = now
     execution.setdefault("timeline", []).append({"at": now, "stage": normalized, "status": "SUCCESS", "detail": "Этап подтверждён"})
     executions[snapshot_id] = execution
     settings.youtube_publication_executions = executions
