@@ -11525,7 +11525,7 @@ def prepare_montage(payload: dict) -> dict:
                         project_used_families=project_used_families,
                         reserved_paths=set(), reserved_families=set(),
                         source_exists=source_exists, source_duration=verified_duration,
-                        source_allowed=lambda item: _montage_screen_text_safe(index, item),
+                        source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
                         recent_project_paths=recent_project_paths,
                         immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
                         position_bucket=position_bucket,
@@ -11702,7 +11702,7 @@ def prepare_montage(payload: dict) -> dict:
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
             if (selected and _semantic_clip_ok(scene["visual_query_en"], selected)
-                    and _montage_screen_text_safe(index, selected)
+                    and _montage_screen_text_safe(index, selected, allow_uncertain=True)
                     and not batch_is_reserved(selected, external_family, position_bucket)
                     and claim_batch_source(selected, external_family, position_bucket)):
                 score, source = 1.0, selected.source or "external"
@@ -11728,7 +11728,7 @@ def prepare_montage(payload: dict) -> dict:
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
                     source_exists=source_exists, source_duration=verified_duration,
-                    source_allowed=lambda item: _montage_screen_text_safe(index, item),
+                    source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
                     recent_project_paths=recent_project_paths,
                     immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
                     position_bucket=position_bucket, batch_family_buckets=family_buckets,
@@ -11744,6 +11744,52 @@ def prepare_montage(payload: dict) -> dict:
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
+
+        # Final local rescue: exact wording may be absent from the library, but
+        # a large indexed collection should still complete the timeline with
+        # neutral semantically nearest B-roll rather than aborting. Geography,
+        # named-person, duration and screen BLOCKED guards remain hard.
+        if selected is None and indexed_count:
+            rescue_started = time.perf_counter()
+            try:
+                broad_hits = index.search_many(
+                    ["contextual news documentary city infrastructure people buildings vehicles"],
+                    limit=512,
+                )[0]
+            except (OSError, RuntimeError, ValueError, IndexError):
+                broad_hits = []
+            try:
+                selection = _select_montage_candidate(
+                    scene["visual_query_en"], strict_hits=[], fallback_hits=[],
+                    relaxed_hits=[], category_hits=[], safe_context_hits=broad_hits,
+                    required_duration=required_source_duration,
+                    match_threshold=0.0,
+                    used_paths=set(), used_families=set(),
+                    project_used_paths=project_used,
+                    project_used_families=project_used_families,
+                    reserved_paths=set(), reserved_families=set(),
+                    source_exists=source_exists, source_duration=verified_duration,
+                    source_allowed=lambda item: _montage_screen_text_safe(
+                        index, item, allow_uncertain=True,
+                    ),
+                    recent_project_paths=recent_project_paths,
+                    immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                    position_bucket=position_bucket,
+                    batch_family_buckets=family_buckets,
+                    diversity_seed=f"{titles[scenario_index]}|{scenario_index}|neutral-rescue",
+                    allow_safe_reuse=True,
+                    allow_below_threshold=True,
+                )
+                selected = selection.item
+                selected_duration = selection.duration
+                score = selection.score
+                source = f"{selected.source or 'local'} · {selection.fallback_level}"
+            except MontageSelectionFailure as error:
+                selection_failure_diagnostics = error.diagnostics
+                selection = None
+                selected = None
+            preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
+
         if selected is None:
             diagnostics = selection.diagnostics if selection else selection_failure_diagnostics
             raise ValueError(
@@ -12459,7 +12505,7 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
     candidates = [
         hit.item for hit in ranked
         if (float(hit.score) >= minimum and _semantic_clip_ok(query, hit.item)
-            and _montage_screen_text_safe(index, hit.item))
+            and _montage_screen_text_safe(index, hit.item, allow_uncertain=True))
     ]
     if candidates or not settings.montage_auto_web:
         return candidates
