@@ -176,6 +176,14 @@ class PublicationV2DistributionTests(unittest.TestCase):
     def test_bridge_bulk_range_preview_filters_channels_and_does_not_persist_assignments(self):
         """Range controls are a dry run until the operator explicitly confirms it."""
         settings = Settings(
+            analytics_channels=[
+                {"profile_id": "channel-a", "name": "A"},
+                {"profile_id": "channel-b", "name": "B"},
+            ],
+            youtube_oauth_tokens={
+                "channel-a": "{\"token\": \"a\"}",
+                "channel-b": "{\"token\": \"b\"}",
+            },
             youtube_publication_items={
                 f"pi-{index}": {"productionItemId": f"pi-{index}", "readiness": {"state": "VIDEO_READY"}}
                 for index in range(3)
@@ -393,6 +401,14 @@ class PublicationV2DistributionTests(unittest.TestCase):
     def test_bridge_preview_preserves_confirmed_snapshot_as_locked_and_does_not_redistribute_it(self):
         """Confirmed/scheduled work must never be moved by an ordinary auto-preview."""
         settings = Settings(
+            analytics_channels=[
+                {"profile_id": "channel-a", "name": "A"},
+                {"profile_id": "channel-b", "name": "B"},
+            ],
+            youtube_oauth_tokens={
+                "channel-a": "{\"token\": \"a\"}",
+                "channel-b": "{\"token\": \"b\"}",
+            },
             youtube_publication_items={
                 "pi-confirmed": {"productionItemId": "pi-confirmed", "readiness": {"state": "VIDEO_READY"}},
                 "pi-new": {"productionItemId": "pi-new", "readiness": {"state": "VIDEO_READY"}},
