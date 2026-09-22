@@ -218,7 +218,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     confirmRef.current = true;
     setConfirming(true);
     try {
-      await command("confirm-publication-v2-distribution", {
+      const state = await command("confirm-publication-v2-distribution", {
         assignments: distribution
           .filter((row) => row.channelId)
           .map((row) => ({
@@ -229,6 +229,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
             locked: row.locked,
           })),
       });
+      if (!state) return;
       setDistributionHistory([]);
       setTab("queue");
     } finally {
