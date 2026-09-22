@@ -558,6 +558,101 @@ def _validate_quarter_hour_clock(value: time | None, label: str) -> None:
     if value is not None and (value.minute % 15 != 0 or value.second != 0 or value.microsecond != 0):
         raise ValueError(f"{label} должно быть кратно 15 минутам (:00/:15/:30/:45).")
 
+def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize one persisted channel rule at the write boundary."""
+
+    source = dict(rule or {})
+    channel_id = str(source.get("channelId", "")).strip()
+    if not channel_id:
+        raise ValueError("Правило публикации требует channelId")
+    try:
+        quota = int(source.get("quota", 0) or 0)
+        interval = int(source.get("intervalMinutes", 180) or 180)
+        daily_cap = int(source.get("dailyCap", 0) or 0)
+        minimum = float(source.get("minDurationSeconds", 0) or 0)
+        maximum = float(source.get("maxDurationSeconds", 0) or 0)
+        order_start = int(source.get("orderStart", 0) or 0)
+        order_end = int(source.get("orderEnd", 0) or 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Квоты, интервалы и диапазоны должны быть числами") from error
+    if quota < 0 or daily_cap < 0 or minimum < 0 or maximum < 0 or order_start < 0 or order_end < 0:
+        raise ValueError("Квоты и диапазоны не могут быть отрицательными")
+    if maximum and maximum < minimum:
+        raise ValueError("Некорректный диапазон длительности канала")
+    if order_start and order_end and order_end < order_start:
+        raise ValueError("Некорректный диапазон номеров роликов")
+    if interval < 15 or interval % 15 != 0:
+        raise ValueError("Интервал публикации должен быть кратен 15 минутам")
+
+    timezone_name = str(source.get("timezone", "")).strip() or "UTC"
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        raise ValueError("Неизвестный timezone канала") from error
+
+    first_publish = str(source.get("firstPublishAt", "")).strip()
+    if first_publish:
+        try:
+            first_point = datetime.fromisoformat(first_publish)
+        except ValueError as error:
+            raise ValueError("Некорректное время первого выхода") from error
+        if not _is_quarter_hour(first_point):
+            raise ValueError("Первый выход должен быть кратен 15 минутам")
+
+    window_start = _clock(source.get("publishWindowStart"))
+    window_end = _clock(source.get("publishWindowEnd"))
+    _validate_quarter_hour_clock(window_start, "Начало окна публикации")
+    _validate_quarter_hour_clock(window_end, "Конец окна публикации")
+
+    strategy = str(source.get("distributionStrategy", "balanced")).strip()
+    if strategy not in {"balanced", "longest_monetized", "ordered", "manual"}:
+        raise ValueError("Неизвестная стратегия распределения")
+    privacy = str(source.get("privacy", "private")).strip()
+    if privacy not in {"private", "unlisted", "public"}:
+        raise ValueError("Некорректный privacy режим")
+    publish_mode = str(source.get("publishMode", "publish_now")).strip()
+    if publish_mode not in {"schedule", "publish_now"}:
+        raise ValueError("Некорректный режим публикации")
+
+    allowed_weekdays = source.get("allowedWeekdays")
+    if isinstance(allowed_weekdays, list):
+        weekdays = sorted({int(day) for day in allowed_weekdays if 0 <= int(day) <= 6})
+    else:
+        weekdays = list(range(7))
+    automation_source = dict(source.get("automation", {}) or {})
+    automation = {
+        "upload": bool(automation_source.get("upload", True)),
+        "metadata": bool(automation_source.get("metadata", True)),
+        "thumbnail": bool(automation_source.get("thumbnail", True)),
+        "ads": bool(automation_source.get("ads", True)),
+        "post": bool(automation_source.get("post", True)),
+        "cards": bool(automation_source.get("cards", True)),
+        "endScreen": bool(automation_source.get("endScreen", True)),
+    }
+    return {
+        **source,
+        "channelId": channel_id,
+        "enabled": bool(source.get("enabled", True)),
+        "quota": quota,
+        "monetized": bool(source.get("monetized", False)),
+        "distributionStrategy": strategy,
+        "privacy": privacy,
+        "publishMode": publish_mode,
+        "timezone": timezone_name,
+        "firstPublishAt": first_publish,
+        "intervalMinutes": interval,
+        "allowedWeekdays": weekdays,
+        "publishWindowStart": window_start.isoformat(timespec="minutes") if window_start else "",
+        "publishWindowEnd": window_end.isoformat(timespec="minutes") if window_end else "",
+        "dailyCap": daily_cap,
+        "minDurationSeconds": minimum,
+        "maxDurationSeconds": maximum,
+        "orderStart": order_start,
+        "orderEnd": order_end,
+        "automation": automation,
+    }
+
+
 def _next_allowed_slot(candidate: datetime, rule: dict[str, Any], zone: ZoneInfo) -> datetime:
     allowed = rule.get("allowedWeekdays")
     weekdays = {int(value) for value in allowed} if isinstance(allowed, list) and allowed else set(range(7))
