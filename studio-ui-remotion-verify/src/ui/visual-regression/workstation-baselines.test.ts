@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { workstationBaselineCases } from "./workstation-baselines";
 
@@ -26,6 +28,7 @@ describe("workstation visual baseline matrix", () => {
       "publication-empty",
       "publication-paused",
       "publication-84",
+      "publication-narrow",
       "publication-day-plan",
       "publication-queue-ads",
       "publication-receipt",
@@ -38,8 +41,18 @@ describe("workstation visual baseline matrix", () => {
     expect(workstationBaselineCases.every((item) => item.dataRoot === "disposable")).toBe(true);
   });
 
-  it("declares a real narrow Topics viewport instead of relying on a scaled desktop capture", () => {
+  it("declares real narrow viewports instead of relying on scaled desktop captures", () => {
     const narrowTopics = workstationBaselineCases.find((item) => item.id === "topics-narrow");
+    const narrowPublication = workstationBaselineCases.find((item) => item.id === "publication-narrow");
     expect(narrowTopics).toMatchObject({ page: "ideas", dataRoot: "disposable", viewport: { width: 390, height: 844 } });
+    expect(narrowPublication).toMatchObject({ page: "publication", dataRoot: "disposable", fixture: "publication-84", viewport: { width: 390, height: 844 } });
+  });
+
+  it("requires an approved PNG for every release visual baseline case", () => {
+    const approvedRoot = new URL("../../../tests/visual-baselines/approved/", import.meta.url);
+    const missing = workstationBaselineCases
+      .filter((item) => !existsSync(fileURLToPath(new URL(`${item.id}.png`, approvedRoot))))
+      .map((item) => item.id);
+    expect(missing).toEqual([]);
   });
 });
