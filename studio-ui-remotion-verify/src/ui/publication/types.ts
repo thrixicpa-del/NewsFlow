@@ -11,7 +11,8 @@ export type ChannelRule = {
   channelId: string; enabled: boolean; quota: number; monetized: boolean; distributionStrategy: "balanced" | "longest_monetized";
   privacy: "private" | "unlisted" | "public"; publishMode: "schedule" | "publish_now"; timezone: string; firstPublishAt: string; intervalMinutes: number;
   allowedWeekdays: number[]; publishWindowStart: string; publishWindowEnd: string; dailyCap: number; minDurationSeconds: number; maxDurationSeconds: number;
-  orderStart: number; orderEnd: number;
+  orderStart: number; orderEnd: number; channelPriority: number; maxVideosPerHour: number; topicCooldownMinutes: number;
+  includeKeywords: string[]; excludeKeywords: string[];
   automation: { upload: boolean; metadata: boolean; thumbnail: boolean; ads: boolean; post: boolean; cards: boolean; endScreen: boolean };
 };
 
