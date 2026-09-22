@@ -14098,7 +14098,7 @@ def upload_publication_jobs(payload: dict) -> dict:
         job = _publication_job_from_record(item)
         credentials = json.loads(settings.youtube_oauth_tokens[job.channel_id])
         body = build_private_video_insert_body(
-            title=job.title, description=job.seo_description, tags=job.tags,
+            title=job.title, description=job.seo_description, tags=job.tags, hashtags=job.hashtags,
             publish_at=job.publish_at.isoformat() if job.publish_at else "",
         )
         result, refreshed_credentials = upload_private_video(
@@ -14387,6 +14387,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
             body = build_private_video_insert_body(
                 title=str(metadata.get("title", "")), description=str(metadata.get("description", "")),
                 tags=[str(value) for value in metadata.get("tags", []) if str(value).strip()],
+                hashtags=[str(value) for value in metadata.get("hashtags", []) if str(value).strip()],
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
                 privacy=str(snapshot_record.get("privacy", "private")),
             )
