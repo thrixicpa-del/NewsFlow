@@ -15883,6 +15883,14 @@ def main() -> None:
             result = apply_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
         elif command == "delete-publication-v2-rule-preset":
             result = delete_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-v2-plan-version":
+            result = save_publication_v2_plan_version(payload if isinstance(payload, dict) else {})
+        elif command == "restore-publication-v2-plan-version":
+            result = restore_publication_v2_plan_version(payload if isinstance(payload, dict) else {})
+        elif command == "delete-publication-v2-plan-version":
+            result = delete_publication_v2_plan_version(payload if isinstance(payload, dict) else {})
+        elif command == "set-publication-v2-item-priority":
+            result = set_publication_v2_item_priority(payload if isinstance(payload, dict) else {})
         elif command == "preview-publication-v2-distribution":
             result = preview_publication_v2_distribution(payload if isinstance(payload, dict) else {})
         elif command == "confirm-publication-v2-distribution":
