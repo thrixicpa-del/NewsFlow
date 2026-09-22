@@ -68,6 +68,16 @@ export function PublicationQueue({
   const toggleAll = () => setSelected(allSelected ? [] : rows.map((row) => row.snapshotId));
   const toggle = (snapshotId: string) => setSelected((current) => current.includes(snapshotId) ? current.filter((id) => id !== snapshotId) : [...current, snapshotId]);
   const actionIds = selected.length ? selected : undefined;
+  const channelProgress = [...new Set(rows.map((row) => row.channelId).filter(Boolean))].map((channelId) => {
+    const channelRows = rows.filter((row) => row.channelId === channelId);
+    return {
+      channelId,
+      total: channelRows.length,
+      uploaded: channelRows.filter((row) => Boolean(row.youtubeVideoId)).length,
+      complete: channelRows.filter((row) => ["DONE", "SCHEDULED"].includes(row.status)).length,
+      errors: channelRows.filter((row) => row.status === "PARTIAL" || Object.values(row.steps).some((step) => badStates.has(String(step.status)))).length,
+    };
+  });
 
   const columns = useMemo<ColumnDef<QueueRow>[]>(() => [
     {
@@ -105,6 +115,7 @@ export function PublicationQueue({
         <UiButton variant="primary" disabled={paused || starting} onClick={() => onStart(actionIds)}><Upload size={15}/>{starting ? "Запуск…" : selected.length ? `Запустить выбранные (${selected.length})` : "Запустить очередь"}</UiButton>
       </div>
     </div>
+    {channelProgress.length ? <div className="nf-channel-progress-strip" aria-label="Прогресс по каналам">{channelProgress.map((item) => <div className="nf-channel-progress-card" key={item.channelId}><b>{channelName(item.channelId)}</b><small>Готово {item.complete}/{item.total} · Upload {item.uploaded}/{item.total} · Ошибки {item.errors}</small></div>)}</div> : null}
     <DataTable data={rows} columns={columns} expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
   </section>;
 }
