@@ -33,6 +33,14 @@ def studio_editor_url(video_id: str) -> str:
     return f"https://studio.youtube.com/video/{value}/editor"
 
 
+def studio_monetization_url(video_id: str) -> str:
+    """Build the Studio monetization route for one uploaded video."""
+    value = str(video_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", value):
+        raise StudioAutomationError("Некорректный идентификатор ролика для монетизации Studio.")
+    return f"https://studio.youtube.com/video/{value}/monetization"
+
+
 def studio_details_url(video_id: str) -> str:
     """Build the Studio details route used before opening the editor tab."""
 
@@ -167,6 +175,10 @@ def planned_studio_actions(task: Mapping[str, object], *, action_kinds: set[str]
         cards = list(plan.get("cards") or [])
         if cards:
             actions.append({"kind": "cards", "cards": cards})
+    if (action_kinds is None or "ads" in action_kinds) and str(dict(task.get("ads") or {}).get("status", "pending")) not in _TERMINAL:
+        ads = dict(plan.get("ads") or {})
+        if ads and bool(ads.get("enabled")):
+            actions.append({"kind": "ads", **ads})
     if (action_kinds is None or "end-screen" in action_kinds) and str(dict(task.get("endScreen") or {}).get("status", "pending")) not in _TERMINAL:
         end_screen = dict(plan.get("endScreen") or {})
         if end_screen and str(end_screen.get("status", "")) != "skipped":
