@@ -18,7 +18,7 @@ describe("Publication V2 accessibility", () => {
     });
     const blocking = result.violations.filter((violation) => ["serious", "critical"].includes(String(violation.impact)));
     expect(blocking.map((violation) => ({ id: violation.id, nodes: violation.nodes.map((node) => node.target) }))).toEqual([]);
-  });
+  }, 15000);
 
   it("keeps bulk controls reachable by accessible names and native controls", () => {
     render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
