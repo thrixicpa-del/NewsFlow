@@ -12,8 +12,7 @@ from datetime import datetime, time, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
-
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _STAGES = (
     "AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION",
@@ -76,9 +75,9 @@ def migrate_legacy_publication_data(settings: Any) -> PublicationMigrationReport
     items = dict(getattr(settings, "youtube_publication_items", {}) or {})
     snapshots = dict(getattr(settings, "youtube_publication_snapshots", {}) or {})
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
-    known_by_id = {str(item.get("production_item_id", "")).strip(): item
+    known_by_id = {str(item.get("id") or item.get("production_item_id") or "").strip(): item
                    for item in getattr(settings, "idea_production_items", []) if isinstance(item, dict)
-                   and str(item.get("production_item_id", "")).strip()}
+                   and str(item.get("id") or item.get("production_item_id") or "").strip()}
     known_by_title: dict[str, list[str]] = {}
     for production_id, item in known_by_id.items():
         known_by_title.setdefault(_normalise(item.get("title")), []).append(production_id)
@@ -418,7 +417,7 @@ def validate_publication_schedule(assignments: list[dict], channel_rules: dict[s
         try:
             zone = ZoneInfo(str(rule.get("timezone", "") or "UTC"))
             slot = datetime.fromisoformat(raw_slot)
-        except Exception:
+        except (ValueError, ZoneInfoNotFoundError):
             conflicts.append({"kind": "invalid_timezone_or_time", "productionItemId": production_id, "channelId": channel_id})
             continue
         local_slot = slot.replace(tzinfo=zone) if slot.tzinfo is None else slot.astimezone(zone)
@@ -514,7 +513,7 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
             "id": snapshot_id, "productionItemId": production_id, "channelId": channel_id,
             "videoPath": str(artifact.get("path", "")), "thumbnailPath": str(thumbnail.get("path", "")), "metadata": metadata,
             "privacy": privacy, "publishMode": mode, "requestedPublishAt": publish_at,
-            "idempotencyKey": sha256(f"{production_id}|{channel_id}".encode("utf-8")).hexdigest(), "createdAt": _now(),
+            "idempotencyKey": sha256(f"{production_id}|{channel_id}".encode()).hexdigest(), "createdAt": _now(),
         }
         snapshots[snapshot_id] = snapshot
         executions[snapshot_id] = _execution(snapshot_id, production_id, {"publishAt": publish_at or ""})
@@ -679,7 +678,6 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
     if not snapshot or not execution:
         raise ValueError("Publication snapshot или execution не найден")
     snippet = dict(video.get("snippet", {}) or {})
-    status = dict(video.get("status", {}) or {})
     processing = dict(video.get("processingDetails", {}) or {})
     expected = dict(snapshot.get("metadata", {}) or {})
     steps = dict(execution.get("steps", {}) or {})
