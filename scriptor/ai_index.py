@@ -976,7 +976,7 @@ class ClipIndex:
 
     @classmethod
     def _screen_text_obvious_from_vectors(cls, frame_vectors, query_vectors) -> bool:
-        """Cheap indexing gate: block only unmistakable text evidence."""
+        """Cheap indexing gate: block only unmistakable English/title evidence."""
         return any(
             positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN
             for positive, negative in (
@@ -986,19 +986,25 @@ class ClipIndex:
 
     @classmethod
     def _screen_text_state_from_vectors(cls, frame_vectors, query_vectors) -> int:
-        """Strict selection gate: every frame must be clearly text-free."""
+        """Return 1=BLOCKED, -1=SAFE, 0=UNCERTAIN."""
+        safe_frames = 0
+        total = 0
         for frame in frame_vectors:
+            total += 1
             positive, negative = cls._screen_text_scores(frame, query_vectors)
-            # Fail closed: ambiguous frames are not safe enough for Montage.
-            if negative < positive + _SCREEN_TEXT_SAFE_MARGIN:
+            if positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN:
                 return 1
-        return -1
+            if negative >= positive + _SCREEN_TEXT_SAFE_MARGIN:
+                safe_frames += 1
+        if total and safe_frames == total:
+            return -1
+        return 0
 
-    def _screen_text_state(self, path: Path) -> int:
-        """Return -1 only when every sampled frame is clearly text-free."""
+    def _screen_text_state(self, path: Path, *, samples: int = 5) -> int:
+        """Classify samples without turning ambiguity into a hard block."""
         if not self._text_model_is_cached():
             return 0
-        images = self._sample_frames(path, samples=5)[0]
+        images = self._sample_frames(path, samples=samples)[0]
         image_model, _text_model = self._models()
         frame_vectors = [
             self._normalize(value) for value in image_model.embed(images, batch_size=len(images))
@@ -1008,14 +1014,15 @@ class ClipIndex:
         ])
         return self._screen_text_state_from_vectors(frame_vectors, query_vectors)
 
-    def screen_text_safe(self, path: str | Path) -> bool:
-        """Lazily verify one ranked candidate; unchecked is never treated as safe."""
+    def screen_text_eligibility(self, path: str | Path, *, deep: bool = False) -> str:
+        """Return SAFE, UNCERTAIN or BLOCKED for one ranked candidate."""
         candidate = Path(path)
         try:
             resolved = str(candidate.resolve())
         except OSError:
             resolved = str(candidate)
-        cached = self._screen_text_safe_cache.get(resolved)
+        cache_key = (resolved, bool(deep))
+        cached = self._screen_text_state_cache.get(cache_key)
         if cached is not None:
             return cached
         with self._connect() as connection:
@@ -1023,58 +1030,69 @@ class ClipIndex:
                 "SELECT english_text,english_text_version FROM clips WHERE path=?", (resolved,)
             ).fetchone()
         if row is not None and int(row["english_text_version"] or 0) >= SCREEN_TEXT_CLASSIFIER_VERSION:
-            safe = int(row["english_text"]) == -1
-            self._screen_text_safe_cache[resolved] = safe
-            return safe
+            persisted = int(row["english_text"])
+            if persisted == 1:
+                self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_BLOCKED
+                return SCREEN_ELIGIBILITY_BLOCKED
+            if persisted == -1:
+                self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_SAFE
+                return SCREEN_ELIGIBILITY_SAFE
+            if not deep:
+                self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_UNCERTAIN
+                return SCREEN_ELIGIBILITY_UNCERTAIN
         try:
-            state = self._screen_text_state(candidate)
+            state = self._screen_text_state(candidate, samples=11 if deep else 5)
         except (OSError, ValueError):
             state = 0
-        if state == 0:
-            self._screen_text_safe_cache[resolved] = False
-            return False
         if row is not None:
             with self._lock, self._connect() as connection:
                 connection.execute(
                     "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
                     (state, SCREEN_TEXT_CLASSIFIER_VERSION, resolved),
                 )
-            self._invalidate_search_cache()
-        safe = state == -1
-        self._screen_text_safe_cache[resolved] = safe
-        return safe
+            if state == 1:
+                self._invalidate_search_cache()
+        eligibility = (
+            SCREEN_ELIGIBILITY_BLOCKED if state == 1
+            else SCREEN_ELIGIBILITY_SAFE if state == -1
+            else SCREEN_ELIGIBILITY_UNCERTAIN
+        )
+        self._screen_text_state_cache[(resolved, bool(deep))] = eligibility
+        if state in {-1, 1}:
+            self._screen_text_state_cache[(resolved, not bool(deep))] = eligibility
+        return eligibility
+
+    def screen_text_safe(self, path: str | Path) -> bool:
+        """Compatibility helper: deep-check ambiguity; reject only BLOCKED."""
+        return self.screen_text_eligibility(path, deep=True) != SCREEN_ELIGIBILITY_BLOCKED
 
     def classify_english_screen_text(self) -> dict[str, int]:
-        """Explicit maintenance pass using frame-level, fail-closed screening."""
+        """Persist v4 English/interstitial SAFE/BLOCKED/UNCERTAIN states."""
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT path FROM clips
-                   WHERE english_text_version < ? OR english_text=0 ORDER BY path""",
+                   WHERE english_text_version < ? ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
         if not rows:
             stats = self.screen_text_stats()
-            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"]}
+            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
+                    "uncertain": stats["unchecked"]}
         if not self._text_model_is_cached():
             stats = self.screen_text_stats()
-            return {"checked": 0, "blocked": stats["blocked"], "safe": 0}
-
-        blocked = safe = checked = 0
+            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
+                    "uncertain": stats["unchecked"]}
+        blocked = safe = uncertain = checked = 0
         for row in rows:
-            result = self.screen_text_safe(row["path"])
-            with self._connect() as connection:
-                current = connection.execute(
-                    "SELECT english_text,english_text_version FROM clips WHERE path=?", (row["path"],)
-                ).fetchone()
-            if current is None or int(current["english_text_version"] or 0) < SCREEN_TEXT_CLASSIFIER_VERSION:
-                continue
+            eligibility = self.screen_text_eligibility(row["path"], deep=False)
             checked += 1
-            blocked += int(not result)
-            safe += int(result)
-        return {"checked": checked, "blocked": blocked, "safe": safe}
+            blocked += int(eligibility == SCREEN_ELIGIBILITY_BLOCKED)
+            safe += int(eligibility == SCREEN_ELIGIBILITY_SAFE)
+            uncertain += int(eligibility == SCREEN_ELIGIBILITY_UNCERTAIN)
+        return {"checked": checked, "blocked": blocked, "safe": safe, "uncertain": uncertain}
 
     def screen_text_stats(self) -> dict[str, int]:
-        """Return current classifier state without treating stale safe labels as verified."""
+        """Count only current-v4 verdicts; stale v3 blocks become uncertain."""
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT english_text,english_text_version,COUNT(*) AS amount
@@ -1085,9 +1103,11 @@ class ClipIndex:
             state = int(row["english_text"])
             version = int(row["english_text_version"] or 0)
             amount = int(row["amount"])
-            if state == 1:
+            if version < SCREEN_TEXT_CLASSIFIER_VERSION:
+                unchecked += amount
+            elif state == 1:
                 blocked += amount
-            elif state == -1 and version >= SCREEN_TEXT_CLASSIFIER_VERSION:
+            elif state == -1:
                 safe += amount
             else:
                 unchecked += amount
