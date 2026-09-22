@@ -18,7 +18,7 @@ from .timeline import probe_media_duration
 
 _STAGES = (
     "AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION",
-    "TAGS", "THUMBNAIL", "POST", "CARDS", "END_SCREEN", "SCHEDULE",
+    "TAGS", "THUMBNAIL", "ADS", "POST", "CARDS", "END_SCREEN", "SCHEDULE",
 )
 
 
@@ -825,16 +825,51 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
         artifact = dict(item.get("artifacts", {}).get("video", {}) or {})
         thumbnail = dict(item.get("artifacts", {}).get("thumbnail", {}) or {})
         metadata = dict(item.get("metadata", {}) or {})
+        automation = dict(rule.get("automation", {}) or {})
+        frozen_automation = {
+            "upload": bool(automation.get("upload", True)),
+            "metadata": bool(automation.get("metadata", True)),
+            "thumbnail": bool(automation.get("thumbnail", True)),
+            "ads": bool(automation.get("ads", True)),
+            "post": bool(automation.get("post", True)),
+            "cards": bool(automation.get("cards", True)),
+            "endScreen": bool(automation.get("endScreen", True)),
+        }
+        duration_seconds = _item_duration_seconds(item)
+        monetized = bool(rule.get("monetized", False))
         snapshot = {
             "id": snapshot_id, "productionItemId": production_id, "channelId": channel_id,
             "videoPath": str(artifact.get("path", "")), "thumbnailPath": str(thumbnail.get("path", "")), "metadata": metadata,
+            "durationSeconds": duration_seconds, "monetized": monetized,
+            "adPolicy": {
+                "enabled": monetized and frozen_automation["ads"],
+                "manualIntervalSeconds": 39,
+                "automaticSlotsEnabled": True,
+            },
+            "automation": frozen_automation,
             "privacy": privacy, "publishMode": mode, "requestedPublishAt": publish_at,
             "idempotencyKey": sha256(f"{production_id}|{channel_id}".encode()).hexdigest(), "createdAt": _now(),
         }
         snapshots[snapshot_id] = snapshot
-        executions[snapshot_id] = _execution(snapshot_id, production_id, {"publishAt": publish_at or ""})
-        executions[snapshot_id]["overallStatus"] = "SCHEDULED" if mode == "schedule" else "READY"
-        executions[snapshot_id]["plannedPublishAt"] = publish_at
+        execution = _execution(snapshot_id, production_id, {"publishAt": publish_at or ""})
+        execution["overallStatus"] = "SCHEDULED" if mode == "schedule" else "READY"
+        execution["plannedPublishAt"] = publish_at
+        if not frozen_automation["thumbnail"]:
+            execution["steps"]["THUMBNAIL"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "channel_policy"}}
+        if not monetized or not frozen_automation["ads"]:
+            execution["steps"]["ADS"] = {
+                **_step("NOT_REQUIRED"),
+                "providerResult": {"mode": "NONE", "reason": "channel_not_monetized_or_ads_disabled"},
+            }
+        if not frozen_automation["post"]:
+            execution["steps"]["POST"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "channel_policy"}}
+        if not frozen_automation["cards"]:
+            execution["steps"]["CARDS"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "channel_policy"}}
+        if not frozen_automation["endScreen"]:
+            execution["steps"]["END_SCREEN"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "channel_policy"}}
+        if mode != "schedule":
+            execution["steps"]["SCHEDULE"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "publish_now"}}
+        executions[snapshot_id] = execution
         created.append(snapshot_id)
     settings.youtube_publication_snapshots = snapshots
     settings.youtube_publication_executions = executions
@@ -1220,6 +1255,10 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
             "privacy": snapshot.get("privacy", "private"), "publishMode": snapshot.get("publishMode", "publish_now"),
             "youtubeVideoId": execution.get("youtubeVideoId"), "youtubeVideoUrl": execution.get("youtubeVideoUrl"),
             "currentStage": execution.get("currentStage", "WAITING"), "status": status,
+            "ads": {
+                "status": str(dict(steps.get("ADS", {}) or {}).get("status", "PENDING")),
+                "mode": str(dict(dict(steps.get("ADS", {}) or {}).get("providerResult", {}) or {}).get("mode", "")),
+            },
             "completion": {"completed": completed, "total": total}, "steps": steps,
             "timeline": list(execution.get("timeline", []) or [])[-100:],
             "active": bool(execution.get("activeLease")),
