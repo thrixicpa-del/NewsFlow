@@ -17,7 +17,7 @@ export function defaultRule(id: string, saved: Record<string, any> = {}): Channe
     publishMode: saved.publishMode === "schedule" ? "schedule" : "publish_now",
     timezone: text(saved.timezone) || "Europe/Minsk",
     firstPublishAt: text(saved.firstPublishAt),
-    intervalMinutes: Math.max(15, Number(saved.intervalMinutes) || 180),
+    intervalMinutes: Math.max(15, Math.round((Number(saved.intervalMinutes) || 180) / 15) * 15),
     allowedWeekdays: Array.isArray(saved.allowedWeekdays) ? saved.allowedWeekdays.map(Number).filter((day) => day >= 0 && day <= 6) : [0, 1, 2, 3, 4, 5, 6],
     publishWindowStart: text(saved.publishWindowStart),
     publishWindowEnd: text(saved.publishWindowEnd),
