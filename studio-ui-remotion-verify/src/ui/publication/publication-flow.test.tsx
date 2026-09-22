@@ -27,10 +27,10 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByText("Количество роликов")).toBeInTheDocument();
     expect(screen.getByLabelText("Ролики с №")).toBeInTheDocument();
     expect(screen.getByLabelText("Ролики по №")).toBeInTheDocument();
-    expect(screen.getByLabelText("Первый выход")).toHaveAttribute("step", "900");
-    expect(screen.getByLabelText("Окно: начало")).toHaveAttribute("step", "900");
+    expect(screen.getByLabelText("Первый выход канала")).toHaveAttribute("step", "900");
+    expect(screen.getByLabelText("Окно публикации: начало")).toHaveAttribute("step", "900");
     expect(screen.getByText(/:00 \/ :15 \/ :30 \/ :45/)).toBeInTheDocument();
-    expect(screen.getByText("Реклама / монетизация")).toBeInTheDocument();
+    expect(screen.getByText(/реклама тоже обязательна/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeInTheDocument();
   });
 
@@ -169,7 +169,7 @@ describe("PublicationPage interactions", () => {
     fireEvent.change(channelSelect, { target: { value: "" } });
     expect(channelSelect).toHaveValue("");
     fireEvent.click(screen.getByRole("button", { name: "Отменить изменение" }));
-    expect(channelSelect).toHaveValue("channel-a");
+    await waitFor(() => expect(screen.getByLabelText("Канал для Готовый ролик")).toHaveValue("channel-a"));
   });
 
   it("shows the preview in a 15-minute day-plan grid", async () => {
