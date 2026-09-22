@@ -30,5 +30,5 @@ export function VideosTable({ rows, onSelectionChange, onPriorityChange }: { row
 }
 
 function VideoDetails({ row }: { row: VideoRow }) {
-  return <div className="nf-video-details"><div><small>АРТЕФАКТЫ</small><p>{mark(row.mp4Ready, "MP4 есть", "MP4 отсутствует")}{mark(row.coverReady, "Обложка есть", "Обложки нет")}{mark(row.seoReady, "SEO готов", "SEO нет")}{mark(row.mp3Ready, "MP3 есть", "MP3 нет")}</p></div><div><small>МЕТАДАННЫЕ</small><p>{mark(row.metadataReady, "Заголовок/описание", "Метаданные")}</p></div><div><small>ПУБЛИКАЦИЯ</small><p>{row.channelName} · {row.publishAt || "не назначено"} · {row.assignmentType}</p></div></div>;
+  return <div className="nf-video-details"><div><small>АРТЕФАКТЫ</small><p>{mark(row.mp4Ready, "MP4 есть", "MP4 отсутствует")}{mark(row.coverReady, "Обложка есть", "Обложки нет")}{mark(row.seoReady, "SEO готов", "SEO нет")}{mark(row.mp3Ready, "MP3 есть", "MP3 нет")}</p></div><div><small>МЕТАДАННЫЕ</small><p>{mark(row.metadataReady, "Заголовок/описание", "Метаданные")}</p></div><div><small>ПУБЛИКАЦИЯ</small><p>{row.channelName} · {row.publishAt || "не назначено"} · {row.assignmentType}</p></div><div><small>ProductionItem ID</small><p>{row.id}</p></div></div>;
 }
