@@ -35,7 +35,7 @@ export interface CriticalCommandPayloads {
   "run-montage-queue": { indices?: number[]; missingOnly?: boolean; replaceOutput?: boolean };
   "generate-seo": { indices?: number[]; provider?: "agent" | "openai" };
   "generate-tags": { indices?: number[]; provider?: "agent" | "openai" };
-  "preview-publication-v2-distribution": { bulkSchedule?: { date: string; startTime: string; endTime: string; timezone: string; channelIds: string[]; maxPerChannel: number } };
+  "preview-publication-v2-distribution": { productionItemIds?: string[]; bulkSchedule?: { date: string; startTime: string; endTime: string; timezone: string; channelIds: string[]; maxPerChannel: number } };
   "confirm-publication-v2-distribution": { assignments?: Array<Record<string, unknown>> };
   "run-publication-v2-studio": { snapshotIds?: string[]; steps?: Array<"ads" | "post" | "cards" | "end-screen"> };
 }
