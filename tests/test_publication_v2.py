@@ -395,7 +395,8 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertNotEqual(rows["pi-new"]["productionItemId"], "pi-confirmed")
 
 
-class PublicationV2RuleTests(unittest.TestCase):    def test_channel_rule_normalizes_blackout_periods(self):
+class PublicationV2RuleTests(unittest.TestCase):
+    def test_channel_rule_normalizes_blackout_periods(self):
         rule = normalize_channel_publication_rule({
             "channelId": "channel-a",
             "quota": 1,
