@@ -887,6 +887,50 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["ADS"]["status"], "PENDING")
         execute.assert_not_called()
 
+    def test_v2_studio_honors_frozen_non_ads_automation_policy(self):
+        """Confirmed channel policy disables cards/end-screen without changing completed upload."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1", "productionItemId": "pi-1", "channelId": "channel-a",
+                    "durationSeconds": 600, "monetized": True,
+                    "automation": {"post": True, "cards": False, "endScreen": False, "ads": True},
+                    "adPolicy": {"enabled": True, "manualIntervalSeconds": 39, "automaticSlotsEnabled": True},
+                    "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1", "productionItemId": "pi-1",
+                    "youtubeVideoId": "yt-existing", "overallStatus": "FORMATTING", "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "SUCCESS"},
+                        "CARDS": {"status": "PENDING"},
+                        "END_SCREEN": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "execute_studio_task") as execute:
+            result = bridge.run_publication_v2_studio({
+                "snapshotIds": ["snapshot-1"],
+                "steps": ["cards", "end-screen"],
+            })
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["failed"], 0)
+        self.assertEqual(result["operationResult"]["skipped"], 2)
+        self.assertEqual(execution["steps"]["CARDS"]["status"], "NOT_REQUIRED")
+        self.assertEqual(execution["steps"]["END_SCREEN"]["status"], "NOT_REQUIRED")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
+        execute.assert_not_called()
+
     def test_v2_studio_partial_ads_preserves_auto_mode_and_never_reuploads_mp4(self):
         """AUTO success plus incomplete manual slots stays retryable without reopening VIDEO_UPLOAD."""
         settings = Settings(
