@@ -198,6 +198,21 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   const updateDistribution = (id: string, patch: Partial<DistributionRow>) =>
     setDistribution((current) => current.map((row) => row.productionItemId === id ? { ...row, ...patch } : row));
 
+  const dayPlanRows: DistributionRow[] = distribution.length
+    ? distribution
+    : model.queue.map((row) => ({
+      productionItemId: row.productionItemId,
+      title: row.title || row.productionItemId,
+      duration: "—",
+      channelId: row.channelId,
+      channelName: name(row.channelId),
+      source: "confirmed_snapshot",
+      locked: true,
+      reason: "confirmed_snapshot",
+      publishAt: row.publishAt || "",
+      warning: "",
+    }));
+
   return <div className="nf-publication-page">
     <PublicationHeader
       model={model}
@@ -213,6 +228,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         { id: "videos", label: "Ролики", count: model.videos.length },
         { id: "channels", label: "Каналы", count: model.channels.length },
         { id: "distribution", label: "Распределение", count: distribution.length || undefined },
+        { id: "dayplan", label: "План дня", count: dayPlanRows.filter((row) => row.publishAt).length || undefined },
         { id: "queue", label: "Очередь", count: model.queue.length || undefined },
         { id: "history", label: "История", count: model.receipts.length || undefined },
       ]}
@@ -267,9 +283,10 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       {distribution.length ? <>
         <DistributionHealth rows={distribution}/>
         <DistributionTable rows={distribution} channels={rules} onChange={updateDistribution}/>
-        <PublicationDayPlan rows={distribution} channels={rules}/>
       </> : <div className="nf-empty-small"><b>Preview ещё не построен</b><span>Сохраните правила каналов и нажмите «Распределить».</span></div>}
     </section> : null}
+
+    {tab === "dayplan" ? <PublicationDayPlan rows={dayPlanRows} channels={rules}/> : null}
 
     {tab === "queue" ? <PublicationQueue
       rows={model.queue}
