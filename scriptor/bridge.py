@@ -11797,17 +11797,78 @@ def prepare_montage(payload: dict) -> dict:
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         if selected is None:
-            diagnostics = selection.diagnostics if selection else selection_failure_diagnostics
-            raise ValueError(
-                f"Не найдено ни одного допустимого футажа для сцены {scene_number}; "
-                f"retrieved={diagnostics.get('candidates_retrieved', len(seen_candidate_paths))}, "
-                f"hard_valid={diagnostics.get('hard_valid', 0)}, "
-                f"reserved_unique={diagnostics.get('unique_rejected_reservation', 0)}, "
-                f"diversity_unique={diagnostics.get('unique_rejected_diversity', 0)}, "
-                f"duration={diagnostics.get('rejected_duration', 0)}, "
-                f"safety={diagnostics.get('rejected_safety', 0)}, "
-                f"missing={diagnostics.get('rejected_missing', 0)}, "
-                f"rejection_events={diagnostics.get('rejection_events', 0)}"
+            # Absolute visual-continuity fallback. At this point all semantic
+            # ladders are exhausted, so topic/geography relevance is no longer
+            # allowed to abort an otherwise renderable project. English/Latin
+            # overlays, full-screen title/interstitial slates, missing files
+            # and insufficient physical duration remain hard technical blocks.
+            try:
+                continuity_items = index.all_items(exclude_english_text=True)
+            except (OSError, RuntimeError, ValueError):
+                continuity_items = []
+            continuity_ranked = sorted(
+                continuity_items,
+                key=lambda item: (
+                    _montage_clip_family_key(item.path) in project_used_families,
+                    _montage_clip_key(item.path) in recent_project_paths,
+                    _montage_stable_variation(
+                        f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
+                        scene["visual_query_en"],
+                        _montage_clip_family_key(item.path),
+                    ),
+                    _montage_clip_key(item.path),
+                ),
+            )
+            for candidate in continuity_ranked:
+                candidate_key = _montage_clip_key(candidate.path)
+                candidate_family = _montage_clip_family_key(candidate.path)
+                if not source_exists(candidate):
+                    continue
+                candidate_duration = verified_duration(candidate)
+                if candidate_duration + .05 < required_source_duration:
+                    continue
+                if not _montage_screen_text_safe(index, candidate, allow_uncertain=True):
+                    continue
+                selected = candidate
+                selected_duration = candidate_duration
+                score = 0.0
+                reused_candidate = (
+                    candidate_key in project_used
+                    or candidate_family in project_used_families
+                )
+                selection = MontageCandidateSelection(
+                    candidate,
+                    candidate_duration,
+                    0.0,
+                    "VISUAL_CONTINUITY_FALLBACK",
+                    False,
+                    {
+                        "candidates_retrieved": len(continuity_ranked),
+                        "hard_valid": 1,
+                        "strict_accepted": 0,
+                        "rejected_threshold": 0,
+                        "rejected_reservation": 0,
+                        "rejected_diversity": 0,
+                        "rejected_missing": 0,
+                        "rejected_duration": 0,
+                        "rejected_safety": 0,
+                    },
+                    source_family=candidate_family,
+                    reused=reused_candidate,
+                    position_bucket=position_bucket,
+                    position_rotation_reason=(
+                        "визуальная непрерывность: смысловые варианты исчерпаны; "
+                        "выбран новый технически пригодный футаж"
+                        if not reused_candidate
+                        else "визуальная непрерывность: новых пригодных family не осталось"
+                    ),
+                )
+                source = f"{candidate.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
+                break
+
+        if selected is None:
+            raise RuntimeError(
+                "В библиотеке нет ни одного физически пригодного видео для продолжения монтажа"
             )
         # The index may still contain a row for a user-deleted cut. Never
         # persist that stale database path into a .newsflow project.
