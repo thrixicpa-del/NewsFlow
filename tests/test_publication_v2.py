@@ -339,6 +339,45 @@ class PublicationV2RuleTests(unittest.TestCase):
         self.assertFalse(rule["automation"]["post"])
 
 
+class PublicationV2PresetTests(unittest.TestCase):
+    def test_rule_preset_save_apply_delete_round_trip(self):
+        settings = Settings()
+        rules = {
+            "channel-a": {
+                "channelId": "channel-a", "enabled": True, "quota": 4, "intervalMinutes": 30,
+                "timezone": "Europe/Minsk", "orderStart": 1, "orderEnd": 20,
+                "automation": {"post": False},
+            },
+        }
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {"v2": {}}}):
+            bridge.save_publication_v2_rule_preset({"name": "Будни", "rules": rules})
+            settings.youtube_channel_publication_rules = {}
+            bridge.apply_publication_v2_rule_preset({"name": "Будни"})
+            applied = settings.youtube_channel_publication_rules["channel-a"]
+            self.assertEqual(applied["quota"], 4)
+            self.assertEqual(applied["intervalMinutes"], 30)
+            self.assertEqual((applied["orderStart"], applied["orderEnd"]), (1, 20))
+            self.assertFalse(applied["automation"]["post"])
+            bridge.delete_publication_v2_rule_preset({"name": "Будни"})
+
+        self.assertEqual(settings.youtube_publication_v2_rule_presets, [])
+
+    def test_rule_presets_survive_settings_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            settings = Settings(youtube_publication_v2_rule_presets=[{
+                "name": "Срочные",
+                "rules": {"channel-a": {"channelId": "channel-a", "quota": 2, "intervalMinutes": 15}},
+            }])
+            with patch.object(config, "config_path", return_value=path):
+                config.save_settings(settings)
+                restored = config.load_settings()
+
+        self.assertEqual(restored.youtube_publication_v2_rule_presets, settings.youtube_publication_v2_rule_presets)
+
+
 class PublicationV2SchedulerTests(unittest.TestCase):
     def test_bulk_range_schedules_each_channel_independently_on_quarter_hour_grid(self):
         """A bulk window is a per-channel boundary, never one global timeline shared by every channel."""
