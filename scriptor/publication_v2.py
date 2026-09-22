@@ -1458,6 +1458,8 @@ def retry_publication_stage(settings: Any, snapshot_id: str, stage: str) -> None
         raise ValueError("Готовый этап нельзя повторить без явного force")
     if normalized == "VIDEO_UPLOAD" and str(execution.get("youtubeVideoId") or "").strip():
         raise ValueError("MP4 уже загружен на YouTube; повторная загрузка запрещена")
+    if normalized == "VIDEO_UPLOAD" and str(result.get("status", "")).upper() == "USER_ACTION_REQUIRED":
+        raise ValueError("Прерванная загрузка требует безопасной сверки перед повтором; обычный retry запрещён")
     result.update({"status": "RETRYING", "error": None, "nextRetryAt": None})
     steps[normalized] = result
     execution["steps"] = steps
