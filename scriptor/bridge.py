@@ -14593,7 +14593,8 @@ def run_publication_v2_studio(payload: dict) -> dict:
         )
         video_url = str(execution.get("youtubeVideoUrl") or "").strip() or f"https://www.youtube.com/watch?v={video_id}"
         description = re.sub(r"(?<!\w)#[^\s#]+", "", str(metadata.get("description", ""))).strip()
-        cta = re.sub(r"(?<!\w)#[^\s#]+", "", str(settings.seo_call_to_action or "")).strip()
+        community_post = dict(snapshot_record.get("communityPost", {}) or {})
+        cta = re.sub(r"(?<!\w)#[^\s#]+", "", str(community_post.get("callToAction", "") or "")).strip()
         post_text = "\n\n".join(value for value in (description, cta, video_url) if value)
 
         steps_now = dict((settings.youtube_publication_executions.get(snapshot_id, {}) or {}).get("steps", {}) or {})
