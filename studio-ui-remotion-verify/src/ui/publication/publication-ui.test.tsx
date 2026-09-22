@@ -57,6 +57,42 @@ describe("PublicationPage", () => {
     expect(screen.getByText("AUTO + MANUAL 39s")).toBeInTheDocument();
   });
 
+  it("keeps video-ready, new-package, and quota-slot counters semantically distinct", () => {
+    const semanticFixture = {
+      ...fixture,
+      publication: {
+        ...fixture.publication,
+        readyOutputs: [],
+        v2: {
+          ...fixture.publication.v2,
+          counters: {
+            total: 84,
+            videoReady: 84,
+            publicationReady: 84,
+            assigned: 0,
+            unassigned: 84,
+            quotaSlotsRemaining: 88,
+          },
+          items: Object.fromEntries(Array.from({ length: 84 }, (_, index) => [`item-${index + 1}`, {
+            productionItemId: `item-${index + 1}`,
+            metadata: { title: `Ролик ${index + 1}` },
+            readiness: { state: "VIDEO_READY", videoReady: true, publicationReady: true },
+            artifacts: { video: { path: `D:/videos/${index + 1}.mp4`, exists: true } },
+          }])),
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+
+    render(<PublicationPage data={semanticFixture} command={command} />);
+
+    expect(screen.getByText("MP4 готовы")).toBeInTheDocument();
+    expect(screen.getByText("84", { selector: ".nf-kpi b" })).toBeInTheDocument();
+    expect(screen.getByText("Новые packages")).toBeInTheDocument();
+    expect(screen.getByText("0", { selector: ".nf-kpi b" })).toBeInTheDocument();
+    expect(screen.getByText("Свободно по квотам")).toBeInTheDocument();
+    expect(screen.getByText("88", { selector: ".nf-kpi b" })).toBeInTheDocument();
+  });
+
   it("shows snapshot-backed provenance for a publication receipt", () => {
     render(<PublicationHistory rows={[{
       snapshotId: "receipt-42",
