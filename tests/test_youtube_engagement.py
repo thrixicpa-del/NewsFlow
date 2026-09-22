@@ -93,6 +93,20 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             transition_engagement_step(completed, "post", "pending")
 
+
+    def test_ads_are_a_resumable_engagement_step_with_explicit_mode(self):
+        state = new_engagement_state("job-a", "channel-a")
+        self.assertEqual(state["ads"]["mode"], "PENDING")
+        completed = transition_engagement_step(
+            state, "ads", "done",
+            mode="AUTO+MANUAL", automatic=True, manual=True,
+            manualSlots=[39, 78], manualMidrollApplicable=True,
+        )
+        self.assertEqual(completed["ads"]["status"], "done")
+        self.assertEqual(completed["ads"]["mode"], "AUTO+MANUAL")
+        with self.assertRaises(ValueError):
+            transition_engagement_step(completed, "ads", "running")
+
     def test_policies_and_engagement_tasks_survive_settings_restart(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
