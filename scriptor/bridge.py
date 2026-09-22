@@ -3606,47 +3606,84 @@ def _ensure_ready_voice_maps(indices: list[int] | set[int]) -> None:
 
 
 _VOICE_MAP_CUTTER_TARGET_SECONDS = 6.0
-_VOICE_MAP_SINGLE_BEAT_MAX_SECONDS = 6.5
 
 
-def _voice_map_segment_visual_beats(segment: dict) -> list[dict]:
-    """Split one durable speech segment into balanced footage-sized beats."""
-    start = float(segment["start"])
-    end = float(segment["end"])
-    duration = float(segment["duration"])
-    beat_count = max(1, math.ceil(duration / _VOICE_MAP_SINGLE_BEAT_MAX_SECONDS))
-    words = str(segment["text"]).split()
-    beats = []
-    for index in range(beat_count):
-        beat_start = start + ((end - start) * index / beat_count)
-        beat_end = end if index == beat_count - 1 else start + ((end - start) * (index + 1) / beat_count)
-        word_start = len(words) * index // beat_count
-        word_end = len(words) * (index + 1) // beat_count
-        beats.append({
-            "narration": " ".join(words[word_start:word_end]),
-            "visual_query_en": str(segment["visualQuery"]),
-            "duration": beat_end - beat_start,
-            "minimum_footage_duration": min(
-                beat_end - beat_start, _VOICE_MAP_CUTTER_TARGET_SECONDS,
-            ),
-            "voice_segment_id": int(segment["id"]),
-            "narration_start": beat_start,
-            "narration_end": beat_end,
-            "visual_beat_index": index + 1,
-            "visual_beat_count": beat_count,
-        })
-    return beats
+def _voice_map_overlap_text(segment: dict, beat_start: float, beat_end: float) -> str:
+    """Return the canonical words whose timing falls inside one visual beat."""
+    segment_start = float(segment["start"])
+    segment_end = float(segment["end"])
+    overlap_start = max(segment_start, beat_start)
+    overlap_end = min(segment_end, beat_end)
+    if overlap_end <= overlap_start:
+        return ""
+    words = str(segment.get("text", "")).split()
+    if not words:
+        return ""
+    duration = max(0.001, segment_end - segment_start)
+
+    def word_boundary(moment: float) -> int:
+        ratio = max(0.0, min(1.0, (moment - segment_start) / duration))
+        if ratio >= 1.0 - 1e-9:
+            return len(words)
+        return max(0, min(len(words), int(math.floor(ratio * len(words) + 1e-9))))
+
+    first = word_boundary(overlap_start)
+    last = word_boundary(overlap_end)
+    return " ".join(words[first:last])
 
 
 def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
+    """Project exact VoiceMap timing onto a natural six-second Cutter grid.
+
+    VoiceMap remains the narration authority. Visual changes are deliberately
+    independent of short speech-segment boundaries: normal footage runs for
+    six seconds and only the terminal visual beat is shortened to the MP3 end.
+    """
     payload = status.data
     if status.state not in {"ready", "approximate"} or not payload:
         raise ValueError(status.reason or "VoiceMap is unavailable")
-    scenes = [
-        beat
-        for segment in payload["segments"]
-        for beat in _voice_map_segment_visual_beats(segment)
-    ]
+    segments = list(payload["segments"])
+    audio_duration = float(payload.get("audioDuration") or segments[-1]["end"])
+    if audio_duration <= 0.0:
+        raise ValueError("VoiceMap audio duration is invalid")
+
+    visual_beat_count = max(1, math.ceil(audio_duration / _VOICE_MAP_CUTTER_TARGET_SECONDS))
+    scenes: list[dict] = []
+    for beat_index in range(visual_beat_count):
+        beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
+        beat_end = min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS)
+        if beat_end <= beat_start:
+            continue
+        overlapping = [
+            segment for segment in segments
+            if float(segment["end"]) > beat_start and float(segment["start"]) < beat_end
+        ]
+        if not overlapping:
+            raise ValueError("VoiceMap has a visual timing gap")
+
+        narration_parts = [
+            part
+            for segment in overlapping
+            if (part := _voice_map_overlap_text(segment, beat_start, beat_end))
+        ]
+        queries = list(dict.fromkeys(
+            str(segment.get("visualQuery", "")).strip()
+            for segment in overlapping
+            if str(segment.get("visualQuery", "")).strip()
+        ))
+        duration = beat_end - beat_start
+        scenes.append({
+            "narration": " ".join(narration_parts).strip(),
+            "visual_query_en": ", ".join(queries) or "contextual news footage",
+            "duration": duration,
+            "minimum_footage_duration": duration,
+            "voice_segment_id": int(overlapping[0]["id"]),
+            "narration_start": beat_start,
+            "narration_end": beat_end,
+            "visual_beat_index": beat_index + 1,
+            "visual_beat_count": visual_beat_count,
+        })
+
     provenance = {
         "alignmentMode": str(payload["timingMode"]),
         "voiceMapPath": status.path,
@@ -10198,6 +10235,23 @@ _MONTAGE_NAMED_PERSON_GUARDS = (
     (("trump", "трамп"), ("putin", "путин", "zelensk", "зеленск")),
     (("zelensk", "зеленск"), ("putin", "путин", "trump", "трамп")),
 )
+_MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("us", ("washington", "white house", "united states", "us government", "american government",
+            "trump", "вашингтон", "сша", "америк", "трамп", "us-government-washington")),
+    ("ukraine", ("ukraine", "kyiv", "kiev", "zelensk", "odesa", "donbas", "pokrovsk",
+                 "украин", "киев", "зеленск", "одесс", "донбасс", "покровск",
+                 "ukraine-government-kyiv")),
+    ("russia", ("russia", "moscow", "kremlin", "putin", "росси", "москв", "кремл", "путин",
+                "russia-government-moscow")),
+    ("eu", ("european union", "brussels", "eu parliament", "europe", "евросоюз", "брюссел",
+            "европ", "eu-institutions")),
+    ("iran", ("iran", "tehran", "persian", "иран", "тегеран", "персид", "iran-government-tehran")),
+    ("armenia", ("armenia", "yerevan", "pashinyan", "армени", "ереван", "пашинян",
+                 "armenia-government-yerevan")),
+    ("azerbaijan", ("azerbaijan", "baku", "aliyev", "азербайдж", "баку", "алиев",
+                    "azerbaijan-government-baku")),
+)
+
 _MONTAGE_SEMANTIC_RULES = (
     (_FRONTLINE_QUERY_TERMS, _WAR_VISUAL_TAGS),
     (("protest", "demonstration", "rally", "picket", "митинг", "протест", "демонстр", "пикет"),
@@ -10231,6 +10285,21 @@ def _has_any(value: str, terms: tuple[str, ...]) -> bool:
     return any(term in value for term in terms)
 
 
+def _montage_entity_groups(value: str) -> set[str]:
+    lowered = str(value or "").casefold()
+    return {
+        name for name, terms in _MONTAGE_ENTITY_GROUPS
+        if any(term in lowered for term in terms)
+    }
+
+
+def _montage_entity_conflict(scene_query: str, candidate_metadata: str) -> bool:
+    """Reject explicit named geography/person contradictions, not neutral B-roll."""
+    requested = _montage_entity_groups(scene_query)
+    candidate = _montage_entity_groups(candidate_metadata)
+    return bool(requested and candidate and requested.isdisjoint(candidate))
+
+
 def _montage_has_war_action(value: str) -> bool:
     lowered = str(value or "").casefold()
     if _has_any(lowered, _KINETIC_WAR_ACTION_TERMS):
@@ -10258,7 +10327,11 @@ def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
             # A small bounded bonus only breaks ties among visually similar
             # results; it cannot turn an unrelated clip into a match alone.
             bonus += min(0.18, matches * 0.06)
-    return min(0.24, bonus)
+    requested_entities = _montage_entity_groups(query)
+    candidate_entities = _montage_entity_groups(haystack)
+    if requested_entities & candidate_entities:
+        bonus += 0.10
+    return min(0.30, bonus)
 
 
 def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
@@ -10283,6 +10356,8 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     for requested_names, contradictory_names in _MONTAGE_NAMED_PERSON_GUARDS:
         if _has_any(query, requested_names) and _has_any(haystack, contradictory_names):
             return False
+    if _montage_entity_conflict(query, haystack):
+        return False
     expected_semantic_tags: set[str] = set()
     for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:
         if _montage_semantic_rule_applies(query, query_terms, preferred_tags):
@@ -10673,7 +10748,14 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             rotation_penalty = _montage_rotation_penalty(placements, position_bucket)
             quality = float(value.score) + _montage_semantic_bonus(scene_query, value.item)
             variation = _montage_stable_variation(diversity_seed, scene_query, family)
-            return -(quality - rotation_penalty + variation), _montage_clip_key(value.item.path)
+            # SAFE_REUSE is a last resort. Once several safe families are
+            # available, strongly prefer the one used least often instead of
+            # repeatedly returning to the same high-scoring source family.
+            reuse_penalty = (
+                min(0.18, max(0, len(placements) - 1) * 0.045)
+                if level == "SAFE_REUSE" else 0.0
+            )
+            return -(quality - rotation_penalty - reuse_penalty + variation), _montage_clip_key(value.item.path)
 
         ranked = sorted(
             pool,
@@ -10855,7 +10937,7 @@ def _montage_item_is_excluded(item: FootageItem, excluded_paths: set[str] | None
 
 
 def _montage_screen_text_safe(index, item: FootageItem) -> bool:
-    """English/Latin on-screen text is a hard Montage exclusion."""
+    """Readable on-screen text, title cards and interstitial slates are hard exclusions."""
     checker = getattr(index, "screen_text_safe", None)
     if not callable(checker):
         return True
@@ -11101,8 +11183,11 @@ def prepare_montage(payload: dict) -> dict:
         # whenever the narration contains enough scene boundaries.
         unique_scene_count = min(len(scenes), max(2, unique_scene_count))
     if progress:
-        mode_detail = (f"быстрый режим {fast_reuse_percent}%: {unique_scene_count} уникальных из {len(scenes)} сцен, затем ротация"
-                       if fast_reuse else f"{len(scenes)} уникальных сцен")
+        mode_detail = (
+        f"быстрый режим {fast_reuse_percent}%: после {unique_scene_count} сцен reuse разрешён "
+        "раньше внешнего поиска; новые безопасные семьи остаются приоритетом"
+        if fast_reuse else f"{len(scenes)} уникальных сцен"
+    )
         progress("Подбор футажей", f"Пакетный поиск: {mode_detail}")
     # Ask the text model once for the whole scenario and score all scenes
     # against the shared in-memory vector matrix.  Keep extra candidates so a
@@ -11117,7 +11202,7 @@ def prepare_montage(payload: dict) -> dict:
     # rescan or full-library iteration per scene.
     scene_query_ladders: list[dict[str, list[str]]] = []
     all_search_queries: list[str] = []
-    for scene in scenes[:unique_scene_count]:
+    for scene in scenes:
         original_query = str(scene.get("visual_query_en", ""))
         ladder = _montage_query_ladder(original_query)
         scene["visual_query_en"] = ladder["STRICT_MATCH"][0]
@@ -11239,49 +11324,11 @@ def prepare_montage(payload: dict) -> dict:
             batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
             return source_start, bool(previous_starts)
 
-    # item, verified source duration, relevance score, source label, family
-    reuse_pool: list[tuple[FootageItem, float, float, str, str]] = []
-    reuse_cursor = 0
     for scene_number, scene in enumerate(scenes, 1):
         required_source_duration = float(
             scene.get("minimum_footage_duration", scene["duration"]),
         )
         position_bucket = _montage_position_bucket(scene_number - 1, len(scenes))
-        if fast_reuse and scene_number > unique_scene_count:
-            eligible = [
-                entry for entry in reuse_pool
-                if entry[1] + 0.05 >= required_source_duration
-            ]
-            # At least the unique source selected for its own beat must fit;
-            # this fallback only applies when a later beat is exceptionally
-            # longer. It preserves narration timing rather than cloning a
-            # still frame or truncating the speech.
-            if not eligible:
-                eligible = reuse_pool
-            if not eligible:
-                raise ValueError("Быстрый режим не получил ни одного пригодного уникального футажа")
-            selected, source_duration, score, original_source, source_family = eligible[reuse_cursor % len(eligible)]
-            reuse_cursor += 1
-            source_start, _family_reused = allocate_batch_source_start(
-                source_family, position_bucket, source_duration,
-                float(scene["duration"]), titles[scenario_index],
-            )
-            clips.append(TimelineClip(path=selected.path, narration=scene["narration"],
-                                      visual_query_en=scene["visual_query_en"], duration=scene["duration"],
-                                      source_start=source_start, score=score,
-                                      source=f"повтор: {original_source or 'локальный'}",
-                                      fallback_level="SAFE_REUSE", source_family=source_family,
-                                      reused=True, position_bucket=position_bucket,
-                                      position_rotation_reason="быстрый режим: другой сегмент длинного источника",
-                                      voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
-                                      narration_start=float(scene.get("narration_start", 0.0) or 0.0),
-                                      narration_end=float(scene.get("narration_end", 0.0) or 0.0),
-                                      minimum_source_duration=required_source_duration,
-                                      visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
-                                      visual_beat_count=int(scene.get("visual_beat_count", 0) or 0)))
-            if progress:
-                progress("Подбор футажей", f"Ротация {scene_number}/{len(scenes)}: {Path(selected.path).name}")
-            continue
         hits_by_level = scene_hits_by_level[scene_number - 1]
         strict_hits = hits_by_level["STRICT_MATCH"]
         relaxed_hits = hits_by_level["RELAXED_SEMANTIC"]
@@ -11396,7 +11443,7 @@ def prepare_montage(payload: dict) -> dict:
             source = selected.source or "local"
             if selection.fallback_level != "STRICT_MATCH":
                 source = f"{source} · {selection.fallback_level}"
-        if selected is None:
+        if selected is None and not (fast_reuse and scene_number > unique_scene_count):
             # This is deliberately rare: no bounded local candidate survived
             # validation. External search remains opt-in and does not change
             # the user's local-only montage configuration.
@@ -11500,8 +11547,6 @@ def prepare_montage(payload: dict) -> dict:
                                   minimum_source_duration=required_source_duration,
                                   visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
                                   visual_beat_count=int(scene.get("visual_beat_count", 0) or 0)))
-        if fast_reuse:
-            reuse_pool.append((selected, selected_duration, score, source, source_family))
         if progress:
             diagnostics = selection.diagnostics if selection else {}
             level = selection.fallback_level if selection else "LOCAL"

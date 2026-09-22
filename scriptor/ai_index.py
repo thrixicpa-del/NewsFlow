@@ -44,6 +44,10 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
     ("migrant-border", "migrants border crossing checkpoint fence border guards people with luggage"),
     ("refugee-transport", "refugee evacuation buses families luggage humanitarian aid"),
     ("political-office", "Kremlin government office politician press conference meeting room"),
+    ("russia-government-moscow", "Moscow Kremlin Russian government officials meeting press conference"),
+    ("iran-government-tehran", "Tehran Iran government officials Iranian flags political meeting"),
+    ("armenia-government-yerevan", "Yerevan Armenia government officials Armenian flags political meeting"),
+    ("azerbaijan-government-baku", "Baku Azerbaijan government officials Azerbaijani flags political meeting"),
     ("us-government-washington", "Washington DC White House United States government officials press briefing"),
     ("ukraine-government-kyiv", "Kyiv Ukraine government officials parliament presidential administration"),
     ("eu-institutions", "Brussels European Union parliament commission flags government meeting"),
@@ -71,13 +75,15 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
     ("documentary-neutral", "safe neutral documentary context everyday people buildings landscape b roll"),
 )
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
-SEMANTIC_INDEX_VERSION = 6
+SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 2
+SCREEN_TEXT_CLASSIFIER_VERSION = 3
 _SCREEN_TEXT_POSITIVE_QUERIES = (
-    "video frame with readable English words Latin alphabet captions subtitles or lower third",
-    "news broadcast frame with English headline ticker labels or on screen text",
-    "sign billboard poster computer screen or document with readable English Latin letters",
+    "video frame with readable words in any language including Latin or Cyrillic captions subtitles lower third",
+    "news broadcast frame with headline ticker labels or readable on screen text in any language",
+    "sign billboard poster computer screen or document with readable writing Latin or Cyrillic letters",
+    "full screen title card interstitial educational slate bumper logo with large text or branding",
+    "Russian or Ukrainian Cyrillic title card caption headline logo or educational interstitial",
 )
 _SCREEN_TEXT_NEGATIVE_QUERIES = (
     "clean documentary video frame without readable writing captions subtitles labels or text overlay",

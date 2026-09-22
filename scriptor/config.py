@@ -387,8 +387,9 @@ class Settings:
     # The narration gives the planner the best semantic context. It can be
     # switched off for fast title+MP3 assembly when a text file is unavailable.
     montage_use_script_text: bool = True
-    # Screen-text classification is persisted inside the footage index. A clip
-    # marked as having English lettering is never offered to montage again.
+    # Screen-text classification is persisted inside the footage index. The
+    # legacy setting name is retained, but readable text in any language plus
+    # full-screen title/interstitial cards are excluded from Montage.
     montage_exclude_english_text: bool = True
     # Optional text agent turns narration into concrete visual scene queries.
     # It falls back to the local deterministic planner without consuming API

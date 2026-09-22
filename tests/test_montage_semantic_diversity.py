@@ -133,6 +133,56 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         self.assertEqual(selection.item.path, requested_person.path)
         self.assertEqual(selection.diagnostics["unique_rejected_safety"], 1)
 
+    def test_explicit_entity_focus_rejects_disjoint_government_geography(self):
+        query = "Washington US government changes support conditions for Ukraine"
+        wrong_summit = FootageItem(
+            "D:/wrong/processed_пашинян путин саммит_slice_9.mp4",
+            "Pashinyan Putin summit.mp4",
+            tags=["press-conference"],
+        )
+        wrong_iran = FootageItem(
+            "D:/wrong/iran-corridor.mp4",
+            "government corridor.mp4",
+            tags=["iran-government-tehran", "parliament-government"],
+        )
+        right = FootageItem(
+            "D:/right/white-house.mp4",
+            "White House briefing.mp4",
+            tags=["us-government-washington", "press-conference"],
+        )
+
+        self.assertFalse(bridge._semantic_clip_ok(query, wrong_summit))
+        self.assertFalse(bridge._semantic_clip_ok(query, wrong_iran))
+        self.assertTrue(bridge._semantic_clip_ok(query, right))
+
+    def test_safe_reuse_prefers_the_less_repeated_safe_family(self):
+        frequent = FootageItem(
+            "D:/safe/frequent/shot.mp4", "frequent tanker.mp4", tags=["oil-tanker-port"],
+        )
+        alternate = FootageItem(
+            "D:/safe/alternate/shot.mp4", "alternate tanker.mp4", tags=["oil-tanker-port"],
+        )
+        frequent_key = bridge._montage_clip_key(frequent.path)
+        alternate_key = bridge._montage_clip_key(alternate.path)
+        selection = self._select(
+            strict=[
+                SearchHit(frequent, .55, 30.0, source_family="family-frequent"),
+                SearchHit(alternate, .50, 30.0, source_family="family-alternate"),
+            ],
+            used_paths={frequent_key, alternate_key},
+            used_families={"family-frequent", "family-alternate"},
+            project_paths={frequent_key, alternate_key},
+            project_families={"family-frequent", "family-alternate"},
+            family_buckets={
+                "family-frequent": ["EARLY", "EARLY", "MIDDLE", "MIDDLE", "LATE"],
+                "family-alternate": ["EARLY"],
+            },
+            bucket="LATE",
+        )
+
+        self.assertEqual(selection.source_family, "family-alternate")
+        self.assertEqual(selection.fallback_level, "SAFE_REUSE")
+
     def test_all_ladder_queries_use_one_batched_index_request(self):
         ladders = [
             bridge._montage_query_ladder("oil tanker traffic"),
