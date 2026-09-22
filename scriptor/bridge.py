@@ -11217,11 +11217,12 @@ def prepare_montage(payload: dict) -> dict:
     if not used_voice_map:
         scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
     preparation_metrics["planning"] = (time.perf_counter() - preparation_started) * 1000
-    # Fast visual loop searches only a user-selected prefix of the *voice
-    # duration*, not merely the same percentage of scene count.  Afterwards
-    # the chosen source clips are rotated on the original speech boundaries.
-    # This makes a 13% setting mean roughly 13% unique visuals even if some
-    # narration sentences are longer than others.
+    # Fast visual loop treats the slider as a target for how much of the
+    # narration receives newly prepared footage.  After that target is reached
+    # the selector first reuses the already prepared pool (including the same
+    # source_start, so the FFmpeg proxy cache is actually reused). A new source
+    # is allowed only as a semantic/safety escape hatch when no pooled source
+    # can validly illustrate the current beat.
     unique_scene_count = len(scenes)
     fast_reuse_percent = _fast_reuse_percent_for_scenario(settings, scenario_index)
     fast_reuse = bool(fast_reuse_percent is not None and len(scenes) > 1)
@@ -11239,8 +11240,8 @@ def prepare_montage(payload: dict) -> dict:
         unique_scene_count = min(len(scenes), max(2, unique_scene_count))
     if progress:
         mode_detail = (
-            f"быстрый режим {fast_reuse_percent}%: после {unique_scene_count} сцен reuse разрешён "
-            "раньше внешнего поиска; новые безопасные семьи остаются приоритетом"
+            f"быстрый режим {fast_reuse_percent}%: {unique_scene_count} сцен формируют уникальный пул, "
+            "после порога сначала повторяются готовые proxy; новый источник — только safety fallback"
             if fast_reuse else f"{len(scenes)} уникальных сцен"
         )
         progress("Подбор футажей", f"Пакетный поиск: {mode_detail}")
@@ -11379,6 +11380,7 @@ def prepare_montage(payload: dict) -> dict:
             batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
             return source_start, bool(previous_starts)
 
+    fast_reuse_pool: dict[str, TimelineClip] = {}
     for scene_number, scene in enumerate(scenes, 1):
         required_source_duration = float(
             scene.get("minimum_footage_duration", scene["duration"]),
@@ -11400,6 +11402,8 @@ def prepare_montage(payload: dict) -> dict:
         source = ""
         selection = None
         selection_failure_diagnostics: dict[str, int] = {}
+        reuse_origin_clip: TimelineClip | None = None
+        fast_pool_reuse = False
         # Reuse is acceptable only after quality exhaustion.  Keep a small
         # local cooldown so fallback yields A → B → A rather than A → A.
         recent_project_paths = {
@@ -11407,6 +11411,70 @@ def prepare_montage(payload: dict) -> dict:
             if str(clip.path or "").strip()
         }
         selection_started = time.perf_counter()
+        if fast_reuse and scene_number > unique_scene_count and fast_reuse_pool:
+            pool_paths = set(fast_reuse_pool)
+
+            def pooled(values):
+                result = []
+                for hit in values:
+                    key = _montage_clip_key(hit.item.path)
+                    origin = fast_reuse_pool.get(key)
+                    if origin is None:
+                        continue
+                    available_from_cached_window = (
+                        float(verified_duration(hit.item) or 0.0)
+                        - max(0.0, float(origin.source_start))
+                    )
+                    if available_from_cached_window + .05 < required_source_duration:
+                        continue
+                    result.append(hit)
+                return result
+
+            pooled_hits = {
+                level: pooled(hits_by_level[level])
+                for level in _MONTAGE_FALLBACK_LEVELS
+            }
+            if any(pooled_hits.values()):
+                _reserved_paths, _reserved_families, family_buckets, _source_windows = reservation_snapshot(
+                    position_bucket,
+                )
+                try:
+                    selection = _select_montage_candidate(
+                        scene["visual_query_en"],
+                        strict_hits=pooled_hits["STRICT_MATCH"], fallback_hits=[],
+                        relaxed_hits=pooled_hits["RELAXED_SEMANTIC"],
+                        category_hits=pooled_hits["CATEGORY_MATCH"],
+                        safe_context_hits=pooled_hits["SAFE_CONTEXT"],
+                        required_duration=required_source_duration,
+                        match_threshold=settings.montage_match_threshold,
+                        used_paths=used, used_families=used_families,
+                        project_used_paths=project_used,
+                        project_used_families=project_used_families,
+                        reserved_paths=set(), reserved_families=set(),
+                        source_exists=source_exists, source_duration=verified_duration,
+                        source_allowed=lambda item: _montage_screen_text_safe(index, item),
+                        recent_project_paths=recent_project_paths,
+                        immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                        position_bucket=position_bucket,
+                        batch_family_buckets=family_buckets,
+                        diversity_seed=f"{titles[scenario_index]}|{scenario_index}|fast-reuse",
+                        allow_safe_reuse=True,
+                    )
+                    reuse_origin_clip = fast_reuse_pool.get(_montage_clip_key(selection.item.path))
+                    if reuse_origin_clip is not None:
+                        selection = replace(
+                            selection,
+                            fallback_level="SAFE_REUSE",
+                            reused=True,
+                            position_rotation_reason=(
+                                "быстрый режим: повтор уже подготовленного proxy после целевого процента"
+                            ),
+                        )
+                        fast_pool_reuse = True
+                except MontageSelectionFailure:
+                    selection = None
+                    reuse_origin_clip = None
+
         # First exhaust unique local choices. EXTERNAL is intentionally tried
         # before SAFE_REUSE so the persisted level order remains truthful.
         # Parallel planners may collide on the same top family several times;
@@ -11418,6 +11486,8 @@ def prepare_montage(payload: dict) -> dict:
             for hit in hits_by_level[level]
         })))
         for _attempt in range(claim_attempt_limit):
+            if selection is not None:
+                break
             reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
             try:
                 selection = _select_montage_candidate(
@@ -11498,7 +11568,7 @@ def prepare_montage(payload: dict) -> dict:
             source = selected.source or "local"
             if selection.fallback_level != "STRICT_MATCH":
                 source = f"{source} · {selection.fallback_level}"
-        if selected is None and not (fast_reuse and scene_number > unique_scene_count):
+        if selected is None:
             # This is deliberately rare: no bounded local candidate survived
             # validation. External search remains opt-in and does not change
             # the user's local-only montage configuration.
@@ -11577,34 +11647,50 @@ def prepare_montage(payload: dict) -> dict:
         if selected_duration <= 0.05:
             raise ValueError(f"Подобранный футаж не проходит проверку видео: {selected.path}")
         source_family = selection.source_family or _montage_clip_family_key(selected.path)
-        source_start, family_reused = allocate_batch_source_start(
-            source_family, position_bucket, selected_duration,
-            float(scene["duration"]), titles[scenario_index],
-        )
+        if reuse_origin_clip is not None:
+            # Reuse the exact cached window. Choosing a fresh source_start here
+            # would create a different proxy key and defeat the speed slider.
+            source_start = float(reuse_origin_clip.source_start)
+            family_reused = True
+            if batch_lock is None:
+                batch_family_buckets.setdefault(source_family, []).append(position_bucket)
+                batch_source_windows.setdefault(source_family, []).append(source_start)
+            else:
+                with batch_lock:
+                    batch_family_buckets.setdefault(source_family, []).append((scenario_index, position_bucket))
+                    batch_source_windows.setdefault(source_family, []).append((scenario_index, source_start))
+        else:
+            source_start, family_reused = allocate_batch_source_start(
+                source_family, position_bucket, selected_duration,
+                float(scene["duration"]), titles[scenario_index],
+            )
         reused = bool(selection.reused or family_reused or source_family in project_used_families)
         selection = replace(selection, source_family=source_family, source_start=source_start, reused=reused)
         used.add(_montage_clip_key(selected.path))
         used_families.add(source_family)
         project_used.add(_montage_clip_key(selected.path))
         project_used_families.add(source_family)
-        clips.append(TimelineClip(path=selected.path, narration=scene["narration"], visual_query_en=scene["visual_query_en"],
-                                  duration=scene["duration"], source_start=source_start,
-                                  score=score, source=source,
-                                  fallback_level=selection.fallback_level,
-                                  source_family=source_family, reused=reused,
-                                  position_bucket=position_bucket,
-                                  position_rotation_penalty=selection.position_rotation_penalty,
-                                  position_rotation_reason=selection.position_rotation_reason,
-                                  strict_rejection_reason=selection.strict_rejection_reason,
-                                  voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
-                                  voice_segment_ids=[
-                                      int(value) for value in scene.get("voice_segment_ids", [])
-                                  ],
-                                  narration_start=float(scene.get("narration_start", 0.0) or 0.0),
-                                  narration_end=float(scene.get("narration_end", 0.0) or 0.0),
-                                  minimum_source_duration=required_source_duration,
-                                  visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
-                                  visual_beat_count=int(scene.get("visual_beat_count", 0) or 0)))
+        timeline_clip = TimelineClip(path=selected.path, narration=scene["narration"], visual_query_en=scene["visual_query_en"],
+                                     duration=scene["duration"], source_start=source_start,
+                                     score=score, source=source,
+                                     fallback_level=selection.fallback_level,
+                                     source_family=source_family, reused=reused,
+                                     position_bucket=position_bucket,
+                                     position_rotation_penalty=selection.position_rotation_penalty,
+                                     position_rotation_reason=selection.position_rotation_reason,
+                                     strict_rejection_reason=selection.strict_rejection_reason,
+                                     voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
+                                     voice_segment_ids=[
+                                         int(value) for value in scene.get("voice_segment_ids", [])
+                                     ],
+                                     narration_start=float(scene.get("narration_start", 0.0) or 0.0),
+                                     narration_end=float(scene.get("narration_end", 0.0) or 0.0),
+                                     minimum_source_duration=required_source_duration,
+                                     visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
+                                     visual_beat_count=int(scene.get("visual_beat_count", 0) or 0))
+        clips.append(timeline_clip)
+        if fast_reuse and not fast_pool_reuse:
+            fast_reuse_pool.setdefault(_montage_clip_key(selected.path), timeline_clip)
         if progress:
             diagnostics = selection.diagnostics if selection else {}
             level = selection.fallback_level if selection else "LOCAL"
@@ -11645,6 +11731,14 @@ def prepare_montage(payload: dict) -> dict:
         raise RuntimeError(f"Не удалось завершить видеоряд реальными футажами: {exc}") from exc
     clips = project.clips
     selection_summary = _montage_selection_summary(clips)
+    if fast_reuse:
+        distinct_paths = len({_montage_clip_key(clip.path) for clip in clips})
+        selection_summary.update({
+            "uniqueTargetPercent": int(fast_reuse_percent or 100),
+            "uniqueTargetScenes": int(unique_scene_count),
+            "uniqueActualPaths": distinct_paths,
+            "uniqueActualPercent": round(distinct_paths / max(1, len(clips)) * 100.0, 1),
+        })
     summary_text = (
         f"{selection_summary['scenes']} сцен · strict {selection_summary['strict']} · "
         f"semantic {selection_summary['semantic']} · reuse {selection_summary['reuse']}"
