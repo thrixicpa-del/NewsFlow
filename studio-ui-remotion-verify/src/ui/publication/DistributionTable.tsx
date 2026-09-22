@@ -13,7 +13,7 @@ const distributionReason = (reason: string) => ({
   manual_locked: "Ручное назначение",
   confirmed_snapshot: "Уже подтверждено — защищено от перераспределения",
   quota_exhausted: "Нет свободной квоты у выбранных каналов",
-  eligibility_mismatch: "Не подходит диапазон номера/длительности канала",
+  eligibility_mismatch: "Не подходит правило канала: номер, длительность или тема/направление",
 }[reason] || reason || "—");
 
 export function DistributionTable({ rows, channels, onChange }: { rows: DistributionRow[]; channels: ChannelRow[]; onChange(id: string, patch: Partial<DistributionRow>): void }) {
