@@ -275,25 +275,7 @@ def build_private_video_insert_body(
         raise ValueError("Некорректный privacy режим YouTube")
     if publish_at and resolved_privacy != "private":
         raise ValueError("Запланированная публикация YouTube должна начинаться в режиме private")
-    description_text = str(description).strip()
-    existing_hashtags = {
-        token.casefold()
-        for token in description_text.split()
-        if token.startswith("#") and len(token) > 1
-    }
-    appended: list[str] = []
-    for raw in hashtags or []:
-        clean = "".join(str(raw or "").split())
-        if not clean:
-            continue
-        if not clean.startswith("#"):
-            clean = f"#{clean}"
-        identity = clean.casefold()
-        if identity in existing_hashtags or identity in {value.casefold() for value in appended}:
-            continue
-        appended.append(clean)
-    if appended:
-        description_text = "\n\n".join(part for part in (description_text, " ".join(appended)) if part)
+    description_text = compose_youtube_description(description, hashtags or [])
 
     status: dict[str, Any] = {"privacyStatus": resolved_privacy, "selfDeclaredMadeForKids": False}
     if publish_at:
