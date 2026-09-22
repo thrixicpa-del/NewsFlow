@@ -10,7 +10,10 @@ from unittest.mock import patch
 import numpy as np
 
 from scriptor.ai_index import (
+    _SCREEN_TEXT_NEGATIVE_QUERIES,
     _SCREEN_TEXT_POSITIVE_QUERIES,
+    SCREEN_ELIGIBILITY_BLOCKED,
+    SCREEN_ELIGIBILITY_SAFE,
     SCREEN_TEXT_CLASSIFIER_VERSION,
     SEMANTIC_INDEX_VERSION,
     SEMANTIC_TAG_LABELS,
@@ -570,12 +573,16 @@ class ClipIndexTests(unittest.TestCase):
         class TextQueryEmbedding:
             def query_embed(self, queries, **_):
                 values = queries if isinstance(queries, list) else [queries]
+                positive = {value.casefold() for value in _SCREEN_TEXT_POSITIVE_QUERIES}
+                negative = {value.casefold() for value in _SCREEN_TEXT_NEGATIVE_QUERIES}
                 for query in values:
                     value = str(query).casefold()
-                    if "without readable" in value or "no readable text" in value:
+                    if value in positive:
+                        yield np.asarray([1.0, 0.0], dtype=np.float32)
+                    elif value in negative:
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
                     else:
-                        yield np.asarray([1.0, 0.0], dtype=np.float32)
+                        raise AssertionError(f"Unexpected V4 query: {query!r}")
 
         class TextFrameIndex(ClipIndex):
             @staticmethod
@@ -606,6 +613,50 @@ class ClipIndexTests(unittest.TestCase):
                 }
             self.assertEqual(rows["blocked.mp4"], (1, SCREEN_TEXT_CLASSIFIER_VERSION))
             self.assertEqual(rows["safe.mp4"], (-1, SCREEN_TEXT_CLASSIFIER_VERSION))
+
+    def test_batch_screen_classifier_checks_late_text_before_persisting_safe(self):
+        """A clip cannot become durable SAFE from only the shallow five-frame pass."""
+        class ImageEmbedding:
+            def embed(self, images, **_):
+                for image in images:
+                    yield (np.asarray([1.0, 0.0], dtype=np.float32)
+                           if image == "text" else np.asarray([0.0, 1.0], dtype=np.float32))
+
+        class TextEmbedding:
+            def query_embed(self, queries, **_):
+                values = queries if isinstance(queries, list) else [queries]
+                positive = {value.casefold() for value in _SCREEN_TEXT_POSITIVE_QUERIES}
+                for query in values:
+                    yield (np.asarray([1.0, 0.0], dtype=np.float32)
+                           if str(query).casefold() in positive
+                           else np.asarray([0.0, 1.0], dtype=np.float32))
+
+        class LateTextIndex(ClipIndex):
+            @staticmethod
+            def _sample_frames(_path, samples=3):
+                frames = ["clean"] * samples
+                if samples > 5:
+                    frames[-1] = "text"
+                return frames, 6.0, 1920, 1080, 30.0
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            clip = root / "late-text.mp4"
+            batch_clip = root / "batch-late-text.mp4"
+            clip.write_bytes(b"late-text")
+            batch_clip.write_bytes(b"batch-late-text")
+            index = LateTextIndex(
+                root / "index.sqlite3",
+                embedder_factory=lambda: (ImageEmbedding(), TextEmbedding()),
+            )
+            index.index_folders([str(root)])
+
+            self.assertEqual(index.screen_text_eligibility(clip, deep=False), SCREEN_ELIGIBILITY_SAFE)
+            self.assertEqual(index.screen_text_eligibility(clip, deep=True), SCREEN_ELIGIBILITY_BLOCKED)
+            result = index.classify_english_screen_text()
+
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["blocked"], 1)
 
     def test_failed_embedding_transaction_is_recoverable_without_partial_rows(self):
         class FailingImageEmbedding:

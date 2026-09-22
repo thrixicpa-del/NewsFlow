@@ -430,7 +430,7 @@ class MontageQueueStateTests(unittest.TestCase):
             bridge.save_montage_settings({"excludeEnglishText": False})
         self.assertTrue(settings.montage_exclude_english_text)
 
-    def test_uncertain_screen_candidate_waits_for_rescue_deep_check(self):
+    def test_screen_candidate_always_receives_a_deep_check(self):
         calls = []
 
         class FakeIndex:
@@ -443,7 +443,7 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertTrue(bridge._montage_screen_text_safe(
             FakeIndex(), item, allow_uncertain=True,
         ))
-        self.assertEqual(calls, [False, True])
+        self.assertEqual(calls, [True, True])
 
     def test_semantic_rescue_can_use_best_safe_hit_below_normal_score_floor(self):
         candidate = FootageItem(

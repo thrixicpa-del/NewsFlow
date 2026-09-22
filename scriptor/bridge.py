@@ -11151,8 +11151,8 @@ def _montage_screen_text_state(index, item: FootageItem, *, deep: bool = False) 
 
 
 def _montage_screen_text_safe(index, item: FootageItem, *, allow_uncertain: bool = False) -> bool:
-    """Prefer verified SAFE; deep-check UNCERTAIN only in the rescue stage."""
-    state = _montage_screen_text_state(index, item, deep=allow_uncertain)
+    """Require a deep V4 verdict before admitting a montage candidate."""
+    state = _montage_screen_text_state(index, item, deep=True)
     if state == SCREEN_ELIGIBILITY_BLOCKED:
         return False
     return state == SCREEN_ELIGIBILITY_SAFE or allow_uncertain

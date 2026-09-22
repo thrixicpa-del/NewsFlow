@@ -1035,7 +1035,9 @@ class ClipIndex:
             if persisted == 1:
                 self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_BLOCKED
                 return SCREEN_ELIGIBILITY_BLOCKED
-            if persisted == -1:
+            # A shallow all-clear must not suppress a later deep inspection:
+            # sparse lower-thirds and end cards can fall between five samples.
+            if persisted == -1 and not deep:
                 self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_SAFE
                 return SCREEN_ELIGIBILITY_SAFE
             if not deep:
@@ -1059,7 +1061,9 @@ class ClipIndex:
             else SCREEN_ELIGIBILITY_UNCERTAIN
         )
         self._screen_text_state_cache[(resolved, bool(deep))] = eligibility
-        if state in {-1, 1}:
+        # A BLOCKED verdict remains blocking at either sampling depth.  SAFE is
+        # deliberately depth-specific so a deep request can inspect all frames.
+        if state == 1:
             self._screen_text_state_cache[(resolved, not bool(deep))] = eligibility
         return eligibility
 
@@ -1085,7 +1089,7 @@ class ClipIndex:
                     "uncertain": stats["unchecked"]}
         blocked = safe = uncertain = checked = 0
         for row in rows:
-            eligibility = self.screen_text_eligibility(row["path"], deep=False)
+            eligibility = self.screen_text_eligibility(row["path"], deep=True)
             checked += 1
             blocked += int(eligibility == SCREEN_ELIGIBILITY_BLOCKED)
             safe += int(eligibility == SCREEN_ELIGIBILITY_SAFE)
