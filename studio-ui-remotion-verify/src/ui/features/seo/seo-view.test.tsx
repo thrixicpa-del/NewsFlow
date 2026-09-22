@@ -44,7 +44,7 @@ describe("SEO and Tags Light views", () => {
   it("caps the editable tag budget at YouTube's 500-character limit", () => {
     render(<Tags data={{ ...fallback, seo: [{ source_title: "Ормуз" }] }} command={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Настроить теги" }));
-    expect(screen.getByLabelText("Лимит тегов, символов")).toHaveAttribute("max", "500");
+    expect((screen.getByLabelText("Лимит тегов, символов") as HTMLInputElement).max).toBe("500");
   });
 
 });
