@@ -12,7 +12,7 @@ from typing import Mapping, Sequence
 
 
 _TERMINAL_STATUSES = {"scheduled", "done", "failed", "skipped"}
-_VALID_STEPS = {"post", "cards", "endScreen"}
+_VALID_STEPS = {"post", "cards", "endScreen", "ads"}
 _VALID_STATUSES = {"pending", "running", "scheduled", "done", "failed", "skipped"}
 
 
@@ -126,6 +126,8 @@ def new_engagement_state(job_id: str, channel_id: str) -> dict:
         "post": {"status": "pending"},
         "cards": {"status": "pending"},
         "endScreen": {"status": "pending"},
+        "ads": {"status": "pending", "mode": "PENDING", "automatic": False, "manual": False,
+                "manualSlots": [], "manualMidrollApplicable": None},
         "attempts": [],
     }
 
