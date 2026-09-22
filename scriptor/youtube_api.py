@@ -204,6 +204,57 @@ def parse_current_channel(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+YOUTUBE_DESCRIPTION_BYTE_LIMIT = 5000
+
+
+def compose_youtube_description(
+    description: str,
+    hashtags: Iterable[object] = (),
+    *,
+    byte_limit: int = YOUTUBE_DESCRIPTION_BYTE_LIMIT,
+) -> str:
+    """Append unique whole hashtags without exceeding YouTube's UTF-8 byte limit."""
+
+    if byte_limit < 1:
+        raise ValueError("Лимит описания YouTube должен быть положительным")
+    base = str(description or "").strip()
+    if "<" in base or ">" in base:
+        raise ValueError("Описание YouTube не может содержать символы < или >")
+    if len(base.encode("utf-8")) > byte_limit:
+        raise ValueError(f"Описание YouTube превышает {byte_limit} байт")
+
+    existing = {
+        token.casefold()
+        for token in re.findall(r"(?<!\w)#[^\s#]+", base)
+    }
+    clean: list[str] = []
+    seen = set(existing)
+    for raw in hashtags:
+        token = "".join(str(raw or "").strip().split())
+        if not token:
+            continue
+        if not token.startswith("#"):
+            token = f"#{token}"
+        if token in {"#", "##"}:
+            continue
+        identity = token.casefold()
+        if identity in seen:
+            continue
+        candidate_tags = " ".join([*clean, token])
+        candidate = base
+        if candidate_tags:
+            candidate = f"{base}\n\n{candidate_tags}" if base else candidate_tags
+        if len(candidate.encode("utf-8")) > byte_limit:
+            continue
+        clean.append(token)
+        seen.add(identity)
+
+    suffix = " ".join(clean)
+    if not suffix:
+        return base
+    return f"{base}\n\n{suffix}" if base else suffix
+
+
 def build_private_video_insert_body(
     *,
     title: str,
