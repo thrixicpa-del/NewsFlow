@@ -332,7 +332,11 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       ]}
     />
 
-    {tab === "videos" ? <VideosTable rows={model.videos} onSelectionChange={setSelectedVideoIds}/> : null}
+    {tab === "videos" ? <VideosTable
+      rows={model.videos}
+      onSelectionChange={setSelectedVideoIds}
+      onPriorityChange={(productionItemId, priority) => void command("set-publication-v2-item-priority", { productionItemId, priority })}
+    /> : null}
     {tab === "channels" ? <section>
       <div className="nf-preset-toolbar">
         <div><b>Пресеты каналов</b><small>Квоты, диапазоны, 15-минутный тайминг и automation rules.</small></div>
