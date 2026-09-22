@@ -5012,6 +5012,17 @@ def remove_scenarios_command(payload: dict) -> dict:
             *(str(value).strip() for value in settings.deleted_scenario_production_ids if str(value).strip()),
             *removed_production_ids,
         })[-10000:]
+        settings.seo_queue = [
+            item for item in settings.seo_queue
+            if not (
+                (str(item.get("production_item_id", "")).strip()
+                 and str(item.get("production_item_id", "")).strip() in removed_production_ids)
+                or (
+                    not str(item.get("production_item_id", "")).strip()
+                    and " ".join(str(item.get("source_title", "")).split()).casefold() in removed_keys
+                )
+            )
+        ]
         root = Path(settings.voicer_output_folder).resolve()
         # Scenario indexes are compacted after deletion. Carry each retained
         # audio mapping to its new index; otherwise the next row can inherit a
@@ -5294,6 +5305,32 @@ def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None, *,
             "tags_error": "",
         })
     return identity_changed or content_changed
+
+
+def _current_seo_queue_indices(settings: Settings, titles: list[str], jobs: list[Job]) -> list[int]:
+    """Return only SEO rows that belong to the active scenario batch."""
+
+    current_ids = {
+        str(job.request.production_item_id).strip()
+        for job in jobs
+        if str(job.request.production_item_id).strip()
+    }
+    current_titles = {
+        " ".join(str(title).split()).casefold()
+        for title in titles
+        if str(title).strip()
+    }
+    result: list[int] = []
+    for index, item in enumerate(settings.seo_queue):
+        production_item_id = str(item.get("production_item_id", "")).strip()
+        if production_item_id:
+            if production_item_id in current_ids:
+                result.append(index)
+            continue
+        title_key = " ".join(str(item.get("source_title", "")).split()).casefold()
+        if title_key in current_titles:
+            result.append(index)
+    return result
 
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
@@ -14513,14 +14550,19 @@ def run_auto_pipeline(payload: dict) -> dict:
     if enabled("seo"):
         transfer_scenarios({"target": "seo", "indices": indices})
         settings = load_settings()
-        pending_seo = [index for index, item in enumerate(settings.seo_queue)
-                       if item.get("status") != "Готово"]
+        current_seo = _current_seo_queue_indices(settings, titles, jobs)
+        pending_seo = [
+            index for index in current_seo
+            if settings.seo_queue[index].get("status") != "Готово"
+        ]
         if pending_seo:
             generate_seo({"indices": pending_seo, "chatUrl": payload.get("chatUrl", "")})
         settings = load_settings()
+        current_seo = _current_seo_queue_indices(settings, titles, jobs)
         pending_tags = [
-            index for index, item in enumerate(settings.seo_queue)
-            if item.get("tags_status") != "Готово" or not item.get("tags")
+            index for index in current_seo
+            if settings.seo_queue[index].get("tags_status") != "Готово"
+            or not settings.seo_queue[index].get("tags")
         ]
         if pending_tags:
             generate_tags({"indices": pending_tags, "chatUrl": payload.get("chatUrl", "")})
