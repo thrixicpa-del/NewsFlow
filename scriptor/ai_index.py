@@ -77,20 +77,33 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
 SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 3
+SCREEN_TEXT_CLASSIFIER_VERSION = 4
+# Restore the NewsFlow 2.1.136 contract: ordinary Cyrillic/Russian lettering is
+# allowed. Montage blocks prominent English/Latin lettering and, separately,
+# full-screen title/interstitial slates in any language.
+_SCREEN_TEXT_ENGLISH_QUERIES = (
+    "video frame with prominent English words Latin alphabet captions subtitles lower third or text overlay",
+    "news broadcast frame with readable English headline ticker labels or Latin alphabet on screen words",
+    "sign billboard poster computer screen or document with readable English or Latin alphabet writing",
+)
+_SCREEN_TEXT_INTERSTITIAL_QUERIES = (
+    "full screen title card interstitial educational slate bumper graphic with large centered text or branding",
+    "full screen program title explainer slate logo bumper presentation slide instead of natural video footage",
+)
 _SCREEN_TEXT_POSITIVE_QUERIES = (
-    "video frame with readable words in any language including Latin or Cyrillic captions subtitles lower third",
-    "news broadcast frame with headline ticker labels or readable on screen text in any language",
-    "sign billboard poster computer screen or document with readable writing Latin or Cyrillic letters",
-    "full screen title card interstitial educational slate bumper logo with large text or branding",
-    "Russian or Ukrainian Cyrillic title card caption headline logo or educational interstitial",
+    *_SCREEN_TEXT_ENGLISH_QUERIES,
+    *_SCREEN_TEXT_INTERSTITIAL_QUERIES,
 )
 _SCREEN_TEXT_NEGATIVE_QUERIES = (
-    "clean documentary video frame without readable writing captions subtitles labels or text overlay",
-    "natural news b roll with people buildings vehicles and no readable text",
+    "natural documentary video frame without English or Latin alphabet captions; Cyrillic writing may be present",
+    "natural news b roll with people buildings vehicles and no English overlay or full screen title card",
+    "real world footage with Russian or Ukrainian Cyrillic writing but no English Latin alphabet overlay",
 )
 _SCREEN_TEXT_SAFE_MARGIN = 0.015
 _SCREEN_TEXT_OBVIOUS_MARGIN = 0.060
+SCREEN_ELIGIBILITY_SAFE = "SAFE"
+SCREEN_ELIGIBILITY_UNCERTAIN = "UNCERTAIN"
+SCREEN_ELIGIBILITY_BLOCKED = "BLOCKED"
 
 
 # A montage batch creates several ClipIndex instances (one per worker).  The
@@ -209,7 +222,7 @@ class ClipIndex:
         self.embedder_factory = embedder_factory
         self._image_embedder = None
         self._text_embedder = None
-        self._screen_text_safe_cache: dict[str, bool] = {}
+        self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
@@ -329,7 +342,7 @@ class ClipIndex:
         return tuple(fingerprint)
 
     def _invalidate_search_cache(self) -> None:
-        self._screen_text_safe_cache.clear()
+        self._screen_text_state_cache.clear()
         with _SEARCH_CORPORA_LOCK:
             _SEARCH_CORPORA.pop(self._cache_key(), None)
 
@@ -351,8 +364,10 @@ class ClipIndex:
                     """SELECT path,name,source,source_url,license,tags,embedding,duration,width,height,source_family,
                               semantic_scores,
                               used_count,rating FROM clips
-                       WHERE embedding IS NOT NULL AND disabled=0 AND english_text<>1"""
-                    + " ORDER BY path"
+                       WHERE embedding IS NOT NULL AND disabled=0
+                         AND NOT (english_text=1 AND english_text_version>=?)"""
+                    + " ORDER BY path",
+                    (SCREEN_TEXT_CLASSIFIER_VERSION,),
                 ).fetchall()
             items: list[FootageItem] = []
             vectors = []
@@ -539,9 +554,15 @@ class ClipIndex:
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 25.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        fractions = ((0.15, 0.50, 0.85) if samples <= 3
-                     else (0.05, 0.25, 0.50, 0.75, 0.95))
-        positions = [int(frame_count * value) for value in fractions[:samples]]
+        sample_count = max(1, int(samples))
+        if sample_count <= 3:
+            fractions = (0.15, 0.50, 0.85)[:sample_count]
+        else:
+            fractions = tuple(
+                0.03 + (0.94 * index / max(1, sample_count - 1))
+                for index in range(sample_count)
+            )
+        positions = [int(frame_count * value) for value in fractions]
         images = []
         for position in positions:
             capture.set(cv2.CAP_PROP_POS_FRAMES, min(frame_count - 1, position))
@@ -788,7 +809,9 @@ class ClipIndex:
         self._invalidate_search_cache()
 
     def all_items(self, limit: int | None = None, exclude_english_text: bool = False) -> list[FootageItem]:
-        text_filter = (" WHERE english_text=-1 AND english_text_version=?"
+        # 2.1.136 semantics: exclude only a current positive block. Stale and
+        # UNCERTAIN rows remain searchable and can be verified lazily.
+        text_filter = (" WHERE NOT (english_text=1 AND english_text_version>=?)"
                        if exclude_english_text else "")
         query = ("SELECT path,name,source,source_url,license,tags,source_family FROM clips"
                  + text_filter + " ORDER BY name")
