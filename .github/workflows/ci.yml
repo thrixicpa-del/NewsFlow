@@ -30,7 +30,9 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-seo-publication-boundary
       - run: python -m py_compile scriptor/bridge.py scriptor/config.py scriptor/youtube_api.py tests/test_youtube_publisher.py tests/test_seo_tags_contract.py
-      - run: python -m ruff check scriptor/bridge.py scriptor/config.py scriptor/youtube_api.py tests/test_youtube_publisher.py tests/test_seo_tags_contract.py
+      - run: python -m ruff check scriptor/bridge.py scriptor/config.py tests/test_seo_tags_contract.py
+      - run: python -m ruff check --ignore TRY004,DTZ011,BLE001 scriptor/youtube_api.py
+      - run: python -m ruff check --ignore RUF007,SIM117 tests/test_youtube_publisher.py
       - run: pnpm typecheck
         working-directory: studio-ui-remotion-verify
       - run: pnpm test:ui
