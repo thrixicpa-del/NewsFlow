@@ -19,5 +19,5 @@ export function ChannelsTable({ rows, onEdit }: { rows: ChannelRow[]; onEdit(row
     { accessorKey: "publishMode", header: "Режим", cell: ({ row }) => row.original.publishMode === "schedule" ? "Расписание" : "Сразу" },
     { id: "action", header: "Действия", cell: ({ row }) => <UiButton variant="ghost" size="icon" aria-label={`Действия канала ${row.original.name}`} title="Настройки канала" onClick={() => onEdit(row.original)}><MoreHorizontal size={17}/></UiButton> },
   ];
-  return <section className="nf-workspace-panel"><DataTable data={rows} columns={columns} /></section>;
+  return <section className="nf-workspace-panel"><DataTable data={rows} columns={columns} preferenceKey="publication-channels" ariaLabel="Каналы публикации" /></section>;
 }
