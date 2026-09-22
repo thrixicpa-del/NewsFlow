@@ -1264,6 +1264,7 @@ def _youtube_engagement_policy(settings: Settings, channel_id: str) -> dict:
         "postsEnabled": bool(selected.get("postsEnabled", True)),
         "cardsEnabled": bool(selected.get("cardsEnabled", True)),
         "endScreensEnabled": bool(selected.get("endScreensEnabled", True)),
+        "adsEnabled": bool(selected.get("adsEnabled", True)),
     }
 
 
@@ -1346,6 +1347,13 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
         for item in settings.youtube_publication_jobs
     ]
     plan = build_engagement_plan(record, catalog, [])
+    channel_rule = dict((settings.youtube_channel_publication_rules or {}).get(channel_id, {}) or {})
+    monetized = bool(channel_rule.get("monetized", False))
+    plan["ads"] = build_ad_plan(
+        float(record.get("durationSeconds", 0) or 0),
+        monetized=monetized and policy["adsEnabled"],
+        interval_seconds=39,
+    )
     state = new_engagement_state(job_id, channel_id)
     state.update({
         "videoId": str(record.get("videoId", "")).strip(),
@@ -1363,6 +1371,19 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
         state["cards"] = {"status": "skipped", "reason": "Карточки выключены в правилах канала"}
     if not policy["endScreensEnabled"]:
         state["endScreen"] = {"status": "skipped", "reason": "Конечные заставки выключены в правилах канала"}
+    ads_plan = dict(plan.get("ads") or {})
+    if not policy["adsEnabled"]:
+        state["ads"] = {"status": "skipped", "mode": "NONE", "reason": "Автоматизация рекламы выключена в правилах канала"}
+    elif not bool(ads_plan.get("enabled")):
+        state["ads"] = {"status": "skipped", "mode": "NONE", "reason": "Канал не отмечен монетизированным"}
+    else:
+        state["ads"].update({
+            "mode": "PENDING",
+            "automatic": False,
+            "manual": False,
+            "manualMidrollApplicable": bool(ads_plan.get("manualMidrollApplicable")),
+            "manualSlots": list(ads_plan.get("manualSlots") or []),
+        })
     settings.youtube_engagement_tasks.append(state)
     return state
 
@@ -13437,6 +13458,53 @@ def save_youtube_engagement_policy(payload: dict) -> dict:
     }}
 
 
+def _queue_publication_v2_engagement_task(settings: Settings, snapshot_id: str) -> dict | None:
+    """Adopt one uploaded V2 snapshot into the existing resumable Studio queue."""
+    snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+    execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+    video_id = str(execution.get("youtubeVideoId") or "").strip()
+    if not snapshot_record or not video_id:
+        return None
+    steps = dict(execution.get("steps", {}) or {})
+    processing = str(dict(steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper()
+    if processing != "SUCCESS":
+        return None
+
+    production_id = str(snapshot_record.get("productionItemId", "")).strip()
+    item = dict((settings.youtube_publication_items or {}).get(production_id, {}) or {})
+    metadata = dict(snapshot_record.get("metadata", {}) or {})
+    duration = (
+        item.get("durationSeconds")
+        or dict(dict(item.get("artifacts", {}) or {}).get("video", {}) or {}).get("durationSeconds")
+        or metadata.get("durationSeconds")
+        or 0
+    )
+    record = {
+        "id": snapshot_id,
+        "productionItemId": production_id,
+        "title": str(metadata.get("title", "")).strip(),
+        "channelId": str(snapshot_record.get("channelId", "")).strip(),
+        "videoId": video_id,
+        "videoUrl": str(execution.get("youtubeVideoUrl") or "").strip(),
+        "publishAt": str(snapshot_record.get("requestedPublishAt") or "").strip(),
+        "durationSeconds": float(duration or 0),
+        "seoDescription": str(metadata.get("description", "")).strip(),
+        "youtubePrivacyStatus": str(snapshot_record.get("privacy", "private")),
+    }
+    post_text = "\n\n".join(value for value in (
+        str(metadata.get("description", "")).strip(),
+        str(execution.get("youtubeVideoUrl") or "").strip(),
+    ) if value)
+    post_draft = {
+        "text": post_text,
+        "status": "prepared" if post_text else "needs-text",
+        "publishAt": record["publishAt"],
+        "videoUrl": record["videoUrl"],
+        "requiresManualConfirmation": False,
+    }
+    return _queue_youtube_engagement_task(settings, record, post_draft)
+
+
 def run_youtube_engagement(payload: dict) -> dict:
     """Run selected queued Studio tasks in their own channel Chrome profiles.
 
@@ -13450,7 +13518,7 @@ def run_youtube_engagement(payload: dict) -> dict:
     if not requested:
         raise ValueError("Выберите хотя бы одно задание Studio.")
     requested_steps = {str(item).strip() for item in payload.get("steps", []) if str(item).strip()}
-    unknown_steps = requested_steps - {"post", "cards", "end-screen"}
+    unknown_steps = requested_steps - {"post", "ads", "cards", "end-screen"}
     if unknown_steps:
         raise ValueError("Выбраны неизвестные действия Studio.")
     settings = load_settings()
@@ -13480,6 +13548,24 @@ def run_youtube_engagement(payload: dict) -> dict:
             for item in completed:
                 if item == "post":
                     task = transition_engagement_step(task, "post", "scheduled")
+                elif item == "ads":
+                    ads_result = dict((task.get("_studioResults") or {}).get("ads") or {})
+                    manual_applicable = bool(ads_result.get("manualMidrollApplicable"))
+                    manual_complete = bool(ads_result.get("manual"))
+                    if manual_applicable and not manual_complete:
+                        current_ads = dict(task.get("ads") or {})
+                        current_ads.update({
+                            **ads_result,
+                            "status": "pending",
+                            "mode": "AUTO_ONLY" if ads_result.get("automatic") else "NONE",
+                            "reason": "Автоматическая реклама подтверждена, ручные 39-секундные слоты требуют повтора.",
+                        })
+                        task["ads"] = current_ads
+                    else:
+                        task = transition_engagement_step(
+                            task, "ads", "done",
+                            **ads_result,
+                        )
                 elif item == "cards":
                     task = transition_engagement_step(task, "cards", "done")
                 elif item == "end-screen":
@@ -14497,6 +14583,7 @@ def reconcile_publication_v2_youtube(payload: dict) -> dict:
             video, refreshed = fetch_youtube_video_state(credentials, video_id)
             reconcile_youtube_video_state(settings, snapshot_id, video)
             settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
+            _queue_publication_v2_engagement_task(settings, snapshot_id)
             confirmed += 1
         except _BRIDGE_OPERATION_ERRORS as exc:
             fail_publication_stage(settings, snapshot_id, "YOUTUBE_PROCESSING", classify_publication_error(exc), str(exc))
