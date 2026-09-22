@@ -10,6 +10,7 @@ import type { QueueRow } from "./types";
 
 const badStates = new Set(["FAILED", "AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"]);
 const terminalStates = new Set(["SUCCESS", "SKIPPED", "NOT_REQUIRED"]);
+const uploadableStates = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED"]);
 const stepTone = (state: string): BadgeTone => terminalStates.has(state) ? "success" : badStates.has(state) ? "danger" : state === "RUNNING" ? "info" : "neutral";
 function stageIcon(state: string) { return terminalStates.has(state) ? <CheckCircle2 size={14}/> : badStates.has(state) ? <CircleX size={14}/> : <Circle size={14}/>; }
 
@@ -81,6 +82,10 @@ export function PublicationQueue({
   const toggleAll = () => setSelected(allSelected ? [] : rows.map((row) => row.snapshotId));
   const toggle = (snapshotId: string) => setSelected((current) => current.includes(snapshotId) ? current.filter((id) => id !== snapshotId) : [...current, snapshotId]);
   const actionIds = selected.length ? selected : undefined;
+  const startScope = selected.length ? rows.filter((row) => selected.includes(row.snapshotId)) : rows;
+  const hasUploadable = startScope.some((row) =>
+    !row.youtubeVideoId && !row.active && uploadableStates.has(String(row.status || "").toUpperCase())
+  );
   const channelProgress = [...new Set(rows.map((row) => row.channelId).filter(Boolean))].map((channelId) => {
     const channelRows = rows.filter((row) => row.channelId === channelId);
     return {
@@ -125,7 +130,7 @@ export function PublicationQueue({
         <UiButton variant="secondary" onClick={() => onReconcile(actionIds)}><RefreshCw size={15}/>Проверить YouTube</UiButton>
         <UiButton variant="secondary" disabled={continuing} onClick={() => onContinue(actionIds)}><RefreshCw size={15}/>{continuing ? "Оформление…" : selected.length ? "Продолжить выбранные" : "Продолжить оформление"}</UiButton>
         <UiButton variant={paused ? "primary" : "secondary"} onClick={onPause}>{paused ? <Play size={15}/> : <Pause size={15}/>}{paused ? "Продолжить" : "Пауза"}</UiButton>
-        <UiButton variant="primary" disabled={paused || starting} onClick={() => onStart(actionIds)}><Upload size={15}/>{starting ? "Запуск…" : selected.length ? `Запустить выбранные (${selected.length})` : "Запустить очередь"}</UiButton>
+        <UiButton variant="primary" disabled={paused || starting || !hasUploadable} onClick={() => onStart(actionIds)}><Upload size={15}/>{starting ? "Запуск…" : selected.length ? `Запустить выбранные (${selected.length})` : "Запустить очередь"}</UiButton>
       </div>
     </div>
     {channelProgress.length ? <div className="nf-channel-progress-strip" aria-label="Прогресс по каналам">{channelProgress.map((item) => <div className="nf-channel-progress-card" key={item.channelId}><b>{channelName(item.channelId)}</b><small>Готово {item.complete}/{item.total} · Upload {item.uploaded}/{item.total} · Ошибки {item.errors}</small></div>)}</div> : null}
