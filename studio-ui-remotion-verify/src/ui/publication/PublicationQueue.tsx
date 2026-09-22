@@ -52,6 +52,7 @@ export function PublicationQueue({
   continuing,
   onReconcile,
   onRetry,
+  onResolveUpload,
   onCancel,
   onThumbnail,
 }: {
@@ -67,6 +68,7 @@ export function PublicationQueue({
   continuing: boolean;
   onReconcile(snapshotIds?: string[]): void;
   onRetry(snapshotId: string, stage: string): void;
+  onResolveUpload(snapshotId: string, outcome: "found" | "not_found", youtubeVideoId?: string): void;
   onCancel(snapshotId: string): void;
   onThumbnail(snapshotId: string): void;
 }) {
@@ -135,11 +137,12 @@ export function PublicationQueue({
       </div>
     </div>
     {channelProgress.length ? <div className="nf-channel-progress-strip" aria-label="Прогресс по каналам">{channelProgress.map((item) => <div className="nf-channel-progress-card" key={item.channelId}><b>{channelName(item.channelId)}</b><small>Готово {item.complete}/{item.total} · Upload {item.uploaded}/{item.total} · Ошибки {item.errors}</small></div>)}</div> : null}
-    <DataTable data={rows} columns={columns} preferenceKey="publication-queue" ariaLabel="Очередь публикации" expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
+    <DataTable data={rows} columns={columns} preferenceKey="publication-queue" ariaLabel="Очередь публикации" expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onResolveUpload={onResolveUpload} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
   </section>;
 }
 
-export function PublicationExecutionDetails({ row, channelName, onRetry, onCancel, onThumbnail }: { row: QueueRow; channelName(id: string): string; onRetry(snapshotId: string, stage: string): void; onCancel(snapshotId: string): void; onThumbnail(snapshotId: string): void }) {
+export function PublicationExecutionDetails({ row, channelName, onRetry, onResolveUpload, onCancel, onThumbnail }: { row: QueueRow; channelName(id: string): string; onRetry(snapshotId: string, stage: string): void; onResolveUpload(snapshotId: string, outcome: "found" | "not_found", youtubeVideoId?: string): void; onCancel(snapshotId: string): void; onThumbnail(snapshotId: string): void }) {
+  const [reconciledVideoId, setReconciledVideoId] = useState("");
   const failed = Object.entries(row.steps).find(([, step]) => badStates.has(String(step.status)));
   const uploadNeedsReconciliation = String(row.steps.VIDEO_UPLOAD?.status || "").toUpperCase() === "USER_ACTION_REQUIRED" && !row.youtubeVideoId;
   const thumbnailPending = Boolean(row.youtubeVideoId) && !terminalStates.has(String(row.steps.THUMBNAIL?.status || "").toUpperCase());
@@ -164,10 +167,15 @@ export function PublicationExecutionDetails({ row, channelName, onRetry, onCance
     </div>
     <PublicationTimeline events={row.timeline}/>
     <div className="nf-detail-actions">
-      {uploadNeedsReconciliation ? <p role="status">Исход загрузки неизвестен: сверьте канал в YouTube Studio перед любым повтором MP4.</p> : null}
+      {uploadNeedsReconciliation ? <div>
+        <p role="status">Исход загрузки неизвестен: сначала сверьте канал в YouTube Studio. Обычный retry и отмена заблокированы, чтобы не создать дубликат.</p>
+        <label>YouTube video ID<input aria-label={`YouTube video ID для ${row.title || row.productionItemId}`} value={reconciledVideoId} onChange={(event) => setReconciledVideoId(event.target.value)}/></label>
+        <UiButton variant="secondary" disabled={!reconciledVideoId.trim()} onClick={() => onResolveUpload(row.snapshotId, "found", reconciledVideoId.trim())}>Привязать найденный YouTube ID</UiButton>
+        <UiButton variant="secondary" onClick={() => onResolveUpload(row.snapshotId, "not_found")}>Я проверил канал: видео нет — разрешить повтор</UiButton>
+      </div> : null}
       {failed && !uploadNeedsReconciliation ? <UiButton variant="secondary" onClick={() => onRetry(row.snapshotId, failed[0])}><RefreshCw size={15}/>Повторить {stageLabel(failed[0])}</UiButton> : null}
       {thumbnailPending ? <UiButton variant="secondary" onClick={() => onThumbnail(row.snapshotId)}>Поставить обложку</UiButton> : null}
-      <UiButton variant="destructive" onClick={() => onCancel(row.snapshotId)}>Отменить автоматизацию</UiButton>
+      {!uploadNeedsReconciliation ? <UiButton variant="destructive" onClick={() => onCancel(row.snapshotId)}>Отменить автоматизацию</UiButton> : null}
     </div>
   </div>;
 }
