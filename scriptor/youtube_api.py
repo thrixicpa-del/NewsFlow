@@ -183,7 +183,7 @@ def normalize_youtube_tags(tags: Iterable[object], *, limit: int = YOUTUBE_TAG_C
             continue
         candidate_length = youtube_tag_character_length([*normalized, tag])
         if candidate_length > limit:
-            break
+            continue
         normalized.append(tag)
         seen.add(identity)
     return normalized
