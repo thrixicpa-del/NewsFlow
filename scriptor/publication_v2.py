@@ -551,15 +551,56 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
             eligible = str(readiness.get("state", "")) == "VIDEO_READY"
         if eligible:
             candidates.append((production_id, item))
-    if any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
-           for rule in active_rules):
-        candidates.sort(key=lambda pair: (-(_item_duration_seconds(pair[1]) or 0.0), -_item_priority(pair[1]), item_order[pair[0]], pair[0]))
 
-    if not any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
-               for rule in active_rules):
-        candidates.sort(key=lambda pair: (-_item_priority(pair[1]), item_order[pair[0]], pair[0]))
+    # Longest-to-monetized is a first pass, not a global candidate sort.
+    # Once monetized capacity is filled, all remaining items must return to
+    # their normal priority/batch order so regular channels keep deterministic
+    # ordered/balanced semantics.
+    candidates.sort(key=lambda pair: (-_item_priority(pair[1]), item_order[pair[0]], pair[0]))
+    longest_rules = [
+        rule for rule in active_rules
+        if bool(rule.get("monetized"))
+        and str(rule.get("distributionStrategy", "")) == "longest_monetized"
+    ]
+    allocated_ids: set[str] = set()
+    for production_id, item in sorted(
+        candidates,
+        key=lambda pair: (
+            -(_item_duration_seconds(pair[1]) or 0.0),
+            -_item_priority(pair[1]),
+            item_order[pair[0]],
+            pair[0],
+        ),
+    ):
+        available_longest = [
+            rule for rule in longest_rules
+            if used[str(rule["channelId"])] < int(rule["quota"])
+            and _rule_allows_item(rule, item, item_order[production_id])
+        ]
+        if not available_longest:
+            continue
+        chosen = min(
+            available_longest,
+            key=lambda rule: (
+                _fill_ratio(rule, used),
+                -int(rule.get("channelPriority", 0) or 0),
+                rule_order[str(rule["channelId"])],
+            ),
+        )
+        channel_id = str(chosen["channelId"])
+        used[channel_id] += 1
+        allocated_ids.add(production_id)
+        rows.append({
+            "productionItemId": production_id,
+            "channelId": channel_id,
+            "source": "auto",
+            "locked": False,
+            "reason": "longest_monetized",
+        })
 
     for production_id, item in candidates:
+        if production_id in allocated_ids:
+            continue
         available = [
             rule for rule in active_rules
             if used[str(rule["channelId"])] < int(rule["quota"])
@@ -576,19 +617,9 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
             })
             continue
 
-        monetized = [
-            rule for rule in available
-            if bool(rule.get("monetized"))
-            and str(rule.get("distributionStrategy", "")) == "longest_monetized"
-        ]
-        if monetized:
-            pool = monetized
-            reason = "longest_monetized"
-        else:
-            balanced = [rule for rule in available if str(rule.get("distributionStrategy", "balanced")) == "balanced"]
-            pool = balanced or available
-            reason = "balanced" if balanced else "ordered"
-
+        balanced = [rule for rule in available if str(rule.get("distributionStrategy", "balanced")) == "balanced"]
+        pool = balanced or available
+        reason = "balanced" if balanced else "ordered"
         chosen = min(
             pool,
             key=lambda rule: (
@@ -1257,7 +1288,20 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
     snapshots = dict(getattr(settings, "youtube_publication_snapshots", {}) or {})
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
     created: list[str] = []
-    existing_by_item = {str(snapshot.get("productionItemId", "")): snapshot_id for snapshot_id, snapshot in snapshots.items()}
+    existing_by_item: dict[str, str] = {}
+    for existing_snapshot_id, existing_snapshot in snapshots.items():
+        production_id = str(dict(existing_snapshot or {}).get("productionItemId", "")).strip()
+        if not production_id:
+            continue
+        existing_execution = dict(executions.get(existing_snapshot_id, {}) or {})
+        status = str(existing_execution.get("overallStatus", "")).upper()
+        has_video = bool(str(existing_execution.get("youtubeVideoId") or "").strip())
+        # A pre-upload cancellation explicitly releases the item for a new
+        # confirmation. Once YouTube identity exists, even cancelled
+        # downstream automation must continue to protect the frozen snapshot.
+        if status == "CANCELLED" and not has_video:
+            continue
+        existing_by_item[production_id] = existing_snapshot_id
     for assignment in assignments:
         production_id = str(assignment.get("productionItemId", "")).strip()
         channel_id = str(assignment.get("channelId", "")).strip()
@@ -1286,7 +1330,12 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
             raise ValueError("Некорректный privacy режим")
         if mode == "schedule" and privacy != "private":
             raise ValueError("Для публикации по расписанию YouTube требует initial privacy private")
-        snapshot_id = f"snapshot:{production_id}:{channel_id}"
+        base_snapshot_id = f"snapshot:{production_id}:{channel_id}"
+        snapshot_id = base_snapshot_id
+        revision = 2
+        while snapshot_id in snapshots:
+            snapshot_id = f"{base_snapshot_id}:r{revision}"
+            revision += 1
         artifact = dict(item.get("artifacts", {}).get("video", {}) or {})
         thumbnail = dict(item.get("artifacts", {}).get("thumbnail", {}) or {})
         metadata = dict(item.get("metadata", {}) or {})
@@ -1316,7 +1365,7 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
             },
             "automation": frozen_automation,
             "privacy": privacy, "publishMode": mode, "requestedPublishAt": publish_at,
-            "idempotencyKey": sha256(f"{production_id}|{channel_id}".encode()).hexdigest(), "createdAt": _now(),
+            "idempotencyKey": sha256(f"{snapshot_id}|{channel_id}".encode()).hexdigest(), "createdAt": _now(),
         }
         snapshots[snapshot_id] = snapshot
         execution = _execution(snapshot_id, production_id, {"publishAt": publish_at or ""})
