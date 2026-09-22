@@ -10610,6 +10610,7 @@ def _montage_selection_summary(clips: list[TimelineClip]) -> dict[str, object]:
         "semantic": sum(levels.get(level, 0) for level in (
             "RELAXED_SEMANTIC", "CATEGORY_MATCH", "SAFE_CONTEXT", "EXTERNAL_FALLBACK",
         )),
+        "continuity": levels.get("VISUAL_CONTINUITY_FALLBACK", 0),
         "reuse": levels.get("SAFE_REUSE", 0),
         "levels": levels,
     }
@@ -11096,6 +11097,51 @@ def _montage_screen_text_safe(index, item: FootageItem, *, allow_uncertain: bool
     if state == SCREEN_ELIGIBILITY_BLOCKED:
         return False
     return state == SCREEN_ELIGIBILITY_SAFE or allow_uncertain
+
+
+def _select_visual_continuity_candidate(items: list[FootageItem], *,
+                                        required_duration: float,
+                                        project_used_paths: set[str],
+                                        project_used_families: set[str],
+                                        recent_project_paths: set[str],
+                                        source_exists, source_duration, source_allowed,
+                                        diversity_seed: str) -> tuple[FootageItem, float, str, bool] | None:
+    """Choose any technically valid footage when semantic matching is exhausted.
+
+    This layer is intentionally topic-agnostic. It exists to keep a montage
+    renderable even when the library contains no relevant scene. It still
+    rejects missing/too-short media and screen-safety BLOCKED footage, and it
+    prefers a family not yet shown in the current video.
+    """
+    seen: set[str] = set()
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            source_family_identity_text(item.path, item.source_url) in project_used_families,
+            _montage_clip_key(item.path) in recent_project_paths,
+            _montage_stable_variation(
+                diversity_seed, "visual-continuity",
+                source_family_identity_text(item.path, item.source_url),
+            ),
+            _montage_clip_key(item.path),
+        ),
+    )
+    for item in ranked:
+        key = _montage_clip_key(item.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not source_exists(item):
+            continue
+        duration = float(source_duration(item) or 0.0)
+        if duration + .05 < float(required_duration):
+            continue
+        if source_allowed is not None and not source_allowed(item):
+            continue
+        family = source_family_identity_text(item.path, item.source_url)
+        reused = key in project_used_paths or family in project_used_families
+        return item, duration, family, reused
+    return None
 
 
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
@@ -11803,47 +11849,37 @@ def prepare_montage(payload: dict) -> dict:
             # overlays, full-screen title/interstitial slates, missing files
             # and insufficient physical duration remain hard technical blocks.
             try:
-                continuity_items = index.all_items(exclude_english_text=True)
+                indexed_continuity = index.all_items(exclude_english_text=True)
             except (OSError, RuntimeError, ValueError):
-                continuity_items = []
-            continuity_ranked = sorted(
+                indexed_continuity = []
+            continuity_items = list({
+                _montage_clip_key(item.path): item
+                for item in [*indexed_continuity, *local_items]
+            }.values())
+            continuity = _select_visual_continuity_candidate(
                 continuity_items,
-                key=lambda item: (
-                    _montage_clip_family_key(item.path) in project_used_families,
-                    _montage_clip_key(item.path) in recent_project_paths,
-                    _montage_stable_variation(
-                        f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
-                        scene["visual_query_en"],
-                        _montage_clip_family_key(item.path),
-                    ),
-                    _montage_clip_key(item.path),
+                required_duration=required_source_duration,
+                project_used_paths=project_used,
+                project_used_families=project_used_families,
+                recent_project_paths=recent_project_paths,
+                source_exists=source_exists,
+                source_duration=verified_duration,
+                source_allowed=lambda item: _montage_screen_text_safe(
+                    index, item, allow_uncertain=True,
                 ),
+                diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
             )
-            for candidate in continuity_ranked:
-                candidate_key = _montage_clip_key(candidate.path)
-                candidate_family = _montage_clip_family_key(candidate.path)
-                if not source_exists(candidate):
-                    continue
-                candidate_duration = verified_duration(candidate)
-                if candidate_duration + .05 < required_source_duration:
-                    continue
-                if not _montage_screen_text_safe(index, candidate, allow_uncertain=True):
-                    continue
-                selected = candidate
-                selected_duration = candidate_duration
+            if continuity is not None:
+                selected, selected_duration, candidate_family, reused_candidate = continuity
                 score = 0.0
-                reused_candidate = (
-                    candidate_key in project_used
-                    or candidate_family in project_used_families
-                )
                 selection = MontageCandidateSelection(
-                    candidate,
-                    candidate_duration,
+                    selected,
+                    selected_duration,
                     0.0,
                     "VISUAL_CONTINUITY_FALLBACK",
                     False,
                     {
-                        "candidates_retrieved": len(continuity_ranked),
+                        "candidates_retrieved": len(continuity_items),
                         "hard_valid": 1,
                         "strict_accepted": 0,
                         "rejected_threshold": 0,
@@ -11863,8 +11899,7 @@ def prepare_montage(payload: dict) -> dict:
                         else "визуальная непрерывность: новых пригодных family не осталось"
                     ),
                 )
-                source = f"{candidate.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
-                break
+                source = f"{selected.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
 
         if selected is None:
             raise RuntimeError(
