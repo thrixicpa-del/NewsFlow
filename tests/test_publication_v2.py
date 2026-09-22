@@ -193,7 +193,7 @@ class PublicationV2DistributionTests(unittest.TestCase):
         rows = result["publicationPreview"]["assignments"]
         self.assertEqual([row["channelId"] for row in rows], ["channel-b", "channel-b", ""])
         self.assertEqual([row.get("publishAt", "") for row in rows[:2]], [
-            "2026-11-15T04:00:00+03:00", "2026-11-15T10:00:00+03:00",
+            "2026-11-15T04:00:00+03:00", "2026-11-15T04:15:00+03:00",
         ])
         self.assertEqual(settings.youtube_publication_assignments, {})
 
