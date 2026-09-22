@@ -879,6 +879,58 @@ def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, 
     }
 
 
+def _normalize_publish_at(value: object, rule: dict[str, Any]) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        point = datetime.fromisoformat(raw)
+        zone = ZoneInfo(str(rule.get("timezone", "") or "UTC"))
+    except (ValueError, ZoneInfoNotFoundError) as error:
+        raise ValueError("Некорректное время публикации или timezone канала") from error
+    if point.tzinfo is None:
+        point = point.replace(tzinfo=zone)
+    else:
+        point = point.astimezone(zone)
+    if not _is_quarter_hour(point):
+        raise ValueError("Время публикации должно быть кратно 15 минутам")
+    return point.isoformat()
+
+
+def _refresh_execution_overall_status(settings: Any, snapshot_id: str, execution: dict[str, Any]) -> None:
+    """Derive the row status from all persisted stages without hiding failures."""
+
+    steps = dict(execution.get("steps", {}) or {})
+    statuses = {
+        stage: str(dict(steps.get(stage, {}) or {}).get("status", "PENDING")).upper()
+        for stage in _STAGES
+    }
+    failures = {"FAILED", "AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"}
+    terminal = {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}
+    if any(status in failures for status in statuses.values()):
+        execution["overallStatus"] = "PARTIAL" if str(execution.get("youtubeVideoId") or "").strip() else next(
+            status for status in statuses.values() if status in failures
+        )
+        return
+    if statuses.get("VIDEO_UPLOAD") == "RUNNING":
+        execution["overallStatus"] = "UPLOADING"
+        return
+    if statuses.get("YOUTUBE_PROCESSING") == "RUNNING":
+        execution["overallStatus"] = "PROCESSING"
+        return
+    if all(status in terminal for status in statuses.values()):
+        snapshot = dict((getattr(settings, "youtube_publication_snapshots", {}) or {}).get(snapshot_id, {}) or {})
+        execution["currentStage"] = "DONE"
+        execution["completedAt"] = execution.get("completedAt") or _now()
+        execution["overallStatus"] = (
+            "SCHEDULED"
+            if str(snapshot.get("publishMode", "")) == "schedule" and str(snapshot.get("requestedPublishAt") or "").strip()
+            else "DONE"
+        )
+        return
+    execution["overallStatus"] = "FORMATTING" if str(execution.get("youtubeVideoId") or "").strip() else "WAITING"
+
+
 def confirm_publication_snapshots(settings: Any, assignments: list[dict], channel_rules: dict[str, dict]) -> list[str]:
     """Freeze explicit valid assignments once; repeat confirmation is idempotent."""
     conflicts = validate_publication_schedule(assignments, channel_rules)
@@ -907,7 +959,7 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
             created.append(snapshot_id)
             continue
         rule = dict(channel_rules.get(channel_id, {}) or {})
-        publish_at = str(assignment.get("publishAt", "")).strip() or None
+        publish_at = _normalize_publish_at(assignment.get("publishAt"), rule)
         mode = str(rule.get("publishMode", "")).strip() or ("schedule" if publish_at else "publish_now")
         if mode == "schedule" and not publish_at:
             raise ValueError(f"Для scheduled публикации {production_id} требуется время")
@@ -1179,7 +1231,7 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
 
     execution["steps"] = steps
     execution["currentStage"] = "THUMBNAIL"
-    execution["overallStatus"] = "FORMATTING" if processing_step["status"] == "SUCCESS" else "PROCESSING"
+    _refresh_execution_overall_status(settings, snapshot_id, execution)
     execution.setdefault("timeline", []).append({"at": now, "stage": "YOUTUBE_PROCESSING", "status": processing_step["status"], "detail": "Состояние YouTube подтверждено через API."})
     executions[snapshot_id] = execution
     settings.youtube_publication_executions = executions
@@ -1245,12 +1297,8 @@ def mark_publication_stage_not_required(
         "providerResult": {"reason": str(reason), **dict(provider_result or {})},
     })
     steps[normalized] = step
-    terminal = {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}
     execution["steps"] = steps
-    if all(str(dict(value or {}).get("status", "PENDING")).upper() in terminal for value in steps.values()):
-        execution["currentStage"] = "DONE"
-        execution["overallStatus"] = "DONE"
-        execution["completedAt"] = now
+    _refresh_execution_overall_status(settings, snapshot_id, execution)
     execution.setdefault("timeline", []).append({
         "at": now, "stage": normalized, "status": "NOT_REQUIRED", "detail": str(reason),
     })
@@ -1277,12 +1325,9 @@ def complete_publication_stage(settings: Any, snapshot_id: str, worker_id: str, 
     steps[normalized] = step
     index = _STAGES.index(normalized)
     next_stage = next((candidate for candidate in _STAGES[index + 1:] if str(dict(steps.get(candidate, {}) or {}).get("status", "PENDING")).upper() not in {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}), "DONE")
-    terminal = {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}
     execution["steps"] = steps
     execution["currentStage"] = next_stage
-    execution["overallStatus"] = "DONE" if all(str(dict(value or {}).get("status", "PENDING")).upper() in terminal for value in steps.values()) else "FORMATTING"
-    if execution["overallStatus"] == "DONE":
-        execution["completedAt"] = now
+    _refresh_execution_overall_status(settings, snapshot_id, execution)
     execution.setdefault("timeline", []).append({"at": now, "stage": normalized, "status": "SUCCESS", "detail": "Этап подтверждён"})
     executions[snapshot_id] = execution
     settings.youtube_publication_executions = executions
