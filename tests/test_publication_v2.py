@@ -21,6 +21,7 @@ from scriptor.publication_v2 import (
     fail_publication_stage,
     migrate_legacy_publication_data,
     next_upload_candidates,
+    normalize_channel_publication_rule,
     persist_publication_receipt,
     publication_receipt,
     reconcile_publication_executions,
@@ -303,6 +304,37 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertTrue(rows["pi-confirmed"]["locked"])
         self.assertEqual(rows["pi-confirmed"]["reason"], "confirmed_snapshot")
         self.assertNotEqual(rows["pi-new"]["productionItemId"], "pi-confirmed")
+
+
+class PublicationV2RuleTests(unittest.TestCase):
+    def test_channel_rule_rejects_non_quarter_hour_interval_and_reversed_ranges(self):
+        with self.assertRaisesRegex(ValueError, "15"):
+            normalize_channel_publication_rule({
+                "channelId": "channel-a", "enabled": True, "quota": 3,
+                "publishMode": "schedule", "timezone": "Europe/Minsk",
+                "intervalMinutes": 17,
+            })
+        with self.assertRaisesRegex(ValueError, "диапазон"):
+            normalize_channel_publication_rule({
+                "channelId": "channel-a", "enabled": True, "quota": 3,
+                "intervalMinutes": 15, "orderStart": 20, "orderEnd": 10,
+            })
+
+    def test_channel_rule_freezes_explicit_ads_and_range_policy(self):
+        rule = normalize_channel_publication_rule({
+            "channelId": "channel-a", "enabled": True, "quota": 8, "monetized": True,
+            "distributionStrategy": "longest_monetized",
+            "intervalMinutes": 45, "timezone": "Europe/Minsk",
+            "orderStart": 1, "orderEnd": 20,
+            "minDurationSeconds": 300, "maxDurationSeconds": 1200,
+            "automation": {"ads": True, "post": False},
+        })
+
+        self.assertEqual(rule["intervalMinutes"], 45)
+        self.assertEqual((rule["orderStart"], rule["orderEnd"]), (1, 20))
+        self.assertTrue(rule["monetized"])
+        self.assertTrue(rule["automation"]["ads"])
+        self.assertFalse(rule["automation"]["post"])
 
 
 class PublicationV2SchedulerTests(unittest.TestCase):
