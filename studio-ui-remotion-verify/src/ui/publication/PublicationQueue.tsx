@@ -17,11 +17,24 @@ function adsState(row: QueueRow) {
   const step = row.steps.ADS || {};
   const status = String(row.ads?.status || step.status || "PENDING").toUpperCase();
   const mode = String(row.ads?.mode || step.providerResult?.mode || "").toUpperCase();
-  if (status === "SUCCESS" && mode === "AUTO+MANUAL_39S") return { label: "AUTO + MANUAL 39s", tone: "success" as BadgeTone };
-  if (status === "SUCCESS" && mode === "AUTO_ONLY") return { label: "AUTO ONLY", tone: "info" as BadgeTone };
-  if (status === "NOT_REQUIRED" || mode === "NONE") return { label: "NONE", tone: "neutral" as BadgeTone };
-  if (badStates.has(status)) return { label: "ОШИБКА", tone: "danger" as BadgeTone };
+
+  if (mode === "AUTO+MANUAL") {
+    return {
+      label: status === "SUCCESS" ? "AUTO + MANUAL 39s" : "AUTO + MANUAL · требует проверки",
+      tone: status === "SUCCESS" ? "success" as BadgeTone : "warning" as BadgeTone,
+    };
+  }
+  if (mode === "AUTO_ONLY") {
+    return {
+      label: status === "SUCCESS" || status === "NOT_REQUIRED" ? "AUTO ONLY" : "AUTO ONLY · ручные не готовы",
+      tone: status === "SUCCESS" || status === "NOT_REQUIRED" ? "info" as BadgeTone : "warning" as BadgeTone,
+    };
+  }
+  if (status === "NOT_REQUIRED" || status === "SKIPPED" || mode === "NONE") {
+    return { label: "NONE", tone: "neutral" as BadgeTone };
+  }
   if (status === "RUNNING") return { label: "НАСТРОЙКА…", tone: "info" as BadgeTone };
+  if (status === "FAILED" || badStates.has(status)) return { label: "ОШИБКА", tone: "danger" as BadgeTone };
   return { label: "ОЖИДАЕТ", tone: "warning" as BadgeTone };
 }
 
