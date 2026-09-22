@@ -76,7 +76,7 @@ export function buildVisualFixture(
       const monetized = channelIndex < 4;
       const uploaded = index < 48;
       const failedAds = index === 13;
-      const adsMode = monetized ? (durationSeconds >= 480 ? "AUTO+MANUAL_39S" : "AUTO_ONLY") : "NONE";
+      const adsMode = monetized ? (durationSeconds >= 480 ? "AUTO+MANUAL" : "AUTO_ONLY") : "NONE";
       const adsStatus = failedAds ? "FAILED" : monetized && uploaded ? "SUCCESS" : monetized ? "PENDING" : "NOT_REQUIRED";
       const overallStatus = failedAds ? "PARTIAL" : index < 24 ? "DONE" : uploaded ? "FORMATTING" : "WAITING";
       const currentStage = failedAds ? "ADS" : index < 24 ? "DONE" : uploaded ? "ADS" : "VIDEO_UPLOAD";
@@ -129,7 +129,7 @@ export function buildVisualFixture(
           THUMBNAIL: { status: index < 30 ? "SUCCESS" : uploaded ? "PENDING" : "PENDING" },
           ADS: {
             status: adsStatus,
-            providerResult: { mode: adsMode, automaticSlotsEnabled: monetized, manualSlotsSeconds: adsMode === "AUTO+MANUAL_39S" ? [39, 78, 117] : [] },
+            providerResult: { mode: adsMode, automaticSlotsEnabled: monetized, manualSlotsSeconds: adsMode === "AUTO+MANUAL" ? [39, 78, 117] : [] },
             error: failedAds ? { category: "RETRYABLE", message: "Тестовая ошибка Studio" } : undefined,
           },
           POST: { status: index < 24 ? "SUCCESS" : "PENDING" },
@@ -174,7 +174,8 @@ export function buildVisualFixture(
           confirmedPublishAt: "2026-09-15T12:02:00Z",
           finalStatus: "DONE",
           totalDuration: "01:00",
-          stages: { VIDEO_UPLOAD: "SUCCESS", TITLE: "SUCCESS", SCHEDULE: "SUCCESS" },
+          ads: { status: "SUCCESS", mode: "AUTO+MANUAL", automatic: true, manualSlotsSeconds: [39, 78], confirmedManualSlotsSeconds: [39, 78] },
+          stages: { VIDEO_UPLOAD: "SUCCESS", ADS: "SUCCESS", TITLE: "SUCCESS", SCHEDULE: "SUCCESS" },
         },
       },
     };
