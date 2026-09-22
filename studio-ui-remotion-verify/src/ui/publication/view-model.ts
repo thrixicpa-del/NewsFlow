@@ -31,6 +31,12 @@ export function defaultRule(id: string, saved: Record<string, any> = {}): Channe
     topicCooldownMinutes: Math.max(0, Number(saved.topicCooldownMinutes) || 0),
     includeKeywords: Array.isArray(saved.includeKeywords) ? saved.includeKeywords.map(text).filter(Boolean) : [],
     excludeKeywords: Array.isArray(saved.excludeKeywords) ? saved.excludeKeywords.map(text).filter(Boolean) : [],
+    blackoutPeriods: Array.isArray(saved.blackoutPeriods)
+      ? saved.blackoutPeriods.map((value: unknown) => {
+          const item = record(value);
+          return { start: text(item.start), end: text(item.end), label: text(item.label) || undefined };
+        }).filter((item: { start: string; end: string }) => item.start && item.end)
+      : [],
     automation: {
       upload: rawAutomation.upload !== false,
       metadata: rawAutomation.metadata !== false,
