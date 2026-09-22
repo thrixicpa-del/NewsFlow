@@ -35,6 +35,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _file_fingerprint(path_value: object) -> dict[str, int] | None:
+    """Return a cheap immutable-input fingerprint without hashing large media files."""
+    path = Path(str(path_value or "").strip())
+    try:
+        if not path.is_file():
+            return None
+        stat = path.stat()
+    except OSError:
+        return None
+    return {"sizeBytes": int(stat.st_size), "mtimeNs": int(stat.st_mtime_ns)}
+
+
 def _normalise(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
@@ -1196,8 +1208,17 @@ def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, 
     execution = dict(executions.get(snapshot_id, {}) or {})
     reasons: list[dict[str, str]] = []
     video_path = str(snapshot.get("videoPath", "")).strip()
-    if not video_path or not Path(video_path).is_file():
+    current_video_fingerprint = _file_fingerprint(video_path)
+    if not video_path or current_video_fingerprint is None:
         reasons.append({"kind": "VIDEO_MISSING", "message": "MP4 из snapshot не найден. Связь с роликом сохранена для восстановления."})
+    else:
+        frozen_fingerprints = dict(snapshot.get("artifactFingerprints", {}) or {})
+        frozen_video_fingerprint = dict(frozen_fingerprints.get("video", {}) or {})
+        if frozen_video_fingerprint and current_video_fingerprint != frozen_video_fingerprint:
+            reasons.append({
+                "kind": "VIDEO_STALE",
+                "message": "MP4 изменился после подтверждения snapshot. Переподтвердите назначение перед загрузкой.",
+            })
     metadata = dict(snapshot.get("metadata", {}) or {})
     upload_title = resolve_publication_upload_title(metadata)
     if not upload_title or len(upload_title) > 100:
@@ -1351,9 +1372,17 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
         }
         duration_seconds = _item_duration_seconds(item)
         monetized = bool(rule.get("monetized", False))
+        artifact_fingerprints: dict[str, dict[str, int]] = {}
+        video_fingerprint = _file_fingerprint(artifact.get("path", ""))
+        if video_fingerprint is not None:
+            artifact_fingerprints["video"] = video_fingerprint
+        thumbnail_fingerprint = _file_fingerprint(thumbnail.get("path", ""))
+        if thumbnail_fingerprint is not None:
+            artifact_fingerprints["thumbnail"] = thumbnail_fingerprint
         snapshot = {
             "id": snapshot_id, "productionItemId": production_id, "channelId": channel_id,
             "videoPath": str(artifact.get("path", "")), "thumbnailPath": str(thumbnail.get("path", "")), "metadata": metadata,
+            "artifactFingerprints": artifact_fingerprints,
             "durationSeconds": duration_seconds, "monetized": monetized,
             "adPolicy": {
                 "enabled": monetized,
