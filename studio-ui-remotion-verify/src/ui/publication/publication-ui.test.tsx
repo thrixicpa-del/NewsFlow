@@ -57,7 +57,7 @@ describe("PublicationPage", () => {
     expect(screen.getByText("AUTO + MANUAL 39s")).toBeInTheDocument();
   });
 
-  it("does not offer a duplicate-prone retry for an upload with unknown outcome", () => {
+  it("requires explicit reconciliation for an upload with unknown outcome", () => {
     const uncertainFixture = {
       ...fixture,
       publication: {
@@ -74,12 +74,28 @@ describe("PublicationPage", () => {
       },
     } as unknown as NewsFlowSnapshot;
 
+    command.mockClear();
     render(<PublicationPage data={uncertainFixture} command={command} />);
     fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
     fireEvent.click(screen.getByRole("button", { name: "Раскрыть ход публикации Ролик 1" }));
 
     expect(screen.queryByRole("button", { name: /Повторить/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/сверьте канал/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить автоматизацию" })).not.toBeInTheDocument();
+    expect(screen.getByText(/обычный retry и отмена заблокированы/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("YouTube video ID для Ролик 1"), { target: { value: "yt-verified-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Привязать найденный YouTube ID" }));
+    expect(command).toHaveBeenCalledWith("resolve-publication-v2-uncertain-upload", {
+      snapshotId: "snapshot-uncertain",
+      outcome: "found",
+      youtubeVideoId: "yt-verified-1",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Я проверил канал: видео нет — разрешить повтор" }));
+    expect(command).toHaveBeenCalledWith("resolve-publication-v2-uncertain-upload", {
+      snapshotId: "snapshot-uncertain",
+      outcome: "not_found",
+    });
   });
 
   it("keeps video-ready, new-package, and quota-slot counters semantically distinct", () => {
