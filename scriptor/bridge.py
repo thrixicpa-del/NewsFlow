@@ -4949,6 +4949,11 @@ def generate_scenarios(payload: dict) -> dict:
     finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected))
     current.update({job.request.index: job for job in finished})
     save_session(titles, list(current.values()))
+    for job in finished:
+        if job.state == RunState.DONE and str(job.result or "").strip():
+            _sync_scenario_to_seo(
+                settings, titles[job.request.index], job, create_if_missing=False,
+            )
     save_settings(settings)
     return snapshot()
 
