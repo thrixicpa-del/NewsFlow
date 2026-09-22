@@ -14174,6 +14174,69 @@ def save_publication_v2_rules(payload: dict) -> dict:
     return snapshot()
 
 
+def save_publication_v2_rule_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Укажите название пресета Publication V2.")
+    raw_rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
+    if not raw_rules:
+        raise ValueError("В пресете нет правил каналов.")
+    normalized = {
+        str(channel_id).strip(): normalize_channel_publication_rule({**dict(rule), "channelId": str(channel_id).strip()})
+        for channel_id, rule in raw_rules.items()
+        if isinstance(rule, dict) and str(channel_id).strip()
+    }
+    if not normalized:
+        raise ValueError("В пресете нет корректных правил каналов.")
+    settings = load_settings()
+    presets = [
+        dict(item) for item in (settings.youtube_publication_v2_rule_presets or [])
+        if isinstance(item, dict) and str(item.get("name", "")).casefold() != name.casefold()
+    ]
+    presets.append({"name": name, "rules": normalized, "updatedAt": datetime.now().astimezone().isoformat()})
+    settings.youtube_publication_v2_rule_presets = presets[-50:]
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-preset-save", "count": 1,
+            "message": f"Пресет «{name}» сохранён."}}
+
+
+def apply_publication_v2_rule_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Выберите пресет Publication V2.")
+    settings = load_settings()
+    preset = next((dict(item) for item in (settings.youtube_publication_v2_rule_presets or [])
+                   if isinstance(item, dict) and str(item.get("name", "")).casefold() == name.casefold()), None)
+    if preset is None:
+        raise ValueError("Пресет Publication V2 не найден.")
+    rules = dict(preset.get("rules", {}) or {})
+    settings.youtube_channel_publication_rules = {
+        str(channel_id): normalize_channel_publication_rule({**dict(rule), "channelId": str(channel_id)})
+        for channel_id, rule in rules.items() if isinstance(rule, dict)
+    }
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-preset-apply",
+            "count": len(settings.youtube_channel_publication_rules),
+            "message": f"Пресет «{name}» применён."}}
+
+
+def delete_publication_v2_rule_preset(payload: dict) -> dict:
+    name = " ".join(str(payload.get("name", "")).split())
+    if not name:
+        raise ValueError("Выберите пресет Publication V2.")
+    settings = load_settings()
+    before = len(settings.youtube_publication_v2_rule_presets or [])
+    settings.youtube_publication_v2_rule_presets = [
+        dict(item) for item in (settings.youtube_publication_v2_rule_presets or [])
+        if isinstance(item, dict) and str(item.get("name", "")).casefold() != name.casefold()
+    ]
+    if len(settings.youtube_publication_v2_rule_presets) == before:
+        raise ValueError("Пресет Publication V2 не найден.")
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-preset-delete", "count": 1,
+            "message": f"Пресет «{name}» удалён."}}
+
+
 def preview_publication_v2_distribution(payload: dict) -> dict:
     settings = load_settings()
     reconcile_publication_items(settings)
@@ -15556,6 +15619,12 @@ def main() -> None:
             result = migrate_publication_v2(payload if isinstance(payload, dict) else {})
         elif command == "save-publication-v2-rules":
             result = save_publication_v2_rules(payload if isinstance(payload, dict) else {})
+        elif command == "save-publication-v2-rule-preset":
+            result = save_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
+        elif command == "apply-publication-v2-rule-preset":
+            result = apply_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
+        elif command == "delete-publication-v2-rule-preset":
+            result = delete_publication_v2_rule_preset(payload if isinstance(payload, dict) else {})
         elif command == "preview-publication-v2-distribution":
             result = preview_publication_v2_distribution(payload if isinstance(payload, dict) else {})
         elif command == "confirm-publication-v2-distribution":
