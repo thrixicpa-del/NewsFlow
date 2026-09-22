@@ -4959,8 +4959,16 @@ def rename_scenario_command(payload: dict) -> dict:
     titles, jobs = load_session()
     if not 0 <= index < len(titles):
         raise ValueError("Сценарий не найден")
+    previous_title = titles[index]
     titles, jobs = rename_scenario(titles, jobs, index, title)
     save_session(titles, jobs)
+    updated_job = next((job for job in jobs if job.request.index == index), None)
+    settings = load_settings()
+    if _sync_scenario_to_seo(
+        settings, titles[index], updated_job,
+        create_if_missing=False, legacy_titles=(previous_title,),
+    ):
+        save_settings(settings)
     return snapshot()
 
 
@@ -5042,7 +5050,13 @@ def save_scenario_text(payload: dict) -> dict:
     previous = current.get(index)
     request = previous.request if previous else ScenarioRequest(index, titles[index], "")
     current[index] = Job(request, RunState.DONE, text, "")
-    save_session(titles, list(current.values()))
+    updated_jobs = list(current.values())
+    save_session(titles, updated_jobs)
+    settings = load_settings()
+    if _sync_scenario_to_seo(
+        settings, titles[index], current[index], create_if_missing=False,
+    ):
+        save_settings(settings)
     return snapshot()
 
 
@@ -5197,22 +5211,82 @@ def _sync_finished_scenarios_to_montage(settings: Settings, scenarios: list[dict
     return changed
 
 
-def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bool:
-    """Keep one SEO/tags row per scenario title and refresh its finished text."""
-    existing = next((item for item in settings.seo_queue
-                     if str(item.get("source_title", "")).casefold() == title.casefold()), None)
+def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None, *,
+                          create_if_missing: bool = True,
+                          legacy_titles: tuple[str, ...] = ()) -> bool:
+    """Keep SEO/tags attached to the durable ProductionItem and invalidate stale results."""
+    production_item_id = str(
+        getattr(getattr(job, "request", None), "production_item_id", "") or ""
+    ).strip()
+    title_keys = {
+        str(value).strip().casefold()
+        for value in (title, *legacy_titles)
+        if str(value).strip()
+    }
+    existing = None
+    if production_item_id:
+        existing = next((
+            item for item in settings.seo_queue
+            if str(item.get("production_item_id", "")).strip() == production_item_id
+        ), None)
+    if existing is None and title_keys:
+        existing = next((
+            item for item in settings.seo_queue
+            if str(item.get("source_title", "")).strip().casefold() in title_keys
+            and (
+                not str(item.get("production_item_id", "")).strip()
+                or not production_item_id
+                or str(item.get("production_item_id", "")).strip() == production_item_id
+            )
+        ), None)
+
     script = job.result if job else ""
     requirements = _scenario_preferences(job)
     if existing is None:
-        settings.seo_queue.append({"source_title": title, "script": script, "requirements": requirements,
-                                   "status": "Ожидает", "title": "", "description": "", "hashtags": [], "tags": [],
-                                   "tags_status": "Ожидают", "tags_error": "", "error": ""})
+        if not create_if_missing:
+            return False
+        settings.seo_queue.append({
+            "production_item_id": production_item_id,
+            "source_title": title,
+            "script": script,
+            "requirements": requirements,
+            "status": "Ожидает",
+            "title": "",
+            "description": "",
+            "hashtags": [],
+            "tags": [],
+            "tags_status": "Ожидают",
+            "tags_error": "",
+            "error": "",
+        })
         return True
-    changed = (existing.get("source_title") != title or existing.get("script", "") != script
-               or existing.get("requirements", "") != requirements)
-    if changed:
-        existing.update({"source_title": title, "script": script, "requirements": requirements})
-    return changed
+
+    identity_changed = bool(
+        production_item_id
+        and str(existing.get("production_item_id", "")).strip() != production_item_id
+    )
+    content_changed = (
+        str(existing.get("source_title", "")) != title
+        or str(existing.get("script", "")) != script
+        or str(existing.get("requirements", "")) != requirements
+    )
+    if identity_changed:
+        existing["production_item_id"] = production_item_id
+    if content_changed:
+        existing.update({
+            "source_title": title,
+            "script": script,
+            "requirements": requirements,
+            "status": "Ожидает",
+            "title": "",
+            "description": "",
+            "hashtags": [],
+            "error": "",
+            "tags": [],
+            "tags_status": "Ожидают",
+            "tags_error": "",
+        })
+    return identity_changed or content_changed
 
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
@@ -8723,14 +8797,15 @@ def save_seo_settings(payload: dict) -> dict:
     prefix_ranges = payload.get("descriptionPrefixRanges")
     prefix_presets = payload.get("descriptionPrefixPresets")
     fixed_prefix = payload.get("fixedDescriptionPrefix")
-    if (template or provider in {"agent", "openai"} or call_to_action or isinstance(use_script_context, bool)
-            or isinstance(prefix_ranges, list) or isinstance(prefix_presets, list) or isinstance(fixed_prefix, str)):
+    if (template or provider in {"agent", "openai"} or "callToAction" in payload
+            or isinstance(use_script_context, bool) or isinstance(prefix_ranges, list)
+            or isinstance(prefix_presets, list) or isinstance(fixed_prefix, str)):
         settings = load_settings()
         if provider in {"agent", "openai"}:
             settings.seo_provider = provider
         if template:
             settings.seo_prompt_template = template
-        if call_to_action:
+        if "callToAction" in payload:
             settings.seo_call_to_action = call_to_action[:1000]
         if isinstance(use_script_context, bool):
             settings.seo_use_script_context = use_script_context
@@ -8765,7 +8840,7 @@ def save_tag_limits(payload: dict) -> dict:
     settings = load_settings()
     try:
         settings.hashtag_batch_size = max(1, min(30, int(payload.get("hashtagBatchSize", settings.hashtag_batch_size))))
-        settings.tag_char_limit = max(50, min(5000, int(payload.get("tagCharLimit", settings.tag_char_limit))))
+        settings.tag_char_limit = max(50, min(500, int(payload.get("tagCharLimit", settings.tag_char_limit))))
     except (TypeError, ValueError) as exc:
         raise ValueError("Укажите целое число для пачки хештегов и лимита тегов") from exc
     save_settings(settings)
@@ -13206,9 +13281,36 @@ def remove_montage_projects(payload: dict) -> dict:
 def package_outputs(payload: dict) -> dict:
     settings = load_settings()
     _titles, jobs = load_session()
-    jobs_by_title = {job.request.title: job for job in jobs if job.state == RunState.DONE}
+    ready_jobs = [job for job in jobs if job.state == RunState.DONE]
+    jobs_by_title = {job.request.title: job for job in ready_jobs}
+    jobs_by_index = {job.request.index: job for job in ready_jobs}
+    jobs_by_safe_stem: dict[str, list[Job]] = {}
+    for job in ready_jobs:
+        jobs_by_safe_stem.setdefault(safe_filename(job.request.title).casefold(), []).append(job)
     covers_by_title = {str(item.get("title", "")): item for item in settings.cover_queue}
-    seo_by_title = {str(item.get("source_title", "")): item for item in settings.seo_queue if item.get("status") == "Готово"}
+    covers_by_id = {
+        str(item.get("production_item_id", "")).strip(): item
+        for item in settings.cover_queue
+        if str(item.get("production_item_id", "")).strip()
+    }
+    seo_ready = [item for item in settings.seo_queue if item.get("status") == "Готово"]
+    seo_by_title = {str(item.get("source_title", "")): item for item in seo_ready}
+    seo_by_id = {
+        str(item.get("production_item_id", "")).strip(): item
+        for item in seo_ready
+        if str(item.get("production_item_id", "")).strip()
+    }
+    task_index_by_output: dict[str, int] = {}
+    for key, raw in settings.montage_task_statuses.items():
+        if not isinstance(raw, dict):
+            continue
+        raw_output = str(raw.get("outputPath") or "").strip()
+        if not raw_output:
+            continue
+        try:
+            task_index_by_output[str(Path(raw_output).resolve()).casefold()] = int(raw.get("scenarioIndex", key))
+        except (TypeError, ValueError, OSError):
+            continue
     root = Path(settings.montage_output_folder) / "Результаты по роликам"
     created = 0
     for video in settings.pipeline_montage_outputs:
@@ -13227,12 +13329,27 @@ def package_outputs(payload: dict) -> dict:
         xml_source = Path(settings.montage_project_folder) / f"{safe_filename(title)}.fcpxml"
         if xml_source.is_file():
             shutil.copy2(xml_source, folder / f"{safe_filename(title)}.fcpxml")
-        job = jobs_by_title.get(title)
-        cover = covers_by_title.get(title)
-        seo = seo_by_title.get(title, {})
+        scenario_index = None
+        try:
+            scenario_index = task_index_by_output.get(str(source.resolve()).casefold())
+        except OSError:
+            scenario_index = None
+        job = jobs_by_index.get(scenario_index) if scenario_index is not None else jobs_by_title.get(title)
+        if job is None:
+            safe_matches = jobs_by_safe_stem.get(title.casefold(), [])
+            job = safe_matches[0] if len(safe_matches) == 1 else None
+        production_item_id = str(
+            getattr(getattr(job, "request", None), "production_item_id", "") or ""
+        ).strip()
+        scenario_title = str(getattr(getattr(job, "request", None), "title", "") or title)
+        cover = covers_by_id.get(production_item_id) if production_item_id else None
+        if cover is None:
+            cover = covers_by_title.get(scenario_title) or covers_by_title.get(title)
+        seo = seo_by_id.get(production_item_id, {}) if production_item_id else {}
+        if not seo:
+            seo = seo_by_title.get(scenario_title, seo_by_title.get(title, {}))
         tags = seo.get("tags", []) if isinstance(seo.get("tags", []), list) else []
         hashtags = seo.get("hashtags", []) if isinstance(seo.get("hashtags", []), list) else []
-        scenario_title = str(getattr(getattr(job, "request", None), "title", "") or title)
         seo_title = str(seo.get("title") or "")
         seo_phrases = seo.get("phrases", seo.get("keywords", []))
         if not isinstance(seo_phrases, list):
