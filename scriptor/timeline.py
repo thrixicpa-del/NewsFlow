@@ -123,6 +123,7 @@ class TimelineClip:
     position_rotation_reason: str = ""
     strict_rejection_reason: str = ""
     voice_segment_id: int = 0
+    voice_segment_ids: list[int] = field(default_factory=list)
     narration_start: float = 0.0
     narration_end: float = 0.0
     minimum_source_duration: float = 0.0

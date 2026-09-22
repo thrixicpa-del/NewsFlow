@@ -492,6 +492,7 @@ class VoiceMapTests(unittest.TestCase):
                     visual_query_en=scene["visual_query_en"],
                     duration=scene["duration"],
                     voice_segment_id=scene["voice_segment_id"],
+                    voice_segment_ids=scene["voice_segment_ids"],
                     narration_start=scene["narration_start"],
                     narration_end=scene["narration_end"],
                     minimum_source_duration=scene["minimum_footage_duration"],
@@ -513,6 +514,10 @@ class VoiceMapTests(unittest.TestCase):
         self.assertEqual(
             [clip.visual_beat_index for clip in restored.clips],
             list(range(1, len(scenes) + 1)),
+        )
+        self.assertEqual(
+            [clip.voice_segment_ids for clip in restored.clips],
+            [scene["voice_segment_ids"] for scene in scenes],
         )
         self.assertEqual(restored.voice_map_provenance["alignmentMode"], "aligned")
         self.assertEqual(restored.voice_map_provenance["voiceMapSchemaVersion"], VOICE_MAP_SCHEMA_VERSION)
@@ -561,9 +566,15 @@ class VoiceMapTests(unittest.TestCase):
         )
         self.assertEqual([scene["visual_beat_index"] for scene in scenes], [1, 2, 3])
         self.assertEqual({scene["visual_beat_count"] for scene in scenes}, {3})
-        self.assertIn("Washington", scenes[0]["visual_query_en"])
+        # Beat 1 overlaps segment 1 for 2s and segment 2 for 4s, so the
+        # visual search must stay focused on Kyiv instead of concatenating
+        # multiple entity queries into a broad ambiguous request.
         self.assertIn("Kyiv", scenes[0]["visual_query_en"])
+        self.assertNotIn("Washington", scenes[0]["visual_query_en"])
+        self.assertEqual(scenes[0]["voice_segment_ids"], [1, 2])
+        self.assertEqual(scenes[0]["voice_segment_id"], 2)
         self.assertIn("Europe", scenes[1]["visual_query_en"])
+        self.assertEqual(scenes[1]["voice_segment_ids"], [2, 3])
         for previous, current in pairwise(scenes):
             self.assertAlmostEqual(previous["narration_end"], current["narration_start"], places=6)
         self.assertAlmostEqual(sum(scene["duration"] for scene in scenes), 14.4, places=6)
@@ -600,6 +611,7 @@ class VoiceMapTests(unittest.TestCase):
         self.assertAlmostEqual(scenes[0]["minimum_footage_duration"], 6.0, places=6)
         self.assertAlmostEqual(scenes[1]["minimum_footage_duration"], 0.398, places=6)
         self.assertEqual([scene["voice_segment_id"] for scene in scenes], [29, 29])
+        self.assertEqual([scene["voice_segment_ids"] for scene in scenes], [[29], [29]])
         self.assertEqual(scenes[0]["narration_start"], 0.0)
         self.assertAlmostEqual(scenes[-1]["narration_end"], 6.398, places=6)
         self.assertNotEqual([round(scene["duration"], 3) for scene in scenes], [3.199, 3.199])

@@ -3666,18 +3666,33 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
             for segment in overlapping
             if (part := _voice_map_overlap_text(segment, beat_start, beat_end))
         ]
-        queries = list(dict.fromkeys(
-            str(segment.get("visualQuery", "")).strip()
+        overlap_durations = {
+            int(segment["id"]): min(float(segment["end"]), beat_end)
+            - max(float(segment["start"]), beat_start)
             for segment in overlapping
-            if str(segment.get("visualQuery", "")).strip()
-        ))
+        }
+        dominant = max(
+            overlapping,
+            key=lambda segment: (
+                overlap_durations[int(segment["id"])],
+                -abs(
+                    ((float(segment["start"]) + float(segment["end"])) / 2.0)
+                    - ((beat_start + beat_end) / 2.0)
+                ),
+                -int(segment["id"]),
+            ),
+        )
         duration = beat_end - beat_start
         scenes.append({
             "narration": " ".join(narration_parts).strip(),
-            "visual_query_en": ", ".join(queries) or "contextual news footage",
+            "visual_query_en": (
+                str(dominant.get("visualQuery", "")).strip()
+                or "contextual news footage"
+            ),
             "duration": duration,
             "minimum_footage_duration": duration,
-            "voice_segment_id": int(overlapping[0]["id"]),
+            "voice_segment_id": int(dominant["id"]),
+            "voice_segment_ids": [int(segment["id"]) for segment in overlapping],
             "narration_start": beat_start,
             "narration_end": beat_end,
             "visual_beat_index": beat_index + 1,
@@ -11542,6 +11557,9 @@ def prepare_montage(payload: dict) -> dict:
                                   position_rotation_reason=selection.position_rotation_reason,
                                   strict_rejection_reason=selection.strict_rejection_reason,
                                   voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
+                                  voice_segment_ids=[
+                                      int(value) for value in scene.get("voice_segment_ids", [])
+                                  ],
                                   narration_start=float(scene.get("narration_start", 0.0) or 0.0),
                                   narration_end=float(scene.get("narration_end", 0.0) or 0.0),
                                   minimum_source_duration=required_source_duration,
