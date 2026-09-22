@@ -1876,7 +1876,11 @@ def publication_receipt(settings: Any, snapshot_id: str) -> dict[str, Any]:
     statuses = {stage: str(dict(value or {}).get("status", "PENDING")).upper() for stage, value in steps.items()}
     has_failure = any(status in {"FAILED", "AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"} for status in statuses.values())
     incomplete = any(status in {"PENDING", "RUNNING", "RETRYING", "UNVERIFIED"} for status in statuses.values())
-    final_status = "PARTIAL" if has_failure or incomplete else str(execution.get("overallStatus", "DONE")).upper()
+    overall_status = str(execution.get("overallStatus", "DONE")).upper()
+    if overall_status in {"CANCELLED", "AUTOMATION_CANCELLED"}:
+        final_status = overall_status
+    else:
+        final_status = "PARTIAL" if has_failure or incomplete else overall_status
     if final_status not in {"DONE", "SCHEDULED", "PARTIAL", "NEEDS_ATTENTION", "AUTOMATION_CANCELLED", "CANCELLED"}:
         final_status = "PARTIAL"
     ads_step = dict(steps.get("ADS", {}) or {})
