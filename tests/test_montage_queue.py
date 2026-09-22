@@ -474,7 +474,7 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(rescued.item.path, candidate.path)
         self.assertEqual(rescued.fallback_level, "STRICT_MATCH")
 
-    def test_final_thematic_rescue_relaxes_taxonomy_but_not_geography(self):
+    def test_final_thematic_mismatch_is_reserved_for_continuity_fallback(self):
         stale_tag = FootageItem(
             "D:/library/washington-building.mp4",
             "Washington government building exterior.mp4",
@@ -488,12 +488,7 @@ class MontageQueueStateTests(unittest.TestCase):
         query = "Washington DC White House US government officials"
 
         self.assertFalse(bridge._semantic_clip_ok(query, stale_tag))
-        self.assertTrue(bridge._semantic_clip_ok(
-            query, stale_tag, allow_thematic_mismatch=True,
-        ))
-        self.assertFalse(bridge._semantic_clip_ok(
-            query, sevastopol, allow_thematic_mismatch=True,
-        ))
+        self.assertFalse(bridge._semantic_clip_ok(query, sevastopol))
 
     def test_visual_continuity_fallback_is_topic_agnostic_and_prefers_new_family(self):
         reused = FootageItem("D:/used/family-a/clip.mp4", "used.mp4", tags=["ukraine"])

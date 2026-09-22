@@ -10440,7 +10440,7 @@ def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     return min(0.30, bonus)
 
 
-def _semantic_clip_ok(scene_query: str, item: FootageItem, *, allow_thematic_mismatch: bool = False) -> bool:
+def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     query = str(scene_query or "").casefold()
     haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
     # Never let a generic Kremlin / politician / cabinet shot illustrate a
@@ -10473,8 +10473,7 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, allow_thematic_mis
     semantic_tags = set(item.tags or ()) & SEMANTIC_TAG_LABELS
     specific_semantic_tags = semantic_tags - _MONTAGE_GENERIC_SAFE_SEMANTIC_TAGS
     if (expected_semantic_tags and specific_semantic_tags
-            and not (expected_semantic_tags & specific_semantic_tags)
-            and not allow_thematic_mismatch):
+            and not (expected_semantic_tags & specific_semantic_tags)):
         return False
     for scene_terms, wanted_terms, forbidden_terms in _MONTAGE_TOPIC_GUARDS:
         if not any(term in query for term in scene_terms):
@@ -10809,8 +10808,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                               relaxed_hits=None, category_hits=None, safe_context_hits=None,
                               position_bucket: str = "", batch_family_buckets=None,
                               diversity_seed: str = "", allow_safe_reuse: bool = True,
-                              allow_below_threshold: bool = False,
-                              allow_thematic_mismatch: bool = False) -> MontageCandidateSelection:
+                              allow_below_threshold: bool = False) -> MontageCandidateSelection:
     """Select one valid clip without letting batch uniqueness become a hard failure.
 
     The candidate collections come from a bounded in-memory vector search.
@@ -10895,9 +10893,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if float(hit.duration or 0.0) + .05 < required_duration:
                 reject("duration", key)
                 continue
-            if not _semantic_clip_ok(
-                    scene_query, hit.item, allow_thematic_mismatch=allow_thematic_mismatch,
-            ):
+            if not _semantic_clip_ok(scene_query, hit.item):
                 reject("safety", key)
                 continue
             if minimum_score is not None and float(hit.score) < minimum_score:
@@ -11800,7 +11796,6 @@ def prepare_montage(payload: dict) -> dict:
                     diversity_seed=f"{titles[scenario_index]}|{scenario_index}|neutral-rescue",
                     allow_safe_reuse=False,
                     allow_below_threshold=True,
-                    allow_thematic_mismatch=True,
                 )
                 selected = selection.item
                 selected_duration = selection.duration
