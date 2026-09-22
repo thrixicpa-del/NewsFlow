@@ -9,7 +9,7 @@
 .nf-publication-header p{margin:5px 0 0;color:var(--nf-muted);font-size:13px}
 .nf-header-actions,.nf-section-toolbar>div:last-child,.nf-detail-actions,.nf-queue-toolbar>div{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 
-.nf-kpi-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+.nf-kpi-strip{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px}
 .nf-kpi{background:linear-gradient(180deg,#0c223b,#091c31);border:1px solid var(--nf-border);border-radius:10px;display:grid;grid-template-columns:18px auto;align-items:center;column-gap:6px;min-height:60px;padding:9px 11px;color:#88b9e5}
 .nf-kpi>svg{grid-row:span 2;width:17px}.nf-kpi b{color:#f1f7ff;font-size:19px;line-height:1}.nf-kpi small{font-size:10px;color:var(--nf-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nf-kpi.success{border-color:#21755a;color:var(--nf-success)}.nf-kpi.warning{border-color:#85662b;color:var(--nf-warning)}.nf-kpi.info{border-color:#2b6eab;color:#58a9ff}

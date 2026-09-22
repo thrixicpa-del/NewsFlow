@@ -1923,6 +1923,8 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
     items = dict(getattr(settings, "youtube_publication_items", {}) or {})
     snapshots = dict(getattr(settings, "youtube_publication_snapshots", {}) or {})
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
+    assignments = dict(getattr(settings, "youtube_publication_assignments", {}) or {})
+    rules = dict(getattr(settings, "youtube_channel_publication_rules", {}) or {})
     rows: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
     for snapshot_id, snapshot in snapshots.items():
@@ -1955,7 +1957,64 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
             "timeline": list(execution.get("timeline", []) or [])[-100:],
             "active": bool(execution.get("activeLease")),
         })
-    return {"items": items, "queue": rows, "counters": {"total": len(rows), **status_counts},
+    assigned_channels: dict[str, str] = {}
+    for production_id, assignment in assignments.items():
+        production_key = str(production_id)
+        if production_key not in items:
+            continue
+        channel_id = str(dict(assignment or {}).get("channelId", "")).strip()
+        if channel_id:
+            assigned_channels[production_key] = channel_id
+    for snapshot_id, snapshot in snapshots.items():
+        production_id = str(dict(snapshot or {}).get("productionItemId", "")).strip()
+        channel_id = str(dict(snapshot or {}).get("channelId", "")).strip()
+        if not production_id or production_id not in items or not channel_id or production_id in assigned_channels:
+            continue
+        execution = dict(executions.get(snapshot_id, {}) or {})
+        status = str(execution.get("overallStatus", "")).upper()
+        has_video = bool(str(execution.get("youtubeVideoId") or "").strip())
+        if status == "CANCELLED" and not has_video:
+            continue
+        assigned_channels[production_id] = channel_id
+
+    used_by_channel: dict[str, int] = {}
+    for channel_id in assigned_channels.values():
+        used_by_channel[channel_id] = used_by_channel.get(channel_id, 0) + 1
+
+    video_ready = publication_ready = unassigned = 0
+    for production_id, item in items.items():
+        readiness = dict(dict(item or {}).get("readiness", {}) or {})
+        is_video_ready = bool(readiness.get("videoReady")) if "videoReady" in readiness else str(readiness.get("state", "")).upper() == "VIDEO_READY"
+        is_publication_ready = bool(readiness.get("publicationReady"))
+        is_content_ready = bool(readiness.get("contentReady")) if "contentReady" in readiness else is_video_ready
+        video_ready += int(is_video_ready)
+        publication_ready += int(is_publication_ready)
+        unassigned += int(is_content_ready and str(production_id) not in assigned_channels)
+
+    quota_slots_remaining = 0
+    for channel_id, rule in rules.items():
+        source = dict(rule or {})
+        if source.get("enabled") is False:
+            continue
+        try:
+            quota = max(0, int(source.get("quota", 0) or 0))
+        except (TypeError, ValueError):
+            quota = 0
+        quota_slots_remaining += max(0, quota - used_by_channel.get(str(channel_id), 0))
+
+    semantic_counters = {
+        "total": len(items),
+        "videoReady": video_ready,
+        "publicationReady": publication_ready,
+        "assigned": len(assigned_channels),
+        "unassigned": unassigned,
+        "scheduled": sum(1 for execution in executions.values() if str(dict(execution or {}).get("overallStatus", "")).upper() == "SCHEDULED"),
+        "uploading": sum(1 for execution in executions.values() if str(dict(execution or {}).get("overallStatus", "")).upper() == "UPLOADING"),
+        "done": sum(1 for execution in executions.values() if str(dict(execution or {}).get("overallStatus", "")).upper() == "DONE"),
+        "failed": sum(1 for execution in executions.values() if str(dict(execution or {}).get("overallStatus", "")).upper() in {"FAILED", "PARTIAL", "AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"}),
+        "quotaSlotsRemaining": quota_slots_remaining,
+    }
+    return {"items": items, "queue": rows, "counters": {**semantic_counters, **status_counts},
             "paused": bool(getattr(settings, "youtube_publication_queue_paused", False)),
             "uploadConcurrency": int(getattr(settings, "youtube_publication_upload_concurrency", 1) or 1),
             "channelRules": dict(getattr(settings, "youtube_channel_publication_rules", {}) or {}),

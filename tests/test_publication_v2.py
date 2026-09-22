@@ -24,6 +24,7 @@ from scriptor.publication_v2 import (
     normalize_channel_publication_rule,
     persist_publication_receipt,
     publication_receipt,
+    publication_queue_projection,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
@@ -164,6 +165,34 @@ class PublicationV2RegistryTests(unittest.TestCase):
         )
         self.assertEqual(registry["items"]["pi-ready"]["readiness"]["state"], "VIDEO_READY")
         self.assertEqual(registry["items"]["pi-missing"]["readiness"]["state"], "VIDEO_MISSING")
+
+
+    def test_queue_projection_exposes_registry_and_quota_counters_separately(self):
+        settings = Settings(
+            youtube_publication_items={
+                f"pi-{index}": {
+                    "productionItemId": f"pi-{index}",
+                    "readiness": {
+                        "state": "VIDEO_READY",
+                        "videoReady": True,
+                        "contentReady": True,
+                        "publicationReady": False,
+                    },
+                }
+                for index in range(84)
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 44},
+                "channel-b": {"channelId": "channel-b", "enabled": True, "quota": 44},
+            },
+        )
+
+        projection = publication_queue_projection(settings)
+
+        self.assertEqual(
+            {key: projection["counters"][key] for key in ("total", "videoReady", "assigned", "unassigned", "quotaSlotsRemaining")},
+            {"total": 84, "videoReady": 84, "assigned": 0, "unassigned": 84, "quotaSlotsRemaining": 88},
+        )
 
 
 class PublicationV2DistributionTests(unittest.TestCase):
