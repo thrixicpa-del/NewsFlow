@@ -451,20 +451,20 @@ class MontageQueueStateTests(unittest.TestCase):
             "neutral-government.mp4",
             tags=["documentary-neutral"],
         )
-        kwargs = dict(
-            scene_query="Washington government press conference",
-            strict_hits=[SearchHit(candidate, .03, duration=6.0)],
-            fallback_hits=[],
-            relaxed_hits=[], category_hits=[], safe_context_hits=[],
-            required_duration=6.0, match_threshold=.22,
-            used_paths=set(), used_families=set(),
-            project_used_paths=set(), project_used_families=set(),
-            reserved_paths=set(), reserved_families=set(),
-            source_exists=lambda _item: True,
-            source_duration=lambda _item: 6.0,
-            source_allowed=lambda _item: True,
-            allow_safe_reuse=False,
-        )
+        kwargs = {
+            "scene_query": "Washington government press conference",
+            "strict_hits": [SearchHit(candidate, .03, duration=6.0)],
+            "fallback_hits": [],
+            "relaxed_hits": [], "category_hits": [], "safe_context_hits": [],
+            "required_duration": 6.0, "match_threshold": .22,
+            "used_paths": set(), "used_families": set(),
+            "project_used_paths": set(), "project_used_families": set(),
+            "reserved_paths": set(), "reserved_families": set(),
+            "source_exists": lambda _item: True,
+            "source_duration": lambda _item: 6.0,
+            "source_allowed": lambda _item: True,
+            "allow_safe_reuse": False,
+        }
         with self.assertRaises(bridge.MontageSelectionFailure):
             bridge._select_montage_candidate(**kwargs)
 

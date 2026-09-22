@@ -11547,7 +11547,6 @@ def prepare_montage(payload: dict) -> dict:
         score = 0.0
         source = ""
         selection = None
-        selection_failure_diagnostics: dict[str, int] = {}
         reuse_origin_clip: TimelineClip | None = None
         fast_pool_reuse = False
         # Reuse is acceptable only after quality exhaustion.  Keep a small
@@ -11633,8 +11632,7 @@ def prepare_montage(payload: dict) -> dict:
                     diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
                     allow_safe_reuse=False,
                 )
-            except MontageSelectionFailure as error:
-                selection_failure_diagnostics = error.diagnostics
+            except MontageSelectionFailure:
                 selection = None
                 break
             if claim_batch_source(selection.item, selection.source_family, position_bucket):
@@ -11667,8 +11665,7 @@ def prepare_montage(payload: dict) -> dict:
                         diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
                         allow_safe_reuse=False,
                     )
-                except MontageSelectionFailure as error:
-                    selection_failure_diagnostics = error.diagnostics
+                except MontageSelectionFailure:
                     selection = None
                     break
                 if claim_batch_source(
@@ -11718,8 +11715,7 @@ def prepare_montage(payload: dict) -> dict:
                         allow_safe_reuse=False,
                         allow_below_threshold=True,
                     )
-                except MontageSelectionFailure as error:
-                    selection_failure_diagnostics = error.diagnostics
+                except MontageSelectionFailure:
                     selection = None
                 if selection is None:
                     continue
@@ -11810,8 +11806,7 @@ def prepare_montage(payload: dict) -> dict:
                 selected_duration = selection.duration
                 score = selection.score
                 source = f"{selected.source or 'local'} · {selection.fallback_level}"
-            except MontageSelectionFailure as error:
-                selection_failure_diagnostics = error.diagnostics
+            except MontageSelectionFailure:
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
@@ -11896,14 +11891,12 @@ def prepare_montage(payload: dict) -> dict:
                 selected_duration = selection.duration
                 score = selection.score
                 source = f"{selected.source or 'local'} · {selection.fallback_level}"
-            except MontageSelectionFailure as error:
-                selection_failure_diagnostics = error.diagnostics
+            except MontageSelectionFailure:
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         if selected is None:
-            if selected is None:
             try:
                 indexed_continuity = index.all_items(exclude_english_text=True)
             except (OSError, RuntimeError, ValueError):
