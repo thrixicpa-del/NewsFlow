@@ -13298,16 +13298,26 @@ def package_outputs(payload: dict) -> dict:
     settings = load_settings()
     _titles, jobs = load_session()
     ready_jobs = [job for job in jobs if job.state == RunState.DONE]
-    jobs_by_title = {job.request.title: job for job in ready_jobs}
-    jobs_by_index = {job.request.index: job for job in ready_jobs}
-    jobs_by_id = {
-        str(job.request.production_item_id).strip(): job
+    jobs_by_title = {
+        str(getattr(job.request, "title", "")): job
         for job in ready_jobs
-        if str(job.request.production_item_id).strip()
+        if str(getattr(job.request, "title", "")).strip()
+    }
+    jobs_by_index = {
+        int(index): job
+        for job in ready_jobs
+        if isinstance((index := getattr(job.request, "index", None)), int)
+    }
+    jobs_by_id = {
+        identity: job
+        for job in ready_jobs
+        if (identity := str(getattr(job.request, "production_item_id", "") or "").strip())
     }
     jobs_by_safe_stem: dict[str, list[Job]] = {}
     for job in ready_jobs:
-        jobs_by_safe_stem.setdefault(safe_filename(job.request.title).casefold(), []).append(job)
+        job_title = str(getattr(job.request, "title", "") or "").strip()
+        if job_title:
+            jobs_by_safe_stem.setdefault(safe_filename(job_title).casefold(), []).append(job)
     covers_by_title = {str(item.get("title", "")): item for item in settings.cover_queue}
     covers_by_id = {
         str(item.get("production_item_id", "")).strip(): item
