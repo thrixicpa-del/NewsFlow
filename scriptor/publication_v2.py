@@ -7,6 +7,7 @@ touching a user's actual publication queue.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from hashlib import sha256
@@ -54,6 +55,18 @@ def frozen_artifact_matches(snapshot: dict[str, Any], artifact_name: str, path_v
         return True
     current = _file_fingerprint(path_value)
     return current is not None and current == frozen
+
+
+def _oauth_payload_is_structurally_valid(value: object) -> bool:
+    """Validate persisted OAuth shape without network access or exposing secrets."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and bool(payload)
 
 
 def _normalise(value: object) -> str:
@@ -1231,8 +1244,8 @@ def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, 
         reasons.append({"kind": "TITLE_INVALID", "message": "Заголовок YouTube должен содержать от 1 до 100 символов."})
     channel_id = str(snapshot.get("channelId", "")).strip()
     tokens = dict(getattr(settings, "youtube_oauth_tokens", {}) or {})
-    if not channel_id or not str(tokens.get(channel_id, "")).strip():
-        reasons.append({"kind": "AUTH_REQUIRED", "message": "Для канала требуется OAuth-вход."})
+    if not channel_id or not _oauth_payload_is_structurally_valid(tokens.get(channel_id, "")):
+        reasons.append({"kind": "AUTH_REQUIRED", "message": "OAuth канала отсутствует или повреждён. Выполните повторный вход."})
     return {
         "ok": not reasons,
         "snapshotId": snapshot_id,
