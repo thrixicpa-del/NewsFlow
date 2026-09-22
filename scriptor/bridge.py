@@ -14493,7 +14493,9 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
         if not production_id or not channel_id:
             continue
         execution = dict(executions.get(snapshot_id, {}) or {})
-        if str(execution.get("overallStatus", "")).upper() in {"CANCELLED", "AUTOMATION_CANCELLED"}:
+        status = str(execution.get("overallStatus", "")).upper()
+        has_video = bool(str(execution.get("youtubeVideoId") or "").strip())
+        if status == "CANCELLED" and not has_video:
             continue
         effective_assignments[production_id] = {
             "productionItemId": production_id,
