@@ -503,6 +503,28 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             "2026-11-15T04:15:00+03:00",
         )
 
+    def test_snapshot_freezes_current_cta_for_later_studio_post(self):
+        settings = Settings(
+            seo_call_to_action="CTA at confirmation",
+            youtube_publication_items={
+                "pi-1": {
+                    "productionItemId": "pi-1",
+                    "metadata": {"title": "Выпуск"},
+                    "artifacts": {"video": {"path": "D:/out.mp4", "exists": True}},
+                    "readiness": {"state": "VIDEO_READY"},
+                },
+            },
+        )
+        created = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a"}],
+            {"channel-a": {"privacy": "private", "publishMode": "publish_now", "intervalMinutes": 15}},
+        )
+        settings.seo_call_to_action = "CTA changed later"
+
+        snapshot = settings.youtube_publication_snapshots[created[0]]
+        self.assertEqual(snapshot["communityPost"]["callToAction"], "CTA at confirmation")
+
     def test_scheduled_snapshot_rejects_non_private_initial_privacy_before_transport(self):
         """YouTube schedule semantics require a private draft, so reject invalid input before any upload."""
         settings = Settings(youtube_publication_items={
