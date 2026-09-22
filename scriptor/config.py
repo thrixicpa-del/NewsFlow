@@ -1278,7 +1278,7 @@ def load_settings() -> Settings:
             seo_provider=data.get("seo_provider", "agent") if data.get("seo_provider", "agent") in {"agent", "openai"} else "agent",
             tags_provider=data.get("tags_provider", "agent") if data.get("tags_provider", "agent") in {"agent", "openai"} else "agent",
             hashtag_batch_size=max(1, min(30, int(data.get("hashtag_batch_size", 5) or 5))),
-            tag_char_limit=max(50, min(5000, int(data.get("tag_char_limit", 500) or 500))),
+            tag_char_limit=max(50, min(500, int(data.get("tag_char_limit", 500) or 500))),
             seo_use_script_context=bool(data.get("seo_use_script_context", False)),
             seo_call_to_action=str(data.get("seo_call_to_action") or Settings().seo_call_to_action)[:1000],
             seo_description_prefix=str(data.get("seo_description_prefix") or "")[:4000],
