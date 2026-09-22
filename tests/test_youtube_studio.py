@@ -6,19 +6,24 @@ from scriptor.youtube_studio import (_click_exact_visible_button, planned_studio
 
 
 class YouTubeStudioActionsTests(unittest.TestCase):
-    def test_pending_task_has_linked_post_cards_and_end_screen_actions(self):
+    def test_pending_task_has_ads_linked_post_cards_and_end_screen_actions(self):
         actions = planned_studio_actions({
+            "ads": {"status": "pending"},
             "post": {"status": "pending"},
             "cards": {"status": "pending"},
             "endScreen": {"status": "pending"},
             "postDraft": {"text": "Описание", "videoUrl": "https://www.youtube.com/watch?v=current"},
             "plan": {
+                "ads": {"mode": "AUTO+MANUAL_39S", "monetizationEnabled": True, "midRollEligible": True,
+                        "automaticSlotsEnabled": True, "manualSlotsSeconds": [39, 78]},
                 "cards": [{"videoId": "previous", "atSeconds": 210}],
                 "endScreen": {"startSeconds": 580, "items": [{"kind": "subscribe"}]},
             },
         })
 
-        self.assertEqual([item["kind"] for item in actions], ["post", "cards", "end-screen"])
+        self.assertEqual([item["kind"] for item in actions], ["ads", "post", "cards", "end-screen"])
+        self.assertEqual(actions[0]["mode"], "AUTO+MANUAL_39S")
+        self.assertEqual(actions[0]["manualSlotsSeconds"], [39, 78])
         self.assertEqual(actions[0]["videoUrl"], "https://www.youtube.com/watch?v=current")
         self.assertEqual(actions[1]["cards"][0]["atSeconds"], 210)
         self.assertEqual(actions[2]["startSeconds"], 580)
