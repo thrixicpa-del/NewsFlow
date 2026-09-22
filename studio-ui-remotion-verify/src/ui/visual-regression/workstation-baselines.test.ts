@@ -1,7 +1,13 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { workstationBaselineCases } from "./workstation-baselines";
+
+function hasApprovedPng(filePath: string) {
+  if (!existsSync(filePath)) return false;
+  return readFileSync(filePath).subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+}
 
 describe("workstation visual baseline matrix", () => {
   it("covers the required production workspaces without production data", () => {
@@ -51,8 +57,19 @@ describe("workstation visual baseline matrix", () => {
   it("requires an approved PNG for every release visual baseline case", () => {
     const approvedRoot = resolve(process.cwd(), "tests", "visual-baselines", "approved");
     const missing = workstationBaselineCases
-      .filter((item) => !existsSync(resolve(approvedRoot, `${item.id}.png`)))
+      .filter((item) => !hasApprovedPng(resolve(approvedRoot, `${item.id}.png`)))
       .map((item) => item.id);
     expect(missing).toEqual([]);
+  });
+
+  it("rejects a Git LFS pointer as an approved visual baseline", () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "newsflow-visual-lfs-pointer-"));
+    const pointerPath = join(fixtureRoot, "baseline.png");
+    try {
+      writeFileSync(pointerPath, "version https://git-lfs.github.com/spec/v1\noid sha256:fixture\nsize 131\n");
+      expect(hasApprovedPng(pointerPath)).toBe(false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });
