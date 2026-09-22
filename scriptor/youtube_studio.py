@@ -265,7 +265,7 @@ def _nearby_checkbox_state(page, labels: list[str]) -> bool | None:
     """Read a visible Studio checkbox/switch state by nearby text."""
 
     value = page.locator("body").evaluate("""(patterns) => {
-      const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
       const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
       const needles = patterns.map((value) => normalize(value));
       const labels = Array.from(document.querySelectorAll('label,*')).filter((node) => {
@@ -294,7 +294,7 @@ def _set_nearby_checkbox(page, labels: list[str], checked: bool = True) -> bool:
         return False
     if current != checked:
         clicked = bool(page.locator("body").evaluate("""([patterns, desired]) => {
-          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
           const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
           const needles = patterns.map((value) => normalize(value));
           const labels = Array.from(document.querySelectorAll('label,*')).filter((node) => {
