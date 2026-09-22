@@ -39,6 +39,44 @@ def _eligible_catalog(job: Mapping[str, object], catalog: Sequence[Mapping[str, 
     )
 
 
+def build_ad_plan(duration_seconds: float, *, monetized: bool, interval_seconds: int = 39) -> dict:
+    """Build the Studio monetization/ad plan without touching YouTube.
+
+    Monetization is enabled for every upload on a channel explicitly marked
+    monetized. YouTube only permits mid-roll slots on videos of at least
+    eight minutes, so shorter videos truthfully use AUTO_ONLY.
+    """
+
+    try:
+        duration = max(0, int(float(duration_seconds or 0)))
+        interval = int(interval_seconds)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Длительность и интервал рекламы должны быть числами") from error
+    if interval < 1:
+        raise ValueError("Интервал рекламных слотов должен быть положительным")
+    if not monetized:
+        return {
+            "mode": "NONE",
+            "monetizationEnabled": False,
+            "midRollEligible": False,
+            "automaticSlotsEnabled": False,
+            "manualSlotsSeconds": [],
+        }
+
+    midroll_eligible = duration >= 8 * 60
+    manual_slots = (
+        [second for second in range(interval, duration, interval) if second + 15 <= duration]
+        if midroll_eligible else []
+    )
+    return {
+        "mode": "AUTO+MANUAL_39S" if midroll_eligible and manual_slots else "AUTO_ONLY",
+        "monetizationEnabled": True,
+        "midRollEligible": midroll_eligible,
+        "automaticSlotsEnabled": True,
+        "manualSlotsSeconds": manual_slots,
+    }
+
+
 def build_engagement_plan(
     job: Mapping[str, object],
     catalog: Sequence[Mapping[str, object]],
