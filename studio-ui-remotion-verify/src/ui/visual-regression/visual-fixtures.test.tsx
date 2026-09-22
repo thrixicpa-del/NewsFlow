@@ -68,7 +68,7 @@ describe("visual fixtures", () => {
     expect(Object.keys(fixture?.publication.v2?.items || {})).toHaveLength(84);
     expect(fixture?.channels).toHaveLength(8);
     expect(fixture?.publication.v2?.queue).toHaveLength(84);
-    expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "AUTO+MANUAL_39S")).toBe(true);
+    expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "AUTO+MANUAL")).toBe(true);
     expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "AUTO_ONLY")).toBe(true);
     expect(fixture?.publication.v2?.queue.some((row: any) => row.ads?.mode === "NONE")).toBe(true);
     expect(fallback.channels).toEqual([]);
