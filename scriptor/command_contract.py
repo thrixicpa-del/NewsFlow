@@ -63,6 +63,9 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "apply-publication-v2-rule-preset": CommandRegistration("apply_publication_v2_rule_preset", "scriptor.publication_v2", _NO_LEGACY),
     "delete-publication-v2-rule-preset": CommandRegistration("delete_publication_v2_rule_preset", "scriptor.publication_v2", _NO_LEGACY),
     "run-publication-v2-studio": CommandRegistration("run_publication_v2_studio", "scriptor.youtube_studio + scriptor.publication_v2", _NO_LEGACY),
+    "resolve-publication-v2-uncertain-upload": CommandRegistration(
+        "resolve_publication_v2_uncertain_upload", "scriptor.publication_v2 + scriptor.youtube_api", _NO_LEGACY,
+    ),
 }
 
 

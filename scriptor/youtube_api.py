@@ -6,7 +6,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 YOUTUBE_TAG_CHARACTER_LIMIT = 500
@@ -320,6 +320,7 @@ def upload_private_video(
     video_path: str,
     body: dict[str, Any],
     thumbnail_path: str = "",
+    on_insert_started: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Upload one NewsFlow package using an explicitly authorised channel.
 
@@ -342,11 +343,14 @@ def upload_private_video(
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
     youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
-    response = youtube.videos().insert(
+    request = youtube.videos().insert(
         part="snippet,status",
         body=body,
         media_body=MediaFileUpload(str(source), mimetype="video/mp4", resumable=True),
-    ).execute()
+    )
+    if on_insert_started is not None:
+        on_insert_started()
+    response = request.execute()
     video_id = str(response.get("id", "")).strip() if isinstance(response, dict) else ""
     if not video_id:
         raise RuntimeError("YouTube не вернул ID после загрузки ролика")

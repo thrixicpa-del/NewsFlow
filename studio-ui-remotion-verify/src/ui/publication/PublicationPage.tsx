@@ -445,6 +445,11 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       continuing={continuing}
       onReconcile={reconcile}
       onRetry={(snapshotId, stage) => void command("retry-publication-v2-stage", { snapshotId, stage })}
+      onResolveUpload={(snapshotId, outcome, youtubeVideoId) => void command("resolve-publication-v2-uncertain-upload", {
+        snapshotId,
+        outcome,
+        ...(youtubeVideoId ? { youtubeVideoId } : {}),
+      })}
       onCancel={(snapshotId) => void command("cancel-publication-v2-execution", { snapshotId })}
       onThumbnail={(snapshotId) => void command("run-publication-v2-thumbnails", { snapshotIds: [snapshotId] })}
     /> : null}
