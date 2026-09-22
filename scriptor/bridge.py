@@ -14469,8 +14469,10 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
     for raw_rule in settings.youtube_channel_publication_rules.values():
         rule = dict(raw_rule)
         channel_id = str(rule.get("channelId", "")).strip()
-        if channel_id in known_channel_ids:
-            rule["oauthConnected"] = bool(str((settings.youtube_oauth_tokens or {}).get(channel_id, "")).strip())
+        rule["oauthConnected"] = (
+            channel_id in known_channel_ids
+            and bool(str((settings.youtube_oauth_tokens or {}).get(channel_id, "")).strip())
+        )
         rules.append(rule)
 
     # A confirmed snapshot is immutable planning input. Re-previewing must not
