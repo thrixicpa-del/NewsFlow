@@ -223,13 +223,13 @@ class SeoTagsContractTests(TestCase):
         }])
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "save_settings"), \
-             patch.object(bridge, "snapshot", return_value={}):
-            with self.assertRaisesRegex(ValueError, "5000 байт"):
-                bridge.save_seo_text({
-                    "index": 0,
-                    "description": "я" * 2501,
-                    "hashtags": [],
-                })
+             patch.object(bridge, "snapshot", return_value={}), \
+             self.assertRaisesRegex(ValueError, "5000 байт"):
+            bridge.save_seo_text({
+                "index": 0,
+                "description": "я" * 2501,
+                "hashtags": [],
+            })
 
     def test_result_package_resolves_sanitized_filename_through_durable_identity(self):
         with TemporaryDirectory() as directory:
