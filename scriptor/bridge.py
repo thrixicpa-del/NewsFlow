@@ -89,6 +89,7 @@ from .observability import start_action_trace
 from .openai_client import HybridTextPool, OpenAIAPIError
 from .publication_v2 import (
     apply_bulk_schedule_range,
+    begin_publication_stage,
     begin_upload_attempt,
     build_distribution_preview,
     cancel_publication_execution,
@@ -98,6 +99,7 @@ from .publication_v2 import (
     complete_upload_attempt,
     confirm_publication_snapshots,
     fail_publication_stage,
+    mark_publication_stage_not_required,
     migrate_legacy_publication_data,
     persist_publication_receipt,
     publication_queue_projection,
@@ -173,6 +175,7 @@ from .youtube_api import (
     upload_private_video,
 )
 from .youtube_engagement import (
+    build_ad_plan,
     build_engagement_plan,
     new_engagement_state,
     transition_engagement_step,
@@ -14468,6 +14471,215 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
             "failed": len(failures), "message": f"Обложки установлены: {succeeded}. Ошибок: {len(failures)}."}}
 
 
+
+
+def run_publication_v2_studio(payload: dict) -> dict:
+    """Continue selected V2 snapshots through confirmed Studio-only stages.
+
+    Every action is leased and persisted independently, so a failed card/end
+    screen/ads/post attempt never reopens VIDEO_UPLOAD or another completed
+    irreversible stage.
+    """
+
+    requested = list(dict.fromkeys(
+        str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()
+    ))
+    if not requested:
+        raise ValueError("Выберите хотя бы один snapshot для оформления в Studio.")
+    requested_kinds = {
+        str(value).strip().casefold()
+        for value in payload.get("steps", [])
+        if str(value).strip()
+    }
+    allowed_kinds = {"ads", "post", "cards", "end-screen"}
+    if requested_kinds - allowed_kinds:
+        raise ValueError("Выбраны неизвестные этапы Studio V2.")
+    if not requested_kinds:
+        requested_kinds = set(allowed_kinds)
+
+    settings = load_settings()
+    channels = {
+        str(item.get("profile_id", "")).strip(): dict(item)
+        for item in settings.analytics_channels
+        if isinstance(item, dict)
+    }
+    snapshots = dict(settings.youtube_publication_snapshots or {})
+    executions = dict(settings.youtube_publication_executions or {})
+
+    catalog = [
+        {
+            "videoId": str(item.get("videoId", "")).strip(),
+            "channelId": str(item.get("channelId", "")).strip(),
+            "privacyStatus": str(item.get("youtubePrivacyStatus", "")).strip(),
+            "publishedAt": str(item.get("publishAt", "")).strip(),
+            "score": item.get("engagementScore", 0),
+        }
+        for item in settings.youtube_publication_jobs
+        if isinstance(item, dict) and str(item.get("videoId", "")).strip()
+    ]
+
+    succeeded = failed = skipped = 0
+    stage_map = {"ads": "ADS", "post": "POST", "cards": "CARDS", "end-screen": "END_SCREEN"}
+    terminal = {"SUCCESS", "SKIPPED", "NOT_REQUIRED"}
+
+    for snapshot_id in requested:
+        snapshot_record = dict(snapshots.get(snapshot_id, {}) or {})
+        execution = dict(executions.get(snapshot_id, {}) or {})
+        if not snapshot_record or not execution:
+            failed += 1
+            continue
+        video_id = str(execution.get("youtubeVideoId") or "").strip()
+        if not video_id:
+            fail_publication_stage(
+                settings, snapshot_id, "ADS", "USER_ACTION_REQUIRED",
+                "Studio-оформление нельзя запускать до подтверждённого YouTube video ID.",
+            )
+            failed += 1
+            continue
+
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        channel = channels.get(channel_id)
+        if not channel or not str(channel.get("channel_id", "")).strip():
+            fail_publication_stage(
+                settings, snapshot_id, "ADS", "USER_ACTION_REQUIRED",
+                "Для Studio-оформления не найден подтверждённый YouTube-канал.",
+            )
+            failed += 1
+            continue
+
+        metadata = dict(snapshot_record.get("metadata", {}) or {})
+        try:
+            duration = max(0.0, float(snapshot_record.get("durationSeconds") or 0))
+        except (TypeError, ValueError):
+            duration = 0.0
+        ad_policy = dict(snapshot_record.get("adPolicy", {}) or {})
+        ad_plan = build_ad_plan(
+            duration,
+            monetized=bool(snapshot_record.get("monetized")) and bool(ad_policy.get("enabled", True)),
+            interval_seconds=max(1, int(ad_policy.get("manualIntervalSeconds", 39) or 39)),
+        )
+        engagement_plan = build_engagement_plan(
+            {
+                "id": snapshot_id,
+                "channelId": channel_id,
+                "videoId": video_id,
+                "durationSeconds": duration,
+            },
+            catalog,
+            [],
+        )
+        video_url = str(execution.get("youtubeVideoUrl") or "").strip() or f"https://www.youtube.com/watch?v={video_id}"
+        description = re.sub(r"(?<!\w)#[^\s#]+", "", str(metadata.get("description", ""))).strip()
+        cta = re.sub(r"(?<!\w)#[^\s#]+", "", str(settings.seo_call_to_action or "")).strip()
+        post_text = "\n\n".join(value for value in (description, cta, video_url) if value)
+
+        steps_now = dict((settings.youtube_publication_executions.get(snapshot_id, {}) or {}).get("steps", {}) or {})
+        task = {
+            "videoId": video_id,
+            "channelId": channel_id,
+            "publishAt": str(snapshot_record.get("requestedPublishAt") or ""),
+            "ads": {"status": "done" if str(dict(steps_now.get("ADS", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "post": {"status": "done" if str(dict(steps_now.get("POST", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "cards": {"status": "done" if str(dict(steps_now.get("CARDS", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "endScreen": {"status": "done" if str(dict(steps_now.get("END_SCREEN", {}) or {}).get("status", "")).upper() in terminal else "pending"},
+            "postDraft": {"text": post_text, "videoUrl": video_url},
+            "plan": {
+                "ads": ad_plan,
+                "cards": list(engagement_plan.get("cards") or []),
+                "endScreen": dict(engagement_plan.get("endScreen") or {}),
+            },
+        }
+
+        for kind in ("ads", "post", "cards", "end-screen"):
+            if kind not in requested_kinds:
+                continue
+            stage = stage_map[kind]
+            execution = dict(settings.youtube_publication_executions.get(snapshot_id, {}) or {})
+            stage_state = str(dict(dict(execution.get("steps", {}) or {}).get(stage, {}) or {}).get("status", "PENDING")).upper()
+            if stage_state in terminal:
+                skipped += 1
+                continue
+            if kind == "ads" and not bool(ad_plan.get("monetizationEnabled")):
+                mark_publication_stage_not_required(settings, snapshot_id, stage, "Канал не отмечен как монетизированный.",
+                                                    {"mode": "NONE"})
+                skipped += 1
+                continue
+            if kind == "post" and not post_text:
+                mark_publication_stage_not_required(settings, snapshot_id, stage, "Нет текста для Community post.")
+                skipped += 1
+                continue
+            if kind == "cards" and not list(engagement_plan.get("cards") or []):
+                mark_publication_stage_not_required(settings, snapshot_id, stage, "Нет другого публичного ролика для безопасной подсказки.")
+                skipped += 1
+                continue
+            end_screen = dict(engagement_plan.get("endScreen") or {})
+            if kind == "end-screen" and str(end_screen.get("status", "")) == "skipped":
+                mark_publication_stage_not_required(settings, snapshot_id, stage,
+                                                    str(end_screen.get("reason") or "Конечная заставка недоступна."))
+                skipped += 1
+                continue
+
+            worker_id = f"publication-v2-studio-{kind}-{uuid.uuid4().hex[:8]}"
+            try:
+                begin_publication_stage(settings, snapshot_id, worker_id, stage)
+                save_settings(settings)
+                completed = execute_studio_task(
+                    task,
+                    profile_dir=_youtube_channel_profile_dir(channel_id),
+                    youtube_channel_id=str(channel.get("channel_id", "")).strip(),
+                    action_kinds={kind},
+                )
+                if kind not in completed:
+                    raise StudioAutomationError(f"Studio не подтвердил этап {kind}.")
+                provider_result: dict = {"kind": kind}
+                if kind == "ads":
+                    provider_result.update({
+                        "mode": str(ad_plan.get("mode", "AUTO_ONLY")),
+                        "automaticSlotsEnabled": bool(ad_plan.get("automaticSlotsEnabled")),
+                        "manualSlotsSeconds": list(ad_plan.get("manualSlotsSeconds") or []),
+                        "midRollEligible": bool(ad_plan.get("midRollEligible")),
+                    })
+                elif kind == "post":
+                    provider_result.update({"publishAt": task["publishAt"], "videoUrl": video_url})
+                elif kind == "cards":
+                    provider_result.update({"count": len(list(engagement_plan.get("cards") or [])),
+                                            "cards": list(engagement_plan.get("cards") or [])})
+                elif kind == "end-screen":
+                    provider_result.update({"startSeconds": end_screen.get("startSeconds"),
+                                            "items": list(end_screen.get("items") or [])})
+                complete_publication_stage(settings, snapshot_id, worker_id, stage, provider_result)
+                save_settings(settings)
+                succeeded += 1
+            except StudioAutomationError as exc:
+                fail_publication_stage(settings, snapshot_id, stage, "RETRYABLE", str(exc))
+                release_execution(settings, snapshot_id, worker_id)
+                save_settings(settings)
+                failed += 1
+                break
+            except _BRIDGE_OPERATION_ERRORS as exc:
+                fail_publication_stage(settings, snapshot_id, stage, classify_publication_error(exc), str(exc))
+                release_execution(settings, snapshot_id, worker_id)
+                save_settings(settings)
+                failed += 1
+                break
+
+        execution = dict(settings.youtube_publication_executions.get(snapshot_id, {}) or {})
+        if str(execution.get("overallStatus", "")).upper() in {"DONE", "SCHEDULED"}:
+            persist_publication_receipt(settings, snapshot_id)
+
+    save_settings(settings)
+    return {
+        **snapshot(),
+        "operationResult": {
+            "kind": "publication-v2-studio",
+            "count": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "message": f"Studio-этапов подтверждено: {succeeded}; ошибок: {failed}; пропущено: {skipped}.",
+        },
+    }
+
+
 def run_auto_pipeline(payload: dict) -> dict:
     """Run the production chain after the user has manually approved ideas.
 
@@ -15322,6 +15534,8 @@ def main() -> None:
             result = reconcile_publication_v2_youtube(payload if isinstance(payload, dict) else {})
         elif command == "run-publication-v2-thumbnails":
             result = run_publication_v2_thumbnails(payload if isinstance(payload, dict) else {})
+        elif command == "run-publication-v2-studio":
+            result = run_publication_v2_studio(payload if isinstance(payload, dict) else {})
         elif command == "run-auto-pipeline":
             result = run_auto_pipeline(payload if isinstance(payload, dict) else {})
         elif command == "generate-media":
