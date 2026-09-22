@@ -43,7 +43,7 @@ export function PublicationDayPlan({ rows, channels }: { rows: DistributionRow[]
           <th><b>{channel.name}</b><small>{channel.timezone}</small></th>
           {slots.map((slot) => {
             const cell = dayRows.filter((row) => row.channelId === channel.channelId && minuteOfDay(row.publishAt) === slot);
-            return <td key={slot} className={cell.length ? "filled" : ""}>{cell.map((row) => <span key={row.productionItemId} title={row.title}>#{row.productionItemId.slice(-6)} · {row.title}</span>)}</td>;
+            return <td key={slot} className={cell.length ? "filled" : ""}>{cell.map((row) => <span key={row.productionItemId} title={`${row.title} · ${row.productionItemId}`} data-production-item-id={row.productionItemId}>{row.title}</span>)}</td>;
           })}
         </tr>)}</tbody>
       </table>
