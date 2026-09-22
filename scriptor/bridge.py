@@ -33,6 +33,9 @@ from pathlib import Path
 
 from . import idea_engine
 from .ai_index import (
+    SCREEN_ELIGIBILITY_BLOCKED,
+    SCREEN_ELIGIBILITY_SAFE,
+    SCREEN_ELIGIBILITY_UNCERTAIN,
     SEMANTIC_TAG_LABELS,
     ClipIndex,
     SearchHit,
