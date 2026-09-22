@@ -13023,10 +13023,13 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             if payload.get("replaceOutput") and _is_valid_montage_output(previous_output)
             else ""
         )
-        _montage_task_update(settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
-                             detail="Сценарий и MP3 готовы", error="", title=titles[index],
-                             voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""), outputPath=retained_output,
-                             queuePid=os.getpid())
+        _montage_task_update(
+            settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
+            detail="Сценарий и MP3 готовы", error="", title=titles[index],
+            productionItemId=str(jobs_by_index[index].request.production_item_id).strip(),
+            voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""),
+            outputPath=retained_output, queuePid=os.getpid(),
+        )
     save_settings(settings)
     download_semaphore = threading.BoundedSemaphore(settings.montage_download_workers)
     # Shared only by this queue invocation.  It reserves footage as soon as a
@@ -13297,6 +13300,11 @@ def package_outputs(payload: dict) -> dict:
     ready_jobs = [job for job in jobs if job.state == RunState.DONE]
     jobs_by_title = {job.request.title: job for job in ready_jobs}
     jobs_by_index = {job.request.index: job for job in ready_jobs}
+    jobs_by_id = {
+        str(job.request.production_item_id).strip(): job
+        for job in ready_jobs
+        if str(job.request.production_item_id).strip()
+    }
     jobs_by_safe_stem: dict[str, list[Job]] = {}
     for job in ready_jobs:
         jobs_by_safe_stem.setdefault(safe_filename(job.request.title).casefold(), []).append(job)
@@ -13313,7 +13321,7 @@ def package_outputs(payload: dict) -> dict:
         for item in seo_ready
         if str(item.get("production_item_id", "")).strip()
     }
-    task_index_by_output: dict[str, int] = {}
+    task_ref_by_output: dict[str, tuple[int | None, str]] = {}
     for key, raw in settings.montage_task_statuses.items():
         if not isinstance(raw, dict):
             continue
@@ -13321,9 +13329,17 @@ def package_outputs(payload: dict) -> dict:
         if not raw_output:
             continue
         try:
-            task_index_by_output[str(Path(raw_output).resolve()).casefold()] = int(raw.get("scenarioIndex", key))
-        except (TypeError, ValueError, OSError):
+            resolved_output = str(Path(raw_output).resolve()).casefold()
+        except OSError:
             continue
+        try:
+            scenario_index = int(raw.get("scenarioIndex", key))
+        except (TypeError, ValueError):
+            scenario_index = None
+        task_ref_by_output[resolved_output] = (
+            scenario_index,
+            str(raw.get("productionItemId") or raw.get("production_item_id") or "").strip(),
+        )
     root = Path(settings.montage_output_folder) / "Результаты по роликам"
     created = 0
     for video in settings.pipeline_montage_outputs:
@@ -13342,16 +13358,21 @@ def package_outputs(payload: dict) -> dict:
         xml_source = Path(settings.montage_project_folder) / f"{safe_filename(title)}.fcpxml"
         if xml_source.is_file():
             shutil.copy2(xml_source, folder / f"{safe_filename(title)}.fcpxml")
-        scenario_index = None
+        task_ref: tuple[int | None, str] = (None, "")
         try:
-            scenario_index = task_index_by_output.get(str(source.resolve()).casefold())
+            task_ref = task_ref_by_output.get(str(source.resolve()).casefold(), (None, ""))
         except OSError:
-            scenario_index = None
-        job = jobs_by_index.get(scenario_index) if scenario_index is not None else jobs_by_title.get(title)
+            pass
+        scenario_index, task_production_item_id = task_ref
+        job = jobs_by_id.get(task_production_item_id) if task_production_item_id else None
+        if job is None and scenario_index is not None:
+            job = jobs_by_index.get(scenario_index)
+        if job is None:
+            job = jobs_by_title.get(title)
         if job is None:
             safe_matches = jobs_by_safe_stem.get(title.casefold(), [])
             job = safe_matches[0] if len(safe_matches) == 1 else None
-        production_item_id = str(
+        production_item_id = task_production_item_id or str(
             getattr(getattr(job, "request", None), "production_item_id", "") or ""
         ).strip()
         scenario_title = str(getattr(getattr(job, "request", None), "title", "") or title)
