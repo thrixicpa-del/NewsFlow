@@ -123,12 +123,14 @@ class TimelineClip:
     position_rotation_reason: str = ""
     strict_rejection_reason: str = ""
     voice_segment_id: int = 0
-    voice_segment_ids: list[int] = field(default_factory=list)
     narration_start: float = 0.0
     narration_end: float = 0.0
     minimum_source_duration: float = 0.0
     visual_beat_index: int = 0
     visual_beat_count: int = 0
+    # Appended at the end to preserve the positional TimelineClip contract
+    # used by legacy/manual project constructors.
+    voice_segment_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
