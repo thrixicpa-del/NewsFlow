@@ -3665,20 +3665,24 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     visual_beat_count = _voice_map_visual_beat_count(audio_duration)
 
     def concrete_query(segment: dict) -> str:
-        return str(segment.get("visualQuery", "")).strip()
+        raw = str(segment.get("visualQuery", "")).strip()
+        normalized = _normalized_montage_visual_query(raw)
+        return normalized if normalized else ""
 
     def resolved_query(segment: dict) -> str:
         query = concrete_query(segment)
-        if query and query != GENERIC_VISUAL_QUERY:
+        if query:
             return query
         segment_index = segments.index(segment)
         for distance in range(1, len(segments)):
             for candidate_index in (segment_index - distance, segment_index + distance):
                 if 0 <= candidate_index < len(segments):
                     candidate = concrete_query(segments[candidate_index])
-                    if candidate and candidate != GENERIC_VISUAL_QUERY:
+                    if candidate:
                         return candidate
-        topic_query = fallback_visual_query(str(payload.get("title", "")))
+        topic_query = _normalized_montage_visual_query(
+            fallback_visual_query(str(payload.get("title", "")))
+        )
         return topic_query or GENERIC_VISUAL_QUERY
 
     scenes: list[dict] = []
