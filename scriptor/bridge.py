@@ -8878,7 +8878,8 @@ def _parse_seo_json(raw: str) -> dict:
             "tags": [str(item).strip() for item in tags if str(item).strip()]}
 
 
-def _seo_format_instruction() -> str:
+def _seo_format_instruction(hashtag_count: int) -> str:
+    count = max(1, min(30, int(hashtag_count)))
     return (
         "\n\nЗадача: напиши готовое описание именно этого одного ролика по теме и контексту сценария. "
         "description должен состоять из 2–4 содержательных предложений (примерно 300–900 символов), объяснять, "
@@ -8886,8 +8887,10 @@ def _seo_format_instruction() -> str:
         "Последнее предложение — самостоятельно придуманный, разный и релевантный именно этой теме естественный призыв посмотреть ролик. Не выдумывай факты. Никогда не пиши "
         "«пришлите список», «укажите тему», «я подготовлю», инструкции, планы или ответ о своей работе.\n\n"
         "Формат обязателен: верни только JSON. description — один готовый цельный текст без Markdown, рубрик, "
-        "подписей «SEO-описание», «хештеги», «призыв» или «теги». hashtags — отдельный массив 3–5 значений "
-        "с символом #. Не добавляй поле tags: теги создаются отдельным этапом."
+        "подписей «SEO-описание», «хештеги», «призыв» или «теги». "
+        f"hashtags — отдельный массив ровно {count} значений с символом #. "
+        "Это точное количество имеет приоритет над любыми другими числами хештегов в пользовательском шаблоне. "
+        "Не добавляй поле tags: теги создаются отдельным этапом."
     )
 
 
@@ -8957,7 +8960,7 @@ def generate_seo(payload: dict) -> dict:
                       .replace("{excerpt}", excerpt)
                       + f"\n\nТЕМА РОЛИКА: {source_title}"
                       + (f"\nКОНТЕКСТ ГОТОВОГО СЦЕНАРИЯ: {excerpt}" if excerpt else "\nРаботай только по названию темы; не выдумывай конкретные факты.")
-                      + _seo_format_instruction()
+                      + _seo_format_instruction(settings.hashtag_batch_size)
                       + f"\nСделай ровно {settings.hashtag_batch_size} хештегов: это отдельная пачка для этого сценария.")
             if settings.seo_call_to_action:
                 prompt += f"\n\nДополнительное пожелание к призыву к просмотру: {settings.seo_call_to_action}"
@@ -14475,6 +14478,13 @@ def run_auto_pipeline(payload: dict) -> dict:
                        if item.get("status") != "Готово"]
         if pending_seo:
             generate_seo({"indices": pending_seo, "chatUrl": payload.get("chatUrl", "")})
+        settings = load_settings()
+        pending_tags = [
+            index for index, item in enumerate(settings.seo_queue)
+            if item.get("tags_status") != "Готово" or not item.get("tags")
+        ]
+        if pending_tags:
+            generate_tags({"indices": pending_tags, "chatUrl": payload.get("chatUrl", "")})
     if enabled("voice"):
         transfer_scenarios({"target": "voice", "indices": indices})
         generate_voice({"indices": indices})
