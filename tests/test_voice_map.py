@@ -619,7 +619,7 @@ class VoiceMapTests(unittest.TestCase):
         self.assertEqual(scenes[0]["visual_query_en"], "Washington White House US government")
         self.assertEqual(scenes[1]["visual_query_en"], "Kyiv Ukraine government")
 
-    def test_6398_audio_uses_full_cutter_then_trimmed_terminal_footage(self):
+    def test_subsecond_terminal_remainder_is_absorbed_in_previous_cutter_beat(self):
         payload = {
             "schemaVersion": VOICE_MAP_SCHEMA_VERSION,
             "productionItemId": "production:alpha",
@@ -645,16 +645,21 @@ class VoiceMapTests(unittest.TestCase):
 
         scenes, _provenance = bridge._voice_map_scenes(status)
 
-        self.assertEqual(len(scenes), 2)
-        self.assertAlmostEqual(scenes[0]["duration"], 6.0, places=6)
-        self.assertAlmostEqual(scenes[1]["duration"], 0.398, places=6)
-        self.assertAlmostEqual(scenes[0]["minimum_footage_duration"], 6.0, places=6)
-        self.assertAlmostEqual(scenes[1]["minimum_footage_duration"], 0.398, places=6)
-        self.assertEqual([scene["voice_segment_id"] for scene in scenes], [29, 29])
-        self.assertEqual([scene["voice_segment_ids"] for scene in scenes], [[29], [29]])
+        self.assertEqual(len(scenes), 1)
+        self.assertAlmostEqual(scenes[0]["duration"], 6.398, places=6)
+        self.assertAlmostEqual(scenes[0]["minimum_footage_duration"], 6.398, places=6)
+        self.assertEqual(scenes[0]["voice_segment_id"], 29)
+        self.assertEqual(scenes[0]["voice_segment_ids"], [29])
         self.assertEqual(scenes[0]["narration_start"], 0.0)
-        self.assertAlmostEqual(scenes[-1]["narration_end"], 6.398, places=6)
-        self.assertNotEqual([round(scene["duration"], 3) for scene in scenes], [3.199, 3.199])
+        self.assertAlmostEqual(scenes[0]["narration_end"], 6.398, places=6)
+
+        payload["audioDuration"] = 12.61
+        payload["segments"][0].update({
+            "end": 12.61,
+            "duration": 12.61,
+        })
+        scenes, _ = bridge._voice_map_scenes(status)
+        self.assertEqual([round(scene["duration"], 3) for scene in scenes], [6.0, 6.61])
 
     def test_prepare_montage_uses_voice_map_timing_instead_of_proportional_fitter(self):
         footage = self.root / "footage"

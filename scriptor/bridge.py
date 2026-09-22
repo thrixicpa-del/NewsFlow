@@ -3608,6 +3608,19 @@ def _ensure_ready_voice_maps(indices: list[int] | set[int]) -> None:
 
 
 _VOICE_MAP_CUTTER_TARGET_SECONDS = 6.0
+_VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS = 1.0
+
+
+def _voice_map_visual_beat_count(audio_duration: float) -> int:
+    """Avoid a sub-second terminal flash while preserving six-second cadence."""
+    duration = max(0.0, float(audio_duration))
+    if duration <= _VOICE_MAP_CUTTER_TARGET_SECONDS:
+        return 1
+    full_beats = int(duration // _VOICE_MAP_CUTTER_TARGET_SECONDS)
+    remainder = duration - (full_beats * _VOICE_MAP_CUTTER_TARGET_SECONDS)
+    if 0.0 < remainder < _VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS:
+        return max(1, full_beats)
+    return max(1, math.ceil(duration / _VOICE_MAP_CUTTER_TARGET_SECONDS))
 
 
 def _voice_map_overlap_text(segment: dict, beat_start: float, beat_end: float) -> str:
@@ -3649,7 +3662,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     if audio_duration <= 0.0:
         raise ValueError("VoiceMap audio duration is invalid")
 
-    visual_beat_count = max(1, math.ceil(audio_duration / _VOICE_MAP_CUTTER_TARGET_SECONDS))
+    visual_beat_count = _voice_map_visual_beat_count(audio_duration)
 
     def concrete_query(segment: dict) -> str:
         return str(segment.get("visualQuery", "")).strip()
@@ -3671,7 +3684,11 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     scenes: list[dict] = []
     for beat_index in range(visual_beat_count):
         beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
-        beat_end = min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS)
+        beat_end = (
+            audio_duration
+            if beat_index == visual_beat_count - 1
+            else min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS)
+        )
         if beat_end <= beat_start:
             continue
         overlapping = [
