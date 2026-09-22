@@ -10806,7 +10806,8 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                               immediately_previous_path: str = "",
                               relaxed_hits=None, category_hits=None, safe_context_hits=None,
                               position_bucket: str = "", batch_family_buckets=None,
-                              diversity_seed: str = "", allow_safe_reuse: bool = True) -> MontageCandidateSelection:
+                              diversity_seed: str = "", allow_safe_reuse: bool = True,
+                              allow_below_threshold: bool = False) -> MontageCandidateSelection:
     """Select one valid clip without letting batch uniqueness become a hard failure.
 
     The candidate collections come from a bounded in-memory vector search.
@@ -10948,11 +10949,14 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             )
         return None
 
+    def floor(level: str) -> float | None:
+        return None if allow_below_threshold else _montage_level_score_floor(level, match_threshold)
+
     ladder = [
-        (strict, _montage_level_score_floor("STRICT_MATCH", match_threshold), False, False, False, True, "STRICT_MATCH"),
-        (relaxed, _montage_level_score_floor("RELAXED_SEMANTIC", match_threshold), False, False, False, True, "RELAXED_SEMANTIC"),
-        (category, _montage_level_score_floor("CATEGORY_MATCH", match_threshold), False, False, False, True, "CATEGORY_MATCH"),
-        (context, _montage_level_score_floor("SAFE_CONTEXT", match_threshold), False, False, False, True, "SAFE_CONTEXT"),
+        (strict, floor("STRICT_MATCH"), False, False, False, True, "STRICT_MATCH"),
+        (relaxed, floor("RELAXED_SEMANTIC"), False, False, False, True, "RELAXED_SEMANTIC"),
+        (category, floor("CATEGORY_MATCH"), False, False, False, True, "CATEGORY_MATCH"),
+        (context, floor("SAFE_CONTEXT"), False, False, False, True, "SAFE_CONTEXT"),
     ]
     for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level in ladder:
         selected = choose(pool, minimum_score=minimum, allow_historical=old_allowed,
@@ -10965,10 +10969,10 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
         # the semantic level that produced the candidate. Diversity exhaustion
         # never grants a free pass to an unrelated low-score context clip.
         reuse_ladder = [
-            (strict, _montage_level_score_floor("STRICT_MATCH", match_threshold)),
-            (relaxed, _montage_level_score_floor("RELAXED_SEMANTIC", match_threshold)),
-            (category, _montage_level_score_floor("CATEGORY_MATCH", match_threshold)),
-            (context, _montage_level_score_floor("SAFE_CONTEXT", match_threshold)),
+            (strict, floor("STRICT_MATCH")),
+            (relaxed, floor("RELAXED_SEMANTIC")),
+            (category, floor("CATEGORY_MATCH")),
+            (context, floor("SAFE_CONTEXT")),
         ]
         # Preserve uniqueness inside the current video before preserving
         # uniqueness across older/batch videos.  A family already used by a
