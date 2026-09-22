@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .timeline import probe_media_duration
+
 _STAGES = (
     "AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION",
     "TAGS", "THUMBNAIL", "POST", "CARDS", "END_SCREEN", "SCHEDULE",
@@ -210,26 +212,146 @@ def migrate_legacy_publication_data(settings: Any) -> PublicationMigrationReport
 
 
 def reconcile_publication_items(settings: Any) -> dict[str, Any]:
-    """Refresh non-destructive artifact state and return the V2 registry projection."""
+    """Refresh Publication V2 from current durable artifacts without title-based identity."""
     migrate_legacy_publication_data(settings)
     items = dict(settings.youtube_publication_items)
-    ready = missing = 0
-    for production_id, item in items.items():
-        artifact = dict(item.get("artifacts", {}).get("video", {}) or {})
-        path = str(artifact.get("path", "")).strip()
-        exists = bool(path and Path(path).is_file())
-        artifact.update({"path": path, "exists": exists, "validatedAt": _now()})
-        item.setdefault("artifacts", {})["video"] = artifact
-        item["readiness"] = {"state": "VIDEO_READY" if exists else "VIDEO_MISSING",
-                             "reasons": [] if exists else ["VIDEO_MISSING"]}
-        item["updatedAt"] = _now()
-        if exists:
-            ready += 1
+
+    seo_by_id = {
+        str(row.get("production_item_id") or row.get("productionItemId") or "").strip(): dict(row)
+        for row in getattr(settings, "seo_queue", [])
+        if isinstance(row, dict) and str(row.get("production_item_id") or row.get("productionItemId") or "").strip()
+    }
+    cover_by_id = {
+        str(row.get("production_item_id") or row.get("productionItemId") or "").strip(): dict(row)
+        for row in getattr(settings, "cover_queue", [])
+        if isinstance(row, dict) and str(row.get("production_item_id") or row.get("productionItemId") or "").strip()
+    }
+    assignments = dict(getattr(settings, "youtube_publication_assignments", {}) or {})
+    rules = dict(getattr(settings, "youtube_channel_publication_rules", {}) or {})
+
+    counters = {
+        "total": len(items),
+        "videoReady": 0,
+        "contentReady": 0,
+        "publicationReady": 0,
+        "needsAttention": 0,
+    }
+
+    for production_id, source in items.items():
+        item = dict(source)
+        artifacts = dict(item.get("artifacts", {}) or {})
+        video = dict(artifacts.get("video", {}) or {})
+        video_path = str(video.get("path", "")).strip()
+        video_exists = bool(video_path and Path(video_path).is_file())
+        duration: float | None = None
+        if video_exists:
+            try:
+                duration = float(video.get("durationSeconds") or video.get("duration") or 0) or float(probe_media_duration(Path(video_path)))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                duration = None
+        video.update({
+            "path": video_path,
+            "exists": video_exists,
+            "validatedAt": _now(),
+        })
+        if duration and duration > 0:
+            video["durationSeconds"] = duration
+            item["durationSeconds"] = duration
+        artifacts["video"] = video
+
+        seo = seo_by_id.get(production_id, {})
+        metadata = dict(item.get("metadata", {}) or {})
+        if seo:
+            if str(seo.get("source_title", "")).strip():
+                metadata["title"] = str(seo.get("source_title", "")).strip()
+            metadata["seoTitle"] = str(seo.get("title", "")).strip()
+            metadata["description"] = str(seo.get("description", "")).strip()
+            metadata["tags"] = [str(value).strip() for value in seo.get("tags", []) if str(value).strip()]
+            metadata["hashtags"] = [str(value).strip() for value in seo.get("hashtags", []) if str(value).strip()]
+            metadata["seoStatus"] = str(seo.get("status", "")).strip()
+            metadata["tagsStatus"] = str(seo.get("tags_status", "")).strip()
+
+        cover = cover_by_id.get(production_id, {})
+        cover_path = str(cover.get("selected_path") or cover.get("path") or "").strip()
+        if not cover_path:
+            paths = cover.get("paths")
+            if isinstance(paths, list):
+                cover_path = next((str(value).strip() for value in paths if str(value).strip()), "")
+        thumbnail = dict(artifacts.get("thumbnail", {}) or {})
+        if cover_path:
+            thumbnail["path"] = cover_path
+        thumbnail_path = str(thumbnail.get("path", "")).strip()
+        thumbnail.update({
+            "path": thumbnail_path,
+            "exists": bool(thumbnail_path and Path(thumbnail_path).is_file()),
+            "validatedAt": _now(),
+        })
+        artifacts["thumbnail"] = thumbnail
+
+        reasons: list[str] = []
+        if not video_exists:
+            reasons.append("VIDEO_MISSING")
+        elif duration is None:
+            reasons.append("VIDEO_DURATION_UNKNOWN")
+        title = str(metadata.get("title", "")).strip()
+        if not title:
+            reasons.append("TITLE_MISSING")
+        elif len(title) > 100:
+            reasons.append("TITLE_TOO_LONG")
+        if not str(metadata.get("description", "")).strip():
+            reasons.append("SEO_DESCRIPTION_MISSING")
+        if not [value for value in metadata.get("tags", []) if str(value).strip()]:
+            reasons.append("TAGS_MISSING")
+        if not thumbnail["exists"]:
+            reasons.append("THUMBNAIL_MISSING")
+
+        content_blockers = {
+            "VIDEO_MISSING", "VIDEO_DURATION_UNKNOWN", "TITLE_MISSING", "TITLE_TOO_LONG",
+            "SEO_DESCRIPTION_MISSING", "TAGS_MISSING", "THUMBNAIL_MISSING",
+        }
+        content_ready = not any(reason in content_blockers for reason in reasons)
+        assignment = dict(assignments.get(production_id, {}) or {})
+        channel_id = str(assignment.get("channelId", "")).strip()
+        if content_ready and not channel_id:
+            reasons.append("ASSIGNMENT_REQUIRED")
+        elif content_ready:
+            rule = dict(rules.get(channel_id, {}) or {})
+            if str(rule.get("publishMode", "")).strip() == "schedule" and not str(assignment.get("publishAt", "")).strip():
+                reasons.append("SCHEDULE_REQUIRED")
+
+        publication_ready = content_ready and not any(
+            reason in {"ASSIGNMENT_REQUIRED", "SCHEDULE_REQUIRED"} for reason in reasons
+        )
+        if not video_exists:
+            state = "VIDEO_MISSING"
+        elif content_ready and publication_ready:
+            state = "PUBLICATION_READY"
+        elif content_ready:
+            state = "CONTENT_READY"
+        elif "THUMBNAIL_MISSING" in reasons and len(set(reasons) - {"THUMBNAIL_MISSING"}) == 0:
+            state = "NEEDS_COVER"
         else:
-            missing += 1
+            state = "NEEDS_ATTENTION"
+
+        item["artifacts"] = artifacts
+        item["metadata"] = metadata
+        item["readiness"] = {
+            "state": state,
+            "videoReady": video_exists,
+            "contentReady": content_ready,
+            "publicationReady": publication_ready,
+            "reasons": reasons,
+        }
+        item["updatedAt"] = _now()
         items[production_id] = item
+
+        counters["videoReady"] += int(video_exists)
+        counters["contentReady"] += int(content_ready)
+        counters["publicationReady"] += int(publication_ready)
+        counters["needsAttention"] += int(bool(reasons))
+
     settings.youtube_publication_items = items
-    return {"items": items, "counters": {"total": len(items), "videoReady": ready, "videoMissing": missing}}
+    return {"items": items, "counters": counters}
 
 
 def _item_duration_seconds(item: dict[str, Any]) -> float | None:
@@ -343,7 +465,10 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
     candidates = [
         (production_id, item) for production_id, item in ordered_items
         if production_id not in assigned_ids
-        and str(dict(item.get("readiness", {}) or {}).get("state", "")) in {"VIDEO_READY", "PUBLICATION_READY"}
+        and (
+            bool(dict(item.get("readiness", {}) or {}).get("contentReady"))
+            or str(dict(item.get("readiness", {}) or {}).get("state", "")) in {"VIDEO_READY", "CONTENT_READY", "PUBLICATION_READY"}
+        )
     ]
     if any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
            for rule in active_rules):
@@ -676,7 +801,11 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
         item = items.get(production_id)
         if not production_id or not channel_id or not item:
             raise ValueError("Подтверждение требует существующий ролик и канал")
-        if str(item.get("readiness", {}).get("state", "")) != "VIDEO_READY":
+        readiness = dict(item.get("readiness", {}) or {})
+        if not (
+            bool(readiness.get("contentReady"))
+            or str(readiness.get("state", "")) in {"VIDEO_READY", "CONTENT_READY", "PUBLICATION_READY"}
+        ):
             raise ValueError(f"Ролик {production_id} не готов к публикации")
         snapshot_id = existing_by_item.get(production_id)
         if snapshot_id:
