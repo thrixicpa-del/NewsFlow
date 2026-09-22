@@ -240,9 +240,12 @@ def _publish_scheduled_post(page, action: Mapping[str, object]) -> None:
         composer.press("Enter")
         composer.press_sequentially(video_url)
         page.wait_for_timeout(1_000)
+    publish_at = str(action.get("publishAt", "")).strip()
     _click_text(page, [r"опубликовать", r"publish"])
+    if not publish_at:
+        return
     _click_text(page, [r"запланир", r"schedule"])
-    date, clock = _parse_schedule(str(action.get("publishAt", "")))
+    date, clock = _parse_schedule(publish_at)
     date_input = _first(page, ["input[type='date']", "input[aria-label*='дата' i]", "input[aria-label*='date' i]"])
     time_input = _first(page, ["input[type='time']", "input[aria-label*='время' i]", "input[aria-label*='time' i]"])
     date_input.fill(date)
