@@ -40,4 +40,10 @@ describe("SEO and Tags Light views", () => {
     fireEvent.click(screen.getByRole("button", { name: "Создать теги" }));
     expect(tagsCommand).toHaveBeenCalledWith("generate-tags", { indices: [], provider: "agent" });
   });
+
+  it("does not offer a YouTube tag limit above 500 characters", () => {
+    render(<Tags data={fallback} command={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить теги" }));
+    expect(screen.getByLabelText(/Лимит тегов, символов/i).getAttribute("max")).toBe("500");
+  });
 });

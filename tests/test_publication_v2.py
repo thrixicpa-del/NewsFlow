@@ -4,37 +4,52 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from scriptor import config
-from scriptor import bridge
+from scriptor import bridge, config
 from scriptor.command_contract import COMMAND_CONTRACT
 from scriptor.config import Settings
 from scriptor.publication_v2 import (
-    build_channel_schedule,
     apply_bulk_schedule_range,
     begin_upload_attempt,
+    build_channel_schedule,
     build_distribution_preview,
     cancel_publication_execution,
-    classify_publication_error,
     claim_execution,
-    complete_upload_attempt,
+    classify_publication_error,
     complete_publication_stage,
-    fail_publication_stage,
+    complete_upload_attempt,
     confirm_publication_snapshots,
-    next_upload_candidates,
+    fail_publication_stage,
     migrate_legacy_publication_data,
-    reconcile_youtube_video_state,
-    publication_receipt,
+    next_upload_candidates,
     persist_publication_receipt,
+    publication_receipt,
     reconcile_publication_executions,
-    retry_publication_stage,
     reconcile_publication_items,
+    reconcile_youtube_video_state,
     release_execution,
+    retry_publication_stage,
     validate_publication_schedule,
     validate_publication_snapshot,
 )
 
 
 class PublicationV2MigrationTests(unittest.TestCase):
+    def test_migration_uses_canonical_production_item_id_field(self):
+        """Modern ProductionItems use ``id``; title lookup must not be required."""
+        settings = Settings(
+            idea_production_items=[{"id": "canonical-pi", "title": "Одинаковый заголовок"}],
+            youtube_publication_jobs=[{
+                "id": "job-canonical", "productionItemId": "canonical-pi",
+                "title": "Одинаковый заголовок", "videoPath": "D:/missing/video.mp4",
+                "packageFolder": "D:/missing",
+            }],
+        )
+
+        migrate_legacy_publication_data(settings)
+
+        self.assertIn("canonical-pi", settings.youtube_publication_items)
+        self.assertEqual(settings.youtube_publication_items["canonical-pi"]["legacyLinks"]["legacyJobId"], "job-canonical")
+
     def test_migration_links_legacy_job_to_stable_production_item_without_mutating_legacy_record(self):
         """Removing ProductionItem linkage or editing legacy data must fail this migration contract."""
         with TemporaryDirectory() as directory:

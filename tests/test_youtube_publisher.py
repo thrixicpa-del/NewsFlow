@@ -1,19 +1,28 @@
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scriptor import bridge
-from scriptor import config
+from scriptor import bridge, config
 from scriptor.config import FastGenKey, OpenAIKey, Settings, WProjectKey
-from scriptor.youtube_oauth import youtube_oauth_scopes
-from scriptor.youtube_api import parse_analytics_rows, parse_current_channel, parse_google_account_email
-from scriptor.youtube_api import build_private_video_insert_body, normalize_youtube_tags
 from scriptor.runner import RunState
-from scriptor.youtube_allocation import allocate_ready_jobs, build_allocation_summary, recommend_quota
+from scriptor.youtube_allocation import (
+    allocate_ready_jobs,
+    build_allocation_summary,
+    recommend_quota,
+)
+from scriptor.youtube_api import (
+    build_private_video_insert_body,
+    normalize_youtube_tags,
+    parse_analytics_rows,
+    parse_current_channel,
+    parse_google_account_email,
+)
+from scriptor.youtube_oauth import youtube_oauth_scopes
 from scriptor.youtube_publisher import (
     AnalyticsMetricPoint,
     PublicationJob,
@@ -32,6 +41,148 @@ from scriptor.youtube_publisher import (
 
 
 class PublicationJobTests(unittest.TestCase):
+    def test_scenario_refresh_matches_seo_by_production_item_and_stales_completed_metadata(self):
+        """A renamed or revised scenario must not retain metadata from its old text."""
+        settings = Settings(seo_queue=[{
+            "production_item_id": "production-1",
+            "source_title": "Старый заголовок",
+            "script": "Старый сценарий",
+            "requirements": "",
+            "status": "Готово",
+            "title": "Старый SEO-заголовок",
+            "description": "Старое SEO-описание",
+            "hashtags": ["#старое"],
+            "tags": ["старый тег"],
+            "tags_status": "Готово",
+            "tags_error": "",
+            "error": "",
+        }])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production-1", prompt=""),
+            result="Новый сценарий",
+        )
+
+        changed = bridge._sync_scenario_to_seo(settings, "Новый заголовок", job)
+
+        self.assertTrue(changed)
+        self.assertEqual(len(settings.seo_queue), 1)
+        row = settings.seo_queue[0]
+        self.assertEqual(row["production_item_id"], "production-1")
+        self.assertEqual(row["source_title"], "Новый заголовок")
+        self.assertEqual(row["script"], "Новый сценарий")
+        self.assertEqual(row["status"], "Ожидает")
+        self.assertEqual(row["tags_status"], "Ожидают")
+        self.assertEqual(row["title"], "")
+        self.assertEqual(row["description"], "")
+        self.assertEqual(row["hashtags"], [])
+        self.assertEqual(row["tags"], [])
+
+    def test_operator_can_clear_saved_cta(self):
+        settings = Settings(seo_call_to_action="Старый призыв")
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_seo_settings({"callToAction": ""})
+
+        self.assertEqual(settings.seo_call_to_action, "")
+
+    def test_seo_identity_and_metadata_survive_settings_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            settings = Settings(
+                seo_call_to_action="Сохранённый CTA",
+                seo_queue=[{
+                    "production_item_id": "production-restart",
+                    "source_title": "Заголовок после rename",
+                    "script": "Актуальный сценарий",
+                    "status": "Готово",
+                    "title": "SEO title",
+                    "description": "SEO description",
+                    "hashtags": ["#news"],
+                    "tags": ["news"],
+                    "tags_status": "Готово",
+                }],
+            )
+            with patch.object(config, "config_path", return_value=path):
+                config.save_settings(settings)
+                restored = config.load_settings()
+
+        self.assertEqual(restored.seo_call_to_action, "Сохранённый CTA")
+        self.assertEqual(restored.seo_queue, settings.seo_queue)
+
+    def test_tag_limit_never_exceeds_youtube_limit(self):
+        settings = Settings(tag_char_limit=500)
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_tag_limits({"hashtagBatchSize": 5, "tagCharLimit": 5000})
+
+        self.assertEqual(settings.tag_char_limit, 500)
+        self.assertLessEqual(len(", ".join(bridge._limit_tags(["a" * 500, "b"], 5000))), 500)
+
+    def test_montage_handoff_persists_production_identity_for_package_linkage(self):
+        settings = Settings()
+
+        changed = bridge._sync_montage_handoff(
+            settings, 4, "Rename-safe title: / ?", transferred=True,
+            production_item_id="production-montage-link",
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(settings.montage_task_statuses["4"]["production_item_id"], "production-montage-link")
+
+    def test_packages_and_publication_keep_duplicate_titles_separate_by_production_item_id(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_video = root / "first-render.mp4"
+            second_video = root / "second-render.mp4"
+            first_video.write_bytes(b"mp4")
+            second_video.write_bytes(b"mp4")
+            title = "Одинаковый title: проверка / Windows?"
+            settings = Settings(
+                montage_output_folder=str(root),
+                pipeline_montage_outputs=[str(first_video), str(second_video)],
+                montage_task_statuses={
+                    "0": {"outputPath": str(first_video), "production_item_id": "production-a", "title": title},
+                    "1": {"outputPath": str(second_video), "production_item_id": "production-b", "title": title},
+                },
+                seo_queue=[
+                    {"production_item_id": "production-a", "source_title": title, "status": "Готово",
+                     "title": "SEO A", "description": "Описание A", "hashtags": ["#a"], "tags": ["тег A"]},
+                    {"production_item_id": "production-b", "source_title": title, "status": "Готово",
+                     "title": "SEO B", "description": "Описание B", "hashtags": ["#b"], "tags": ["тег B"]},
+                ],
+            )
+            jobs = [
+                SimpleNamespace(request=SimpleNamespace(index=0, title=title, production_item_id="production-a"),
+                                state=RunState.DONE, result="Сценарий A"),
+                SimpleNamespace(request=SimpleNamespace(index=1, title=title, production_item_id="production-b"),
+                                state=RunState.DONE, result="Сценарий B"),
+            ]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=([title, title], jobs)), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                bridge.package_outputs({})
+                bridge.queue_ready_publication_outputs({})
+
+            first_package = Path(settings.video_result_packages[str(first_video)])
+            second_package = Path(settings.video_result_packages[str(second_video)])
+            self.assertEqual((first_package / "ProductionItem ID.txt").read_text(encoding="utf-8-sig").strip(), "production-a")
+            self.assertEqual((second_package / "ProductionItem ID.txt").read_text(encoding="utf-8-sig").strip(), "production-b")
+            self.assertEqual((first_package / "Описание.txt").read_text(encoding="utf-8-sig").strip(), "Описание A")
+            self.assertEqual((second_package / "Описание.txt").read_text(encoding="utf-8-sig").strip(), "Описание B")
+            records_by_id = {item["productionItemId"]: item for item in settings.youtube_publication_jobs}
+            self.assertEqual(records_by_id["production-a"]["title"], title)
+            self.assertEqual(records_by_id["production-a"]["seoTitle"], "SEO A")
+            self.assertEqual(records_by_id["production-a"]["seoDescription"], "Описание A")
+            self.assertEqual(records_by_id["production-a"]["tags"], ["тег A"])
+            self.assertEqual(records_by_id["production-a"]["hashtags"], ["#a"])
+            self.assertEqual(records_by_id["production-b"]["seoDescription"], "Описание B")
+            self.assertEqual(records_by_id["production-b"]["seoTitle"], "SEO B")
+            self.assertEqual(records_by_id["production-b"]["tags"], ["тег B"])
+            self.assertEqual(records_by_id["production-b"]["hashtags"], ["#b"])
+
     def test_adding_channel_enables_default_oauth_handoff_for_future_channels(self):
         """Every new row must be ready for the Google → tinkbro token handoff."""
         settings = Settings()
@@ -418,7 +569,7 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(grid, build_staggered_publication_grid(channels, first_cycle, 6, 3))
         for times in grid.values():
             self.assertEqual(len(times), 6)
-            self.assertTrue(all((later - earlier).total_seconds() == 10_800 for earlier, later in zip(times, times[1:])))
+            self.assertTrue(all((later - earlier).total_seconds() == 10_800 for earlier, later in pairwise(times)))
         for cycle_index in range(6):
             times = [grid[channel][cycle_index] for channel in channels]
             self.assertEqual(len(set(times)), 100)
@@ -506,7 +657,7 @@ class PublicationJobTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
             settings = Settings(
-                youtube_publication_jobs=[{"id": "job-1", "title": "Ормуз", "status": "ready"}],
+                youtube_publication_jobs=[{"id": "job-1", "productionItemId": "production-restart", "title": "Ормуз", "status": "ready"}],
                 youtube_publication_presets=[{"name": "Каждые 3 часа", "intervalMinutes": 180}],
                 youtube_publication_activity=[{"kind": "created", "jobId": "job-1"}],
             )
@@ -514,9 +665,9 @@ class PublicationJobTests(unittest.TestCase):
                 config.save_settings(settings)
                 restored = config.load_settings()
 
-            self.assertEqual(restored.youtube_publication_jobs, [{"id": "job-1", "title": "Ормуз", "status": "ready"}])
-            self.assertEqual(restored.youtube_publication_presets, [{"name": "Каждые 3 часа", "intervalMinutes": 180}])
-            self.assertEqual(restored.youtube_publication_activity, [{"kind": "created", "jobId": "job-1"}])
+        self.assertEqual(restored.youtube_publication_jobs, [{"id": "job-1", "productionItemId": "production-restart", "title": "Ормуз", "status": "ready"}])
+        self.assertEqual(restored.youtube_publication_presets, [{"name": "Каждые 3 часа", "intervalMinutes": 180}])
+        self.assertEqual(restored.youtube_publication_activity, [{"kind": "created", "jobId": "job-1"}])
 
     def test_allocation_profiles_and_presets_survive_settings_restart(self):
         with TemporaryDirectory() as directory:
@@ -727,14 +878,14 @@ class PublicationJobTests(unittest.TestCase):
         settings = Settings(analytics_channels=[{
             "profile_id": "profile-a", "channel_id": "UC-real", "name": "Взгляд сверху",
         }])
-        with TemporaryDirectory() as directory:
-            with patch.object(bridge, "load_settings", return_value=settings), \
-                 patch.object(bridge, "save_settings"), \
-                 patch.object(bridge, "snapshot", return_value={}), \
-                 patch.object(bridge, "app_data_root", return_value=Path(directory)), \
-                 patch.object(bridge, "chrome_path", return_value=Path("C:/Chrome/chrome.exe")), \
-                 patch.object(bridge.subprocess, "Popen") as popen:
-                bridge.open_analytics_channel({"index": 0})
+        with TemporaryDirectory() as directory, \
+             patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "app_data_root", return_value=Path(directory)), \
+             patch.object(bridge, "chrome_path", return_value=Path("C:/Chrome/chrome.exe")), \
+             patch.object(bridge.subprocess, "Popen") as popen:
+            bridge.open_analytics_channel({"index": 0})
 
         self.assertIn("--user-data-dir=", popen.call_args.args[0][1])
         self.assertEqual(popen.call_args.args[0][-1], "https://studio.youtube.com/channel/UC-real")

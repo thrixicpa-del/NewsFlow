@@ -7,14 +7,13 @@ the OAuth/API client is added on top of these objects later.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-import re
 from uuid import uuid4
 
 from .timeline import probe_media_duration
-
 
 PublicationPrivacy = str
 PublicationStatus = str
@@ -28,6 +27,7 @@ class PublicationJob:
     video_path: str
     package_folder: str
     title: str
+    production_item_id: str = ""
     status: PublicationStatus = "ready"
     privacy: PublicationPrivacy = "private"
     publish_at: datetime | None = None
@@ -118,6 +118,7 @@ def create_publication_job(
     video_path: str,
     package_folder: str,
     title: str,
+    production_item_id: str = "",
     script_name: str = "",
     seo_title: str = "",
     seo_description: str = "",
@@ -143,6 +144,7 @@ def create_publication_job(
     )
     return PublicationJob(
         id=uuid4().hex,
+        production_item_id=str(production_item_id).strip(),
         video_path=str(video_path),
         package_folder=str(package_folder),
         title=clean_title,
@@ -192,7 +194,7 @@ def build_linked_community_post(
     }
 
 
-def manual_ad_break_checklist(duration_seconds: int | float, *, interval_seconds: int = 39) -> list[str]:
+def manual_ad_break_checklist(duration_seconds: float, *, interval_seconds: int = 39) -> list[str]:
     """Return safe manual Studio ad-marker suggestions for an uploaded video.
 
     Mid-roll placement for ordinary uploads is not exposed by the public
@@ -260,6 +262,7 @@ def publication_job_record(job: PublicationJob) -> dict:
 
     record = asdict(job)
     record["videoPath"] = record.pop("video_path")
+    record["productionItemId"] = record.pop("production_item_id")
     record["packageFolder"] = record.pop("package_folder")
     record["channelId"] = record.pop("channel_id")
     record["scriptName"] = record.pop("script_name")
@@ -312,6 +315,7 @@ def create_publication_job_from_package(source_video: str, package_folder: str) 
         video_path=str(packaged_video),
         package_folder=str(folder),
         title=scenario_title,
+        production_item_id=_read_package_text(folder, "ProductionItem ID.txt"),
         script_name=scenario_title,
         seo_title=_read_package_text(folder, "SEO-заголовок.txt"),
         seo_description=_read_package_text(folder, "Описание.txt"),
