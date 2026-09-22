@@ -39,6 +39,12 @@ def _normalise(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
 
+def resolve_publication_upload_title(metadata: dict[str, Any]) -> str:
+    """Return the frozen YouTube title: SEO title when present, source title otherwise."""
+    source = dict(metadata or {})
+    return " ".join(str(source.get("seoTitle") or source.get("title") or "").split())
+
+
 def _legacy_production_id(job: dict[str, Any]) -> str:
     explicit = str(job.get("productionItemId", "")).strip()
     if explicit:
@@ -308,10 +314,10 @@ def reconcile_publication_items(settings: Any) -> dict[str, Any]:
             reasons.append("VIDEO_MISSING")
         elif duration is None:
             reasons.append("VIDEO_DURATION_UNKNOWN")
-        title = str(metadata.get("title", "")).strip()
-        if not title:
+        upload_title = resolve_publication_upload_title(metadata)
+        if not upload_title:
             reasons.append("TITLE_MISSING")
-        elif len(title) > 100:
+        elif len(upload_title) > 100:
             reasons.append("TITLE_TOO_LONG")
         if not str(metadata.get("description", "")).strip():
             reasons.append("SEO_DESCRIPTION_MISSING")
@@ -1162,8 +1168,8 @@ def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, 
     if not video_path or not Path(video_path).is_file():
         reasons.append({"kind": "VIDEO_MISSING", "message": "MP4 из snapshot не найден. Связь с роликом сохранена для восстановления."})
     metadata = dict(snapshot.get("metadata", {}) or {})
-    title = str(metadata.get("title", "")).strip()
-    if not title or len(title) > 100:
+    upload_title = resolve_publication_upload_title(metadata)
+    if not upload_title or len(upload_title) > 100:
         reasons.append({"kind": "TITLE_INVALID", "message": "Заголовок YouTube должен содержать от 1 до 100 символов."})
     channel_id = str(snapshot.get("channelId", "")).strip()
     tokens = dict(getattr(settings, "youtube_oauth_tokens", {}) or {})
@@ -1518,7 +1524,7 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
         expected.get("hashtags", []) if isinstance(expected.get("hashtags"), list) else [],
     )
     checks = {
-        "TITLE": _normalise(snippet.get("title")) == _normalise(expected.get("title")),
+        "TITLE": _normalise(snippet.get("title")) == _normalise(resolve_publication_upload_title(expected)),
         "DESCRIPTION": str(snippet.get("description", "")).strip() == expected_description.strip(),
         "TAGS": { _normalise(value) for value in expected.get("tags", []) if _normalise(value) }.issubset({ _normalise(value) for value in snippet.get("tags", []) if _normalise(value) }),
     }
