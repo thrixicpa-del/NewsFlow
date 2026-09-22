@@ -606,8 +606,11 @@ class PublicationJobTests(unittest.TestCase):
                 montage_project_folder=str(root),
                 pipeline_montage_outputs=[str(video)],
                 montage_task_statuses={
-                    "0": {
-                        "scenarioIndex": 0,
+                    "legacy-slot": {
+                        # Deliberately stale positional index: durable identity
+                        # must still recover the correct scenario metadata.
+                        "scenarioIndex": 99,
+                        "productionItemId": production_id,
                         "title": original_title,
                         "status": "Готово",
                         "outputPath": str(video),
