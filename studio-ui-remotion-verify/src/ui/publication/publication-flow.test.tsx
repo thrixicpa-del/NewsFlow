@@ -124,6 +124,47 @@ describe("PublicationPage interactions", () => {
     expect(screen.queryByText("quota_exhausted")).not.toBeInTheDocument();
   });
 
+  it("limits smart preview to videos explicitly selected in the registry", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "" }] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByLabelText("Выбрать Готовый ролик"));
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "preview-publication-v2-distribution",
+      { productionItemIds: ["item-ready"] },
+    ));
+  });
+
+  it("starts only queue rows explicitly selected by the operator", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByLabelText("Выбрать публикацию Готовый ролик"));
+    fireEvent.click(screen.getByRole("button", { name: "Запустить выбранные (1)" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "upload-publication-v2-snapshots",
+      { snapshotIds: ["snapshot-ready"] },
+    ));
+  });
+
+  it("renders per-channel quarter-hour day plan from the preview", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [
+      { productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "2026-11-15T04:00:00+03:00" },
+      { productionItemId: "item-uploaded", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "2026-11-15T04:15:00+03:00" },
+    ] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+
+    await waitFor(() => expect(screen.getByRole("region", { name: "План публикаций на сутки" })).toBeInTheDocument());
+    expect(screen.getByRole("columnheader", { name: "04:00" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "04:15" })).toBeInTheDocument();
+    expect(screen.getByText("Готовый ролик", { selector: ".nf-day-plan td span" })).toBeInTheDocument();
+  });
+
   it("blocks confirmation in the UI when preview reports a scheduling conflict", async () => {
     const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "manual", locked: true, reason: "Ручное назначение", publishAt: "2026-09-11T22:00:00", scheduleWarning: "Вне окна публикации" }] } });
     render(<PublicationPage data={base} command={command} />);
