@@ -229,7 +229,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   };
 
   const selectedQueueIds = (explicit?: string[]) => {
-    if (explicit?.length) return explicit;
+    if (explicit !== undefined) return explicit;
     if (selectedVideoIds.length) {
       const wanted = new Set(selectedVideoIds);
       return model.queue.filter((row) => wanted.has(row.productionItemId)).map((row) => row.snapshotId);
