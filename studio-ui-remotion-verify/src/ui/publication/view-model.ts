@@ -26,6 +26,11 @@ export function defaultRule(id: string, saved: Record<string, any> = {}): Channe
     maxDurationSeconds: Math.max(0, Number(saved.maxDurationSeconds) || 0),
     orderStart: Math.max(0, Number(saved.orderStart) || 0),
     orderEnd: Math.max(0, Number(saved.orderEnd) || 0),
+    channelPriority: Number(saved.channelPriority) || 0,
+    maxVideosPerHour: Math.max(0, Number(saved.maxVideosPerHour) || 0),
+    topicCooldownMinutes: Math.max(0, Number(saved.topicCooldownMinutes) || 0),
+    includeKeywords: Array.isArray(saved.includeKeywords) ? saved.includeKeywords.map(text).filter(Boolean) : [],
+    excludeKeywords: Array.isArray(saved.excludeKeywords) ? saved.excludeKeywords.map(text).filter(Boolean) : [],
     automation: {
       upload: rawAutomation.upload !== false,
       metadata: rawAutomation.metadata !== false,
