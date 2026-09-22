@@ -47,6 +47,15 @@ def _file_fingerprint(path_value: object) -> dict[str, int] | None:
     return {"sizeBytes": int(stat.st_size), "mtimeNs": int(stat.st_mtime_ns)}
 
 
+def frozen_artifact_matches(snapshot: dict[str, Any], artifact_name: str, path_value: object) -> bool:
+    """Return True for legacy snapshots or when the current file matches the frozen fingerprint."""
+    frozen = dict(dict(snapshot.get("artifactFingerprints", {}) or {}).get(artifact_name, {}) or {})
+    if not frozen:
+        return True
+    current = _file_fingerprint(path_value)
+    return current is not None and current == frozen
+
+
 def _normalise(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
 
@@ -1211,14 +1220,11 @@ def validate_publication_snapshot(settings: Any, snapshot_id: str) -> dict[str, 
     current_video_fingerprint = _file_fingerprint(video_path)
     if not video_path or current_video_fingerprint is None:
         reasons.append({"kind": "VIDEO_MISSING", "message": "MP4 из snapshot не найден. Связь с роликом сохранена для восстановления."})
-    else:
-        frozen_fingerprints = dict(snapshot.get("artifactFingerprints", {}) or {})
-        frozen_video_fingerprint = dict(frozen_fingerprints.get("video", {}) or {})
-        if frozen_video_fingerprint and current_video_fingerprint != frozen_video_fingerprint:
-            reasons.append({
-                "kind": "VIDEO_STALE",
-                "message": "MP4 изменился после подтверждения snapshot. Переподтвердите назначение перед загрузкой.",
-            })
+    elif not frozen_artifact_matches(snapshot, "video", video_path):
+        reasons.append({
+            "kind": "VIDEO_STALE",
+            "message": "MP4 изменился после подтверждения snapshot. Переподтвердите назначение перед загрузкой.",
+        })
     metadata = dict(snapshot.get("metadata", {}) or {})
     upload_title = resolve_publication_upload_title(metadata)
     if not upload_title or len(upload_title) > 100:
