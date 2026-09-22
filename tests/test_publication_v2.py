@@ -1106,7 +1106,7 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             video = root / "video.mp4"
             video.write_bytes(b"original-video")
             settings = Settings(
-                youtube_oauth_tokens={"channel-a": "protected-token"},
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
                 youtube_publication_items={
                     "pi-1": {
                         "productionItemId": "pi-1",
@@ -1167,7 +1167,7 @@ class PublicationV2SnapshotTests(unittest.TestCase):
             root = Path(directory)
             video = root / "video.mp4"
             video.write_bytes(b"mp4")
-            settings = Settings(youtube_oauth_tokens={"channel-a": "protected-token"}, youtube_publication_snapshots={
+            settings = Settings(youtube_oauth_tokens={"channel-a": '{"token":"safe"}'}, youtube_publication_snapshots={
                 "snapshot-1": {"id": "snapshot-1", "channelId": "channel-a", "videoPath": str(video),
                                "metadata": {"title": "Ролик"}, "privacy": "private", "publishMode": "publish_now"},
             }, youtube_publication_executions={"snapshot-1": {"youtubeVideoId": "yt-existing"}})
