@@ -33,6 +33,9 @@ from pathlib import Path
 
 from . import idea_engine
 from .ai_index import (
+    SCREEN_ELIGIBILITY_BLOCKED,
+    SCREEN_ELIGIBILITY_SAFE,
+    SCREEN_ELIGIBILITY_UNCERTAIN,
     SEMANTIC_TAG_LABELS,
     ClipIndex,
     SearchHit,
@@ -115,12 +118,14 @@ from .thumbnail_prompt_v2 import (
     strip_legacy_thumbnail_phrases,
 )
 from .timeline import (
+    GENERIC_VISUAL_QUERY,
     TimelineClip,
     TimelineProject,
     agent_plan_prompt,
     align_timeline_to_audio,
     export_fcpxml,
     fallback_scene_plan,
+    fallback_visual_query,
     fit_scene_plan_to_voice_duration,
     parse_agent_scene_plan,
     probe_media_duration,
@@ -139,6 +144,13 @@ from .tts_ranges import (
     resolve_assignments,
     snapshot_tts_job,
     validate_ranges,
+)
+from .voice_map import (
+    AlignmentEngine,
+    VoiceMapContext,
+    VoiceMapStatus,
+    ensure_voice_map,
+    remove_voice_map,
 )
 from .voicer import (
     ChromeSecretVoicer,
@@ -1482,6 +1494,7 @@ def snapshot() -> dict:
                     f"reuse {project.selection_summary.get('reuse', 0)}"
                 ) if project.selection_summary else "",
                 "preparationMetricsMs": project.preparation_metrics_ms,
+                "voiceMapProvenance": project.voice_map_provenance,
                 "voicePath": project.voiceover_path,
                 "transitionStyle": project.transition_style,
                 "transitionFrames": project.transition_frames,
@@ -1500,6 +1513,9 @@ def snapshot() -> dict:
                     "reused": clip.reused,
                     "positionBucket": clip.position_bucket,
                     "positionRotationReason": clip.position_rotation_reason,
+                    "voiceSegmentId": clip.voice_segment_id,
+                    "narrationStart": round(float(clip.narration_start), 3),
+                    "narrationEnd": round(float(clip.narration_end), 3),
                 } for clip in project.clips],
             })
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
@@ -1597,7 +1613,11 @@ def snapshot() -> dict:
         "voiceItems": [{
             "index": scenario["index"], "title": scenario["title"], "state": scenario["state"],
             "path": settings.voice_scenario_outputs.get(str(scenario["index"] + 1), ""),
-            "productionItemId": str(voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")),
+            "productionItemId": str(
+                job_by_index.get(scenario["index"]).request.production_item_id
+                if job_by_index.get(scenario["index"]) else
+                voice_assignment_by_index.get(scenario["index"], {}).get("production_item_id", "")
+            ),
             "rangeId": str(voice_assignment_by_index.get(scenario["index"], {}).get("range_id", "")),
             "voiceName": str(voice_assignment_by_index.get(scenario["index"], {}).get("profile", {}).get("name", "")),
             "voiceProvider": str(voice_assignment_by_index.get(scenario["index"], {}).get("profile", {}).get("provider", "")),
@@ -1619,6 +1639,19 @@ def snapshot() -> dict:
             )),
             "voiceUpdatedAt": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("updatedAt", ""),
             "voiceError": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("error", ""),
+            "voiceMapState": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "voiceMapState", "stale" if settings.voice_scenario_outputs.get(str(scenario["index"] + 1), "") else "waiting"
+            ),
+            "voiceMapLabel": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "voiceMapLabel", "Тайминг устарел" if settings.voice_scenario_outputs.get(str(scenario["index"] + 1), "") else "Ожидает MP3"
+            ),
+            "voiceMapPath": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapPath", ""),
+            "voiceMapReason": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapReason", ""),
+            "voiceMapTimingMode": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapTimingMode", ""),
+            "voiceMapEngine": settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get("voiceMapEngine", ""),
+            "voiceMapConfidence": float(settings.voice_task_statuses.get(str(scenario["index"] + 1), {}).get(
+                "voiceMapConfidence", 0.0
+            ) or 0.0),
         } for scenario in scenarios],
         "footageFolders": settings.footage_folders,
         "footageIndex": {
@@ -3448,6 +3481,282 @@ def validate_voiceover_artifact(path: Path) -> float:
     return duration
 
 
+def _voice_map_context_for_scenario(
+    index: int,
+    *,
+    settings: Settings | None = None,
+    session: tuple[list[str], list[Job]] | None = None,
+) -> VoiceMapContext | None:
+    current_settings = settings or load_settings()
+    titles, jobs = session or load_session()
+    if not 0 <= index < len(titles):
+        return None
+    job = next((item for item in jobs if item.request.index == index), None)
+    if job is None or job.state != RunState.DONE or not job.result.strip():
+        return None
+    production_item_id = str(job.request.production_item_id or "").strip()
+    if not production_item_id:
+        return None
+    audio_path = Path(str(current_settings.voice_scenario_outputs.get(str(index + 1), "")))
+    if not audio_path.is_file():
+        return None
+    task_status = current_settings.voice_task_statuses.get(str(index + 1), {})
+    duration = float(task_status.get("durationSeconds", 0.0) or 0.0) if isinstance(task_status, dict) else 0.0
+    deleted = {
+        str(value).strip() for value in current_settings.deleted_scenario_production_ids
+        if str(value).strip()
+    }
+    return VoiceMapContext(
+        production_item_id=production_item_id,
+        scenario_index=index,
+        title=titles[index],
+        script=job.result,
+        audio_path=audio_path,
+        audio_duration=duration,
+        storage_root=app_data_root() / "voice-maps",
+        tombstoned=production_item_id in deleted,
+    )
+
+
+def _current_voice_map_context(production_item_id: str) -> VoiceMapContext | None:
+    settings = load_settings()
+    titles, jobs = load_session()
+    job = next((
+        item for item in jobs
+        if str(item.request.production_item_id or "").strip() == production_item_id
+    ), None)
+    if job is None:
+        return None
+    return _voice_map_context_for_scenario(
+        job.request.index,
+        settings=settings,
+        session=(titles, jobs),
+    )
+
+
+def _set_voice_map_status(settings: Settings, index: int, status: VoiceMapStatus) -> None:
+    key = str(index + 1)
+    record = dict(settings.voice_task_statuses.get(key) or {})
+    record.update({
+        "voiceMapState": status.state,
+        "voiceMapLabel": status.label,
+        "voiceMapPath": status.path,
+        "voiceMapReason": status.reason,
+        "voiceMapTimingMode": str(status.data.get("timingMode", "")),
+        "voiceMapEngine": str(status.data.get("alignmentEngine", "")),
+        "voiceMapConfidence": float(status.data.get("alignmentConfidence", 0.0) or 0.0),
+    })
+    settings.voice_task_statuses[key] = record
+
+
+def _ensure_voice_map_for_scenario(
+    index: int,
+    *,
+    settings: Settings | None = None,
+    engine: AlignmentEngine | None = None,
+    force: bool = False,
+) -> VoiceMapStatus:
+    current_settings = settings or load_settings()
+    context = _voice_map_context_for_scenario(index, settings=current_settings)
+    if context is None:
+        return VoiceMapStatus("waiting", "Ожидает MP3", reason="finished scenario/audio identity is missing")
+    if context.tombstoned:
+        return VoiceMapStatus("error", "Ошибка тайминга", reason="ProductionItem was deleted")
+    _set_voice_map_status(
+        current_settings,
+        index,
+        VoiceMapStatus("building", "Анализ аудио"),
+    )
+    save_settings(current_settings)
+    try:
+        status = ensure_voice_map(
+            context,
+            engine=engine,
+            current_context=lambda: _current_voice_map_context(context.production_item_id),
+            force=force,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        status = VoiceMapStatus("error", "Ошибка тайминга", reason=str(error))
+    latest = load_settings()
+    _set_voice_map_status(latest, index, status)
+    save_settings(latest)
+    if latest is not current_settings:
+        _set_voice_map_status(current_settings, index, status)
+    return status
+
+
+def rebuild_voice_map(payload: dict) -> dict:
+    index = int(payload.get("scenarioIndex", -1))
+    requested_identity = str(payload.get("productionItemId", "")).strip()
+    settings = load_settings()
+    context = _voice_map_context_for_scenario(index, settings=settings)
+    if context is None:
+        raise ValueError("Для VoiceMap нужен готовый сценарий с ProductionItem ID и MP3")
+    if requested_identity and requested_identity != context.production_item_id:
+        raise ValueError("Выбранный VoiceMap устарел: ProductionItem ID изменился")
+    status = _ensure_voice_map_for_scenario(index, settings=settings, force=True)
+    return {
+        **snapshot(),
+        "operationResult": {
+            "kind": "voice-map-rebuild",
+            "count": 1 if status.state in {"ready", "approximate"} else 0,
+            "message": status.label if not status.reason else f"{status.label}: {status.reason}",
+        },
+    }
+
+
+def _ensure_ready_voice_maps(indices: list[int] | set[int]) -> None:
+    for index in sorted({int(value) for value in indices}):
+        _ensure_voice_map_for_scenario(index)
+
+
+_VOICE_MAP_CUTTER_TARGET_SECONDS = 6.0
+_VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS = 1.0
+
+
+def _voice_map_visual_beat_count(audio_duration: float) -> int:
+    """Avoid a sub-second terminal flash while preserving six-second cadence."""
+    duration = max(0.0, float(audio_duration))
+    if duration <= _VOICE_MAP_CUTTER_TARGET_SECONDS:
+        return 1
+    full_beats = int(duration // _VOICE_MAP_CUTTER_TARGET_SECONDS)
+    remainder = duration - (full_beats * _VOICE_MAP_CUTTER_TARGET_SECONDS)
+    if 0.0 < remainder < _VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS:
+        return max(1, full_beats)
+    return max(1, math.ceil(duration / _VOICE_MAP_CUTTER_TARGET_SECONDS))
+
+
+def _voice_map_overlap_text(segment: dict, beat_start: float, beat_end: float) -> str:
+    """Return the canonical words whose timing falls inside one visual beat."""
+    segment_start = float(segment["start"])
+    segment_end = float(segment["end"])
+    overlap_start = max(segment_start, beat_start)
+    overlap_end = min(segment_end, beat_end)
+    if overlap_end <= overlap_start:
+        return ""
+    words = str(segment.get("text", "")).split()
+    if not words:
+        return ""
+    duration = max(0.001, segment_end - segment_start)
+
+    def word_boundary(moment: float) -> int:
+        ratio = max(0.0, min(1.0, (moment - segment_start) / duration))
+        if ratio >= 1.0 - 1e-9:
+            return len(words)
+        return max(0, min(len(words), math.floor(ratio * len(words) + 1e-9)))
+
+    first = word_boundary(overlap_start)
+    last = word_boundary(overlap_end)
+    return " ".join(words[first:last])
+
+
+def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
+    """Project exact VoiceMap timing onto a natural six-second Cutter grid.
+
+    VoiceMap remains the narration authority. Visual changes are deliberately
+    independent of short speech-segment boundaries: normal footage runs for
+    six seconds and only the terminal visual beat is shortened to the MP3 end.
+    """
+    payload = status.data
+    if status.state not in {"ready", "approximate"} or not payload:
+        raise ValueError(status.reason or "VoiceMap is unavailable")
+    segments = list(payload["segments"])
+    audio_duration = float(payload.get("audioDuration") or segments[-1]["end"])
+    if audio_duration <= 0.0:
+        raise ValueError("VoiceMap audio duration is invalid")
+
+    visual_beat_count = _voice_map_visual_beat_count(audio_duration)
+
+    def concrete_query(segment: dict) -> str:
+        raw = str(segment.get("visualQuery", "")).strip()
+        normalized = _normalized_montage_visual_query(raw)
+        return normalized if normalized else ""
+
+    def resolved_query(segment: dict) -> str:
+        query = concrete_query(segment)
+        if query:
+            return query
+        segment_index = segments.index(segment)
+        for distance in range(1, len(segments)):
+            for candidate_index in (segment_index - distance, segment_index + distance):
+                if 0 <= candidate_index < len(segments):
+                    candidate = concrete_query(segments[candidate_index])
+                    if candidate:
+                        return candidate
+        topic_query = _normalized_montage_visual_query(
+            fallback_visual_query(str(payload.get("title", "")))
+        )
+        return topic_query or GENERIC_VISUAL_QUERY
+
+    scenes: list[dict] = []
+    for beat_index in range(visual_beat_count):
+        beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
+        beat_end = (
+            audio_duration
+            if beat_index == visual_beat_count - 1
+            else min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS)
+        )
+        if beat_end <= beat_start:
+            continue
+        overlapping = [
+            segment for segment in segments
+            if float(segment["end"]) > beat_start and float(segment["start"]) < beat_end
+        ]
+        if not overlapping:
+            raise ValueError("VoiceMap has a visual timing gap")
+
+        narration_parts = [
+            part
+            for segment in overlapping
+            if (part := _voice_map_overlap_text(segment, beat_start, beat_end))
+        ]
+        overlap_durations = {
+            int(segment["id"]): min(float(segment["end"]), beat_end)
+            - max(float(segment["start"]), beat_start)
+            for segment in overlapping
+        }
+        dominant = max(
+            overlapping,
+            key=lambda segment: (
+                overlap_durations[int(segment["id"])],
+                -abs(
+                    ((float(segment["start"]) + float(segment["end"])) / 2.0)
+                    - ((beat_start + beat_end) / 2.0)
+                ),
+                -int(segment["id"]),
+            ),
+        )
+        duration = beat_end - beat_start
+        scenes.append({
+            "narration": " ".join(narration_parts).strip(),
+            "visual_query_en": resolved_query(dominant),
+            "duration": duration,
+            "minimum_footage_duration": min(
+                duration, _VOICE_MAP_CUTTER_TARGET_SECONDS,
+            ),
+            "voice_segment_id": int(dominant["id"]),
+            "voice_segment_ids": [int(segment["id"]) for segment in overlapping],
+            "narration_start": beat_start,
+            "narration_end": beat_end,
+            "visual_beat_index": beat_index + 1,
+            "visual_beat_count": visual_beat_count,
+        })
+
+    provenance = {
+        "alignmentMode": str(payload["timingMode"]),
+        "voiceMapPath": status.path,
+        "voiceMapSchemaVersion": int(payload["schemaVersion"]),
+        "productionItemId": str(payload["productionItemId"]),
+        "scriptSha256": str(payload["scriptSha256"]),
+        "audioSha256": str(payload["audioSha256"]),
+        "alignmentEngine": str(payload["alignmentEngine"]),
+        "alignmentConfidence": float(payload.get("alignmentConfidence", 0.0) or 0.0),
+    }
+    if status.reason:
+        provenance["alignmentUnavailableReason"] = status.reason
+    return scenes, provenance
+
+
 def _voice_candidate_folder(output_folder: str) -> Path:
     """Keep a newly generated MP3 out of the active output path until validated."""
     return Path(output_folder) / ".newsflow-voice-staging"
@@ -3603,6 +3912,7 @@ def import_voiceover_folder(payload: dict) -> dict:
     target_folder = Path(settings.voicer_output_folder) / "Импортированные"
     target_folder.mkdir(parents=True, exist_ok=True)
     attached = 0
+    attached_indices: set[int] = set()
     errors = list(scanned["errors"])
     for record in attachable:
         index = int(record["scenarioIndex"])
@@ -3631,12 +3941,14 @@ def import_voiceover_folder(payload: dict) -> dict:
             "artifactPath": str(target),
         }
         attached += 1
+        attached_indices.add(index)
     settings.voice_import_summary = {
         "root": str(root), "foldersFound": scanned["foldersFound"], "audioFound": scanned["audioFound"],
         "matched": attached, "requiresChoice": len(review), "unmatched": len(scanned["unmatched"]),
         "errors": len(errors), "review": review[:200], "unmatchedItems": scanned["unmatched"][:200],
     }
     save_settings(settings)
+    _ensure_ready_voice_maps(attached_indices)
     message = (f"Папок: {scanned['foldersFound']}; аудио: {scanned['audioFound']}; "
                f"сопоставлено: {attached}; требуют выбора: {len(review)}; "
                f"не сопоставлено: {len(scanned['unmatched'])}; ошибок: {len(errors)}.")
@@ -3683,6 +3995,7 @@ def import_voiceover_files(payload: dict) -> dict:
     for index, title in enumerate(titles):
         matches.setdefault(audio_title_key(title), []).append(index)
     attached = 0
+    attached_indices: set[int] = set()
     review: list[str] = []
     for source in extracted:
         candidates = matches.get(audio_title_key(source.name), [])
@@ -3706,7 +4019,9 @@ def import_voiceover_files(payload: dict) -> dict:
                                                         "updatedAt": time.strftime("%H:%M:%S"),
                                                         "durationSeconds": duration, "artifactPath": str(final)}
         attached += 1
+        attached_indices.add(index)
     save_settings(settings)
+    _ensure_ready_voice_maps(attached_indices)
     message = f"Импортировано и сопоставлено: {attached}."
     if review:
         message += f" Требуют ручного назначения: {len(review)}."
@@ -3737,6 +4052,7 @@ def import_voiceover(payload: dict) -> dict:
         "durationSeconds": duration, "artifactPath": str(target),
     }
     save_settings(settings)
+    _ensure_ready_voice_maps({index})
     return snapshot()
 
 
@@ -3746,8 +4062,11 @@ def remove_voiceovers(payload: dict) -> dict:
     if not indices:
         raise ValueError("Выберите одну или несколько готовых озвучек")
     settings = load_settings()
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
     root = Path(settings.voicer_output_folder).resolve()
     removed = 0
+    removed_voice_maps: list[VoiceMapContext] = []
     for index in indices:
         key = str(index + 1)
         source_text = settings.voice_scenario_outputs.get(key, "")
@@ -3764,7 +4083,19 @@ def remove_voiceovers(payload: dict) -> dict:
                 raise ValueError(f"Не удалось удалить MP3: {source.name}") from exc
         settings.voice_scenario_outputs.pop(key, None)
         settings.voice_task_statuses.pop(key, None)
+        job = jobs_by_index.get(index)
+        if job and str(job.request.production_item_id).strip():
+            removed_voice_maps.append(VoiceMapContext(
+                production_item_id=str(job.request.production_item_id).strip(),
+                scenario_index=index,
+                title=titles[index] if 0 <= index < len(titles) else job.request.title,
+                script=job.result,
+                audio_path=source or Path(),
+                storage_root=app_data_root() / "voice-maps",
+            ))
     save_settings(settings)
+    for context in removed_voice_maps:
+        remove_voice_map(context)
     return {**snapshot(), "operationResult": {
         "kind": "voice-remove", "count": removed,
         "message": f"Удалено озвучек: {removed}.",
@@ -4640,6 +4971,19 @@ def remove_scenarios_command(payload: dict) -> dict:
     valid = {index for index in indices if 0 <= index < len(titles)}
     if valid:
         settings = load_settings()
+        jobs_by_index = {job.request.index: job for job in jobs}
+        removed_voice_maps = [
+            VoiceMapContext(
+                production_item_id=str(jobs_by_index[index].request.production_item_id).strip(),
+                scenario_index=index,
+                title=titles[index],
+                script=jobs_by_index[index].result,
+                audio_path=Path(settings.voice_scenario_outputs.get(str(index + 1), "")),
+                storage_root=app_data_root() / "voice-maps",
+            )
+            for index in sorted(valid)
+            if index in jobs_by_index and str(jobs_by_index[index].request.production_item_id).strip()
+        ]
         removed_keys = {" ".join(titles[index].split()).casefold() for index in valid}
         removed_production_ids = {
             str(job.request.production_item_id).strip() for job in jobs
@@ -4678,6 +5022,8 @@ def remove_scenarios_command(payload: dict) -> dict:
         settings.voice_scenario_outputs = remapped
         settings.voice_task_statuses = remapped_statuses
         save_settings(settings)
+        for context in removed_voice_maps:
+            remove_voice_map(context)
         titles, jobs = remove_scenarios(titles, jobs, valid)
         save_session(titles, jobs)
     return snapshot()
@@ -9502,6 +9848,10 @@ def generate_voice(payload: dict) -> dict:
                 set_task_status(index, "Ошибка озвучки", 0, reason)
                 errors.append(f"{index + 1}: {reason}")
     persist_voice_state()
+    _ensure_ready_voice_maps({
+        index for index in candidates
+        if Path(settings.voice_scenario_outputs.get(str(index + 1), "")).is_file()
+    })
     if errors:
         raise RuntimeError("; ".join(errors[:5]))
     return snapshot()
@@ -9853,6 +10203,37 @@ def _fast_reuse_percent_for_scenario(settings: Settings, scenario_index: int) ->
     return None
 
 
+def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
+                          reuse_pool: dict[str, TimelineClip],
+                          required_duration: float,
+                          source_duration) -> dict[str, list[SearchHit]]:
+    """Restrict post-threshold matching to already prepared proxy windows.
+
+    The slider is a speed/uniqueness target, so a higher-scoring fresh source
+    must not silently expand the pool after the target.  A pooled source is
+    eligible only when the exact cached source_start still has enough moving
+    media for the current beat.  The caller may deliberately expand the pool
+    later only when this safe cached set cannot illustrate the scene.
+    """
+    result: dict[str, list[SearchHit]] = {}
+    for level in _MONTAGE_FALLBACK_LEVELS:
+        filtered: list[SearchHit] = []
+        for hit in hits_by_level.get(level, []):
+            key = _montage_clip_key(hit.item.path)
+            origin = reuse_pool.get(key)
+            if origin is None:
+                continue
+            available_from_cached_window = (
+                float(source_duration(hit.item) or 0.0)
+                - max(0.0, float(origin.source_start))
+            )
+            if available_from_cached_window + .05 < float(required_duration):
+                continue
+            filtered.append(hit)
+        result[level] = filtered
+    return result
+
+
 def _random_video(folder: str) -> str:
     root = Path(folder)
     candidates = [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}] if root.is_dir() else []
@@ -9943,6 +10324,31 @@ _MONTAGE_NAMED_PERSON_GUARDS = (
     (("trump", "трамп"), ("putin", "путин", "zelensk", "зеленск")),
     (("zelensk", "зеленск"), ("putin", "путин", "trump", "трамп")),
 )
+_MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("us", ("washington", "white house", "united states", "us government", "american government",
+            "trump", "вашингтон", "сша", "америк", "трамп", "us-government-washington")),
+    ("ukraine", ("ukraine", "kyiv", "kiev", "zelensk", "odesa", "donbas", "pokrovsk",
+                 "украин", "киев", "зеленск", "одесс", "донбасс", "покровск",
+                 "ukraine-government-kyiv")),
+    ("russia", ("russia", "moscow", "kremlin", "putin", "sevastopol", "fsb", "росси", "москв", "кремл", "путин",
+                "севастопол", "фсб", "russia-government-moscow")),
+    ("eu", ("european union", "brussels", "eu parliament", "europe", "евросоюз", "брюссел",
+            "европ", "eu-institutions")),
+    ("iran", ("iran", "tehran", "persian", "иран", "тегеран", "персид", "iran-government-tehran")),
+    ("armenia", ("armenia", "yerevan", "pashinyan", "армени", "ереван", "пашинян",
+                 "armenia-government-yerevan")),
+    ("azerbaijan", ("azerbaijan", "baku", "aliyev", "азербайдж", "баку", "алиев",
+                    "azerbaijan-government-baku")),
+)
+
+# Country-level identity is not enough for an explicitly named government
+# city.  These are only known contradictory locations; neutral Ukraine B-roll
+# remains eligible when no incompatible city is claimed by its provenance.
+_MONTAGE_EXACT_LOCATION_CONFLICTS = (
+    (("kyiv", "kiev", "ukraine government", "ukrainian government", "киев"),
+     ("druzhkivka", "kramatorsk", "дружков", "краматорск")),
+)
+
 _MONTAGE_SEMANTIC_RULES = (
     (_FRONTLINE_QUERY_TERMS, _WAR_VISUAL_TAGS),
     (("protest", "demonstration", "rally", "picket", "митинг", "протест", "демонстр", "пикет"),
@@ -9976,6 +10382,30 @@ def _has_any(value: str, terms: tuple[str, ...]) -> bool:
     return any(term in value for term in terms)
 
 
+def _montage_entity_groups(value: str) -> set[str]:
+    lowered = str(value or "").casefold()
+    return {
+        name for name, terms in _MONTAGE_ENTITY_GROUPS
+        if any(term in lowered for term in terms)
+    }
+
+
+def _montage_entity_conflict(scene_query: str, candidate_metadata: str) -> bool:
+    """Reject explicit named geography/person contradictions, not neutral B-roll."""
+    requested = _montage_entity_groups(scene_query)
+    candidate = _montage_entity_groups(candidate_metadata)
+    return bool(requested and candidate and requested.isdisjoint(candidate))
+
+
+def _montage_exact_location_conflict(scene_query: str, candidate_metadata: str) -> bool:
+    query = str(scene_query or "").casefold()
+    candidate = str(candidate_metadata or "").casefold()
+    return any(
+        _has_any(query, requested_terms) and _has_any(candidate, contradictory_terms)
+        for requested_terms, contradictory_terms in _MONTAGE_EXACT_LOCATION_CONFLICTS
+    )
+
+
 def _montage_has_war_action(value: str) -> bool:
     lowered = str(value or "").casefold()
     if _has_any(lowered, _KINETIC_WAR_ACTION_TERMS):
@@ -10003,7 +10433,11 @@ def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
             # A small bounded bonus only breaks ties among visually similar
             # results; it cannot turn an unrelated clip into a match alone.
             bonus += min(0.18, matches * 0.06)
-    return min(0.24, bonus)
+    requested_entities = _montage_entity_groups(query)
+    candidate_entities = _montage_entity_groups(haystack)
+    if requested_entities & candidate_entities:
+        bonus += 0.10
+    return min(0.30, bonus)
 
 
 def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
@@ -10028,6 +10462,10 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     for requested_names, contradictory_names in _MONTAGE_NAMED_PERSON_GUARDS:
         if _has_any(query, requested_names) and _has_any(haystack, contradictory_names):
             return False
+    if _montage_entity_conflict(query, haystack):
+        return False
+    if _montage_exact_location_conflict(query, haystack):
+        return False
     expected_semantic_tags: set[str] = set()
     for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:
         if _montage_semantic_rule_applies(query, query_terms, preferred_tags):
@@ -10171,6 +10609,7 @@ def _montage_selection_summary(clips: list[TimelineClip]) -> dict[str, object]:
         "semantic": sum(levels.get(level, 0) for level in (
             "RELAXED_SEMANTIC", "CATEGORY_MATCH", "SAFE_CONTEXT", "EXTERNAL_FALLBACK",
         )),
+        "continuity": levels.get("VISUAL_CONTINUITY_FALLBACK", 0),
         "reuse": levels.get("SAFE_REUSE", 0),
         "levels": levels,
     }
@@ -10368,7 +10807,8 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                               immediately_previous_path: str = "",
                               relaxed_hits=None, category_hits=None, safe_context_hits=None,
                               position_bucket: str = "", batch_family_buckets=None,
-                              diversity_seed: str = "", allow_safe_reuse: bool = True) -> MontageCandidateSelection:
+                              diversity_seed: str = "", allow_safe_reuse: bool = True,
+                              allow_below_threshold: bool = False) -> MontageCandidateSelection:
     """Select one valid clip without letting batch uniqueness become a hard failure.
 
     The candidate collections come from a bounded in-memory vector search.
@@ -10418,7 +10858,14 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             rotation_penalty = _montage_rotation_penalty(placements, position_bucket)
             quality = float(value.score) + _montage_semantic_bonus(scene_query, value.item)
             variation = _montage_stable_variation(diversity_seed, scene_query, family)
-            return -(quality - rotation_penalty + variation), _montage_clip_key(value.item.path)
+            # SAFE_REUSE is a last resort. Once several safe families are
+            # available, strongly prefer the one used least often instead of
+            # repeatedly returning to the same high-scoring source family.
+            reuse_penalty = (
+                min(0.18, max(0, len(placements) - 1) * 0.045)
+                if level == "SAFE_REUSE" else 0.0
+            )
+            return -(quality - rotation_penalty - reuse_penalty + variation), _montage_clip_key(value.item.path)
 
         ranked = sorted(
             pool,
@@ -10503,11 +10950,14 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             )
         return None
 
+    def floor(level: str) -> float | None:
+        return None if allow_below_threshold else _montage_level_score_floor(level, match_threshold)
+
     ladder = [
-        (strict, _montage_level_score_floor("STRICT_MATCH", match_threshold), False, False, False, True, "STRICT_MATCH"),
-        (relaxed, _montage_level_score_floor("RELAXED_SEMANTIC", match_threshold), False, False, False, True, "RELAXED_SEMANTIC"),
-        (category, _montage_level_score_floor("CATEGORY_MATCH", match_threshold), False, False, False, True, "CATEGORY_MATCH"),
-        (context, _montage_level_score_floor("SAFE_CONTEXT", match_threshold), False, False, False, True, "SAFE_CONTEXT"),
+        (strict, floor("STRICT_MATCH"), False, False, False, True, "STRICT_MATCH"),
+        (relaxed, floor("RELAXED_SEMANTIC"), False, False, False, True, "RELAXED_SEMANTIC"),
+        (category, floor("CATEGORY_MATCH"), False, False, False, True, "CATEGORY_MATCH"),
+        (context, floor("SAFE_CONTEXT"), False, False, False, True, "SAFE_CONTEXT"),
     ]
     for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level in ladder:
         selected = choose(pool, minimum_score=minimum, allow_historical=old_allowed,
@@ -10520,15 +10970,29 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
         # the semantic level that produced the candidate. Diversity exhaustion
         # never grants a free pass to an unrelated low-score context clip.
         reuse_ladder = [
-            (strict, _montage_level_score_floor("STRICT_MATCH", match_threshold)),
-            (relaxed, _montage_level_score_floor("RELAXED_SEMANTIC", match_threshold)),
-            (category, _montage_level_score_floor("CATEGORY_MATCH", match_threshold)),
-            (context, _montage_level_score_floor("SAFE_CONTEXT", match_threshold)),
+            (strict, floor("STRICT_MATCH")),
+            (relaxed, floor("RELAXED_SEMANTIC")),
+            (category, floor("CATEGORY_MATCH")),
+            (context, floor("SAFE_CONTEXT")),
         ]
-        # First search every semantic level for a safe non-adjacent source.
-        # Only when no such alternative exists may the immediate previous
-        # source be reused. This preserves A→B→A behavior without accepting
-        # candidates below the floor of their semantic level.
+        # Preserve uniqueness inside the current video before preserving
+        # uniqueness across older/batch videos.  A family already used by a
+        # different video is still a better fallback than repeating a family
+        # already visible in this video's own timeline.
+        for avoid_recent in (True, False):
+            for pool, minimum in reuse_ladder:
+                selected = choose(
+                    pool, minimum_score=minimum, allow_historical=True,
+                    allow_reserved=True, allow_project_reuse=False,
+                    avoid_recent=avoid_recent, level="SAFE_REUSE",
+                    skip_previous=True,
+                )
+                if selected:
+                    return selected
+
+        # Only after every semantically valid cross-video option is exhausted
+        # may the current project reuse one of its own sources.  Still avoid
+        # A→A whenever another valid used source exists.
         for skip_previous in (True, False):
             for avoid_recent in (True, False):
                 for pool, minimum in reuse_ladder:
@@ -10599,15 +11063,85 @@ def _montage_item_is_excluded(item: FootageItem, excluded_paths: set[str] | None
             or family in (excluded_families or set()))
 
 
-def _montage_screen_text_safe(index, item: FootageItem) -> bool:
-    """English/Latin on-screen text is a hard Montage exclusion."""
-    checker = getattr(index, "screen_text_safe", None)
-    if not callable(checker):
-        return True
+def _montage_screen_text_state(index, item: FootageItem, *, deep: bool = False) -> str:
+    """Return SAFE / UNCERTAIN / BLOCKED without discarding ambiguity early."""
+    checker = getattr(index, "screen_text_eligibility", None)
+    if callable(checker):
+        try:
+            state = str(checker(item.path, deep=deep))
+        except (OSError, RuntimeError, ValueError):
+            return SCREEN_ELIGIBILITY_UNCERTAIN
+        if state in {
+            SCREEN_ELIGIBILITY_SAFE,
+            SCREEN_ELIGIBILITY_UNCERTAIN,
+            SCREEN_ELIGIBILITY_BLOCKED,
+        }:
+            return state
+        return SCREEN_ELIGIBILITY_UNCERTAIN
+    legacy = getattr(index, "screen_text_safe", None)
+    if not callable(legacy):
+        return SCREEN_ELIGIBILITY_SAFE
     try:
-        return bool(checker(item.path))
+        return SCREEN_ELIGIBILITY_SAFE if bool(legacy(item.path)) else SCREEN_ELIGIBILITY_BLOCKED
     except (OSError, RuntimeError, ValueError):
+        return SCREEN_ELIGIBILITY_UNCERTAIN
+
+
+def _montage_screen_text_safe(index, item: FootageItem, *, allow_uncertain: bool = False) -> bool:
+    """Prefer verified SAFE; deep-check UNCERTAIN only in the rescue stage."""
+    state = _montage_screen_text_state(index, item, deep=allow_uncertain)
+    if state == SCREEN_ELIGIBILITY_BLOCKED:
         return False
+    return state == SCREEN_ELIGIBILITY_SAFE or allow_uncertain
+
+
+def _select_visual_continuity_candidate(items: list[FootageItem], *,
+                                        required_duration: float,
+                                        project_used_paths: set[str],
+                                        project_used_families: set[str],
+                                        recent_project_paths: set[str],
+                                        source_exists, source_duration, source_allowed,
+                                        diversity_seed: str,
+                                        allow_project_reuse: bool = True,
+                                        ) -> tuple[FootageItem, float, str, bool] | None:
+    """Choose any technically valid footage when semantic matching is exhausted.
+
+    This layer is intentionally topic-agnostic. It exists to keep a montage
+    renderable even when the library contains no relevant scene. It still
+    rejects missing/too-short media and screen-safety BLOCKED footage, and it
+    prefers a family not yet shown in the current video.
+    """
+    seen: set[str] = set()
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            source_family_identity_text(item.path, item.source_url) in project_used_families,
+            _montage_clip_key(item.path) in recent_project_paths,
+            _montage_stable_variation(
+                diversity_seed, "visual-continuity",
+                source_family_identity_text(item.path, item.source_url),
+            ),
+            _montage_clip_key(item.path),
+        ),
+    )
+    for item in ranked:
+        key = _montage_clip_key(item.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not source_exists(item):
+            continue
+        duration = float(source_duration(item) or 0.0)
+        if duration + .05 < float(required_duration):
+            continue
+        if source_allowed is not None and not source_allowed(item):
+            continue
+        family = source_family_identity_text(item.path, item.source_url)
+        reused = key in project_used_paths or family in project_used_families
+        if reused and not allow_project_reuse:
+            continue
+        return item, duration, family, reused
+    return None
 
 
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
@@ -10685,7 +11219,7 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
 def prepare_montage(payload: dict) -> dict:
     preparation_started = time.perf_counter()
     preparation_metrics = {
-        "planning": 0.0, "retrieval": 0.0, "selection": 0.0,
+        "alignment": 0.0, "planning": 0.0, "retrieval": 0.0, "selection": 0.0,
         "fallback_expansion": 0.0, "external": 0.0, "total": 0.0,
     }
     settings = load_settings()
@@ -10777,12 +11311,37 @@ def prepare_montage(payload: dict) -> dict:
         )
     clips = []
     voice_duration = probe_media_duration(Path(voice_path))
-    # If a finished narration exists, use it for scene semantics even when
-    # the optional-text switch allows title-only fallback. Title-only is now
-    # reserved for genuinely missing scenario text.
-    scenes = (fallback_scene_plan(narration, titles[scenario_index])
-              if narration.strip() else title_only_scene_plan(titles[scenario_index], voice_duration))
-    if settings.montage_use_script_text and settings.montage_scene_planner == "agent" and settings.openai_api_keys:
+    voice_map_provenance: dict = {}
+    used_voice_map = False
+    alignment_started = time.perf_counter()
+    if narration.strip() and job and str(job.request.production_item_id).strip():
+        voice_map_status = _ensure_voice_map_for_scenario(scenario_index, settings=settings)
+        if voice_map_status.state in {"ready", "approximate"}:
+            scenes, voice_map_provenance = _voice_map_scenes(voice_map_status)
+            used_voice_map = True
+        else:
+            raise ValueError(
+                f"VoiceMap недоступен: {voice_map_status.reason or voice_map_status.label}"
+            )
+    preparation_metrics["alignment"] = (time.perf_counter() - alignment_started) * 1000
+    # Legacy rows without durable identity retain an explicit approximate
+    # planner. Current ProductionItems always flow through the VoiceMap above.
+    if not used_voice_map:
+        scenes = (fallback_scene_plan(narration, titles[scenario_index])
+                  if narration.strip() else title_only_scene_plan(titles[scenario_index], voice_duration))
+        voice_map_provenance = {
+            "alignmentMode": "approximate",
+            "voiceMapPath": "",
+            "voiceMapSchemaVersion": 0,
+            "productionItemId": str(job.request.production_item_id if job else ""),
+            "scriptSha256": hashlib.sha256(narration.encode("utf-8")).hexdigest() if narration else "",
+            "audioSha256": "",
+            "alignmentEngine": "newsflow-fallback-runtime",
+            "alignmentConfidence": 0.0,
+            "alignmentUnavailableReason": "durable ProductionItem identity or VoiceMap unavailable",
+        }
+    if (not used_voice_map and settings.montage_use_script_text
+            and settings.montage_scene_planner == "agent" and settings.openai_api_keys):
         try:
             if progress:
                 progress("Планирование сцен", "Видеопланировщик уточняет объекты, людей, места и действия")
@@ -10795,15 +11354,17 @@ def prepare_montage(payload: dict) -> dict:
             # becoming a video: use the deterministic local visual planner.
             if progress:
                 progress("Планирование сцен", f"Агент недоступен — локальный план: {str(exc)[:120]}")
-    # Align selection to the MP3 before matching. Full six-second source clips
-    # stay intact; only the final beat is trimmed for exact audio alignment.
-    scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
+    # VoiceMap segments already carry the audio-backed boundary contract.
+    # Only legacy/no-identity fallback needs the old proportional fitter.
+    if not used_voice_map:
+        scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
     preparation_metrics["planning"] = (time.perf_counter() - preparation_started) * 1000
-    # Fast visual loop searches only a user-selected prefix of the *voice
-    # duration*, not merely the same percentage of scene count.  Afterwards
-    # the chosen source clips are rotated on the original speech boundaries.
-    # This makes a 13% setting mean roughly 13% unique visuals even if some
-    # narration sentences are longer than others.
+    # Fast visual loop treats the slider as a target for how much of the
+    # narration receives newly prepared footage.  After that target is reached
+    # the selector first reuses the already prepared pool (including the same
+    # source_start, so the FFmpeg proxy cache is actually reused). A new source
+    # is allowed only as a semantic/safety escape hatch when no pooled source
+    # can validly illustrate the current beat.
     unique_scene_count = len(scenes)
     fast_reuse_percent = _fast_reuse_percent_for_scenario(settings, scenario_index)
     fast_reuse = bool(fast_reuse_percent is not None and len(scenes) > 1)
@@ -10820,8 +11381,11 @@ def prepare_montage(payload: dict) -> dict:
         # whenever the narration contains enough scene boundaries.
         unique_scene_count = min(len(scenes), max(2, unique_scene_count))
     if progress:
-        mode_detail = (f"быстрый режим {fast_reuse_percent}%: {unique_scene_count} уникальных из {len(scenes)} сцен, затем ротация"
-                       if fast_reuse else f"{len(scenes)} уникальных сцен")
+        mode_detail = (
+            f"быстрый режим {fast_reuse_percent}%: {unique_scene_count} сцен формируют уникальный пул, "
+            "после порога сначала повторяются готовые proxy; новый источник — только safety fallback"
+            if fast_reuse else f"{len(scenes)} уникальных сцен"
+        )
         progress("Подбор футажей", f"Пакетный поиск: {mode_detail}")
     # Ask the text model once for the whole scenario and score all scenes
     # against the shared in-memory vector matrix.  Keep extra candidates so a
@@ -10836,7 +11400,7 @@ def prepare_montage(payload: dict) -> dict:
     # rescan or full-library iteration per scene.
     scene_query_ladders: list[dict[str, list[str]]] = []
     all_search_queries: list[str] = []
-    for scene in scenes[:unique_scene_count]:
+    for scene in scenes:
         original_query = str(scene.get("visual_query_en", ""))
         ladder = _montage_query_ladder(original_query)
         scene["visual_query_en"] = ladder["STRICT_MATCH"][0]
@@ -10958,38 +11522,12 @@ def prepare_montage(payload: dict) -> dict:
             batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
             return source_start, bool(previous_starts)
 
-    # item, verified source duration, relevance score, source label, family
-    reuse_pool: list[tuple[FootageItem, float, float, str, str]] = []
-    reuse_cursor = 0
+    fast_reuse_pool: dict[str, TimelineClip] = {}
     for scene_number, scene in enumerate(scenes, 1):
+        required_source_duration = float(
+            scene.get("minimum_footage_duration", scene["duration"]),
+        )
         position_bucket = _montage_position_bucket(scene_number - 1, len(scenes))
-        if fast_reuse and scene_number > unique_scene_count:
-            required_duration = float(scene["duration"])
-            eligible = [entry for entry in reuse_pool if entry[1] + 0.05 >= required_duration]
-            # At least the unique source selected for its own beat must fit;
-            # this fallback only applies when a later beat is exceptionally
-            # longer. It preserves narration timing rather than cloning a
-            # still frame or truncating the speech.
-            if not eligible:
-                eligible = reuse_pool
-            if not eligible:
-                raise ValueError("Быстрый режим не получил ни одного пригодного уникального футажа")
-            selected, source_duration, score, original_source, source_family = eligible[reuse_cursor % len(eligible)]
-            reuse_cursor += 1
-            source_start, _family_reused = allocate_batch_source_start(
-                source_family, position_bucket, source_duration,
-                float(scene["duration"]), titles[scenario_index],
-            )
-            clips.append(TimelineClip(path=selected.path, narration=scene["narration"],
-                                      visual_query_en=scene["visual_query_en"], duration=scene["duration"],
-                                      source_start=source_start, score=score,
-                                      source=f"повтор: {original_source or 'локальный'}",
-                                      fallback_level="SAFE_REUSE", source_family=source_family,
-                                      reused=True, position_bucket=position_bucket,
-                                      position_rotation_reason="быстрый режим: другой сегмент длинного источника"))
-            if progress:
-                progress("Подбор футажей", f"Ротация {scene_number}/{len(scenes)}: {Path(selected.path).name}")
-            continue
         hits_by_level = scene_hits_by_level[scene_number - 1]
         strict_hits = hits_by_level["STRICT_MATCH"]
         relaxed_hits = hits_by_level["RELAXED_SEMANTIC"]
@@ -11005,7 +11543,8 @@ def prepare_montage(payload: dict) -> dict:
         score = 0.0
         source = ""
         selection = None
-        selection_failure_diagnostics: dict[str, int] = {}
+        reuse_origin_clip: TimelineClip | None = None
+        fast_pool_reuse = False
         # Reuse is acceptable only after quality exhaustion.  Keep a small
         # local cooldown so fallback yields A → B → A rather than A → A.
         recent_project_paths = {
@@ -11013,6 +11552,51 @@ def prepare_montage(payload: dict) -> dict:
             if str(clip.path or "").strip()
         }
         selection_started = time.perf_counter()
+        if fast_reuse and scene_number > unique_scene_count and fast_reuse_pool:
+            pooled_hits = _fast_reuse_pool_hits(
+                hits_by_level, fast_reuse_pool, required_source_duration, verified_duration,
+            )
+            if any(pooled_hits.values()):
+                _reserved_paths, _reserved_families, family_buckets, _source_windows = reservation_snapshot(
+                    position_bucket,
+                )
+                try:
+                    selection = _select_montage_candidate(
+                        scene["visual_query_en"],
+                        strict_hits=pooled_hits["STRICT_MATCH"], fallback_hits=[],
+                        relaxed_hits=pooled_hits["RELAXED_SEMANTIC"],
+                        category_hits=pooled_hits["CATEGORY_MATCH"],
+                        safe_context_hits=pooled_hits["SAFE_CONTEXT"],
+                        required_duration=required_source_duration,
+                        match_threshold=settings.montage_match_threshold,
+                        used_paths=used, used_families=used_families,
+                        project_used_paths=project_used,
+                        project_used_families=project_used_families,
+                        reserved_paths=set(), reserved_families=set(),
+                        source_exists=source_exists, source_duration=verified_duration,
+                        source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
+                        recent_project_paths=recent_project_paths,
+                        immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                        position_bucket=position_bucket,
+                        batch_family_buckets=family_buckets,
+                        diversity_seed=f"{titles[scenario_index]}|{scenario_index}|fast-reuse",
+                        allow_safe_reuse=True,
+                    )
+                    reuse_origin_clip = fast_reuse_pool.get(_montage_clip_key(selection.item.path))
+                    if reuse_origin_clip is not None:
+                        selection = replace(
+                            selection,
+                            fallback_level="SAFE_REUSE",
+                            reused=True,
+                            position_rotation_reason=(
+                                "быстрый режим: повтор уже подготовленного proxy после целевого процента"
+                            ),
+                        )
+                        fast_pool_reuse = True
+                except MontageSelectionFailure:
+                    selection = None
+                    reuse_origin_clip = None
+
         # First exhaust unique local choices. EXTERNAL is intentionally tried
         # before SAFE_REUSE so the persisted level order remains truthful.
         # Parallel planners may collide on the same top family several times;
@@ -11024,13 +11608,15 @@ def prepare_montage(payload: dict) -> dict:
             for hit in hits_by_level[level]
         })))
         for _attempt in range(claim_attempt_limit):
+            if selection is not None:
+                break
             reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
             try:
                 selection = _select_montage_candidate(
                     scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                     relaxed_hits=relaxed_hits, category_hits=category_hits,
                     safe_context_hits=safe_context_hits,
-                    required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
                     used_paths=used, used_families=used_families,
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -11042,8 +11628,7 @@ def prepare_montage(payload: dict) -> dict:
                     diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
                     allow_safe_reuse=False,
                 )
-            except MontageSelectionFailure as error:
-                selection_failure_diagnostics = error.diagnostics
+            except MontageSelectionFailure:
                 selection = None
                 break
             if claim_batch_source(selection.item, selection.source_family, position_bucket):
@@ -11064,7 +11649,7 @@ def prepare_montage(payload: dict) -> dict:
                         scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                         relaxed_hits=relaxed_hits, category_hits=category_hits,
                         safe_context_hits=safe_context_hits,
-                        required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                        required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
                         used_paths=used, used_families=used_families,
                         project_used_paths=project_used, project_used_families=project_used_families,
                         reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -11076,8 +11661,7 @@ def prepare_montage(payload: dict) -> dict:
                         diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
                         allow_safe_reuse=False,
                     )
-                except MontageSelectionFailure as error:
-                    selection_failure_diagnostics = error.diagnostics
+                except MontageSelectionFailure:
                     selection = None
                     break
                 if claim_batch_source(
@@ -11096,6 +11680,53 @@ def prepare_montage(payload: dict) -> dict:
                     )
                     break
                 selection = None
+
+        # Before any current-video reuse, recover a new family from the full
+        # semantic ladder. First keep only verified SAFE footage; then deep-
+        # verify UNCERTAIN candidates. Historical/batch use is a soft diversity
+        # preference here: a family seen in another video is still new inside
+        # this video and must beat repeating one already on this timeline.
+        if selection is None:
+            for allow_uncertain in (False, True):
+                try:
+                    selection = _select_montage_candidate(
+                        scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
+                        relaxed_hits=relaxed_hits, category_hits=category_hits,
+                        safe_context_hits=safe_context_hits,
+                        required_duration=required_source_duration,
+                        match_threshold=settings.montage_match_threshold,
+                        used_paths=set(), used_families=set(),
+                        project_used_paths=project_used,
+                        project_used_families=project_used_families,
+                        reserved_paths=set(), reserved_families=set(),
+                        source_exists=source_exists, source_duration=verified_duration,
+                        source_allowed=lambda item, allow=allow_uncertain: _montage_screen_text_safe(
+                            index, item, allow_uncertain=allow,
+                        ),
+                        recent_project_paths=recent_project_paths,
+                        immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                        position_bucket=position_bucket,
+                        batch_family_buckets=family_buckets,
+                        diversity_seed=f"{titles[scenario_index]}|{scenario_index}|semantic-rescue",
+                        allow_safe_reuse=False,
+                        allow_below_threshold=True,
+                    )
+                except MontageSelectionFailure:
+                    selection = None
+                if selection is None:
+                    continue
+                if not claim_batch_source(selection.item, selection.source_family, position_bucket):
+                    selection = replace(
+                        selection,
+                        reused_reserved_candidate=True,
+                        reused=True,
+                        position_rotation_reason=(
+                            "новая family внутри ролика: межроликовый/history reservation ослаблен "
+                            "до повторов текущего видео"
+                        ),
+                    )
+                break
+
         preparation_metrics["selection"] += (time.perf_counter() - selection_started) * 1000
         if selection is not None:
             selected = selection.item
@@ -11117,7 +11748,7 @@ def prepare_montage(payload: dict) -> dict:
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
             if (selected and _semantic_clip_ok(scene["visual_query_en"], selected)
-                    and _montage_screen_text_safe(index, selected)
+                    and _montage_screen_text_safe(index, selected, allow_uncertain=True)
                     and not batch_is_reserved(selected, external_family, position_bucket)
                     and claim_batch_source(selected, external_family, position_bucket)):
                 score, source = 1.0, selected.source or "external"
@@ -11130,6 +11761,107 @@ def prepare_montage(payload: dict) -> dict:
                     position_rotation_reason="безопасный внешний источник после локального исчерпания")
             else:
                 selected = None
+
+        # Final local rescue: exact wording may be absent from the library, but
+        # a large indexed collection should still complete the timeline with
+        # neutral semantically nearest B-roll rather than aborting. Geography,
+        # named-person, duration and screen BLOCKED guards remain hard.
+        if selected is None and indexed_count:
+            rescue_started = time.perf_counter()
+            try:
+                broad_hits = index.search_many(
+                    ["contextual news documentary city infrastructure people buildings vehicles"],
+                    limit=512,
+                )[0]
+            except (OSError, RuntimeError, ValueError, IndexError):
+                broad_hits = []
+            try:
+                selection = _select_montage_candidate(
+                    scene["visual_query_en"], strict_hits=[], fallback_hits=[],
+                    relaxed_hits=[], category_hits=[], safe_context_hits=broad_hits,
+                    required_duration=required_source_duration,
+                    match_threshold=0.0,
+                    used_paths=set(), used_families=set(),
+                    project_used_paths=project_used,
+                    project_used_families=project_used_families,
+                    reserved_paths=set(), reserved_families=set(),
+                    source_exists=source_exists, source_duration=verified_duration,
+                    source_allowed=lambda item: _montage_screen_text_safe(
+                        index, item, allow_uncertain=True,
+                    ),
+                    recent_project_paths=recent_project_paths,
+                    immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                    position_bucket=position_bucket,
+                    batch_family_buckets=family_buckets,
+                    diversity_seed=f"{titles[scenario_index]}|{scenario_index}|neutral-rescue",
+                    allow_safe_reuse=False,
+                    allow_below_threshold=True,
+                )
+                selected = selection.item
+                selected_duration = selection.duration
+                score = selection.score
+                source = f"{selected.source or 'local'} · {selection.fallback_level}"
+            except MontageSelectionFailure:
+                selection = None
+                selected = None
+            preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
+
+        # Topic-agnostic continuity comes before current-video reuse.
+        # If semantic matching is exhausted, a new technically valid family is
+        # preferable to repeating footage already visible in this timeline.
+        if selected is None:
+            try:
+                indexed_continuity = index.all_items(exclude_english_text=True)
+            except (OSError, RuntimeError, ValueError):
+                indexed_continuity = []
+            continuity_items = list({
+                _montage_clip_key(item.path): item
+                for item in [*indexed_continuity, *local_items]
+            }.values())
+            continuity = _select_visual_continuity_candidate(
+                continuity_items,
+                required_duration=required_source_duration,
+                project_used_paths=project_used,
+                project_used_families=project_used_families,
+                recent_project_paths=recent_project_paths,
+                source_exists=source_exists,
+                source_duration=verified_duration,
+                source_allowed=lambda item: _montage_screen_text_safe(
+                    index, item, allow_uncertain=True,
+                ),
+                diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
+                allow_project_reuse=False,
+            )
+            if continuity is not None:
+                selected, selected_duration, candidate_family, reused_candidate = continuity
+                score = 0.0
+                selection = MontageCandidateSelection(
+                    selected,
+                    selected_duration,
+                    0.0,
+                    "VISUAL_CONTINUITY_FALLBACK",
+                    False,
+                    {
+                        "candidates_retrieved": len(continuity_items),
+                        "hard_valid": 1,
+                        "strict_accepted": 0,
+                        "rejected_threshold": 0,
+                        "rejected_reservation": 0,
+                        "rejected_diversity": 0,
+                        "rejected_missing": 0,
+                        "rejected_duration": 0,
+                        "rejected_safety": 0,
+                    },
+                    source_family=candidate_family,
+                    reused=reused_candidate,
+                    position_bucket=position_bucket,
+                    position_rotation_reason=(
+                        "визуальная непрерывность: смысловые варианты исчерпаны; "
+                        "выбран новый технически пригодный футаж"
+                    ),
+                )
+                source = f"{selected.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
+
         if selected is None:
             fallback_started = time.perf_counter()
             reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
@@ -11138,12 +11870,12 @@ def prepare_montage(payload: dict) -> dict:
                     scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                     relaxed_hits=relaxed_hits, category_hits=category_hits,
                     safe_context_hits=safe_context_hits,
-                    required_duration=float(scene["duration"]), match_threshold=settings.montage_match_threshold,
+                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
                     used_paths=used, used_families=used_families,
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
                     source_exists=source_exists, source_duration=verified_duration,
-                    source_allowed=lambda item: _montage_screen_text_safe(index, item),
+                    source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
                     recent_project_paths=recent_project_paths,
                     immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
                     position_bucket=position_bucket, batch_family_buckets=family_buckets,
@@ -11154,23 +11886,57 @@ def prepare_montage(payload: dict) -> dict:
                 selected_duration = selection.duration
                 score = selection.score
                 source = f"{selected.source or 'local'} · {selection.fallback_level}"
-            except MontageSelectionFailure as error:
-                selection_failure_diagnostics = error.diagnostics
+            except MontageSelectionFailure:
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
+
         if selected is None:
-            diagnostics = selection.diagnostics if selection else selection_failure_diagnostics
-            raise ValueError(
-                f"Не найдено ни одного допустимого футажа для сцены {scene_number}; "
-                f"retrieved={diagnostics.get('candidates_retrieved', len(seen_candidate_paths))}, "
-                f"hard_valid={diagnostics.get('hard_valid', 0)}, "
-                f"reserved_unique={diagnostics.get('unique_rejected_reservation', 0)}, "
-                f"diversity_unique={diagnostics.get('unique_rejected_diversity', 0)}, "
-                f"duration={diagnostics.get('rejected_duration', 0)}, "
-                f"safety={diagnostics.get('rejected_safety', 0)}, "
-                f"missing={diagnostics.get('rejected_missing', 0)}, "
-                f"rejection_events={diagnostics.get('rejection_events', 0)}"
+            try:
+                indexed_continuity = index.all_items(exclude_english_text=True)
+            except (OSError, RuntimeError, ValueError):
+                indexed_continuity = []
+            continuity_items = list({
+                _montage_clip_key(item.path): item
+                for item in [*indexed_continuity, *local_items]
+            }.values())
+            continuity = _select_visual_continuity_candidate(
+                continuity_items,
+                required_duration=required_source_duration,
+                project_used_paths=project_used,
+                project_used_families=project_used_families,
+                recent_project_paths=recent_project_paths,
+                source_exists=source_exists,
+                source_duration=verified_duration,
+                source_allowed=lambda item: _montage_screen_text_safe(
+                    index, item, allow_uncertain=True,
+                ),
+                diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity-reuse",
+                allow_project_reuse=True,
+            )
+            if continuity is not None:
+                selected, selected_duration, candidate_family, reused_candidate = continuity
+                score = 0.0
+                selection = MontageCandidateSelection(
+                    selected,
+                    selected_duration,
+                    0.0,
+                    "VISUAL_CONTINUITY_FALLBACK",
+                    False,
+                    {"candidates_retrieved": len(continuity_items), "hard_valid": 1},
+                    source_family=candidate_family,
+                    reused=reused_candidate,
+                    position_bucket=position_bucket,
+                    position_rotation_reason=(
+                        "визуальная непрерывность: новых пригодных family не осталось; "
+                        "использован технически пригодный повтор"
+                    ),
+                )
+                source = f"{selected.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
+
+        if selected is None:
+            raise RuntimeError(
+                "В библиотеке нет ни одного физически пригодного видео для продолжения монтажа"
             )
         # The index may still contain a row for a user-deleted cut. Never
         # persist that stale database path into a .newsflow project.
@@ -11183,27 +11949,50 @@ def prepare_montage(payload: dict) -> dict:
         if selected_duration <= 0.05:
             raise ValueError(f"Подобранный футаж не проходит проверку видео: {selected.path}")
         source_family = selection.source_family or _montage_clip_family_key(selected.path)
-        source_start, family_reused = allocate_batch_source_start(
-            source_family, position_bucket, selected_duration,
-            float(scene["duration"]), titles[scenario_index],
-        )
+        if reuse_origin_clip is not None:
+            # Reuse the exact cached window. Choosing a fresh source_start here
+            # would create a different proxy key and defeat the speed slider.
+            source_start = float(reuse_origin_clip.source_start)
+            family_reused = True
+            if batch_lock is None:
+                batch_family_buckets.setdefault(source_family, []).append(position_bucket)
+                batch_source_windows.setdefault(source_family, []).append(source_start)
+            else:
+                with batch_lock:
+                    batch_family_buckets.setdefault(source_family, []).append((scenario_index, position_bucket))
+                    batch_source_windows.setdefault(source_family, []).append((scenario_index, source_start))
+        else:
+            source_start, family_reused = allocate_batch_source_start(
+                source_family, position_bucket, selected_duration,
+                float(scene["duration"]), titles[scenario_index],
+            )
         reused = bool(selection.reused or family_reused or source_family in project_used_families)
         selection = replace(selection, source_family=source_family, source_start=source_start, reused=reused)
         used.add(_montage_clip_key(selected.path))
         used_families.add(source_family)
         project_used.add(_montage_clip_key(selected.path))
         project_used_families.add(source_family)
-        clips.append(TimelineClip(path=selected.path, narration=scene["narration"], visual_query_en=scene["visual_query_en"],
-                                  duration=scene["duration"], source_start=source_start,
-                                  score=score, source=source,
-                                  fallback_level=selection.fallback_level,
-                                  source_family=source_family, reused=reused,
-                                  position_bucket=position_bucket,
-                                  position_rotation_penalty=selection.position_rotation_penalty,
-                                  position_rotation_reason=selection.position_rotation_reason,
-                                  strict_rejection_reason=selection.strict_rejection_reason))
-        if fast_reuse:
-            reuse_pool.append((selected, max(float(scene["duration"]), selected_duration), score, source, source_family))
+        timeline_clip = TimelineClip(path=selected.path, narration=scene["narration"], visual_query_en=scene["visual_query_en"],
+                                     duration=scene["duration"], source_start=source_start,
+                                     score=score, source=source,
+                                     fallback_level=selection.fallback_level,
+                                     source_family=source_family, reused=reused,
+                                     position_bucket=position_bucket,
+                                     position_rotation_penalty=selection.position_rotation_penalty,
+                                     position_rotation_reason=selection.position_rotation_reason,
+                                     strict_rejection_reason=selection.strict_rejection_reason,
+                                     voice_segment_id=int(scene.get("voice_segment_id", 0) or 0),
+                                     voice_segment_ids=[
+                                         int(value) for value in scene.get("voice_segment_ids", [])
+                                     ],
+                                     narration_start=float(scene.get("narration_start", 0.0) or 0.0),
+                                     narration_end=float(scene.get("narration_end", 0.0) or 0.0),
+                                     minimum_source_duration=required_source_duration,
+                                     visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
+                                     visual_beat_count=int(scene.get("visual_beat_count", 0) or 0))
+        clips.append(timeline_clip)
+        if fast_reuse and not fast_pool_reuse:
+            fast_reuse_pool.setdefault(_montage_clip_key(selected.path), timeline_clip)
         if progress:
             diagnostics = selection.diagnostics if selection else {}
             level = selection.fallback_level if selection else "LOCAL"
@@ -11233,7 +12022,8 @@ def prepare_montage(payload: dict) -> dict:
                               intro_duration=_full_intro_duration(intro_path, settings.montage_intro_duration) if intro_path else 0,
                               overlay_path=_random_video(settings.montage_overlay_folder) if settings.montage_overlay_enabled else "",
                               transition_style=settings.montage_transition_style,
-                              transition_frames=settings.montage_transition_frames)
+                              transition_frames=settings.montage_transition_frames,
+                              voice_map_provenance=voice_map_provenance)
     # Use each selected source in full and close a residual tail with more
     # real footage.  There is no FFmpeg looping or cloned final frame here;
     # only the final source that crosses the MP3 boundary is trimmed.
@@ -11243,6 +12033,14 @@ def prepare_montage(payload: dict) -> dict:
         raise RuntimeError(f"Не удалось завершить видеоряд реальными футажами: {exc}") from exc
     clips = project.clips
     selection_summary = _montage_selection_summary(clips)
+    if fast_reuse:
+        distinct_paths = len({_montage_clip_key(clip.path) for clip in clips})
+        selection_summary.update({
+            "uniqueTargetPercent": int(fast_reuse_percent or 100),
+            "uniqueTargetScenes": int(unique_scene_count),
+            "uniqueActualPaths": distinct_paths,
+            "uniqueActualPercent": round(distinct_paths / max(1, len(clips)) * 100.0, 1),
+        })
     summary_text = (
         f"{selection_summary['scenes']} сцен · strict {selection_summary['strict']} · "
         f"semantic {selection_summary['semantic']} · reuse {selection_summary['reuse']}"
@@ -11796,7 +12594,8 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
             if _montage_item_is_excluded(item, excluded_paths, excluded_families):
                 continue
             available = _validated_montage_clip_duration(Path(item.path))
-            if available + 0.05 < float(clip.duration):
+            required = float(clip.minimum_source_duration or clip.duration)
+            if available + 0.05 < required:
                 continue
             replacement = replace(
                 clip,
@@ -11841,7 +12640,7 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
     candidates = [
         hit.item for hit in ranked
         if (float(hit.score) >= minimum and _semantic_clip_ok(query, hit.item)
-            and _montage_screen_text_safe(index, hit.item))
+            and _montage_screen_text_safe(index, hit.item, allow_uncertain=True))
     ]
     if candidates or not settings.montage_auto_web:
         return candidates
@@ -11865,7 +12664,8 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
     # concat time. Reserve that deterministic frame budget with real footage
     # before FFmpeg starts; the audio mux still cuts the final output exactly
     # at the MP3, never by freezing the last image.
-    target = probe_media_duration(voice) + len(project.clips) / 30.0 + 0.05
+    narration_duration = probe_media_duration(voice)
+    target = narration_duration + len(project.clips) / 30.0 + 0.05
     # Most saved projects already cover their MP3.  Normalise their real
     # durations without an unnecessary vector-index query.
     duration_memo: dict[str, float] = {}
@@ -11884,12 +12684,28 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
             break
         available = max(0.0, duration_probe(Path(clip.path)) - max(0.0, float(clip.source_start)))
         requested = min(max(0.0, float(clip.duration)), remaining)
-        if available + 0.05 < requested:
+        required = min(
+            requested,
+            max(0.0, float(clip.minimum_source_duration or clip.duration)),
+        )
+        if available + 0.05 < required:
             preserved_valid = False
             break
         preserved.append(replace(clip, duration=requested))
         preserved_total += requested
     if preserved_valid and preserved:
+        # VoiceMap beats carry an explicit source-duration contract. Once
+        # those authored beats cover the narration, keep their exact speech
+        # boundaries: the proxy renderer already requests one extra frame and
+        # loops a bounded short moving source, while the final mux ends at the
+        # exact MP3 duration. A synthetic sub-frame tail would only pollute the
+        # visible timeline without adding coverage.
+        if (
+            preserved_total >= narration_duration - 0.05
+            and all(float(clip.minimum_source_duration) > 0.0 for clip in preserved)
+        ):
+            project.clips = preserved
+            return 0
         shortfall = target - preserved_total
         if shortfall > 0.05:
             final = preserved[-1]
@@ -12776,6 +13592,17 @@ def clear_production_queue(payload: dict) -> dict:
         str(job.request.production_item_id).strip()
         for job in jobs if str(job.request.production_item_id).strip()
     }
+    removed_voice_maps = [
+        VoiceMapContext(
+            production_item_id=str(job.request.production_item_id).strip(),
+            scenario_index=job.request.index,
+            title=job.request.title,
+            script=job.result,
+            audio_path=Path(settings.voice_scenario_outputs.get(str(job.request.index + 1), "")),
+            storage_root=app_data_root() / "voice-maps",
+        )
+        for job in jobs if str(job.request.production_item_id).strip()
+    ]
     settings.deleted_scenario_titles = sorted({
         *(str(value).strip().casefold()
           for value in settings.deleted_scenario_titles if str(value).strip()),
@@ -12839,6 +13666,8 @@ def clear_production_queue(payload: dict) -> dict:
     # process dies between these writes and file deletion, the deletion fence
     # still prevents the stale primary/backup from becoming active again.
     save_settings(settings)
+    for context in removed_voice_maps:
+        remove_voice_map(context)
     save_session([], [])
     removed_files = sum(
         _clear_production_folder(folder)
@@ -14023,6 +14852,8 @@ def main() -> None:
             result = import_voiceover_folder(payload if isinstance(payload, dict) else {})
         elif command == "remove-voiceovers":
             result = remove_voiceovers(payload if isinstance(payload, dict) else {})
+        elif command == "rebuild-voice-map":
+            result = rebuild_voice_map(payload if isinstance(payload, dict) else {})
         elif command == "export-stage":
             result = export_stage(payload if isinstance(payload, dict) else {})
         elif command == "export-scenario-titles":

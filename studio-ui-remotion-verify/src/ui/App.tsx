@@ -11856,6 +11856,7 @@ export function VoiceQueue({
   const [provider, setProvider] = useState(data.voiceProvider);
   const [outputFolder, setOutputFolder] = useState(data.voiceOutputFolder);
   const [generating, setGenerating] = useState(false);
+  const [rebuildingTiming, setRebuildingTiming] = useState(false);
   const voiceGenerationLock = useRef(false);
   type VoiceQueueItem = (typeof data.voiceItems)[number] & {
     jobProvider?: string;
@@ -11943,6 +11944,11 @@ export function VoiceQueue({
         cell: ({ row }) => `${row.original.voiceProgress || 0}%`,
       },
       {
+        id: "voice-map",
+        header: "Тайминг",
+        cell: ({ row }) => row.original.voiceMapLabel || (row.original.path ? "Тайминг устарел" : "Ожидает MP3"),
+      },
+      {
         id: "artifact",
         header: "MP3",
         cell: ({ row }) =>
@@ -12003,6 +12009,20 @@ export function VoiceQueue({
   };
   const saveOutputFolder = () =>
     void command("save-voice-settings", { outputFolder });
+  const rebuildVoiceMap = async () => {
+    if (selected.length !== 1 || rebuildingTiming) return;
+    const item = queued.find((value) => value.index === selected[0]);
+    if (!item?.path || !item.productionItemId) return;
+    setRebuildingTiming(true);
+    try {
+      await command("rebuild-voice-map", {
+        scenarioIndex: item.index,
+        productionItemId: item.productionItemId,
+      });
+    } finally {
+      setRebuildingTiming(false);
+    }
+  };
   const generateVoice = async () => {
     if (!selected.length || voiceGenerationLock.current) return;
     voiceGenerationLock.current = true;
@@ -12185,6 +12205,17 @@ export function VoiceQueue({
         >
           <Download size={17} />
           Скачать MP3
+        </Button>
+        <Button
+          onClick={
+            selected.length === 1 &&
+            queued.some((item) => item.index === selected[0] && item.path && item.productionItemId) &&
+            !rebuildingTiming
+              ? () => void rebuildVoiceMap()
+              : undefined
+          }
+        >
+          {rebuildingTiming ? "Анализ аудио…" : "Перестроить тайминг"}
         </Button>
         <Button
           kind="danger"

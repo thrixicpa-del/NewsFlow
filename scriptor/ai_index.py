@@ -44,6 +44,10 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
     ("migrant-border", "migrants border crossing checkpoint fence border guards people with luggage"),
     ("refugee-transport", "refugee evacuation buses families luggage humanitarian aid"),
     ("political-office", "Kremlin government office politician press conference meeting room"),
+    ("russia-government-moscow", "Moscow Kremlin Russian government officials meeting press conference"),
+    ("iran-government-tehran", "Tehran Iran government officials Iranian flags political meeting"),
+    ("armenia-government-yerevan", "Yerevan Armenia government officials Armenian flags political meeting"),
+    ("azerbaijan-government-baku", "Baku Azerbaijan government officials Azerbaijani flags political meeting"),
     ("us-government-washington", "Washington DC White House United States government officials press briefing"),
     ("ukraine-government-kyiv", "Kyiv Ukraine government officials parliament presidential administration"),
     ("eu-institutions", "Brussels European Union parliament commission flags government meeting"),
@@ -71,20 +75,36 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
     ("documentary-neutral", "safe neutral documentary context everyday people buildings landscape b roll"),
 )
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
-SEMANTIC_INDEX_VERSION = 6
+SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 2
+SCREEN_TEXT_CLASSIFIER_VERSION = 4
+# Restore the NewsFlow 2.1.136 contract: ordinary Cyrillic/Russian lettering is
+# allowed. Montage blocks prominent English/Latin lettering and, separately,
+# full-screen title/interstitial slates in any language.
+_SCREEN_TEXT_ENGLISH_QUERIES = (
+    "video frame with prominent English words Latin alphabet captions subtitles lower third or text overlay",
+    "news broadcast frame with readable English headline ticker labels or Latin alphabet on screen words",
+    "sign billboard poster computer screen or document with readable English or Latin alphabet writing",
+)
+_SCREEN_TEXT_INTERSTITIAL_QUERIES = (
+    "full screen title card interstitial educational slate bumper graphic with large centered text or branding",
+    "full screen program title explainer slate logo bumper presentation slide instead of natural video footage",
+    "full screen Russian or Ukrainian Cyrillic title card educational interstitial slate with large centered text",
+)
 _SCREEN_TEXT_POSITIVE_QUERIES = (
-    "video frame with readable English words Latin alphabet captions subtitles or lower third",
-    "news broadcast frame with English headline ticker labels or on screen text",
-    "sign billboard poster computer screen or document with readable English Latin letters",
+    *_SCREEN_TEXT_ENGLISH_QUERIES,
+    *_SCREEN_TEXT_INTERSTITIAL_QUERIES,
 )
 _SCREEN_TEXT_NEGATIVE_QUERIES = (
-    "clean documentary video frame without readable writing captions subtitles labels or text overlay",
-    "natural news b roll with people buildings vehicles and no readable text",
+    "natural documentary video frame without English or Latin alphabet captions; Cyrillic writing may be present",
+    "natural news b roll with people buildings vehicles and no English overlay or full screen title card",
+    "real world footage with Russian or Ukrainian Cyrillic writing but no English Latin alphabet overlay",
 )
 _SCREEN_TEXT_SAFE_MARGIN = 0.015
 _SCREEN_TEXT_OBVIOUS_MARGIN = 0.060
+SCREEN_ELIGIBILITY_SAFE = "SAFE"
+SCREEN_ELIGIBILITY_UNCERTAIN = "UNCERTAIN"
+SCREEN_ELIGIBILITY_BLOCKED = "BLOCKED"
 
 
 # A montage batch creates several ClipIndex instances (one per worker).  The
@@ -203,7 +223,7 @@ class ClipIndex:
         self.embedder_factory = embedder_factory
         self._image_embedder = None
         self._text_embedder = None
-        self._screen_text_safe_cache: dict[str, bool] = {}
+        self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
@@ -323,7 +343,7 @@ class ClipIndex:
         return tuple(fingerprint)
 
     def _invalidate_search_cache(self) -> None:
-        self._screen_text_safe_cache.clear()
+        self._screen_text_state_cache.clear()
         with _SEARCH_CORPORA_LOCK:
             _SEARCH_CORPORA.pop(self._cache_key(), None)
 
@@ -345,8 +365,10 @@ class ClipIndex:
                     """SELECT path,name,source,source_url,license,tags,embedding,duration,width,height,source_family,
                               semantic_scores,
                               used_count,rating FROM clips
-                       WHERE embedding IS NOT NULL AND disabled=0 AND english_text<>1"""
-                    + " ORDER BY path"
+                       WHERE embedding IS NOT NULL AND disabled=0
+                         AND NOT (english_text=1 AND english_text_version>=?)"""
+                    + " ORDER BY path",
+                    (SCREEN_TEXT_CLASSIFIER_VERSION,),
                 ).fetchall()
             items: list[FootageItem] = []
             vectors = []
@@ -533,9 +555,15 @@ class ClipIndex:
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 25.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        fractions = ((0.15, 0.50, 0.85) if samples <= 3
-                     else (0.05, 0.25, 0.50, 0.75, 0.95))
-        positions = [int(frame_count * value) for value in fractions[:samples]]
+        sample_count = max(1, int(samples))
+        if sample_count <= 3:
+            fractions = (0.15, 0.50, 0.85)[:sample_count]
+        else:
+            fractions = tuple(
+                0.03 + (0.94 * index / max(1, sample_count - 1))
+                for index in range(sample_count)
+            )
+        positions = [int(frame_count * value) for value in fractions]
         images = []
         for position in positions:
             capture.set(cv2.CAP_PROP_POS_FRAMES, min(frame_count - 1, position))
@@ -782,7 +810,9 @@ class ClipIndex:
         self._invalidate_search_cache()
 
     def all_items(self, limit: int | None = None, exclude_english_text: bool = False) -> list[FootageItem]:
-        text_filter = (" WHERE english_text=-1 AND english_text_version=?"
+        # 2.1.136 semantics: exclude only a current positive block. Stale and
+        # UNCERTAIN rows remain searchable and can be verified lazily.
+        text_filter = (" WHERE NOT (english_text=1 AND english_text_version>=?)"
                        if exclude_english_text else "")
         query = ("SELECT path,name,source,source_url,license,tags,source_family FROM clips"
                  + text_filter + " ORDER BY name")
@@ -947,7 +977,7 @@ class ClipIndex:
 
     @classmethod
     def _screen_text_obvious_from_vectors(cls, frame_vectors, query_vectors) -> bool:
-        """Cheap indexing gate: block only unmistakable text evidence."""
+        """Cheap indexing gate: block only unmistakable English/title evidence."""
         return any(
             positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN
             for positive, negative in (
@@ -957,19 +987,25 @@ class ClipIndex:
 
     @classmethod
     def _screen_text_state_from_vectors(cls, frame_vectors, query_vectors) -> int:
-        """Strict selection gate: every frame must be clearly text-free."""
+        """Return 1=BLOCKED, -1=SAFE, 0=UNCERTAIN."""
+        safe_frames = 0
+        total = 0
         for frame in frame_vectors:
+            total += 1
             positive, negative = cls._screen_text_scores(frame, query_vectors)
-            # Fail closed: ambiguous frames are not safe enough for Montage.
-            if negative < positive + _SCREEN_TEXT_SAFE_MARGIN:
+            if positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN:
                 return 1
-        return -1
+            if negative >= positive + _SCREEN_TEXT_SAFE_MARGIN:
+                safe_frames += 1
+        if total and safe_frames == total:
+            return -1
+        return 0
 
-    def _screen_text_state(self, path: Path) -> int:
-        """Return -1 only when every sampled frame is clearly text-free."""
+    def _screen_text_state(self, path: Path, *, samples: int = 5) -> int:
+        """Classify samples without turning ambiguity into a hard block."""
         if not self._text_model_is_cached():
             return 0
-        images = self._sample_frames(path, samples=5)[0]
+        images = self._sample_frames(path, samples=samples)[0]
         image_model, _text_model = self._models()
         frame_vectors = [
             self._normalize(value) for value in image_model.embed(images, batch_size=len(images))
@@ -979,14 +1015,15 @@ class ClipIndex:
         ])
         return self._screen_text_state_from_vectors(frame_vectors, query_vectors)
 
-    def screen_text_safe(self, path: str | Path) -> bool:
-        """Lazily verify one ranked candidate; unchecked is never treated as safe."""
+    def screen_text_eligibility(self, path: str | Path, *, deep: bool = False) -> str:
+        """Return SAFE, UNCERTAIN or BLOCKED for one ranked candidate."""
         candidate = Path(path)
         try:
             resolved = str(candidate.resolve())
         except OSError:
             resolved = str(candidate)
-        cached = self._screen_text_safe_cache.get(resolved)
+        cache_key = (resolved, bool(deep))
+        cached = self._screen_text_state_cache.get(cache_key)
         if cached is not None:
             return cached
         with self._connect() as connection:
@@ -994,58 +1031,69 @@ class ClipIndex:
                 "SELECT english_text,english_text_version FROM clips WHERE path=?", (resolved,)
             ).fetchone()
         if row is not None and int(row["english_text_version"] or 0) >= SCREEN_TEXT_CLASSIFIER_VERSION:
-            safe = int(row["english_text"]) == -1
-            self._screen_text_safe_cache[resolved] = safe
-            return safe
+            persisted = int(row["english_text"])
+            if persisted == 1:
+                self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_BLOCKED
+                return SCREEN_ELIGIBILITY_BLOCKED
+            if persisted == -1:
+                self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_SAFE
+                return SCREEN_ELIGIBILITY_SAFE
+            if not deep:
+                self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_UNCERTAIN
+                return SCREEN_ELIGIBILITY_UNCERTAIN
         try:
-            state = self._screen_text_state(candidate)
+            state = self._screen_text_state(candidate, samples=11 if deep else 5)
         except (OSError, ValueError):
             state = 0
-        if state == 0:
-            self._screen_text_safe_cache[resolved] = False
-            return False
         if row is not None:
             with self._lock, self._connect() as connection:
                 connection.execute(
                     "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
                     (state, SCREEN_TEXT_CLASSIFIER_VERSION, resolved),
                 )
-            self._invalidate_search_cache()
-        safe = state == -1
-        self._screen_text_safe_cache[resolved] = safe
-        return safe
+            if state == 1:
+                self._invalidate_search_cache()
+        eligibility = (
+            SCREEN_ELIGIBILITY_BLOCKED if state == 1
+            else SCREEN_ELIGIBILITY_SAFE if state == -1
+            else SCREEN_ELIGIBILITY_UNCERTAIN
+        )
+        self._screen_text_state_cache[(resolved, bool(deep))] = eligibility
+        if state in {-1, 1}:
+            self._screen_text_state_cache[(resolved, not bool(deep))] = eligibility
+        return eligibility
+
+    def screen_text_safe(self, path: str | Path) -> bool:
+        """Compatibility helper: deep-check ambiguity; reject only BLOCKED."""
+        return self.screen_text_eligibility(path, deep=True) != SCREEN_ELIGIBILITY_BLOCKED
 
     def classify_english_screen_text(self) -> dict[str, int]:
-        """Explicit maintenance pass using frame-level, fail-closed screening."""
+        """Persist v4 English/interstitial SAFE/BLOCKED/UNCERTAIN states."""
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT path FROM clips
-                   WHERE english_text_version < ? OR english_text=0 ORDER BY path""",
+                   WHERE english_text_version < ? ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
         if not rows:
             stats = self.screen_text_stats()
-            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"]}
+            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
+                    "uncertain": stats["unchecked"]}
         if not self._text_model_is_cached():
             stats = self.screen_text_stats()
-            return {"checked": 0, "blocked": stats["blocked"], "safe": 0}
-
-        blocked = safe = checked = 0
+            return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
+                    "uncertain": stats["unchecked"]}
+        blocked = safe = uncertain = checked = 0
         for row in rows:
-            result = self.screen_text_safe(row["path"])
-            with self._connect() as connection:
-                current = connection.execute(
-                    "SELECT english_text,english_text_version FROM clips WHERE path=?", (row["path"],)
-                ).fetchone()
-            if current is None or int(current["english_text_version"] or 0) < SCREEN_TEXT_CLASSIFIER_VERSION:
-                continue
+            eligibility = self.screen_text_eligibility(row["path"], deep=False)
             checked += 1
-            blocked += int(not result)
-            safe += int(result)
-        return {"checked": checked, "blocked": blocked, "safe": safe}
+            blocked += int(eligibility == SCREEN_ELIGIBILITY_BLOCKED)
+            safe += int(eligibility == SCREEN_ELIGIBILITY_SAFE)
+            uncertain += int(eligibility == SCREEN_ELIGIBILITY_UNCERTAIN)
+        return {"checked": checked, "blocked": blocked, "safe": safe, "uncertain": uncertain}
 
     def screen_text_stats(self) -> dict[str, int]:
-        """Return current classifier state without treating stale safe labels as verified."""
+        """Count only current-v4 verdicts; stale v3 blocks become uncertain."""
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT english_text,english_text_version,COUNT(*) AS amount
@@ -1056,9 +1104,11 @@ class ClipIndex:
             state = int(row["english_text"])
             version = int(row["english_text_version"] or 0)
             amount = int(row["amount"])
-            if state == 1:
+            if version < SCREEN_TEXT_CLASSIFIER_VERSION:
+                unchecked += amount
+            elif state == 1:
                 blocked += amount
-            elif state == -1 and version >= SCREEN_TEXT_CLASSIFIER_VERSION:
+            elif state == -1:
                 safe += amount
             else:
                 unchecked += amount

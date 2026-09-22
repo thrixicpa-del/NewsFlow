@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from scriptor.ai_index import (
+    _SCREEN_TEXT_POSITIVE_QUERIES,
     SCREEN_TEXT_CLASSIFIER_VERSION,
     SEMANTIC_INDEX_VERSION,
     SEMANTIC_TAG_LABELS,
@@ -51,9 +52,18 @@ class ClipIndexTests(unittest.TestCase):
             "agriculture-farming", "healthcare-hospital", "weather-disaster",
             "technology-datacenter", "documentary-neutral",
             "us-government-washington", "ukraine-government-kyiv", "eu-institutions",
+            "russia-government-moscow", "iran-government-tehran",
+            "armenia-government-yerevan", "azerbaijan-government-baku",
             "nato-alliance", "cybersecurity-network", "economic-sanctions",
         }
         self.assertTrue(required <= SEMANTIC_TAG_LABELS)
+
+    def test_screen_text_gate_covers_cyrillic_and_interstitial_title_cards(self):
+        queries = " ".join(_SCREEN_TEXT_POSITIVE_QUERIES).casefold()
+        self.assertGreaterEqual(SCREEN_TEXT_CLASSIFIER_VERSION, 3)
+        self.assertIn("cyrillic", queries)
+        self.assertIn("title card", queries)
+        self.assertIn("interstitial", queries)
 
     def test_neutral_filenames_retrieve_by_visual_meaning_after_deep_enrichment(self):
         class CategoryImageEmbedding:
@@ -522,6 +532,8 @@ class ClipIndexTests(unittest.TestCase):
             index = ClipIndex(root / "index.sqlite3")
             query_vectors = np.asarray(
                 [
+                    [1.0, 0.0],
+                    [1.0, 0.0],
                     [1.0, 0.0],
                     [1.0, 0.0],
                     [1.0, 0.0],

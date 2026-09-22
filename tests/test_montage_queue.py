@@ -11,7 +11,7 @@ from scriptor.config import OpenAIKey, Settings
 from scriptor.core import ScenarioRequest
 from scriptor.footage import FootageItem
 from scriptor.runner import Job, RunState
-from scriptor.timeline import TimelineProject
+from scriptor.timeline import TimelineClip, TimelineProject
 
 
 class MontageQueueStateTests(unittest.TestCase):
@@ -430,6 +430,139 @@ class MontageQueueStateTests(unittest.TestCase):
             bridge.save_montage_settings({"excludeEnglishText": False})
         self.assertTrue(settings.montage_exclude_english_text)
 
+    def test_uncertain_screen_candidate_waits_for_rescue_deep_check(self):
+        calls = []
+
+        class FakeIndex:
+            def screen_text_eligibility(self, _path, *, deep=False):
+                calls.append(deep)
+                return "UNCERTAIN"
+
+        item = FootageItem("D:/library/russian-caption.mp4", "russian-caption.mp4")
+        self.assertFalse(bridge._montage_screen_text_safe(FakeIndex(), item))
+        self.assertTrue(bridge._montage_screen_text_safe(
+            FakeIndex(), item, allow_uncertain=True,
+        ))
+        self.assertEqual(calls, [False, True])
+
+    def test_semantic_rescue_can_use_best_safe_hit_below_normal_score_floor(self):
+        candidate = FootageItem(
+            "D:/library/neutral-government.mp4",
+            "neutral-government.mp4",
+            tags=["documentary-neutral"],
+        )
+        kwargs = {
+            "scene_query": "Washington government press conference",
+            "strict_hits": [SearchHit(candidate, .03, duration=6.0)],
+            "fallback_hits": [],
+            "relaxed_hits": [], "category_hits": [], "safe_context_hits": [],
+            "required_duration": 6.0, "match_threshold": .22,
+            "used_paths": set(), "used_families": set(),
+            "project_used_paths": set(), "project_used_families": set(),
+            "reserved_paths": set(), "reserved_families": set(),
+            "source_exists": lambda _item: True,
+            "source_duration": lambda _item: 6.0,
+            "source_allowed": lambda _item: True,
+            "allow_safe_reuse": False,
+        }
+        with self.assertRaises(bridge.MontageSelectionFailure):
+            bridge._select_montage_candidate(**kwargs)
+
+        rescued = bridge._select_montage_candidate(
+            **kwargs, allow_below_threshold=True,
+        )
+        self.assertEqual(rescued.item.path, candidate.path)
+        self.assertEqual(rescued.fallback_level, "STRICT_MATCH")
+
+    def test_final_thematic_mismatch_is_reserved_for_continuity_fallback(self):
+        stale_tag = FootageItem(
+            "D:/library/washington-building.mp4",
+            "Washington government building exterior.mp4",
+            tags=["factory-industry"],
+        )
+        sevastopol = FootageItem(
+            "D:/library/sevastopol.mp4",
+            "Sevastopol government building.mp4",
+            tags=["factory-industry", "sevastopol"],
+        )
+        query = "Washington DC White House US government officials"
+
+        self.assertFalse(bridge._semantic_clip_ok(query, stale_tag))
+        self.assertFalse(bridge._semantic_clip_ok(query, sevastopol))
+
+    def test_visual_continuity_fallback_is_topic_agnostic_and_prefers_new_family(self):
+        reused = FootageItem("D:/used/family-a/clip.mp4", "used.mp4", tags=["ukraine"])
+        unrelated_fresh = FootageItem(
+            "D:/fresh/family-b/clip.mp4", "fresh.mp4", tags=["factory-industry", "russia"],
+        )
+        family_a = bridge.source_family_identity_text(reused.path, reused.source_url)
+        choice = bridge._select_visual_continuity_candidate(
+            [reused, unrelated_fresh],
+            required_duration=6.0,
+            project_used_paths={bridge._montage_clip_key(reused.path)},
+            project_used_families={family_a},
+            recent_project_paths=set(),
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            diversity_seed="topic-agnostic",
+            allow_project_reuse=False,
+        )
+        self.assertIsNotNone(choice)
+        item, duration, _family, reused_flag = choice
+        self.assertEqual(item.path, unrelated_fresh.path)
+        self.assertEqual(duration, 6.0)
+        self.assertFalse(reused_flag)
+
+    def test_visual_continuity_fallback_reuses_when_only_valid_family_remains(self):
+        only = FootageItem("D:/used/family-a/clip.mp4", "used.mp4", tags=["anything"])
+        family = bridge.source_family_identity_text(only.path, only.source_url)
+        blocked_reuse = bridge._select_visual_continuity_candidate(
+            [only],
+            required_duration=6.0,
+            project_used_paths={bridge._montage_clip_key(only.path)},
+            project_used_families={family},
+            recent_project_paths={bridge._montage_clip_key(only.path)},
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            diversity_seed="reuse-last",
+            allow_project_reuse=False,
+        )
+        self.assertIsNone(blocked_reuse)
+
+        choice = bridge._select_visual_continuity_candidate(
+            [only],
+            required_duration=6.0,
+            project_used_paths={bridge._montage_clip_key(only.path)},
+            project_used_families={family},
+            recent_project_paths={bridge._montage_clip_key(only.path)},
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            diversity_seed="reuse-last",
+            allow_project_reuse=True,
+        )
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice[0].path, only.path)
+        self.assertTrue(choice[3])
+
+    def test_visual_continuity_fallback_still_rejects_technical_bad_media(self):
+        short = FootageItem("D:/bad/short.mp4", "short.mp4")
+        blocked = FootageItem("D:/bad/english-title.mp4", "english-title.mp4")
+        choice = bridge._select_visual_continuity_candidate(
+            [short, blocked],
+            required_duration=6.0,
+            project_used_paths=set(),
+            project_used_families=set(),
+            recent_project_paths=set(),
+            source_exists=lambda _item: True,
+            source_duration=lambda item: 2.0 if item.path == short.path else 6.0,
+            source_allowed=lambda item: item.path != blocked.path,
+            diversity_seed="technical-guards",
+        )
+        self.assertIsNone(choice)
+
     def test_normalized_montage_query_deduplicates_and_removes_generic_phrases(self):
         normalized = bridge._normalized_montage_visual_query(
             "international news, documentary footage, oil tanker refinery oil terminal, "
@@ -580,6 +713,34 @@ class MontageQueueStateTests(unittest.TestCase):
             source_exists=lambda _: True, source_duration=lambda _: 6.0,
         )
         self.assertEqual(result.item.path, older.path)
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
+
+    def test_safe_reuse_prefers_cross_video_family_before_current_project_repeat(self):
+        current = FootageItem("D:/current/family-a/shot.mp4", "current.mp4", tags=["oil-tanker-port"])
+        cross_video = FootageItem("D:/history/family-b/shot.mp4", "history.mp4", tags=["oil-tanker-port"])
+        current_key = bridge._montage_clip_key(current.path)
+        current_family = bridge._montage_clip_family_key(current.path)
+        cross_key = bridge._montage_clip_key(cross_video.path)
+        cross_family = bridge._montage_clip_family_key(cross_video.path)
+
+        result = bridge._select_montage_candidate(
+            "oil tanker refinery oil terminal",
+            strict_hits=[
+                SearchHit(current, .95, duration=6.0),
+                SearchHit(cross_video, .30, duration=6.0),
+            ],
+            fallback_hits=[], required_duration=6.0, match_threshold=.22,
+            used_paths={current_key, cross_key},
+            used_families={current_family, cross_family},
+            project_used_paths={current_key},
+            project_used_families={current_family},
+            reserved_paths={cross_key},
+            reserved_families={cross_family},
+            source_exists=lambda _: True, source_duration=lambda _: 6.0,
+        )
+
+        self.assertEqual(result.item.path, cross_video.path)
+        self.assertNotIn(result.item.path, {current.path})
         self.assertEqual(result.fallback_level, "SAFE_REUSE")
 
     def test_diagnostics_separate_unique_diversity_rejections_from_pass_events(self):
@@ -853,6 +1014,45 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertAlmostEqual(project.clips[-1].duration, 1.53, places=2)
         self.assertEqual(project.clips[-1].path, str(footage))
 
+    def test_voice_map_beat_uses_renderer_frame_padding_without_a_micro_tail(self):
+        """Renderer padding must not create a synthetic sub-frame VoiceMap beat."""
+        from scriptor.timeline import TimelineClip, TimelineProject
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            voice = root / "voice.mp3"
+            first = root / "first.mp4"
+            for path in (voice, first):
+                path.write_bytes(path.name.encode())
+            project = TimelineProject(
+                title="Тема",
+                voiceover_path=str(voice),
+                clips=[
+                    TimelineClip(
+                        str(first), "first", "query", duration=6.398,
+                        minimum_source_duration=6.0,
+                        voice_segment_id=29, narration_start=0.0, narration_end=6.398,
+                    ),
+                ],
+            )
+            with patch.object(bridge, "probe_media_duration", return_value=6.398), \
+                 patch.object(bridge, "_cached_or_probed_montage_duration", return_value=6.0), \
+                 patch.object(bridge, "_replacement_candidates_for_clip") as replacements:
+                appended = bridge._complete_project_visual_tail(
+                    project, object(), Settings(montage_auto_web=False),
+                )
+
+        self.assertEqual(appended, 0)
+        replacements.assert_not_called()
+        self.assertEqual(len(project.clips), 1)
+        self.assertEqual(project.clips[0].path, str(first))
+        self.assertEqual(project.clips[0].duration, 6.398)
+        self.assertEqual(project.clips[0].minimum_source_duration, 6.0)
+        self.assertEqual(project.clips[0].voice_segment_id, 29)
+        self.assertEqual(project.clips[0].narration_start, 0.0)
+        self.assertEqual(project.clips[0].narration_end, 6.398)
+        self.assertAlmostEqual(sum(clip.duration for clip in project.clips), 6.398, places=3)
+
     def test_clip_identity_is_case_insensitive_and_absolute(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "Shot.MP4"
@@ -941,6 +1141,58 @@ class MontageQueueStateTests(unittest.TestCase):
         settings = Settings(montage_fast_reuse_enabled=True, montage_unique_footage_percent=25)
         self.assertEqual(bridge._fast_reuse_percent_for_scenario(settings, 0), 25)
         self.assertEqual(bridge._fast_reuse_percent_for_scenario(settings, 100), 25)
+
+    def test_fast_reuse_pool_excludes_fresh_source_after_unique_target(self):
+        pooled = FootageItem("D:/pool/cached.mp4", "cached.mp4", tags=["oil-tanker-port"])
+        fresh = FootageItem("D:/fresh/new.mp4", "new.mp4", tags=["oil-tanker-port"])
+        levels = {
+            "STRICT_MATCH": [
+                SearchHit(fresh, .95, duration=12.0),
+                SearchHit(pooled, .40, duration=12.0),
+            ],
+            "RELAXED_SEMANTIC": [],
+            "CATEGORY_MATCH": [],
+            "SAFE_CONTEXT": [],
+        }
+        reuse_pool = {
+            bridge._montage_clip_key(pooled.path): TimelineClip(
+                pooled.path, "voice", "oil tanker", duration=6.0, source_start=3.0,
+            ),
+        }
+
+        filtered = bridge._fast_reuse_pool_hits(
+            levels, reuse_pool, 6.0, source_duration=lambda _item: 12.0,
+        )
+
+        self.assertEqual([hit.item.path for hit in filtered["STRICT_MATCH"]], [pooled.path])
+
+    def test_fast_reuse_pool_keeps_only_cached_windows_long_enough_for_beat(self):
+        short_window = FootageItem("D:/pool/short.mp4", "short.mp4", tags=["oil-tanker-port"])
+        valid_window = FootageItem("D:/pool/valid.mp4", "valid.mp4", tags=["oil-tanker-port"])
+        levels = {
+            "STRICT_MATCH": [
+                SearchHit(short_window, .60, duration=10.0),
+                SearchHit(valid_window, .50, duration=12.0),
+            ],
+            "RELAXED_SEMANTIC": [],
+            "CATEGORY_MATCH": [],
+            "SAFE_CONTEXT": [],
+        }
+        reuse_pool = {
+            bridge._montage_clip_key(short_window.path): TimelineClip(
+                short_window.path, "voice", "oil tanker", duration=6.0, source_start=5.0,
+            ),
+            bridge._montage_clip_key(valid_window.path): TimelineClip(
+                valid_window.path, "voice", "oil tanker", duration=6.0, source_start=2.0,
+            ),
+        }
+        durations = {short_window.path: 10.0, valid_window.path: 12.0}
+
+        filtered = bridge._fast_reuse_pool_hits(
+            levels, reuse_pool, 6.0, source_duration=lambda item: durations[item.path],
+        )
+
+        self.assertEqual([hit.item.path for hit in filtered["STRICT_MATCH"]], [valid_window.path])
 
     def test_interrupted_queue_is_recovered_without_deleting_its_source_data(self):
         settings = Settings()

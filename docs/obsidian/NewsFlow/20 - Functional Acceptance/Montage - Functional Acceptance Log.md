@@ -318,3 +318,77 @@ Status: **FIX VERIFIED LOCALLY; PENDING CI/REVIEW**
 - Three new 30.000 s MP4 SHA-256 values: `1c383c894479f28083442e8cc1d736ab946196bd3907b0183bae21a3203276ce`, `a77cdde300d635315bae9c4816c168bd985253697e2e9dde5fe544dd5d752c52`, `9ff150a947bb1380558999aa12dea1c4e3190a347f92d72b2c45d38afa1611e2`.
 - Review root: `.artifacts/NewsFlow-MONTAGE-003-human-review-quality-v2-20260920/`; it contains the manifest, per-scene query/semantic/screen-text provenance, three contact sheets, timings and three rendered MP4 files. Total final run: **71.079 s**; candidate discovery/copy **5.282 s**, base index **7.614 s**, deep enrichment **0.093 s**, screen-text classification **15.646 s**, direct retrieval **0.040 s**.
 - Settings/session/index and every source project, MP3 and footage hash were identical before/after. No paid provider, OAuth or publication call was made; generated media remains ignored and is not committed.
+
+
+## MONTAGE-004 — automatic VoiceMap narration alignment
+
+Date: **2026-09-20**
+Status: **FIX VERIFIED LOCALLY; PENDING CI/WINDOWS REVIEW**
+
+### Confirmed RED and root cause
+
+- Montage previously inferred scene timing independently from the final MP3. There was no durable artifact connecting the canonical final scenario, its ProductionItem identity, real audio timing and the selected montage clips.
+- Initial deterministic regression was RED because `scriptor.voice_map` did not exist. The UI regression was RED because none of the six operator-facing timing states or the explicit rebuild command existed.
+- The first real isolated render found an avoidable 0.75-second final aligned segment. The word-boundary chooser excluded the final word from its candidate range and selected a 4.5-second split even though the complete final sentence fit inside the 6.8-second preferred maximum. A focused RED regression now protects this boundary.
+
+### Minimal architecture fix
+
+- Added a versioned, hashed VoiceMap artifact keyed by `ProductionItem ID + script SHA-256 + audio SHA-256 + schema version`. Title and scenario index remain metadata only. Valid matching artifacts are reused without rerunning alignment.
+- Canonical NewsFlow scenario text remains the text authority and the MP3 remains the timing authority. Optional FFmpeg/whisper output supplies timed observations only; it must reconcile completely to canonical tokens before `timingMode=aligned` can be published. Low coverage, malformed/non-monotonic observations, a missing cached model or a missing FFmpeg whisper filter produce an explicit `approximate` VoiceMap with truthful reason/provenance.
+- No model is downloaded or bundled. The optional adapter reads only an explicitly supplied `NEWSFLOW_WHISPER_MODEL` or the controlled app-data cache path and resolves FFmpeg through the packaged NewsFlow runtime path. Segment-only output never fabricates word timing; real word evidence is stored only when the engine provides it.
+- Candidate JSON is schema/timestamp validated, then ProductionItem existence, tombstone state, script hash and audio hash are revalidated immediately before atomic replace. Delete/reset persists SESSION-001 tombstone authority before physical VoiceMap cleanup, so a stale worker cannot republish a deleted item.
+- Voice import and successful TTS attachment automatically ensure a map, but never start Montage. The UI exposes `Ожидает MP3`, `Анализ аудио`, `Тайминг готов`, `Приблизительный тайминг`, `Тайминг устарел`, `Ошибка тайминга` and a manual `Перестроить тайминг` action bound to the exact ProductionItem ID.
+- Montage consumes one VoiceMap contract for aligned and approximate modes. `.newsflow` persists map path/schema/hashes/engine/confidence plus each clip's `voiceSegmentId`, narration start and narration end. Existing semantic safety, screen-text safety, diversity, source-family/source-start and queue behavior are unchanged.
+
+### Automated verification
+
+- VoiceMap targeted suite: **30 PASS, 0 FAIL, 0 SKIP**. Coverage includes alignment/reconciliation, natural boundaries, optional word evidence integrity, contiguous segment validation, approximate provenance, missing model/filter, packaged FFmpeg resolution, cache invalidation, corrupt/interrupted artifacts, atomic stale-worker rejection, fail-closed Montage consumption, SESSION-001 delete order, UI rebuild behavior and `.newsflow` round-trip.
+- Combined Voice/SESSION-001/Montage queue/timeline/MONTAGE-003/index/render/runtime suite: **220 PASS, 0 FAIL, 0 SKIP**; `PRODUCTION_WRITE_GUARD=PASS`.
+- Targeted Voice UI: **1 file / 18 tests PASS**. Full frontend: **36 files / 209 tests PASS**. `pnpm typecheck`, Electron security gate and web/desktop/Remotion source builds: **PASS**.
+- Source Electron E2E with `NEWSFLOW_RUN_ELECTRON_E2E=1`: **2 PASS, 0 FAIL, 0 SKIP**, including accessibility/UX guards.
+- `py_compile`, scoped Ruff for all changed Python files, secret scan, production integrity guard and working-tree `git diff --check`: **PASS**.
+
+### Isolated real media acceptance
+
+- Reproducible command: `python tests/run_voice_map_montage_smoke.py --output .artifacts/montage-004/2026-09-20-voice-map-smoke-05`.
+- Runtime path: real local synthetic MP3 and four MP4 sources → incremental `ClipIndex` → durable aligned VoiceMap → `prepare_montage` → persisted `.newsflow` → `render_montage(renderer="ffmpeg")` → FFprobe. All storage and media roots were isolated under `.artifacts`; no provider/network/OAuth/publication or production path was used.
+- VoiceMap produced three natural canonical segments of **4.515 / 5.268 / 5.267 s**, confidence **1.0**, and full **15.050 s** audio coverage. Every project clip retained the matching segment ID and narration timestamps; the expected 30 FPS visual safety tail was present.
+- Final MP4 duration: **15.000 s** with audio and video streams. Timings: alignment **0.004 s**, preparation **0.683 s**, render **7.372 s**. MP4 SHA-256: `b9fd7c38b145af696e47d6bc54e09449c3e74d20fd5e2fdef2457d34f559899f`.
+- Manifest: `.artifacts/montage-004/2026-09-20-voice-map-smoke-05/manifest.json`. All **13** contract/media assertions passed; every synthetic source hash was identical before/after. Generated evidence is ignored and not committed.
+
+### Deferred / N/A
+
+- A cached production whisper.cpp model was intentionally not installed or downloaded. The adapter capability, parsing and canonical reconciliation are deterministic-test covered; model-unavailable behavior is an accepted approximate fallback, not a Montage failure.
+- Packaged EXE/clean-Windows release acceptance and controlled real-provider smoke are N/A for this source-level issue. The requested three 3–5 minute human quality-review videos remain a separate follow-up after this implementation is reviewed.
+
+
+## MONTAGE-004 long-form human review — bounded Cutter overrun correction
+
+Date: **2026-09-22**
+Status: **AUTOMATED LONG-FORM GATE GREEN; HUMAN EDITORIAL REVIEW PENDING; NOT RELEASE-READY**
+
+### Confirmed RED and correction
+
+- A real `6.398 s` VoiceMap segment was rejected against ordinary `~6.0 s` Cutter footage because candidate selection required the full narration beat duration from one physical source. The first deterministic regression run was RED: **7 failures / 6 errors** across 106 targeted tests, including this duration mismatch.
+- The final contract keeps `6.0`, `6.001`, `6.398` and `6.5 s` as one visual beat; a `6.398 s` beat retains the exact VoiceMap interval while candidate selection requires only a `6.0 s` source. Longer segments split into balanced beats only above `6.5 s` (for example `8.4 -> 4.2 + 4.2`, `12.1 -> ~6.05 + ~6.05`). No `6.0 + 0.398` flash beat is created.
+- The existing renderer's bounded moving-source continuation is reused; renderer, durable VoiceMap schema/timestamps, semantic scoring/thresholds, MONTAGE-003 safety/diversity and original Cutter media are unchanged. `.newsflow` retains `voiceSegmentId`, exact narration bounds, `minimum_source_duration` and beat index/count diagnostics.
+- Focused RED/then GREEN coverage verifies the `6.398 s` six-second-source case, immutable source bytes, `6.0/6.001/6.398/6.5/6.501/8.4/12.0/12.1/13.0/13.001/19.237` boundaries, balanced beats, original query/segment identity, exact continuous coverage and no synthetic frame-margin micro-tail.
+- Diff review found one adjacent fast-reuse risk created by the new duration distinction: its pool stored `max(beat duration, source duration)`, which overstated a physical 6.0-second Cutter file as 6.398 seconds. The new focused test was **RED, 1 failure / 32 tests**, then **GREEN, 32/32** after the one-line change to retain the verified physical source duration. This keeps later `source_start` rotation within the real file without changing scoring or fast-mode policy.
+
+### Verification
+
+- Full required MONTAGE-004/MONTAGE-003 isolated Python gate: **219 PASS / 0 FAIL / 0 SKIP**, including `PRODUCTION_WRITE_GUARD=PASS`.
+- `py_compile`, scoped Ruff, `SECRET_SCAN=PASS`, production-integrity-guard test, range and working-tree `git diff --check`: **PASS**. The integrity test's deliberate `covers-library.json` mutation fixture reported its expected inner `PRODUCTION_WRITE_GUARD=FAIL`; the overall guard test passed.
+- Full frontend: **36 files / 209 tests PASS**; `pnpm typecheck`, `verify:security`, web/desktop/Remotion source builds **PASS**. Source Electron E2E: **2 PASS / 0 FAIL / 0 SKIP**, production write guard PASS.
+
+### Three real isolated 3–5 minute review videos
+
+- Current production audit: **84 completed scenario jobs, 2 voice-output entries whose MP3 paths do not exist, 0 valid current completed scenario+MP3 pairs**. This shortage is explicit; the acceptance harness used three real *archived* NewsFlow scenario+MP3 pairs read-only, with coherent ~240-second copied excerpts. They are not represented as current-production pairs. No provider, OAuth or publication call was made.
+- Isolated pool: **151 real source clips / 151 original source families**, freshly indexed and deep-enriched; screen-text classifier **151 safe / 0 blocked / 0 unchecked**. A prior RED render had three adjacent repeats for the Washington story. Targeted read-only search found a current-screen-safe real White House Cutter cut (`..._slice_10.mp4`) whose current semantic label includes `us-government-washington`; replacing another cut **within the same original family** in the isolated pool removed those repeats. Earlier diagnostic renders remain archived outside production.
+- `01-military-security-conflict`: **238.979 s**, 51 scenes / 50 families, max family use 2, adjacent family/path repeats 0/0, repeated paths 1, alternate source-start windows 0, `STRICT_MATCH=50` / `SAFE_REUSE=1`.
+- `02-political-diplomatic-government`: **242.119 s**, 59 scenes / 39 families, max family use 7 (11.86%), adjacent family/path repeats 0/0, repeated paths 20, alternate source-start windows 20, `STRICT_MATCH=31` / `SAFE_REUSE=28`. Reuse and candidate scarcity are explicit in per-scene evidence; no adjacent source was repeated.
+- `03-economic-energy-logistics`: **240.584 s**, 50 scenes / 46 families, max family use 5 (10%), adjacent family/path repeats 0/0, repeated paths 4, alternate source-start windows 3, `STRICT_MATCH=44` / `SAFE_REUSE=6`.
+- All three outputs are H.264/AAC, 1920×1080 at 30 FPS with playable audio/video. VoiceMap is truthfully `approximate / newsflow-fallback / confidence 0` because no local Whisper model was configured. Real timeline narration starts at 0, ends at its VoiceMap audio duration, and has **0 gaps / 0 overlaps / 0 beat-duration mismatches**. FFprobe format/MP3 duration agrees within the existing 0.25-second media tolerance; video stream end trails AAC by 0.052–0.117 seconds, so no claim of sample-exact AV alignment is made.
+- One decoded sample per scene found **0 decode failures, 0 near-solid/black placeholders and 0 identical frozen scene pairs**. Three contact sheets and the per-scene semantic/query/fallback/source-start evidence are preserved. The source production session/settings/index/model-cache and all original MP3/footage hashes were identical before and after.
+- Review root (ignored, no generated MP4 committed): `.artifacts/montage-004/long-form-human-review-20260920/`. It contains `manifest.json`, `review-summary.md`, three MP4s, three VoiceMap JSONs, three `.newsflow` projects, Remotion JSON payloads, scene evidence, contact sheets, FFprobe JSON and hashes/timings. Fresh-pool acceptance took **201.225 s** (base index **45.802 s**, deep enrichment **0.082 s**, screen classification **89.555 s**); the final reproducibility rerender on the completed incremental index took **61.852 s**, with **0** clips needing re-embedding. Per-video build/preparation/render/visual timings are in the final manifest. Final MP4 SHA-256 values, in story order: `1eb2da1efd3c9576763465a0405abed65a4e80d915163b1e5625d881abc5400f`, `02608c1f07a2700ec9170001d775f998172cea347ab6ff7c56a5e6c3f3cf3172`, `c4364577f90b40472c8ed752326f8484282511767e11ad3a36bb7c806bea32df`.
+- Automated structural/media/diversity assertions: **PASS**. Human editorial relevance is **not yet accepted**: the contact sheets show candidates for closer review, including a Ukrainian press-room shot on Washington-related beats and an apparent educational/interstitial frame in the political video. These are flagged for human judgment; the automated semantic guard passing is not presented as proof of editorial correctness.
