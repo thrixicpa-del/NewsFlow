@@ -107,6 +107,7 @@ from .publication_v2 import (
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
+    resolve_publication_upload_title,
     release_execution,
     retry_publication_stage,
     validate_publication_snapshot,
@@ -14677,7 +14678,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
         try:
             credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
             body = build_private_video_insert_body(
-                title=str(metadata.get("title", "")), description=str(metadata.get("description", "")),
+                title=resolve_publication_upload_title(metadata), description=str(metadata.get("description", "")),
                 tags=[str(value) for value in metadata.get("tags", []) if str(value).strip()],
                 hashtags=[str(value) for value in metadata.get("hashtags", []) if str(value).strip()],
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
