@@ -495,6 +495,63 @@ class MontageQueueStateTests(unittest.TestCase):
             query, sevastopol, allow_thematic_mismatch=True,
         ))
 
+    def test_visual_continuity_fallback_is_topic_agnostic_and_prefers_new_family(self):
+        reused = FootageItem("D:/used/family-a/clip.mp4", "used.mp4", tags=["ukraine"])
+        unrelated_fresh = FootageItem(
+            "D:/fresh/family-b/clip.mp4", "fresh.mp4", tags=["factory-industry", "russia"],
+        )
+        family_a = bridge.source_family_identity_text(reused.path, reused.source_url)
+        choice = bridge._select_visual_continuity_candidate(
+            [reused, unrelated_fresh],
+            required_duration=6.0,
+            project_used_paths={bridge._montage_clip_key(reused.path)},
+            project_used_families={family_a},
+            recent_project_paths=set(),
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            diversity_seed="topic-agnostic",
+        )
+        self.assertIsNotNone(choice)
+        item, duration, _family, reused_flag = choice
+        self.assertEqual(item.path, unrelated_fresh.path)
+        self.assertEqual(duration, 6.0)
+        self.assertFalse(reused_flag)
+
+    def test_visual_continuity_fallback_reuses_when_only_valid_family_remains(self):
+        only = FootageItem("D:/used/family-a/clip.mp4", "used.mp4", tags=["anything"])
+        family = bridge.source_family_identity_text(only.path, only.source_url)
+        choice = bridge._select_visual_continuity_candidate(
+            [only],
+            required_duration=6.0,
+            project_used_paths={bridge._montage_clip_key(only.path)},
+            project_used_families={family},
+            recent_project_paths={bridge._montage_clip_key(only.path)},
+            source_exists=lambda _item: True,
+            source_duration=lambda _item: 6.0,
+            source_allowed=lambda _item: True,
+            diversity_seed="reuse-last",
+        )
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice[0].path, only.path)
+        self.assertTrue(choice[3])
+
+    def test_visual_continuity_fallback_still_rejects_technical_bad_media(self):
+        short = FootageItem("D:/bad/short.mp4", "short.mp4")
+        blocked = FootageItem("D:/bad/english-title.mp4", "english-title.mp4")
+        choice = bridge._select_visual_continuity_candidate(
+            [short, blocked],
+            required_duration=6.0,
+            project_used_paths=set(),
+            project_used_families=set(),
+            recent_project_paths=set(),
+            source_exists=lambda _item: True,
+            source_duration=lambda item: 2.0 if item.path == short.path else 6.0,
+            source_allowed=lambda item: item.path != blocked.path,
+            diversity_seed="technical-guards",
+        )
+        self.assertIsNone(choice)
+
     def test_normalized_montage_query_deduplicates_and_removes_generic_phrases(self):
         normalized = bridge._normalized_montage_visual_query(
             "international news, documentary footage, oil tanker refinery oil terminal, "
