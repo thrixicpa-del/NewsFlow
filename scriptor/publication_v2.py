@@ -66,7 +66,9 @@ def _oauth_payload_is_structurally_valid(value: object) -> bool:
         payload = json.loads(raw)
     except (TypeError, ValueError):
         return False
-    return isinstance(payload, dict) and bool(payload)
+    if not isinstance(payload, dict):
+        return False
+    return any(str(payload.get(key) or "").strip() for key in ("token", "refresh_token"))
 
 
 def _normalise(value: object) -> str:
