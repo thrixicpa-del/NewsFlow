@@ -1,6 +1,7 @@
 import unittest
 
 from scriptor.youtube_studio import (_click_exact_visible_button, planned_studio_actions, studio_details_url, studio_editor_url,
+                                     studio_monetization_url,
                                      studio_shell_loaded, studio_control_labels, end_screen_requires_editor_entry,
                                      studio_transition_label)
 
@@ -28,6 +29,23 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         self.assertEqual(actions[1]["cards"][0]["atSeconds"], 210)
         self.assertEqual(actions[2]["startSeconds"], 580)
 
+    def test_pending_monetization_action_is_planned_with_manual_slots(self):
+        actions = planned_studio_actions({
+            "post": {"status": "skipped"},
+            "ads": {"status": "pending"},
+            "cards": {"status": "skipped"},
+            "endScreen": {"status": "skipped"},
+            "postDraft": {},
+            "plan": {"ads": {
+                "enabled": True, "automatic": True, "manual": True,
+                "mode": "AUTO+MANUAL", "manualMidrollApplicable": True,
+                "manualSlots": [39, 78],
+            }},
+        })
+
+        self.assertEqual([item["kind"] for item in actions], ["ads"])
+        self.assertEqual(actions[0]["manualSlots"], [39, 78])
+
     def test_terminal_or_skipped_steps_are_not_repeated(self):
         self.assertEqual(planned_studio_actions({
             "post": {"status": "scheduled"},
@@ -35,6 +53,12 @@ class YouTubeStudioActionsTests(unittest.TestCase):
             "endScreen": {"status": "skipped"},
             "postDraft": {}, "plan": {},
         }), [])
+
+    def test_monetization_uses_the_exact_uploaded_video_route(self):
+        self.assertEqual(
+            studio_monetization_url("video-a"),
+            "https://studio.youtube.com/video/video-a/monetization",
+        )
 
     def test_cards_and_end_screen_use_the_exact_video_editor_url(self):
         self.assertEqual(
