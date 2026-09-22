@@ -953,6 +953,7 @@ class PublicationJobTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "chrome_path", return_value=Path("C:/Chrome/chrome.exe")), \
                  patch.object(bridge, "authorize_desktop_channel", return_value={"refresh_token": "secret", "token": "short"}), \
                  patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-real", "name": "Реальный канал", "thumbnailUrl": "https://i.ytimg.com/real.jpg", "subscribers": 15, "viewsTotal": 120}, {"refresh_token": "secret", "token": "refreshed"})):
                 bridge.connect_youtube_channel({"index": 0, "includeMonetary": True})
@@ -977,6 +978,7 @@ class PublicationJobTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "chrome_path", return_value=Path("C:/Chrome/chrome.exe")), \
                  patch.object(bridge, "authorize_desktop_channel", return_value={"token": "short"}), \
                  patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-real", "name": "Реальный канал", "subscribers": 15, "viewsTotal": 120}, {"token": "fresh"})):
                 bridge.connect_youtube_channel({"index": 0})
