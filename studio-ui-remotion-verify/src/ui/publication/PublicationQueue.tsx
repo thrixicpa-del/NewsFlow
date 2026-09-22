@@ -116,7 +116,7 @@ export function PublicationQueue({
       </div>
     </div>
     {channelProgress.length ? <div className="nf-channel-progress-strip" aria-label="Прогресс по каналам">{channelProgress.map((item) => <div className="nf-channel-progress-card" key={item.channelId}><b>{channelName(item.channelId)}</b><small>Готово {item.complete}/{item.total} · Upload {item.uploaded}/{item.total} · Ошибки {item.errors}</small></div>)}</div> : null}
-    <DataTable data={rows} columns={columns} expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
+    <DataTable data={rows} columns={columns} preferenceKey="publication-queue" ariaLabel="Очередь публикации" expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
   </section>;
 }
 
