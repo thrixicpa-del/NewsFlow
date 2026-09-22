@@ -99,6 +99,7 @@ from .publication_v2 import (
     complete_upload_attempt,
     confirm_publication_snapshots,
     fail_publication_stage,
+    frozen_artifact_matches,
     mark_publication_stage_not_required,
     migrate_legacy_publication_data,
     normalize_channel_publication_rule,
@@ -14771,6 +14772,13 @@ def run_publication_v2_thumbnails(payload: dict) -> dict:
         if not thumbnail_path or not Path(thumbnail_path).is_file():
             fail_publication_stage(settings, snapshot_id, "THUMBNAIL", "USER_ACTION_REQUIRED", "Файл обложки не найден; загрузка MP4 сохранена.")
             failures.append((snapshot_id, "Файл обложки не найден."))
+            continue
+        if not frozen_artifact_matches(snapshot_record, "thumbnail", thumbnail_path):
+            fail_publication_stage(
+                settings, snapshot_id, "THUMBNAIL", "USER_ACTION_REQUIRED",
+                "Файл обложки изменился после подтверждения snapshot; загрузка MP4 сохранена.",
+            )
+            failures.append((snapshot_id, "Файл обложки изменился после подтверждения snapshot."))
             continue
         worker_id = f"publication-v2-thumbnail-{uuid.uuid4().hex[:8]}-{position}"
         if not claim_execution(settings, snapshot_id, worker_id):
