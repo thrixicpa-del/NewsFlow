@@ -8350,7 +8350,7 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
             <input
               type="number"
               min="50"
-              max="5000"
+              max="500"
               value={tagCharLimit}
               onChange={(event) => setTagCharLimit(event.target.value)}
               onBlur={() =>
