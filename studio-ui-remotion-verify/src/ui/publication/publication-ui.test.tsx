@@ -91,6 +91,16 @@ describe("PublicationPage", () => {
     expect(metricValue("Свободно по квотам")).toHaveTextContent("88");
   });
 
+  it("keeps ProductionItem ID inspectable without replacing the human video title", () => {
+    render(<PublicationPage data={fixture} command={command} />);
+
+    expect(screen.getByText(/Ролик 1:/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByLabelText("Раскрыть детали")[0]);
+
+    expect(screen.getByText("ProductionItem ID")).toBeInTheDocument();
+    expect(screen.getByText("item-1")).toBeInTheDocument();
+  });
+
   it("shows snapshot-backed provenance for a publication receipt", () => {
     render(<PublicationHistory rows={[{
       snapshotId: "receipt-42",
