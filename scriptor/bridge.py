@@ -110,6 +110,7 @@ from .publication_v2 import (
     reconcile_youtube_video_state,
     release_execution,
     resolve_publication_upload_title,
+    resolve_uncertain_upload,
     retry_publication_stage,
     validate_publication_snapshot,
 )
@@ -14609,6 +14610,35 @@ def retry_publication_v2_stage(payload: dict) -> dict:
     return snapshot()
 
 
+def resolve_publication_v2_uncertain_upload(payload: dict) -> dict:
+    """Apply one explicit operator decision after an upload with unknown remote outcome."""
+    settings = load_settings()
+    snapshot_id = str(payload.get("snapshotId", "")).strip()
+    outcome = str(payload.get("outcome", "")).strip().lower()
+    video_id = str(payload.get("youtubeVideoId", "")).strip()
+
+    if outcome == "found":
+        snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+        if not snapshot_record:
+            raise ValueError("Publication snapshot не найден")
+        channel_id = str(snapshot_record.get("channelId", "")).strip()
+        credentials = json.loads((settings.youtube_oauth_tokens or {}).get(channel_id, ""))
+        profile, refreshed = fetch_current_channel(credentials)
+        video, refreshed = fetch_youtube_video_state(refreshed, video_id)
+        owner_channel_id = str(dict(profile or {}).get("channelId", "")).strip()
+        video_channel_id = str(dict(video.get("snippet", {}) or {}).get("channelId", "")).strip()
+        if not owner_channel_id or video_channel_id != owner_channel_id:
+            raise ValueError("Указанный YouTube ID не принадлежит подключённому каналу")
+        resolve_uncertain_upload(settings, snapshot_id, outcome, video_id)
+        reconcile_youtube_video_state(settings, snapshot_id, video)
+        settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
+    else:
+        resolve_uncertain_upload(settings, snapshot_id, outcome, video_id)
+
+    save_settings(settings)
+    return snapshot()
+
+
 def set_publication_v2_paused(payload: dict) -> dict:
     settings = load_settings()
     settings.youtube_publication_queue_paused = bool(payload.get("paused", False))
@@ -14721,11 +14751,17 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
                 privacy=str(snapshot_record.get("privacy", "private")),
             )
-            # Once insert is invoked, even a timeout cannot prove YouTube did
-            # not create a video. Require operator reconciliation, not retry.
-            transport_started = True
-            result, refreshed = upload_private_video(validated_credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
-                                                       thumbnail_path="")
+            def mark_transport_started() -> None:
+                nonlocal transport_started
+                transport_started = True
+
+            result, refreshed = upload_private_video(
+                validated_credentials,
+                video_path=str(snapshot_record.get("videoPath", "")),
+                body=body,
+                thumbnail_path="",
+                on_insert_started=mark_transport_started,
+            )
             with lock:
                 complete_upload_attempt(settings, snapshot_id, worker_id, result)
                 settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
@@ -15960,6 +15996,8 @@ def main() -> None:
             result = confirm_publication_v2_distribution(payload if isinstance(payload, dict) else {})
         elif command == "retry-publication-v2-stage":
             result = retry_publication_v2_stage(payload if isinstance(payload, dict) else {})
+        elif command == "resolve-publication-v2-uncertain-upload":
+            result = resolve_publication_v2_uncertain_upload(payload if isinstance(payload, dict) else {})
         elif command == "set-publication-v2-paused":
             result = set_publication_v2_paused(payload if isinstance(payload, dict) else {})
         elif command == "cancel-publication-v2-execution":
