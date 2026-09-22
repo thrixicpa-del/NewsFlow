@@ -11,7 +11,7 @@ from scriptor.config import OpenAIKey, Settings
 from scriptor.core import ScenarioRequest
 from scriptor.footage import FootageItem
 from scriptor.runner import Job, RunState
-from scriptor.timeline import TimelineProject
+from scriptor.timeline import TimelineClip, TimelineProject
 
 
 class MontageQueueStateTests(unittest.TestCase):
@@ -980,6 +980,58 @@ class MontageQueueStateTests(unittest.TestCase):
         settings = Settings(montage_fast_reuse_enabled=True, montage_unique_footage_percent=25)
         self.assertEqual(bridge._fast_reuse_percent_for_scenario(settings, 0), 25)
         self.assertEqual(bridge._fast_reuse_percent_for_scenario(settings, 100), 25)
+
+    def test_fast_reuse_pool_excludes_fresh_source_after_unique_target(self):
+        pooled = FootageItem("D:/pool/cached.mp4", "cached.mp4", tags=["oil-tanker-port"])
+        fresh = FootageItem("D:/fresh/new.mp4", "new.mp4", tags=["oil-tanker-port"])
+        levels = {
+            "STRICT_MATCH": [
+                SearchHit(fresh, .95, duration=12.0),
+                SearchHit(pooled, .40, duration=12.0),
+            ],
+            "RELAXED_SEMANTIC": [],
+            "CATEGORY_MATCH": [],
+            "SAFE_CONTEXT": [],
+        }
+        reuse_pool = {
+            bridge._montage_clip_key(pooled.path): TimelineClip(
+                pooled.path, "voice", "oil tanker", duration=6.0, source_start=3.0,
+            ),
+        }
+
+        filtered = bridge._fast_reuse_pool_hits(
+            levels, reuse_pool, 6.0, source_duration=lambda _item: 12.0,
+        )
+
+        self.assertEqual([hit.item.path for hit in filtered["STRICT_MATCH"]], [pooled.path])
+
+    def test_fast_reuse_pool_keeps_only_cached_windows_long_enough_for_beat(self):
+        short_window = FootageItem("D:/pool/short.mp4", "short.mp4", tags=["oil-tanker-port"])
+        valid_window = FootageItem("D:/pool/valid.mp4", "valid.mp4", tags=["oil-tanker-port"])
+        levels = {
+            "STRICT_MATCH": [
+                SearchHit(short_window, .60, duration=10.0),
+                SearchHit(valid_window, .50, duration=12.0),
+            ],
+            "RELAXED_SEMANTIC": [],
+            "CATEGORY_MATCH": [],
+            "SAFE_CONTEXT": [],
+        }
+        reuse_pool = {
+            bridge._montage_clip_key(short_window.path): TimelineClip(
+                short_window.path, "voice", "oil tanker", duration=6.0, source_start=5.0,
+            ),
+            bridge._montage_clip_key(valid_window.path): TimelineClip(
+                valid_window.path, "voice", "oil tanker", duration=6.0, source_start=2.0,
+            ),
+        }
+        durations = {short_window.path: 10.0, valid_window.path: 12.0}
+
+        filtered = bridge._fast_reuse_pool_hits(
+            levels, reuse_pool, 6.0, source_duration=lambda item: durations[item.path],
+        )
+
+        self.assertEqual([hit.item.path for hit in filtered["STRICT_MATCH"]], [valid_window.path])
 
     def test_interrupted_queue_is_recovered_without_deleting_its_source_data(self):
         settings = Settings()
