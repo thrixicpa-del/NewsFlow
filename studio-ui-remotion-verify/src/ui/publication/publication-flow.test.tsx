@@ -18,12 +18,18 @@ const base = {
 } as unknown as NewsFlowSnapshot;
 
 describe("PublicationPage interactions", () => {
-  it("opens compact channel settings from the channels registry", () => {
+  it("opens compact channel settings with range and quarter-hour scheduling controls", () => {
     render(<PublicationPage data={base} command={vi.fn().mockResolvedValue(undefined)} />);
     fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
     expect(screen.getByRole("columnheader", { name: "Действия" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Действия канала Первый канал" }));
     expect(screen.getByText("Количество роликов")).toBeInTheDocument();
+    expect(screen.getByLabelText("Ролики с №")).toBeInTheDocument();
+    expect(screen.getByLabelText("Ролики по №")).toBeInTheDocument();
+    expect(screen.getByLabelText("Первый выход")).toHaveAttribute("step", "900");
+    expect(screen.getByLabelText("Окно: начало")).toHaveAttribute("step", "900");
+    expect(screen.getByText(/:00 \/ :15 \/ :30 \/ :45/)).toBeInTheDocument();
+    expect(screen.getByText("Реклама / монетизация")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeInTheDocument();
   });
 
@@ -34,6 +40,20 @@ describe("PublicationPage interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Запустить очередь" }));
     await waitFor(() => expect(command).toHaveBeenCalledWith("upload-publication-v2-snapshots", { snapshotIds: ["snapshot-ready"] }));
   });
+
+  it("starts only explicitly selected queue snapshots", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByLabelText("Выбрать публикацию Готовый ролик"));
+    fireEvent.click(screen.getByRole("button", { name: "Запустить выбранные (1)" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "upload-publication-v2-snapshots",
+      { snapshotIds: ["snapshot-ready"] },
+    ));
+  });
+
 
   it("does not submit the current publication upload twice while it is pending", async () => {
     let releaseUpload: (() => void) | undefined;
@@ -51,6 +71,19 @@ describe("PublicationPage interactions", () => {
     expect(command).toHaveBeenCalledWith("upload-publication-v2-snapshots", { snapshotIds: ["snapshot-ready"] });
     releaseUpload?.();
     await waitFor(() => expect(screen.getByRole("button", { name: "Запустить очередь" })).toBeEnabled());
+  });
+
+  it("sends only selected production items to smart distribution preview", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByLabelText("Выбрать Готовый ролик"));
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "preview-publication-v2-distribution",
+      { productionItemIds: ["item-ready"] },
+    ));
   });
 
   it("opens non-uploading distribution preview and preserves its manual lock affordance", async () => {
