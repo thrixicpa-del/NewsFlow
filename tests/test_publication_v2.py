@@ -1548,6 +1548,46 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"], "yt-1")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["TITLE"]["status"], "SUCCESS")
 
+    def test_v2_studio_missing_video_id_fails_only_requested_stage(self):
+        """A cards-only request must not corrupt the independent ADS stage when upload identity is missing."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1", "productionItemId": "pi-1", "channelId": "channel-a",
+                    "durationSeconds": 600, "monetized": True,
+                    "metadata": {"title": "Выпуск", "description": "Описание"},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1", "productionItemId": "pi-1",
+                    "youtubeVideoId": None, "overallStatus": "READY", "activeLease": None,
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "PENDING"},
+                        "ADS": {"status": "PENDING"},
+                        "CARDS": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "execute_studio_task") as execute:
+            result = bridge.run_publication_v2_studio({
+                "snapshotIds": ["snapshot-1"],
+                "steps": ["cards"],
+            })
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["steps"]["CARDS"]["status"], "FAILED")
+        self.assertEqual(execution["steps"]["ADS"]["status"], "PENDING")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "PENDING")
+        execute.assert_not_called()
+
     def test_v2_studio_waits_for_processing_before_ads_editor_steps(self):
         settings = Settings(
             analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-a", "name": "Канал A"}],
@@ -1783,6 +1823,50 @@ class PublicationV2BridgeTests(unittest.TestCase):
         execution = settings.youtube_publication_executions["snapshot-new"]
         self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(execution["steps"]["CARDS"]["status"], "SUCCESS")
+
+    def test_v2_thumbnail_rejects_cover_replaced_after_snapshot_confirmation(self):
+        """Downstream thumbnail must use the same frozen artifact identity confirmed in the snapshot."""
+        with TemporaryDirectory() as directory:
+            cover = Path(directory) / "cover.png"
+            cover.write_bytes(b"original-cover")
+            frozen = {"sizeBytes": cover.stat().st_size, "mtimeNs": cover.stat().st_mtime_ns}
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "thumbnailPath": str(cover),
+                        "artifactFingerprints": {"thumbnail": frozen},
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "youtubeVideoId": "yt-1",
+                        "overallStatus": "FORMATTING",
+                        "activeLease": None,
+                        "steps": {
+                            "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                            "THUMBNAIL": {"status": "PENDING"},
+                        },
+                    },
+                },
+            )
+            cover.write_bytes(b"replacement-cover-is-different")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "set_youtube_thumbnail") as set_thumbnail:
+                result = bridge.run_publication_v2_thumbnails({"snapshotIds": ["snapshot-1"]})
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
+        self.assertEqual(execution["steps"]["THUMBNAIL"]["status"], "FAILED")
+        self.assertEqual(execution["steps"]["THUMBNAIL"]["error"]["category"], "USER_ACTION_REQUIRED")
+        set_thumbnail.assert_not_called()
 
     def test_v2_thumbnail_command_runs_only_for_known_video_without_reopening_upload(self):
         """A thumbnail retry calls the independent thumbnail API and leaves VIDEO_UPLOAD successful."""
