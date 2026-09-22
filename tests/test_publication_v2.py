@@ -452,7 +452,7 @@ class PublicationV2SchedulerTests(unittest.TestCase):
             {"productionItemId": "pi-2", "channelId": "channel-a", "publishAt": "2026-09-10T08:00:00+03:00", "locked": True},
         ], {"channel-a": {"timezone": "Europe/Minsk", "publishWindowStart": "09:00", "publishWindowEnd": "21:00", "dailyCap": 3}})
 
-        self.assertEqual({conflict["kind"] for conflict in conflicts}, {"manual_outside_window", "duplicate_slot"})
+        self.assertEqual({conflict["kind"] for conflict in conflicts}, {"outside_window", "duplicate_slot"})
 
 
 class PublicationV2StateIntegrityTests(unittest.TestCase):
