@@ -152,6 +152,7 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
     const row = {
       id,
       number: Number(metadata.index) || index + 1,
+      priority: Math.max(-10, Math.min(10, Number(metadata.priority) || 0)),
       title,
       duration: text(video.durationSeconds || video.duration || item.durationSeconds || metadata.duration || "—"),
       mp4Ready,
