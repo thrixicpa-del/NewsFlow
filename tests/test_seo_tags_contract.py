@@ -213,6 +213,24 @@ class SeoTagsContractTests(TestCase):
                 tags=[],
             )
 
+    def test_manual_seo_save_rejects_description_that_youtube_would_reject(self):
+        settings = Settings(seo_queue=[{
+            "source_title": "Тема",
+            "status": "Ожидает",
+            "description": "",
+            "hashtags": [],
+            "tags": [],
+        }])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            with self.assertRaisesRegex(ValueError, "5000 байт"):
+                bridge.save_seo_text({
+                    "index": 0,
+                    "description": "я" * 2501,
+                    "hashtags": [],
+                })
+
     def test_result_package_resolves_sanitized_filename_through_durable_identity(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
