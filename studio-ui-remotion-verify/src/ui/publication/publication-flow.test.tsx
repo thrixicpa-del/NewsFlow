@@ -261,6 +261,45 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByText("Готовый ролик")).toBeInTheDocument();
   });
 
+  it("does not submit distribution confirmation twice while the first confirm is pending", async () => {
+    const releases: Array<() => void> = [];
+    const command = vi.fn().mockImplementation((name) => {
+      if (name === "preview-publication-v2-distribution") {
+        return Promise.resolve({
+          ...base,
+          publicationPreview: {
+            assignments: [{
+              productionItemId: "item-ready",
+              channelId: "channel-a",
+              source: "auto",
+              locked: false,
+              reason: "balanced",
+              publishAt: "2026-11-15T04:00:00+03:00",
+            }],
+          },
+        });
+      }
+      if (name === "confirm-publication-v2-distribution") {
+        return new Promise<NewsFlowSnapshot | undefined>((resolve) => {
+          releases.push(() => resolve(base));
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+    const confirm = await screen.findByRole("button", { name: "Подтвердить назначения" });
+
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await Promise.resolve();
+
+    const confirmCalls = command.mock.calls.filter(([name]) => name === "confirm-publication-v2-distribution");
+    releases.forEach((release) => release());
+    expect(confirmCalls).toHaveLength(1);
+  });
+
   it("blocks confirmation in the UI when preview reports a scheduling conflict", async () => {
     const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "manual", locked: true, reason: "Ручное назначение", publishAt: "2026-09-11T22:00:00", scheduleWarning: "Вне окна публикации", scheduleSuggestion: "Перенесите ролик внутрь окна публикации канала." }] } });
     render(<PublicationPage data={base} command={command} />);
