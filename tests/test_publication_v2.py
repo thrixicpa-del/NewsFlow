@@ -477,6 +477,52 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertIn("blackout", row["scheduleWarning"].casefold())
         self.assertIn("перенесите", row["scheduleSuggestion"].casefold())
 
+    def test_bridge_preview_keeps_uploaded_automation_cancelled_snapshot_frozen(self):
+        """Stopping downstream automation must not release an already uploaded video for redistribution."""
+        settings = Settings(
+            analytics_channels=[
+                {"profile_id": "channel-a", "name": "A"},
+                {"profile_id": "channel-b", "name": "B"},
+            ],
+            youtube_oauth_tokens={
+                "channel-a": "{\"token\": \"a\"}",
+                "channel-b": "{\"token\": \"b\"}",
+            },
+            youtube_publication_items={
+                "pi-uploaded": {"productionItemId": "pi-uploaded", "readiness": {"state": "VIDEO_READY"}},
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 1},
+                "channel-b": {"channelId": "channel-b", "enabled": True, "quota": 1},
+            },
+            youtube_publication_snapshots={
+                "snap-uploaded": {
+                    "id": "snap-uploaded",
+                    "productionItemId": "pi-uploaded",
+                    "channelId": "channel-b",
+                    "requestedPublishAt": "2026-11-15T04:00:00+03:00",
+                },
+            },
+            youtube_publication_executions={
+                "snap-uploaded": {
+                    "snapshotId": "snap-uploaded",
+                    "productionItemId": "pi-uploaded",
+                    "overallStatus": "AUTOMATION_CANCELLED",
+                    "youtubeVideoId": "yt-existing",
+                    "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}},
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({})
+
+        row = result["publicationPreview"]["assignments"][0]
+        self.assertEqual(row["channelId"], "channel-b")
+        self.assertTrue(row["locked"])
+        self.assertEqual(row["reason"], "confirmed_snapshot")
+
     def test_bridge_preview_preserves_confirmed_snapshot_as_locked_and_does_not_redistribute_it(self):
         """Confirmed/scheduled work must never be moved by an ordinary auto-preview."""
         settings = Settings(
