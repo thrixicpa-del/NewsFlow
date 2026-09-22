@@ -57,6 +57,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   const [uploadConcurrency, setUploadConcurrency] = useState(model.uploadConcurrency);
   const [uploadStarting, setUploadStarting] = useState(false);
   const [continuing, setContinuing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [bulkSchedule, setBulkSchedule] = useState<BulkSchedule>(() => ({
     date: "",
     startTime: "04:00",
@@ -66,6 +67,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     maxPerChannel: 1,
   }));
   const uploadStartRef = useRef(false);
+  const confirmRef = useRef(false);
 
   useEffect(() => {
     setRules(model.channels);
@@ -212,20 +214,27 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
 
   const hasScheduleConflicts = distribution.some((row) => Boolean(row.warning));
   const confirm = async () => {
-    if (hasScheduleConflicts || !distribution.some((row) => row.channelId)) return;
-    await command("confirm-publication-v2-distribution", {
-      assignments: distribution
-        .filter((row) => row.channelId)
-        .map((row) => ({
-          productionItemId: row.productionItemId,
-          channelId: row.channelId,
-          publishAt: row.publishAt || undefined,
-          source: row.source,
-          locked: row.locked,
-        })),
-    });
-    setDistributionHistory([]);
-    setTab("queue");
+    if (confirmRef.current || hasScheduleConflicts || !distribution.some((row) => row.channelId)) return;
+    confirmRef.current = true;
+    setConfirming(true);
+    try {
+      await command("confirm-publication-v2-distribution", {
+        assignments: distribution
+          .filter((row) => row.channelId)
+          .map((row) => ({
+            productionItemId: row.productionItemId,
+            channelId: row.channelId,
+            publishAt: row.publishAt || undefined,
+            source: row.source,
+            locked: row.locked,
+          })),
+      });
+      setDistributionHistory([]);
+      setTab("queue");
+    } finally {
+      confirmRef.current = false;
+      setConfirming(false);
+    }
   };
 
   const selectedQueueIds = (explicit?: string[]) => {
@@ -362,7 +371,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         <div>
           <UiButton variant="ghost" disabled={!distributionHistory.length} onClick={undoDistribution}><Undo2 size={15}/>Отменить изменение</UiButton>
           <UiButton variant="secondary" onClick={() => void buildPreview()}><RefreshCw size={15}/>Пересчитать</UiButton>
-          <UiButton variant="primary" disabled={!distribution.some((row) => row.channelId) || hasScheduleConflicts} onClick={() => void confirm()}><CheckCircle2 size={15}/>Подтвердить назначения</UiButton>
+          <UiButton variant="primary" disabled={confirming || !distribution.some((row) => row.channelId) || hasScheduleConflicts} onClick={() => void confirm()}><CheckCircle2 size={15}/>{confirming ? "Подтверждение…" : "Подтвердить назначения"}</UiButton>
         </div>
       </div>
 
