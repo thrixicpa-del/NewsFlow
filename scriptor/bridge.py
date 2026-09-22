@@ -14376,7 +14376,7 @@ def _publication_execution_blocks_planning(execution: dict) -> bool:
 
 
 def restore_publication_v2_plan_version(payload: dict) -> dict:
-    """Restore only mutable draft assignments; frozen snapshots always win."""
+    """Restore mutable draft assignments while active or known-video snapshots stay frozen."""
     version_id = str(payload.get("id", "")).strip()
     if not version_id:
         raise ValueError("Выберите версию плана.")
