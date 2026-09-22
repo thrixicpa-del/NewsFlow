@@ -1959,13 +1959,16 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
         })
     assigned_channels: dict[str, str] = {}
     for production_id, assignment in assignments.items():
+        production_key = str(production_id)
+        if production_key not in items:
+            continue
         channel_id = str(dict(assignment or {}).get("channelId", "")).strip()
         if channel_id:
-            assigned_channels[str(production_id)] = channel_id
+            assigned_channels[production_key] = channel_id
     for snapshot_id, snapshot in snapshots.items():
         production_id = str(dict(snapshot or {}).get("productionItemId", "")).strip()
         channel_id = str(dict(snapshot or {}).get("channelId", "")).strip()
-        if not production_id or not channel_id or production_id in assigned_channels:
+        if not production_id or production_id not in items or not channel_id or production_id in assigned_channels:
             continue
         execution = dict(executions.get(snapshot_id, {}) or {})
         status = str(execution.get("overallStatus", "")).upper()
@@ -1993,7 +1996,10 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
         source = dict(rule or {})
         if source.get("enabled") is False:
             continue
-        quota = max(0, int(source.get("quota", 0) or 0))
+        try:
+            quota = max(0, int(source.get("quota", 0) or 0))
+        except (TypeError, ValueError):
+            quota = 0
         quota_slots_remaining += max(0, quota - used_by_channel.get(str(channel_id), 0))
 
     semantic_counters = {
