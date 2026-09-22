@@ -15,6 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .timeline import probe_media_duration
+from .youtube_api import compose_youtube_description
 
 _STAGES = (
     "AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION",
@@ -1201,9 +1202,13 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
         processing_step.update({"status": "RUNNING", "providerResult": {"processingStatus": processing_status or "unknown"}})
     steps["YOUTUBE_PROCESSING"] = processing_step
 
+    expected_description = compose_youtube_description(
+        str(expected.get("description", "")),
+        expected.get("hashtags", []) if isinstance(expected.get("hashtags"), list) else [],
+    )
     checks = {
         "TITLE": _normalise(snippet.get("title")) == _normalise(expected.get("title")),
-        "DESCRIPTION": str(snippet.get("description", "")).strip() == str(expected.get("description", "")).strip(),
+        "DESCRIPTION": str(snippet.get("description", "")).strip() == expected_description.strip(),
         "TAGS": { _normalise(value) for value in expected.get("tags", []) if _normalise(value) }.issubset({ _normalise(value) for value in snippet.get("tags", []) if _normalise(value) }),
     }
     for stage, matches in checks.items():
