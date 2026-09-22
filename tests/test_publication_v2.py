@@ -1784,6 +1784,54 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(execution["steps"]["CARDS"]["status"], "SUCCESS")
 
+    def test_v2_thumbnail_rejects_cover_replaced_after_snapshot_confirmation(self):
+        """Frozen thumbnail identity must be checked before any Studio/API mutation."""
+        with TemporaryDirectory() as directory:
+            cover = Path(directory) / "cover.png"
+            cover.write_bytes(b"original-cover")
+            frozen = {"sizeBytes": cover.stat().st_size, "mtimeNs": cover.stat().st_mtime_ns}
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "thumbnailPath": str(cover),
+                        "artifactFingerprints": {"thumbnail": frozen},
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "youtubeVideoId": "yt-1",
+                        "overallStatus": "FORMATTING",
+                        "activeLease": None,
+                        "steps": {
+                            "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                            "THUMBNAIL": {"status": "PENDING"},
+                        },
+                    },
+                },
+            )
+            cover.write_bytes(b"replacement-cover-is-different")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "set_youtube_thumbnail", return_value={"credentials": {"token": "refreshed"}, "response": {}}) as set_thumbnail:
+                result = bridge.run_publication_v2_thumbnails({"snapshotIds": ["snapshot-1"]})
+
+        self.assertEqual(result["operationResult"]["count"], 0)
+        self.assertEqual(result["operationResult"]["failed"], 1)
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["THUMBNAIL"]["status"],
+            "USER_ACTION_REQUIRED",
+        )
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"],
+            "SUCCESS",
+        )
+        set_thumbnail.assert_not_called()
+
     def test_v2_thumbnail_command_runs_only_for_known_video_without_reopening_upload(self):
         """A thumbnail retry calls the independent thumbnail API and leaves VIDEO_UPLOAD successful."""
         with TemporaryDirectory() as directory:
