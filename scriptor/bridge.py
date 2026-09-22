@@ -14553,6 +14553,14 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
                 for rule in rules
                 if str(rule.get("channelId", "")).strip()
             },
+            item_topics={
+                str(production_id): str(
+                    dict(item.get("metadata", {}) or {}).get("topicFamily")
+                    or dict(item.get("metadata", {}) or {}).get("topic")
+                    or ""
+                ).strip()
+                for production_id, item in settings.youtube_publication_items.items()
+            },
         )
         preview["scheduleWarnings"] = [
             {
