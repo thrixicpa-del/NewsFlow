@@ -456,6 +456,32 @@ def _fill_ratio(rule: dict[str, Any], used: dict[str, int]) -> float:
     return used.get(channel_id, 0) / quota
 
 
+def _schedule_conflict_message(kind: str) -> str:
+    return {
+        "quarter_hour_required": "Время должно попадать на сетку :00 / :15 / :30 / :45.",
+        "duplicate_slot": "На этом канале уже занят тот же временной слот.",
+        "disabled_weekday": "Выбран день, в который канал не публикует.",
+        "outside_window": "Время находится вне разрешённого окна публикации канала.",
+        "daily_cap_exceeded": "Превышен дневной лимит публикаций канала.",
+        "blackout_period": "Время попадает в blackout-период канала.",
+        "invalid_blackout_period": "В правилах канала есть некорректный blackout-период.",
+        "invalid_timezone_or_time": "Некорректное время или timezone.",
+    }.get(str(kind), str(kind))
+
+
+def _schedule_conflict_suggestion(kind: str) -> str:
+    return {
+        "quarter_hour_required": "Округлите время до ближайшего 15-минутного слота.",
+        "duplicate_slot": "Сдвиньте один ролик минимум на 15 минут.",
+        "disabled_weekday": "Перенесите ролик на следующий разрешённый день.",
+        "outside_window": "Перенесите ролик внутрь окна публикации канала.",
+        "daily_cap_exceeded": "Перенесите лишний ролик на следующий день или увеличьте дневной лимит.",
+        "blackout_period": "Перенесите ролик за пределы blackout-периода.",
+        "invalid_blackout_period": "Исправьте начало/конец blackout в настройках канала.",
+        "invalid_timezone_or_time": "Проверьте timezone и дату/время назначения.",
+    }.get(str(kind), "Измените правило или время и пересчитайте preview.")
+
+
 def build_distribution_preview(items: dict[str, dict], rules: list[dict], assignments: dict[str, dict]) -> dict[str, Any]:
     """Return a deterministic, non-mutating smart allocation preview.
 
@@ -605,7 +631,39 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
             slot = by_production_id[str(row["productionItemId"])]
             row["publishAt"] = slot["publishAt"]
             row["timezone"] = slot["timezone"]
-    return {"assignments": rows, "channelUsage": used, "scheduleWarnings": schedule_warnings}
+    validation_rules = {
+        str(rule.get("channelId", "")).strip(): dict(rule)
+        for rule in rules
+        if str(rule.get("channelId", "")).strip()
+    }
+    validation_conflicts = validate_publication_schedule(rows, validation_rules)
+    conflicts_by_item: dict[str, list[str]] = {}
+    suggestions_by_item: dict[str, list[str]] = {}
+    for conflict in validation_conflicts:
+        production_id = str(conflict.get("productionItemId", "")).strip()
+        if not production_id:
+            continue
+        kind = str(conflict.get("kind", "")).strip()
+        conflicts_by_item.setdefault(production_id, []).append(_schedule_conflict_message(kind))
+        suggestions_by_item.setdefault(production_id, []).append(_schedule_conflict_suggestion(kind))
+    for row in rows:
+        production_id = str(row.get("productionItemId", "")).strip()
+        existing = str(row.get("scheduleWarning", "")).strip()
+        messages = conflicts_by_item.get(production_id, [])
+        if existing:
+            messages = [existing, *messages]
+        if messages:
+            row["scheduleWarning"] = " ".join(dict.fromkeys(messages))
+            row["scheduleSuggestion"] = " ".join(dict.fromkeys(suggestions_by_item.get(production_id, []))) or "Исправьте конфликт и пересчитайте preview."
+
+    return {
+        "assignments": rows,
+        "channelUsage": used,
+        "scheduleWarnings": [
+            *schedule_warnings,
+            *validation_conflicts,
+        ],
+    }
 
 def _clock(value: object) -> time | None:
     clean = str(value or "").strip()
