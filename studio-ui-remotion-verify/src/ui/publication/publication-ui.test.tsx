@@ -29,7 +29,7 @@ const fixture = {
         snapshotId: "snapshot-ads", productionItemId: "item-1", title: "Ролик 1", channelId: "channel-1",
         currentStage: "ADS", status: "FORMATTING", active: false, youtubeVideoId: "yt-1",
         completion: { completed: 4, total: 12 },
-        steps: { ADS: { status: "SUCCESS", providerResult: { mode: "AUTO+MANUAL_39S" } } },
+        steps: { ADS: { status: "SUCCESS", providerResult: { mode: "AUTO+MANUAL", automaticSlotsEnabled: true, manualSlotsSeconds: [39, 78], confirmedManualSlotsSeconds: [39, 78] } } },
         timeline: [],
       }],
       counters: { total: 84, ready: 83 },
@@ -71,13 +71,17 @@ describe("PublicationPage", () => {
       finalStatus: "DONE",
       completion: "3/3",
       duration: "42.0",
-      stages: { DONE: "SUCCESS" },
+      ads: { status: "SUCCESS", mode: "AUTO+MANUAL", automatic: true, manualSlotsSeconds: [39, 78], confirmedManualSlotsSeconds: [39, 78] },
+      stages: { ADS: "SUCCESS", DONE: "SUCCESS" },
     }]} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Ормуз" }));
 
     expect(screen.getByText("Snapshot ID")).toBeInTheDocument();
     expect(screen.getByText("receipt-42")).toBeInTheDocument();
+    expect(screen.getByText("Реклама")).toBeInTheDocument();
+    expect(screen.getByText("AUTO + MANUAL 39s")).toBeInTheDocument();
+    expect(screen.getByText("Ручные рекламные слоты")).toBeInTheDocument();
     expect(screen.getByText("Текущий snapshot не сообщает признак устаревания")).toBeInTheDocument();
   });
 });
