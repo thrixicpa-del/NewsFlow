@@ -101,6 +101,7 @@ from .publication_v2 import (
     fail_publication_stage,
     mark_publication_stage_not_required,
     migrate_legacy_publication_data,
+    normalize_channel_publication_rule,
     persist_publication_receipt,
     publication_queue_projection,
     reconcile_publication_executions,
@@ -14162,8 +14163,13 @@ def migrate_publication_v2(payload: dict) -> dict:
 def save_publication_v2_rules(payload: dict) -> dict:
     settings = load_settings()
     rules = payload.get("rules") if isinstance(payload.get("rules"), dict) else {}
-    settings.youtube_channel_publication_rules = {str(channel_id): dict(rule) for channel_id, rule in rules.items()
-                                                  if isinstance(rule, dict) and str(channel_id).strip()}
+    normalized: dict[str, dict] = {}
+    for channel_id, raw_rule in rules.items():
+        if not isinstance(raw_rule, dict) or not str(channel_id).strip():
+            continue
+        rule = normalize_channel_publication_rule({**raw_rule, "channelId": str(channel_id).strip()})
+        normalized[str(channel_id).strip()] = rule
+    settings.youtube_channel_publication_rules = normalized
     save_settings(settings)
     return snapshot()
 
