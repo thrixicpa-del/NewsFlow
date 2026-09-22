@@ -264,6 +264,10 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(normalized, ["Ормуз", "танкеры", "x" * 484])
         self.assertLessEqual(len(",".join(normalized)), 500)
 
+    def test_tag_budget_counts_youtube_quotes_around_multiword_tags(self):
+        self.assertEqual(normalize_youtube_tags(["foo bar", "x"], limit=10), ["foo bar"])
+        self.assertEqual(bridge._limit_tags(["foo bar", "x"], 10), ["foo bar"])
+
     def test_upload_body_normalizes_tags_before_youtube_receives_them(self):
         body = build_private_video_insert_body(
             title="Ормуз: риски для торговли",
