@@ -228,27 +228,125 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(preview["assignments"][0]["publishAt"], "2026-09-10T18:00:00+03:00")
 
 
-class PublicationV2SchedulerTests(unittest.TestCase):
-    def test_bulk_range_evenly_spreads_selected_assignments_across_the_operator_window(self):
-        """The preview must create distinct, inclusive range slots without persisting anything."""
-        assignments = [
-            {"productionItemId": f"pi-{index:02}", "channelId": f"channel-{index % 3}", "source": "auto",
-             "locked": False, "reason": "auto"}
-            for index in range(12)
+    def test_longest_monetized_uses_monetized_eligible_channel_and_duration_bounds(self):
+        """Longest-first must actually prefer monetized eligible channels, not merely sort the videos."""
+        items = {
+            "pi-long": {"productionItemId": "pi-long", "metadata": {"index": 1}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 900},
+            "pi-mid": {"productionItemId": "pi-mid", "metadata": {"index": 2}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 600},
+            "pi-short": {"productionItemId": "pi-short", "metadata": {"index": 3}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 300},
+        }
+        rules = [
+            {"channelId": "regular", "enabled": True, "oauthConnected": True, "quota": 2, "monetized": False,
+             "distributionStrategy": "longest_monetized"},
+            {"channelId": "money", "enabled": True, "oauthConnected": True, "quota": 1, "monetized": True,
+             "distributionStrategy": "longest_monetized", "minDurationSeconds": 500, "maxDurationSeconds": 1200},
         ]
 
-        scheduled = apply_bulk_schedule_range(assignments, {
-            "date": "2026-11-15", "startTime": "04:00", "endTime": "10:00",
-            "timezone": "Europe/Minsk",
-        })
+        preview = build_distribution_preview(items, rules, {})
 
-        slots = [datetime.fromisoformat(row["publishAt"]) for row in scheduled]
-        self.assertEqual(slots[0].isoformat(), "2026-11-15T04:00:00+03:00")
-        self.assertEqual(slots[-1].isoformat(), "2026-11-15T10:00:00+03:00")
-        intervals = [int((slots[index + 1] - slots[index]).total_seconds()) for index in range(len(slots) - 1)]
-        self.assertEqual(len(set(intervals)), 2)
-        self.assertLessEqual(max(intervals) - min(intervals), 1)
-        self.assertTrue(all(row["source"] == "bulk_range" for row in scheduled))
+        rows = {row["productionItemId"]: row for row in preview["assignments"]}
+        self.assertEqual(rows["pi-long"]["channelId"], "money")
+        self.assertEqual(rows["pi-mid"]["channelId"], "regular")
+        self.assertEqual(rows["pi-short"]["channelId"], "regular")
+        self.assertEqual(rows["pi-long"]["reason"], "longest_monetized")
+
+    def test_balanced_distribution_uses_fill_ratio_and_skips_auth_invalid_channels(self):
+        """Balanced allocation must fill the least-used eligible channel and ignore auth-invalid channels."""
+        items = {
+            "locked-1": {"productionItemId": "locked-1", "readiness": {"state": "VIDEO_READY"}},
+            "locked-2": {"productionItemId": "locked-2", "readiness": {"state": "VIDEO_READY"}},
+            "new": {"productionItemId": "new", "readiness": {"state": "VIDEO_READY"}},
+        }
+        rules = [
+            {"channelId": "auth-bad", "enabled": True, "oauthConnected": False, "quota": 4, "distributionStrategy": "balanced"},
+            {"channelId": "busy", "enabled": True, "oauthConnected": True, "quota": 4, "distributionStrategy": "balanced"},
+            {"channelId": "free", "enabled": True, "oauthConnected": True, "quota": 4, "distributionStrategy": "balanced"},
+        ]
+        assignments = {
+            "locked-1": {"productionItemId": "locked-1", "channelId": "busy", "source": "manual", "locked": True},
+            "locked-2": {"productionItemId": "locked-2", "channelId": "busy", "source": "manual", "locked": True},
+        }
+
+        preview = build_distribution_preview(items, rules, assignments)
+
+        row = next(item for item in preview["assignments"] if item["productionItemId"] == "new")
+        self.assertEqual(row["channelId"], "free")
+        self.assertEqual(row["reason"], "balanced")
+
+    def test_bridge_preview_preserves_confirmed_snapshot_as_locked_and_does_not_redistribute_it(self):
+        """Confirmed/scheduled work must never be moved by an ordinary auto-preview."""
+        settings = Settings(
+            youtube_publication_items={
+                "pi-confirmed": {"productionItemId": "pi-confirmed", "readiness": {"state": "VIDEO_READY"}},
+                "pi-new": {"productionItemId": "pi-new", "readiness": {"state": "VIDEO_READY"}},
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 2},
+                "channel-b": {"channelId": "channel-b", "enabled": True, "quota": 2},
+            },
+            youtube_publication_snapshots={
+                "snap-1": {"id": "snap-1", "productionItemId": "pi-confirmed", "channelId": "channel-b",
+                           "requestedPublishAt": "2026-11-15T04:00:00+03:00"},
+            },
+            youtube_publication_executions={
+                "snap-1": {"snapshotId": "snap-1", "productionItemId": "pi-confirmed", "overallStatus": "SCHEDULED",
+                           "youtubeVideoId": None, "steps": {}},
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({})
+
+        rows = {row["productionItemId"]: row for row in result["publicationPreview"]["assignments"]}
+        self.assertEqual(rows["pi-confirmed"]["channelId"], "channel-b")
+        self.assertTrue(rows["pi-confirmed"]["locked"])
+        self.assertEqual(rows["pi-confirmed"]["reason"], "confirmed_snapshot")
+        self.assertNotEqual(rows["pi-new"]["productionItemId"], "pi-confirmed")
+
+
+class PublicationV2SchedulerTests(unittest.TestCase):
+    def test_bulk_range_schedules_each_channel_independently_on_quarter_hour_grid(self):
+        """A bulk window is a per-channel boundary, never one global timeline shared by every channel."""
+        assignments = [
+            {"productionItemId": "a-1", "channelId": "channel-a", "source": "auto", "locked": False, "reason": "auto"},
+            {"productionItemId": "b-1", "channelId": "channel-b", "source": "auto", "locked": False, "reason": "auto"},
+            {"productionItemId": "a-2", "channelId": "channel-a", "source": "auto", "locked": False, "reason": "auto"},
+            {"productionItemId": "b-2", "channelId": "channel-b", "source": "auto", "locked": False, "reason": "auto"},
+        ]
+        rules = {
+            "channel-a": {"channelId": "channel-a", "timezone": "Europe/Minsk", "intervalMinutes": 15},
+            "channel-b": {"channelId": "channel-b", "timezone": "Europe/Minsk", "intervalMinutes": 30},
+        }
+
+        scheduled = apply_bulk_schedule_range(assignments, {
+            "date": "2026-11-15", "startTime": "04:00", "endTime": "05:00",
+            "timezone": "Europe/Minsk",
+        }, rules)
+
+        by_id = {row["productionItemId"]: row["publishAt"] for row in scheduled}
+        self.assertEqual(by_id, {
+            "a-1": "2026-11-15T04:00:00+03:00",
+            "a-2": "2026-11-15T04:15:00+03:00",
+            "b-1": "2026-11-15T04:00:00+03:00",
+            "b-2": "2026-11-15T04:30:00+03:00",
+        })
+        self.assertTrue(all(datetime.fromisoformat(value).minute in {0, 15, 30, 45} for value in by_id.values()))
+
+    def test_scheduler_rejects_non_quarter_hour_start_or_interval(self):
+        """All automatic slots must stay on :00/:15/:30/:45 so UI and backend cannot disagree."""
+        with self.assertRaisesRegex(ValueError, "15"):
+            build_channel_schedule(
+                ["pi-1"],
+                {"channelId": "channel-a", "firstPublishAt": "2026-09-10T04:07:00+03:00",
+                 "intervalMinutes": 15, "timezone": "Europe/Minsk"},
+            )
+        with self.assertRaisesRegex(ValueError, "15"):
+            build_channel_schedule(
+                ["pi-1"],
+                {"channelId": "channel-a", "firstPublishAt": "2026-09-10T04:00:00+03:00",
+                 "intervalMinutes": 20, "timezone": "Europe/Minsk"},
+            )
 
     def test_scheduler_moves_next_slot_to_next_day_when_interval_leaves_publication_window(self):
         """A naive interval-only scheduler would incorrectly publish this third item at midnight."""
