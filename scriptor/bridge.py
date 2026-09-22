@@ -11633,6 +11633,54 @@ def prepare_montage(payload: dict) -> dict:
                     )
                     break
                 selection = None
+
+        # Before any current-video reuse, recover a new family from the full
+        # semantic ladder. First keep only verified SAFE footage; then deep-
+        # verify UNCERTAIN candidates. Historical/batch use is a soft diversity
+        # preference here: a family seen in another video is still new inside
+        # this video and must beat repeating one already on this timeline.
+        if selection is None:
+            for allow_uncertain in (False, True):
+                try:
+                    selection = _select_montage_candidate(
+                        scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
+                        relaxed_hits=relaxed_hits, category_hits=category_hits,
+                        safe_context_hits=safe_context_hits,
+                        required_duration=required_source_duration,
+                        match_threshold=settings.montage_match_threshold,
+                        used_paths=set(), used_families=set(),
+                        project_used_paths=project_used,
+                        project_used_families=project_used_families,
+                        reserved_paths=set(), reserved_families=set(),
+                        source_exists=source_exists, source_duration=verified_duration,
+                        source_allowed=lambda item, allow=allow_uncertain: _montage_screen_text_safe(
+                            index, item, allow_uncertain=allow,
+                        ),
+                        recent_project_paths=recent_project_paths,
+                        immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                        position_bucket=position_bucket,
+                        batch_family_buckets=family_buckets,
+                        diversity_seed=f"{titles[scenario_index]}|{scenario_index}|semantic-rescue",
+                        allow_safe_reuse=False,
+                        allow_below_threshold=True,
+                    )
+                except MontageSelectionFailure as error:
+                    selection_failure_diagnostics = error.diagnostics
+                    selection = None
+                if selection is None:
+                    continue
+                if not claim_batch_source(selection.item, selection.source_family, position_bucket):
+                    selection = replace(
+                        selection,
+                        reused_reserved_candidate=True,
+                        reused=True,
+                        position_rotation_reason=(
+                            "новая family внутри ролика: межроликовый/history reservation ослаблен "
+                            "до повторов текущего видео"
+                        ),
+                    )
+                break
+
         preparation_metrics["selection"] += (time.perf_counter() - selection_started) * 1000
         if selection is not None:
             selected = selection.item
