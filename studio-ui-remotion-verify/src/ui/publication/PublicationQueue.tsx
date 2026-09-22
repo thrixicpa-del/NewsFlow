@@ -106,7 +106,7 @@ export function PublicationQueue({
     {
       id: "number",
       header: "",
-      cell: ({ row }) => <button className="nf-expand" aria-label="Раскрыть ход публикации" onClick={() => setExpanded((items) => items.includes(row.original.snapshotId) ? items.filter((id) => id !== row.original.snapshotId) : [...items, row.original.snapshotId])}>{expanded.includes(row.original.snapshotId) ? "−" : "+"}</button>,
+      cell: ({ row }) => <button className="nf-expand" aria-label={`Раскрыть ход публикации ${row.original.title || row.original.productionItemId}`} onClick={() => setExpanded((items) => items.includes(row.original.snapshotId) ? items.filter((id) => id !== row.original.snapshotId) : [...items, row.original.snapshotId])}>{expanded.includes(row.original.snapshotId) ? "−" : "+"}</button>,
     },
     { accessorKey: "title", header: "Ролик", cell: ({ row }) => <b>{row.original.title || row.original.productionItemId}</b> },
     { id: "channel", header: "Канал", cell: ({ row }) => channelName(row.original.channelId) },
