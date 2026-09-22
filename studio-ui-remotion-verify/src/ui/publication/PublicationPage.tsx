@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Clock3, RefreshCw } from "lucide-react";
+import { CheckCircle2, Clock3, RefreshCw, Undo2 } from "lucide-react";
 import { Tabs } from "../components/tabs";
 import { UiButton } from "../components/button";
 import { ChannelSettingsSheet } from "./ChannelSettingsSheet";
@@ -47,7 +47,10 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   const [rules, setRules] = useState(model.channels);
   const [editingChannel, setEditingChannel] = useState<ChannelRow | null>(null);
   const [distribution, setDistribution] = useState<DistributionRow[]>([]);
+  const [distributionHistory, setDistributionHistory] = useState<DistributionRow[][]>([]);
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [selectedPresetName, setSelectedPresetName] = useState("");
   const [uploadConcurrency, setUploadConcurrency] = useState(model.uploadConcurrency);
   const [uploadStarting, setUploadStarting] = useState(false);
   const [continuing, setContinuing] = useState(false);
@@ -77,6 +80,19 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
 
   const name = (id: string) => rules.find((channel) => channel.channelId === id)?.name || id || "Не назначен";
   const refreshReadiness = () => void command("migrate-publication-v2");
+  const rememberDistribution = (next: DistributionRow[]) => {
+    if (distribution.length) {
+      setDistributionHistory((history) => [...history.slice(-19), distribution.map((row) => ({ ...row }))]);
+    }
+    setDistribution(next);
+  };
+  const undoDistribution = () => {
+    setDistributionHistory((history) => {
+      if (!history.length) return history;
+      setDistribution(history[history.length - 1].map((row) => ({ ...row })));
+      return history.slice(0, -1);
+    });
+  };
 
   const buildPreview = async (range?: BulkSchedule) => {
     const payload = {
@@ -88,7 +104,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       : await command("preview-publication-v2-distribution");
     const resultPreview = (result as (NewsFlowSnapshot & { publicationPreview?: Preview } | undefined))?.publicationPreview || null;
     if (!resultPreview) return;
-    setDistribution(resultPreview.assignments.map((assignment) => {
+    rememberDistribution(resultPreview.assignments.map((assignment) => {
       const video = model.videos.find((row) => row.id === assignment.productionItemId);
       return {
         productionItemId: assignment.productionItemId,
@@ -113,6 +129,30 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     void saveRules();
     setEditingChannel(null);
   };
+  const savePreset = async () => {
+    const nameValue = presetName.trim();
+    if (!nameValue) return;
+    await command("save-publication-v2-rule-preset", {
+      name: nameValue,
+      rules: Object.fromEntries(rules.map((rule) => [rule.channelId, rule])),
+    });
+    setSelectedPresetName(nameValue);
+    setPresetName("");
+  };
+  const applyPreset = async () => {
+    const preset = model.rulePresets.find((item) => item.name === selectedPresetName);
+    if (!preset) return;
+    await command("apply-publication-v2-rule-preset", { name: preset.name });
+    setRules((current) => current.map((row) => {
+      const saved = preset.rules[row.channelId];
+      return saved ? { ...row, ...saved, name: row.name, oauthConnected: row.oauthConnected, subscribers: row.subscribers, assigned: row.assigned } : row;
+    }));
+  };
+  const deletePreset = async () => {
+    if (!selectedPresetName) return;
+    await command("delete-publication-v2-rule-preset", { name: selectedPresetName });
+    setSelectedPresetName("");
+  };
 
   const hasScheduleConflicts = distribution.some((row) => Boolean(row.warning));
   const confirm = async () => {
@@ -128,6 +168,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
           locked: row.locked,
         })),
     });
+    setDistributionHistory([]);
     setTab("queue");
   };
 
@@ -196,7 +237,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     setRules((current) => current.map((row) => row.channelId === next.channelId ? next : row));
   };
   const updateDistribution = (id: string, patch: Partial<DistributionRow>) =>
-    setDistribution((current) => current.map((row) => row.productionItemId === id ? { ...row, ...patch } : row));
+    rememberDistribution(distribution.map((row) => row.productionItemId === id ? { ...row, ...patch } : row));
 
   const dayPlanRows: DistributionRow[] = distribution.length
     ? distribution
@@ -235,7 +276,17 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     />
 
     {tab === "videos" ? <VideosTable rows={model.videos} onSelectionChange={setSelectedVideoIds}/> : null}
-    {tab === "channels" ? <ChannelsTable rows={rules} onEdit={setEditingChannel}/> : null}
+    {tab === "channels" ? <section>
+      <div className="nf-preset-toolbar">
+        <div><b>Пресеты каналов</b><small>Квоты, диапазоны, 15-минутный тайминг и automation rules.</small></div>
+        <label>Пресет<select aria-label="Пресет правил каналов" value={selectedPresetName} onChange={(event) => setSelectedPresetName(event.target.value)}><option value="">Выберите…</option>{model.rulePresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select></label>
+        <UiButton variant="secondary" disabled={!selectedPresetName} onClick={() => void applyPreset()}>Применить</UiButton>
+        <UiButton variant="ghost" disabled={!selectedPresetName} onClick={() => void deletePreset()}>Удалить</UiButton>
+        <label>Новый пресет<input aria-label="Название нового пресета" value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder="Будни / Срочные новости"/></label>
+        <UiButton variant="secondary" disabled={!presetName.trim()} onClick={() => void savePreset()}>Сохранить текущие</UiButton>
+      </div>
+      <ChannelsTable rows={rules} onEdit={setEditingChannel}/>
+    </section> : null}
 
     {tab === "distribution" ? <section>
       <div className="nf-section-toolbar">
@@ -248,6 +299,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
           </small>
         </div>
         <div>
+          <UiButton variant="ghost" disabled={!distributionHistory.length} onClick={undoDistribution}><Undo2 size={15}/>Отменить изменение</UiButton>
           <UiButton variant="secondary" onClick={() => void buildPreview()}><RefreshCw size={15}/>Пересчитать</UiButton>
           <UiButton variant="primary" disabled={!distribution.some((row) => row.channelId) || hasScheduleConflicts} onClick={() => void confirm()}><CheckCircle2 size={15}/>Подтвердить назначения</UiButton>
         </div>
