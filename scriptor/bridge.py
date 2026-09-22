@@ -14677,6 +14677,20 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 save_settings(settings)
                 blocked.append((snapshot_id, str(first["message"])))
                 return
+            snapshot_record = dict(snapshots[snapshot_id])
+            metadata = dict(snapshot_record.get("metadata", {}) or {})
+            channel_id = str(snapshot_record.get("channelId", "")).strip()
+            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
+        try:
+            _profile, validated_credentials = fetch_current_channel(credentials)
+        except _BRIDGE_OPERATION_ERRORS as exc:
+            with lock:
+                fail_publication_stage(settings, snapshot_id, "AUTH_CHECK", classify_publication_error(exc), str(exc))
+                save_settings(settings)
+                blocked.append((snapshot_id, str(exc)))
+            return
+        with lock:
+            settings.youtube_oauth_tokens[channel_id] = json.dumps(validated_credentials, ensure_ascii=False)
             try:
                 begin_upload_attempt(settings, snapshot_id, worker_id)
                 # This is the durable crash/restart boundary: the RUNNING
@@ -14685,11 +14699,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
             except _BRIDGE_OPERATION_ERRORS as exc:
                 blocked.append((snapshot_id, str(exc)))
                 return
-            snapshot_record = dict(snapshots[snapshot_id])
-            metadata = dict(snapshot_record.get("metadata", {}) or {})
-            channel_id = str(snapshot_record.get("channelId", "")).strip()
         try:
-            credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
             body = build_private_video_insert_body(
                 title=resolve_publication_upload_title(metadata), description=str(metadata.get("description", "")),
                 tags=[str(value) for value in metadata.get("tags", []) if str(value).strip()],
@@ -14697,7 +14707,7 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
                 privacy=str(snapshot_record.get("privacy", "private")),
             )
-            result, refreshed = upload_private_video(credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
+            result, refreshed = upload_private_video(validated_credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
                                                        thumbnail_path="")
             with lock:
                 complete_upload_attempt(settings, snapshot_id, worker_id, result)

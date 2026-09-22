@@ -1518,6 +1518,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(bridge, "upload_private_video") as upload:
                 result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
 
@@ -1597,6 +1598,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings") as save, \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(bridge, "upload_private_video", return_value=({"videoId": "yt-new", "videoUrl": "https://youtu.be/yt-new", "privacyStatus": "private"}, {"token": "refreshed"})) as upload:
                 result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
 
@@ -1641,6 +1643,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(
                      bridge,
                      "upload_private_video",
@@ -1683,6 +1686,7 @@ class PublicationV2BridgeTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "save_settings"), \
                  patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "fetch_current_channel", return_value=({"channelId": "UC-test", "name": "Test", "subscribers": 0, "viewsTotal": 0}, {"token": "safe"})), \
                  patch.object(bridge, "upload_private_video", side_effect=lambda *args, **kwargs: next(responses)) as upload:
                 result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1", "snapshot-2"]})
 
