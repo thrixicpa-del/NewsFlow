@@ -621,10 +621,10 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
         weekdays = list(range(7))
     automation_source = dict(source.get("automation", {}) or {})
     automation = {
-        "upload": bool(automation_source.get("upload", True)),
-        "metadata": bool(automation_source.get("metadata", True)),
+        "upload": True,
+        "metadata": True,
         "thumbnail": bool(automation_source.get("thumbnail", True)),
-        "ads": bool(automation_source.get("ads", True)),
+        "ads": True,
         "post": bool(automation_source.get("post", True)),
         "cards": bool(automation_source.get("cards", True)),
         "endScreen": bool(automation_source.get("endScreen", True)),
@@ -989,7 +989,7 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
             "videoPath": str(artifact.get("path", "")), "thumbnailPath": str(thumbnail.get("path", "")), "metadata": metadata,
             "durationSeconds": duration_seconds, "monetized": monetized,
             "adPolicy": {
-                "enabled": monetized and frozen_automation["ads"],
+                "enabled": monetized,
                 "manualIntervalSeconds": 39,
                 "automaticSlotsEnabled": True,
             },
@@ -1006,10 +1006,10 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
         execution["plannedPublishAt"] = publish_at
         if not frozen_automation["thumbnail"]:
             execution["steps"]["THUMBNAIL"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "channel_policy"}}
-        if not monetized or not frozen_automation["ads"]:
+        if not monetized:
             execution["steps"]["ADS"] = {
                 **_step("NOT_REQUIRED"),
-                "providerResult": {"mode": "NONE", "reason": "channel_not_monetized_or_ads_disabled"},
+                "providerResult": {"mode": "NONE", "reason": "channel_not_monetized"},
             }
         if not frozen_automation["post"]:
             execution["steps"]["POST"] = {**_step("NOT_REQUIRED"), "providerResult": {"reason": "channel_policy"}}
