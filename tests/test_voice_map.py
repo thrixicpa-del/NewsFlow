@@ -647,7 +647,7 @@ class VoiceMapTests(unittest.TestCase):
 
         self.assertEqual(len(scenes), 1)
         self.assertAlmostEqual(scenes[0]["duration"], 6.398, places=6)
-        self.assertAlmostEqual(scenes[0]["minimum_footage_duration"], 6.398, places=6)
+        self.assertAlmostEqual(scenes[0]["minimum_footage_duration"], 6.0, places=6)
         self.assertEqual(scenes[0]["voice_segment_id"], 29)
         self.assertEqual(scenes[0]["voice_segment_ids"], [29])
         self.assertEqual(scenes[0]["narration_start"], 0.0)
@@ -660,6 +660,10 @@ class VoiceMapTests(unittest.TestCase):
         })
         scenes, _ = bridge._voice_map_scenes(status)
         self.assertEqual([round(scene["duration"], 3) for scene in scenes], [6.0, 6.61])
+        self.assertEqual(
+            [round(scene["minimum_footage_duration"], 3) for scene in scenes],
+            [6.0, 6.0],
+        )
 
     def test_prepare_montage_uses_voice_map_timing_instead_of_proportional_fitter(self):
         footage = self.root / "footage"

@@ -3724,7 +3724,9 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
             "narration": " ".join(narration_parts).strip(),
             "visual_query_en": resolved_query(dominant),
             "duration": duration,
-            "minimum_footage_duration": duration,
+            "minimum_footage_duration": min(
+                duration, _VOICE_MAP_CUTTER_TARGET_SECONDS,
+            ),
             "voice_segment_id": int(dominant["id"]),
             "voice_segment_ids": [int(segment["id"]) for segment in overlapping],
             "narration_start": beat_start,
