@@ -993,6 +993,9 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
                 "manualIntervalSeconds": 39,
                 "automaticSlotsEnabled": True,
             },
+            "communityPost": {
+                "callToAction": str(getattr(settings, "seo_call_to_action", "") or "").strip(),
+            },
             "automation": frozen_automation,
             "privacy": privacy, "publishMode": mode, "requestedPublishAt": publish_at,
             "idempotencyKey": sha256(f"{production_id}|{channel_id}".encode()).hexdigest(), "createdAt": _now(),
