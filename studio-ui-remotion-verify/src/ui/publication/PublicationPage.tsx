@@ -321,6 +321,14 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       suggestion: "",
     }));
 
+  const selectedVideoSet = new Set(selectedVideoIds);
+  const headerStartRows = selectedVideoIds.length
+    ? model.queue.filter((row) => selectedVideoSet.has(row.productionItemId))
+    : model.queue;
+  const headerCanStart = headerStartRows.some((row) =>
+    !row.youtubeVideoId && !row.active && uploadableStatuses.has(String(row.status || "").toUpperCase())
+  );
+
   return <div className="nf-publication-page">
     <PublicationHeader
       model={model}
@@ -328,6 +336,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       onPreview={() => void buildPreview()}
       onStart={() => void start()}
       starting={uploadStarting}
+      canStart={headerCanStart}
     />
     <Tabs<PublicationTab>
       value={tab}
