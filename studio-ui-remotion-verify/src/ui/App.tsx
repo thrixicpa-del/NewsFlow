@@ -8350,7 +8350,7 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
             <input
               type="number"
               min="50"
-              max="5000"
+              max="500"
               value={tagCharLimit}
               onChange={(event) => setTagCharLimit(event.target.value)}
               onBlur={() =>
@@ -8362,7 +8362,7 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
             />
           </label>
           <small>
-            Сейчас: до {tagCharLimit || "—"} символов вместе с разделителями.
+            Сейчас: до {tagCharLimit || "—"} символов по правилам YouTube; запятые и кавычки для тегов с пробелами учитываются.
           </small>
           <Button onClick={save}>Применить</Button>
           <Button

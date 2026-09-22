@@ -3,12 +3,37 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 YOUTUBE_TAG_CHARACTER_LIMIT = 500
+YOUTUBE_DESCRIPTION_BYTE_LIMIT = 5000
+
+
+def youtube_tag_character_length(tags: Iterable[object]) -> int:
+    """Return YouTube's effective tag-list length, including commas and quoted spaces."""
+
+    normalized = [" ".join(str(value or "").split()) for value in tags]
+    normalized = [value for value in normalized if value]
+    if not normalized:
+        return 0
+    return (
+        sum(len(value) + (2 if " " in value else 0) for value in normalized)
+        + max(0, len(normalized) - 1)
+    )
+
+
+def validate_youtube_description(value: object, *, limit: int = YOUTUBE_DESCRIPTION_BYTE_LIMIT) -> str:
+    """Return a YouTube-safe description or raise before an upload can fail."""
+
+    description = str(value or "")
+    if "<" in description or ">" in description:
+        raise ValueError("Описание YouTube не может содержать символы < или >")
+    if len(description.encode("utf-8")) > int(limit):
+        raise ValueError(f"Описание YouTube превышает лимит {int(limit)} байт UTF-8")
+    return description
 
 
 def parse_google_account_email(payload: dict[str, Any]) -> str:
@@ -156,9 +181,9 @@ def normalize_youtube_tags(tags: Iterable[object], *, limit: int = YOUTUBE_TAG_C
         identity = tag.casefold()
         if not tag or identity in seen:
             continue
-        candidate_length = len(",".join([*normalized, tag]))
+        candidate_length = youtube_tag_character_length([*normalized, tag])
         if candidate_length > limit:
-            break
+            continue
         normalized.append(tag)
         seen.add(identity)
     return normalized
@@ -228,10 +253,13 @@ def build_private_video_insert_body(
         if scheduled.tzinfo is None:
             raise ValueError("Время публикации должно содержать часовой пояс")
         status["publishAt"] = scheduled.isoformat()
+    if "<" in clean_title or ">" in clean_title:
+        raise ValueError("Заголовок YouTube не может содержать символы < или >")
+    clean_description = validate_youtube_description(description)
     return {
         "snippet": {
             "title": clean_title,
-            "description": str(description),
+            "description": clean_description,
             "tags": normalize_youtube_tags(tags),
         },
         "status": status,

@@ -171,6 +171,8 @@ from .youtube_api import (
     fetch_youtube_video_state,
     set_youtube_thumbnail,
     upload_private_video,
+    validate_youtube_description,
+    youtube_tag_character_length,
 )
 from .youtube_engagement import (
     build_engagement_plan,
@@ -4949,6 +4951,11 @@ def generate_scenarios(payload: dict) -> dict:
     finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected))
     current.update({job.request.index: job for job in finished})
     save_session(titles, list(current.values()))
+    for job in finished:
+        if job.state == RunState.DONE and str(job.result or "").strip():
+            _sync_scenario_to_seo(
+                settings, titles[job.request.index], job, create_if_missing=False,
+            )
     save_settings(settings)
     return snapshot()
 
@@ -4959,8 +4966,16 @@ def rename_scenario_command(payload: dict) -> dict:
     titles, jobs = load_session()
     if not 0 <= index < len(titles):
         raise ValueError("Сценарий не найден")
+    previous_title = titles[index]
     titles, jobs = rename_scenario(titles, jobs, index, title)
     save_session(titles, jobs)
+    updated_job = next((job for job in jobs if job.request.index == index), None)
+    settings = load_settings()
+    if _sync_scenario_to_seo(
+        settings, titles[index], updated_job,
+        create_if_missing=False, legacy_titles=(previous_title,),
+    ):
+        save_settings(settings)
     return snapshot()
 
 
@@ -4997,6 +5012,17 @@ def remove_scenarios_command(payload: dict) -> dict:
             *(str(value).strip() for value in settings.deleted_scenario_production_ids if str(value).strip()),
             *removed_production_ids,
         })[-10000:]
+        settings.seo_queue = [
+            item for item in settings.seo_queue
+            if not (
+                (str(item.get("production_item_id", "")).strip()
+                 and str(item.get("production_item_id", "")).strip() in removed_production_ids)
+                or (
+                    not str(item.get("production_item_id", "")).strip()
+                    and " ".join(str(item.get("source_title", "")).split()).casefold() in removed_keys
+                )
+            )
+        ]
         root = Path(settings.voicer_output_folder).resolve()
         # Scenario indexes are compacted after deletion. Carry each retained
         # audio mapping to its new index; otherwise the next row can inherit a
@@ -5042,7 +5068,13 @@ def save_scenario_text(payload: dict) -> dict:
     previous = current.get(index)
     request = previous.request if previous else ScenarioRequest(index, titles[index], "")
     current[index] = Job(request, RunState.DONE, text, "")
-    save_session(titles, list(current.values()))
+    updated_jobs = list(current.values())
+    save_session(titles, updated_jobs)
+    settings = load_settings()
+    if _sync_scenario_to_seo(
+        settings, titles[index], current[index], create_if_missing=False,
+    ):
+        save_settings(settings)
     return snapshot()
 
 
@@ -5197,22 +5229,108 @@ def _sync_finished_scenarios_to_montage(settings: Settings, scenarios: list[dict
     return changed
 
 
-def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bool:
-    """Keep one SEO/tags row per scenario title and refresh its finished text."""
-    existing = next((item for item in settings.seo_queue
-                     if str(item.get("source_title", "")).casefold() == title.casefold()), None)
+def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None, *,
+                          create_if_missing: bool = True,
+                          legacy_titles: tuple[str, ...] = ()) -> bool:
+    """Keep SEO/tags attached to the durable ProductionItem and invalidate stale results."""
+    production_item_id = str(
+        getattr(getattr(job, "request", None), "production_item_id", "") or ""
+    ).strip()
+    title_keys = {
+        str(value).strip().casefold()
+        for value in (title, *legacy_titles)
+        if str(value).strip()
+    }
+    existing = None
+    if production_item_id:
+        existing = next((
+            item for item in settings.seo_queue
+            if str(item.get("production_item_id", "")).strip() == production_item_id
+        ), None)
+    if existing is None and title_keys:
+        existing = next((
+            item for item in settings.seo_queue
+            if str(item.get("source_title", "")).strip().casefold() in title_keys
+            and (
+                not str(item.get("production_item_id", "")).strip()
+                or not production_item_id
+                or str(item.get("production_item_id", "")).strip() == production_item_id
+            )
+        ), None)
+
     script = job.result if job else ""
     requirements = _scenario_preferences(job)
     if existing is None:
-        settings.seo_queue.append({"source_title": title, "script": script, "requirements": requirements,
-                                   "status": "Ожидает", "title": "", "description": "", "hashtags": [], "tags": [],
-                                   "tags_status": "Ожидают", "tags_error": "", "error": ""})
+        if not create_if_missing:
+            return False
+        settings.seo_queue.append({
+            "production_item_id": production_item_id,
+            "source_title": title,
+            "script": script,
+            "requirements": requirements,
+            "status": "Ожидает",
+            "title": "",
+            "description": "",
+            "hashtags": [],
+            "tags": [],
+            "tags_status": "Ожидают",
+            "tags_error": "",
+            "error": "",
+        })
         return True
-    changed = (existing.get("source_title") != title or existing.get("script", "") != script
-               or existing.get("requirements", "") != requirements)
-    if changed:
-        existing.update({"source_title": title, "script": script, "requirements": requirements})
-    return changed
+
+    identity_changed = bool(
+        production_item_id
+        and str(existing.get("production_item_id", "")).strip() != production_item_id
+    )
+    content_changed = (
+        str(existing.get("source_title", "")) != title
+        or str(existing.get("script", "")) != script
+        or str(existing.get("requirements", "")) != requirements
+    )
+    if identity_changed:
+        existing["production_item_id"] = production_item_id
+    if content_changed:
+        existing.update({
+            "source_title": title,
+            "script": script,
+            "requirements": requirements,
+            "status": "Ожидает",
+            "title": "",
+            "description": "",
+            "hashtags": [],
+            "error": "",
+            "tags": [],
+            "tags_status": "Ожидают",
+            "tags_error": "",
+        })
+    return identity_changed or content_changed
+
+
+def _current_seo_queue_indices(settings: Settings, titles: list[str], jobs: list[Job]) -> list[int]:
+    """Return only SEO rows that belong to the active scenario batch."""
+
+    current_ids = {
+        identity
+        for job in jobs
+        if (identity := str(getattr(job.request, "production_item_id", "") or "").strip())
+    }
+    current_titles = {
+        " ".join(str(title).split()).casefold()
+        for title in titles
+        if str(title).strip()
+    }
+    result: list[int] = []
+    for index, item in enumerate(settings.seo_queue):
+        production_item_id = str(item.get("production_item_id", "")).strip()
+        if production_item_id:
+            if production_item_id in current_ids:
+                result.append(index)
+            continue
+        title_key = " ".join(str(item.get("source_title", "")).split()).casefold()
+        if title_key in current_titles:
+            result.append(index)
+    return result
 
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
@@ -8723,14 +8841,15 @@ def save_seo_settings(payload: dict) -> dict:
     prefix_ranges = payload.get("descriptionPrefixRanges")
     prefix_presets = payload.get("descriptionPrefixPresets")
     fixed_prefix = payload.get("fixedDescriptionPrefix")
-    if (template or provider in {"agent", "openai"} or call_to_action or isinstance(use_script_context, bool)
-            or isinstance(prefix_ranges, list) or isinstance(prefix_presets, list) or isinstance(fixed_prefix, str)):
+    if (template or provider in {"agent", "openai"} or "callToAction" in payload
+            or isinstance(use_script_context, bool) or isinstance(prefix_ranges, list)
+            or isinstance(prefix_presets, list) or isinstance(fixed_prefix, str)):
         settings = load_settings()
         if provider in {"agent", "openai"}:
             settings.seo_provider = provider
         if template:
             settings.seo_prompt_template = template
-        if call_to_action:
+        if "callToAction" in payload:
             settings.seo_call_to_action = call_to_action[:1000]
         if isinstance(use_script_context, bool):
             settings.seo_use_script_context = use_script_context
@@ -8765,7 +8884,7 @@ def save_tag_limits(payload: dict) -> dict:
     settings = load_settings()
     try:
         settings.hashtag_batch_size = max(1, min(30, int(payload.get("hashtagBatchSize", settings.hashtag_batch_size))))
-        settings.tag_char_limit = max(50, min(5000, int(payload.get("tagCharLimit", settings.tag_char_limit))))
+        settings.tag_char_limit = max(50, min(500, int(payload.get("tagCharLimit", settings.tag_char_limit))))
     except (TypeError, ValueError) as exc:
         raise ValueError("Укажите целое число для пачки хештегов и лимита тегов") from exc
     save_settings(settings)
@@ -8788,17 +8907,22 @@ def _parse_seo_json(raw: str) -> dict:
     if not isinstance(hashtags, list):
         hashtags = []
     clean_hashtags = []
+    seen_hashtags: set[str] = set()
     for item in hashtags:
         word = re.sub(r"[^\w-]", "", str(item).strip().lstrip("#").replace(" ", ""))
-        if word and word not in clean_hashtags:
-            clean_hashtags.append(f"#{word}")
+        hashtag = f"#{word}" if word else ""
+        identity = hashtag.casefold()
+        if hashtag and identity not in seen_hashtags:
+            clean_hashtags.append(hashtag)
+            seen_hashtags.add(identity)
     return {"title": str(value.get("title", "")).strip(),
             "description": str(value.get("description", "")).strip(),
             "hashtags": clean_hashtags,
             "tags": [str(item).strip() for item in tags if str(item).strip()]}
 
 
-def _seo_format_instruction() -> str:
+def _seo_format_instruction(hashtag_count: int) -> str:
+    count = max(1, min(30, int(hashtag_count)))
     return (
         "\n\nЗадача: напиши готовое описание именно этого одного ролика по теме и контексту сценария. "
         "description должен состоять из 2–4 содержательных предложений (примерно 300–900 символов), объяснять, "
@@ -8806,8 +8930,10 @@ def _seo_format_instruction() -> str:
         "Последнее предложение — самостоятельно придуманный, разный и релевантный именно этой теме естественный призыв посмотреть ролик. Не выдумывай факты. Никогда не пиши "
         "«пришлите список», «укажите тему», «я подготовлю», инструкции, планы или ответ о своей работе.\n\n"
         "Формат обязателен: верни только JSON. description — один готовый цельный текст без Markdown, рубрик, "
-        "подписей «SEO-описание», «хештеги», «призыв» или «теги». hashtags — отдельный массив 3–5 значений "
-        "с символом #. Не добавляй поле tags: теги создаются отдельным этапом."
+        "подписей «SEO-описание», «хештеги», «призыв» или «теги». "
+        f"hashtags — отдельный массив ровно {count} значений с символом #. "
+        "Это точное количество имеет приоритет над любыми другими числами хештегов в пользовательском шаблоне. "
+        "Не добавляй поле tags: теги создаются отдельным этапом."
     )
 
 
@@ -8837,7 +8963,7 @@ def _limit_tags(tags: list[str], limit: int) -> list[str]:
         key = tag.casefold()
         if not tag or key in used:
             continue
-        candidate_length = sum(len(value) for value in result) + (2 * len(result)) + len(tag)
+        candidate_length = youtube_tag_character_length([*result, tag])
         if candidate_length > limit:
             continue
         result.append(tag)
@@ -8877,7 +9003,7 @@ def generate_seo(payload: dict) -> dict:
                       .replace("{excerpt}", excerpt)
                       + f"\n\nТЕМА РОЛИКА: {source_title}"
                       + (f"\nКОНТЕКСТ ГОТОВОГО СЦЕНАРИЯ: {excerpt}" if excerpt else "\nРаботай только по названию темы; не выдумывай конкретные факты.")
-                      + _seo_format_instruction()
+                      + _seo_format_instruction(settings.hashtag_batch_size)
                       + f"\nСделай ровно {settings.hashtag_batch_size} хештегов: это отдельная пачка для этого сценария.")
             if settings.seo_call_to_action:
                 prompt += f"\n\nДополнительное пожелание к призыву к просмотру: {settings.seo_call_to_action}"
@@ -8898,6 +9024,7 @@ def generate_seo(payload: dict) -> dict:
                 ranges=settings.seo_description_prefix_ranges,
                 fixed_prefix=settings.seo_description_prefix,
             )
+            description = validate_youtube_description(description)
             item.update(status="Готово", title=parsed["title"], description=description,
                         hashtags=parsed["hashtags"], error="")
         except _BRIDGE_OPERATION_ERRORS as exc:
@@ -9002,6 +9129,7 @@ def save_seo_text(payload: dict) -> dict:
     description = str(payload.get("description", "")).strip()
     if not description:
         raise ValueError("SEO-описание не может быть пустым")
+    description = validate_youtube_description(description)
     raw_hashtags = payload.get("hashtags", [])
     if isinstance(raw_hashtags, str):
         raw_hashtags = re.split(r"[,\n\s]+", raw_hashtags)
@@ -12935,10 +13063,13 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             if payload.get("replaceOutput") and _is_valid_montage_output(previous_output)
             else ""
         )
-        _montage_task_update(settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
-                             detail="Сценарий и MP3 готовы", error="", title=titles[index],
-                             voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""), outputPath=retained_output,
-                             queuePid=os.getpid())
+        _montage_task_update(
+            settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
+            detail="Сценарий и MP3 готовы", error="", title=titles[index],
+            productionItemId=str(jobs_by_index[index].request.production_item_id).strip(),
+            voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""),
+            outputPath=retained_output, queuePid=os.getpid(),
+        )
     save_settings(settings)
     download_semaphore = threading.BoundedSemaphore(settings.montage_download_workers)
     # Shared only by this queue invocation.  It reserves footage as soon as a
@@ -13206,9 +13337,59 @@ def remove_montage_projects(payload: dict) -> dict:
 def package_outputs(payload: dict) -> dict:
     settings = load_settings()
     _titles, jobs = load_session()
-    jobs_by_title = {job.request.title: job for job in jobs if job.state == RunState.DONE}
+    ready_jobs = [job for job in jobs if job.state == RunState.DONE]
+    jobs_by_title = {
+        str(getattr(job.request, "title", "")): job
+        for job in ready_jobs
+        if str(getattr(job.request, "title", "")).strip()
+    }
+    jobs_by_index = {
+        int(index): job
+        for job in ready_jobs
+        if isinstance((index := getattr(job.request, "index", None)), int)
+    }
+    jobs_by_id = {
+        identity: job
+        for job in ready_jobs
+        if (identity := str(getattr(job.request, "production_item_id", "") or "").strip())
+    }
+    jobs_by_safe_stem: dict[str, list[Job]] = {}
+    for job in ready_jobs:
+        job_title = str(getattr(job.request, "title", "") or "").strip()
+        if job_title:
+            jobs_by_safe_stem.setdefault(safe_filename(job_title).casefold(), []).append(job)
     covers_by_title = {str(item.get("title", "")): item for item in settings.cover_queue}
-    seo_by_title = {str(item.get("source_title", "")): item for item in settings.seo_queue if item.get("status") == "Готово"}
+    covers_by_id = {
+        str(item.get("production_item_id", "")).strip(): item
+        for item in settings.cover_queue
+        if str(item.get("production_item_id", "")).strip()
+    }
+    seo_ready = [item for item in settings.seo_queue if item.get("status") == "Готово"]
+    seo_by_title = {str(item.get("source_title", "")): item for item in seo_ready}
+    seo_by_id = {
+        str(item.get("production_item_id", "")).strip(): item
+        for item in seo_ready
+        if str(item.get("production_item_id", "")).strip()
+    }
+    task_ref_by_output: dict[str, tuple[int | None, str]] = {}
+    for key, raw in settings.montage_task_statuses.items():
+        if not isinstance(raw, dict):
+            continue
+        raw_output = str(raw.get("outputPath") or "").strip()
+        if not raw_output:
+            continue
+        try:
+            resolved_output = str(Path(raw_output).resolve()).casefold()
+        except OSError:
+            continue
+        try:
+            scenario_index = int(raw.get("scenarioIndex", key))
+        except (TypeError, ValueError):
+            scenario_index = None
+        task_ref_by_output[resolved_output] = (
+            scenario_index,
+            str(raw.get("productionItemId") or raw.get("production_item_id") or "").strip(),
+        )
     root = Path(settings.montage_output_folder) / "Результаты по роликам"
     created = 0
     for video in settings.pipeline_montage_outputs:
@@ -13227,12 +13408,32 @@ def package_outputs(payload: dict) -> dict:
         xml_source = Path(settings.montage_project_folder) / f"{safe_filename(title)}.fcpxml"
         if xml_source.is_file():
             shutil.copy2(xml_source, folder / f"{safe_filename(title)}.fcpxml")
-        job = jobs_by_title.get(title)
-        cover = covers_by_title.get(title)
-        seo = seo_by_title.get(title, {})
+        task_ref: tuple[int | None, str] = (None, "")
+        try:
+            task_ref = task_ref_by_output.get(str(source.resolve()).casefold(), (None, ""))
+        except OSError:
+            pass
+        scenario_index, task_production_item_id = task_ref
+        job = jobs_by_id.get(task_production_item_id) if task_production_item_id else None
+        if job is None and scenario_index is not None:
+            job = jobs_by_index.get(scenario_index)
+        if job is None:
+            job = jobs_by_title.get(title)
+        if job is None:
+            safe_matches = jobs_by_safe_stem.get(title.casefold(), [])
+            job = safe_matches[0] if len(safe_matches) == 1 else None
+        production_item_id = task_production_item_id or str(
+            getattr(getattr(job, "request", None), "production_item_id", "") or ""
+        ).strip()
+        scenario_title = str(getattr(getattr(job, "request", None), "title", "") or title)
+        cover = covers_by_id.get(production_item_id) if production_item_id else None
+        if cover is None:
+            cover = covers_by_title.get(scenario_title) or covers_by_title.get(title)
+        seo = seo_by_id.get(production_item_id, {}) if production_item_id else {}
+        if not seo:
+            seo = seo_by_title.get(scenario_title, seo_by_title.get(title, {}))
         tags = seo.get("tags", []) if isinstance(seo.get("tags", []), list) else []
         hashtags = seo.get("hashtags", []) if isinstance(seo.get("hashtags", []), list) else []
-        scenario_title = str(getattr(getattr(job, "request", None), "title", "") or title)
         seo_title = str(seo.get("title") or "")
         seo_phrases = seo.get("phrases", seo.get("keywords", []))
         if not isinstance(seo_phrases, list):
@@ -14349,10 +14550,22 @@ def run_auto_pipeline(payload: dict) -> dict:
     if enabled("seo"):
         transfer_scenarios({"target": "seo", "indices": indices})
         settings = load_settings()
-        pending_seo = [index for index, item in enumerate(settings.seo_queue)
-                       if item.get("status") != "Готово"]
+        current_seo = _current_seo_queue_indices(settings, titles, jobs)
+        pending_seo = [
+            index for index in current_seo
+            if settings.seo_queue[index].get("status") != "Готово"
+        ]
         if pending_seo:
             generate_seo({"indices": pending_seo, "chatUrl": payload.get("chatUrl", "")})
+        settings = load_settings()
+        current_seo = _current_seo_queue_indices(settings, titles, jobs)
+        pending_tags = [
+            index for index in current_seo
+            if settings.seo_queue[index].get("tags_status") != "Готово"
+            or not settings.seo_queue[index].get("tags")
+        ]
+        if pending_tags:
+            generate_tags({"indices": pending_tags, "chatUrl": payload.get("chatUrl", "")})
     if enabled("voice"):
         transfer_scenarios({"target": "voice", "indices": indices})
         generate_voice({"indices": indices})

@@ -6,14 +6,22 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scriptor import bridge
-from scriptor import config
+from scriptor import bridge, config
 from scriptor.config import FastGenKey, OpenAIKey, Settings, WProjectKey
-from scriptor.youtube_oauth import youtube_oauth_scopes
-from scriptor.youtube_api import parse_analytics_rows, parse_current_channel, parse_google_account_email
-from scriptor.youtube_api import build_private_video_insert_body, normalize_youtube_tags
 from scriptor.runner import RunState
-from scriptor.youtube_allocation import allocate_ready_jobs, build_allocation_summary, recommend_quota
+from scriptor.youtube_allocation import (
+    allocate_ready_jobs,
+    build_allocation_summary,
+    recommend_quota,
+)
+from scriptor.youtube_api import (
+    build_private_video_insert_body,
+    normalize_youtube_tags,
+    parse_analytics_rows,
+    parse_current_channel,
+    parse_google_account_email,
+)
+from scriptor.youtube_oauth import youtube_oauth_scopes
 from scriptor.youtube_publisher import (
     AnalyticsMetricPoint,
     PublicationJob,
@@ -114,6 +122,126 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(settings.seo_description_prefix, "Контакты: @newsflow")
         self.assertEqual(settings.seo_prompt_template, "Существующий SEO-промпт")
 
+    def test_operator_can_clear_saved_seo_call_to_action(self):
+        settings = Settings(seo_call_to_action="Старое пожелание")
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_seo_settings({"callToAction": ""})
+
+        self.assertEqual(settings.seo_call_to_action, "")
+
+    def test_tag_limit_is_capped_to_youtube_five_hundred_characters(self):
+        settings = Settings(tag_char_limit=500)
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_tag_limits({"hashtagBatchSize": 5, "tagCharLimit": 5000})
+
+        self.assertEqual(settings.tag_char_limit, 500)
+
+    def test_persisted_legacy_tag_limit_is_migrated_to_youtube_limit(self):
+        with TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            settings_path.write_text('{"tag_char_limit":5000}', encoding="utf-8")
+            with patch.object(config, "config_path", return_value=settings_path):
+                restored = config.load_settings()
+
+        self.assertEqual(restored.tag_char_limit, 500)
+
+    def test_seo_and_tags_become_stale_when_scenario_content_or_title_changes(self):
+        settings = Settings(seo_queue=[{
+            "production_item_id": "production-1",
+            "source_title": "Старое название",
+            "script": "Старый сценарий",
+            "requirements": "",
+            "status": "Готово",
+            "title": "Готовый SEO заголовок",
+            "description": "Готовое описание",
+            "hashtags": ["#старое"],
+            "tags": ["старый тег"],
+            "tags_status": "Готово",
+            "tags_error": "",
+            "error": "",
+        }])
+        job = SimpleNamespace(
+            request=SimpleNamespace(
+                production_item_id="production-1",
+                prompt="",
+            ),
+            result="Новый сценарий",
+        )
+
+        changed = bridge._sync_scenario_to_seo(
+            settings,
+            "Новое название",
+            job,
+            create_if_missing=False,
+            legacy_titles=("Старое название",),
+        )
+
+        self.assertTrue(changed)
+        row = settings.seo_queue[0]
+        self.assertEqual(row["production_item_id"], "production-1")
+        self.assertEqual(row["source_title"], "Новое название")
+        self.assertEqual(row["script"], "Новый сценарий")
+        self.assertEqual(row["status"], "Ожидает")
+        self.assertEqual(row["tags_status"], "Ожидают")
+        self.assertEqual(row["title"], "")
+        self.assertEqual(row["description"], "")
+        self.assertEqual(row["hashtags"], [])
+        self.assertEqual(row["tags"], [])
+
+    def test_seo_format_instruction_uses_exact_configured_hashtag_count(self):
+        instruction = bridge._seo_format_instruction(9)
+
+        self.assertIn("ровно 9", instruction)
+        self.assertNotIn("3–5", instruction)
+
+    def test_seo_json_deduplicates_hashtags_case_insensitively(self):
+        parsed = bridge._parse_seo_json(
+            '{"title":"Тема","description":"Описание","hashtags":["#Ормуз","орМУЗ","#танкеры"]}'
+        )
+
+        self.assertEqual(parsed["hashtags"], ["#Ормуз", "#танкеры"])
+
+    def test_auto_pipeline_generates_tags_after_seo_stage(self):
+        job = SimpleNamespace(
+            request=SimpleNamespace(index=0),
+            state=RunState.DONE,
+            result="Готовый сценарий",
+        )
+        settings = Settings(
+            seo_queue=[{
+                "source_title": "Тема",
+                "status": "Готово",
+                "description": "Готовое SEO описание",
+                "tags": [],
+                "tags_status": "Ожидают",
+            }],
+            auto_pipeline_stages={
+                "scenarios": False,
+                "covers": False,
+                "seo": True,
+                "voice": False,
+                "montage": False,
+                "package": False,
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+             patch.object(bridge, "transfer_scenarios"), \
+             patch.object(bridge, "generate_seo") as generate_seo_mock, \
+             patch.object(bridge, "generate_tags", return_value={}) as generate_tags_mock, \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.run_auto_pipeline({"enabled": True, "stages": settings.auto_pipeline_stages})
+
+        generate_seo_mock.assert_not_called()
+        generate_tags_mock.assert_called_once_with({"indices": [0], "chatUrl": ""})
+
     def test_allocation_channel_exposes_assigned_video_names_and_durations(self):
         """The allocation screen needs readable assignments, not opaque IDs."""
         settings = Settings(youtube_publication_jobs=[
@@ -144,6 +272,10 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(normalized, ["Ормуз", "танкеры", "x" * 484])
         self.assertLessEqual(len(",".join(normalized)), 500)
 
+    def test_tag_budget_counts_youtube_quotes_around_multiword_tags(self):
+        self.assertEqual(normalize_youtube_tags(["foo bar", "x"], limit=10), ["foo bar"])
+        self.assertEqual(bridge._limit_tags(["foo bar", "x"], 10), ["foo bar"])
+
     def test_upload_body_normalizes_tags_before_youtube_receives_them(self):
         body = build_private_video_insert_body(
             title="Ормуз: риски для торговли",
@@ -151,8 +283,30 @@ class PublicationJobTests(unittest.TestCase):
             tags=["первый", "первый", "x" * 498, "лишний"],
         )
 
-        self.assertEqual(body["snippet"]["tags"], ["первый"])
-        self.assertLessEqual(len(",".join(body["snippet"]["tags"])), 500)
+        self.assertEqual(body["snippet"]["tags"], ["первый", "лишний"])
+        self.assertLessEqual(bridge.youtube_tag_character_length(body["snippet"]["tags"]), 500)
+
+    def test_upload_body_rejects_description_over_youtube_utf8_byte_limit(self):
+        with self.assertRaisesRegex(ValueError, "5000 байт"):
+            build_private_video_insert_body(
+                title="Тема",
+                description="я" * 2501,
+                tags=[],
+            )
+
+    def test_upload_body_rejects_forbidden_angle_brackets_in_metadata(self):
+        with self.assertRaisesRegex(ValueError, "Заголовок"):
+            build_private_video_insert_body(
+                title="Тема <черновик>",
+                description="Описание",
+                tags=[],
+            )
+        with self.assertRaisesRegex(ValueError, "Описание"):
+            build_private_video_insert_body(
+                title="Тема",
+                description="Описание <черновик>",
+                tags=[],
+            )
 
     def test_upload_body_keeps_explicit_supported_privacy_for_confirmed_snapshot(self):
         """Publication V2 resolves privacy into its immutable snapshot before upload."""
@@ -466,6 +620,77 @@ class PublicationJobTests(unittest.TestCase):
         }
         self.assertEqual(times_by_channel["channel-a"], [first_cycle, first_cycle + timedelta(hours=1), first_cycle + timedelta(hours=2)])
         self.assertEqual(times_by_channel["channel-b"], times_by_channel["channel-a"])
+
+    def test_result_package_resolves_sanitized_filename_through_durable_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_title = 'Ормуз: что происходит? Риски / торговля'
+            production_id = "production-seo-1"
+            rendered_stem = bridge.safe_filename(original_title)
+            video = root / f"{rendered_stem}.mp4"
+            video.write_bytes(b"mp4")
+            cover = root / "cover.png"
+            cover.write_bytes(b"png")
+            settings = Settings(
+                montage_output_folder=str(root),
+                montage_project_folder=str(root),
+                pipeline_montage_outputs=[str(video)],
+                montage_task_statuses={
+                    "legacy-slot": {
+                        # Deliberately stale positional index: durable identity
+                        # must still recover the correct scenario metadata.
+                        "scenarioIndex": 99,
+                        "productionItemId": production_id,
+                        "title": original_title,
+                        "status": "Готово",
+                        "outputPath": str(video),
+                    },
+                },
+            )
+            settings.cover_queue = [{
+                "production_item_id": production_id,
+                "title": original_title,
+                "path": str(cover),
+            }]
+            settings.seo_queue = [{
+                "production_item_id": production_id,
+                "source_title": original_title,
+                "status": "Готово",
+                "title": "SEO вариант",
+                "description": "Описание из SEO",
+                "hashtags": ["#Ормуз"],
+                "tags": ["Ормуз", "торговля"],
+            }]
+            job = SimpleNamespace(
+                request=SimpleNamespace(
+                    index=0,
+                    title=original_title,
+                    production_item_id=production_id,
+                ),
+                state=RunState.DONE,
+                result="Текст сценария",
+            )
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=([original_title], [job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                bridge.package_outputs({})
+
+            package = Path(settings.video_result_packages[str(video)])
+            self.assertEqual(
+                (package / "Название сценария.txt").read_text(encoding="utf-8-sig").strip(),
+                original_title,
+            )
+            self.assertEqual(
+                (package / "Описание.txt").read_text(encoding="utf-8-sig").strip(),
+                "Описание из SEO",
+            )
+            self.assertEqual(
+                (package / "Теги.txt").read_text(encoding="utf-8-sig").strip(),
+                "Ормуз, торговля",
+            )
+            self.assertTrue((package / "Обложка.png").is_file())
 
     def test_result_package_keeps_scenario_title_separate_from_seo_metadata(self):
         with TemporaryDirectory() as directory:
