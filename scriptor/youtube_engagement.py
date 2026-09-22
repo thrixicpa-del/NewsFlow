@@ -77,6 +77,51 @@ def build_ad_plan(duration_seconds: float, *, monetized: bool, interval_seconds:
     }
 
 
+def build_ads_plan(
+    duration_seconds: float,
+    *,
+    monetized: bool,
+    interval_seconds: int = 39,
+) -> dict:
+    """Build the intended Studio monetization state without touching YouTube.
+
+    YouTube permits mid-roll ad slots only on videos that are at least eight
+    minutes long. Monetized channels still request ordinary monetization for
+    shorter videos; only the manual mid-roll sub-step becomes not applicable.
+    """
+    try:
+        duration = max(0, int(float(duration_seconds or 0)))
+    except (TypeError, ValueError):
+        duration = 0
+    interval = int(interval_seconds)
+    if interval < 1:
+        raise ValueError("Интервал рекламных слотов должен быть положительным")
+    if not monetized:
+        return {
+            "enabled": False,
+            "automatic": False,
+            "manual": False,
+            "mode": "NONE",
+            "manualMidrollApplicable": False,
+            "manualSlots": [],
+            "intervalSeconds": interval,
+        }
+    applicable = duration >= 8 * 60
+    slots = [
+        second for second in range(interval, duration, interval)
+        if applicable and second + 15 <= duration
+    ]
+    return {
+        "enabled": True,
+        "automatic": True,
+        "manual": applicable,
+        "mode": "AUTO+MANUAL" if applicable else "AUTO_ONLY",
+        "manualMidrollApplicable": applicable,
+        "manualSlots": slots,
+        "intervalSeconds": interval,
+    }
+
+
 def build_engagement_plan(
     job: Mapping[str, object],
     catalog: Sequence[Mapping[str, object]],
