@@ -622,6 +622,43 @@ def _validate_quarter_hour_clock(value: time | None, label: str) -> None:
     if value is not None and (value.minute % 15 != 0 or value.second != 0 or value.microsecond != 0):
         raise ValueError(f"{label} должно быть кратно 15 минутам (:00/:15/:30/:45).")
 
+def _blackout_ranges(rule: dict[str, Any], zone: ZoneInfo) -> list[tuple[datetime, datetime, str]]:
+    result: list[tuple[datetime, datetime, str]] = []
+    raw_periods = rule.get("blackoutPeriods", [])
+    if raw_periods in (None, ""):
+        return result
+    if not isinstance(raw_periods, list):
+        raise ValueError("blackoutPeriods должен быть списком")
+    for raw in raw_periods:
+        if not isinstance(raw, dict):
+            raise ValueError("Каждый blackout-период должен быть объектом")
+        start_raw = str(raw.get("start", "")).strip()
+        end_raw = str(raw.get("end", "")).strip()
+        if not start_raw or not end_raw:
+            raise ValueError("Для blackout укажите начало и конец")
+        try:
+            start = datetime.fromisoformat(start_raw)
+            end = datetime.fromisoformat(end_raw)
+        except ValueError as error:
+            raise ValueError("Некорректный blackout-период") from error
+        start = start.replace(tzinfo=zone) if start.tzinfo is None else start.astimezone(zone)
+        end = end.replace(tzinfo=zone) if end.tzinfo is None else end.astimezone(zone)
+        if not _is_quarter_hour(start) or not _is_quarter_hour(end):
+            raise ValueError("blackout-период должен быть кратен 15 минутам")
+        if end <= start:
+            raise ValueError("Конец blackout-периода должен быть позже начала")
+        result.append((start, end, " ".join(str(raw.get("label", "")).split())))
+    return sorted(result, key=lambda value: value[0])
+
+
+def _blackout_end_for_slot(slot: datetime, rule: dict[str, Any], zone: ZoneInfo) -> datetime | None:
+    local = slot.astimezone(zone)
+    for start, end, _label in _blackout_ranges(rule, zone):
+        if start <= local < end:
+            return end
+    return None
+
+
 def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize one persisted channel rule at the write boundary."""
 
@@ -697,6 +734,10 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
         for value in source.get("excludeKeywords", [])
         if str(value).strip()
     ] if isinstance(source.get("excludeKeywords"), list) else []
+    blackout_periods = [
+        {"start": start.isoformat(), "end": end.isoformat(), **({"label": label} if label else {})}
+        for start, end, label in _blackout_ranges(source, ZoneInfo(timezone_name))
+    ]
     automation_source = dict(source.get("automation", {}) or {})
     automation = {
         "upload": True,
@@ -732,6 +773,7 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
         "excludeKeywords": exclude_keywords,
         "maxVideosPerHour": max_per_hour,
         "topicCooldownMinutes": topic_cooldown,
+        "blackoutPeriods": blackout_periods,
         "automation": automation,
     }
 
@@ -753,6 +795,10 @@ def _next_allowed_slot(candidate: datetime, rule: dict[str, Any], zone: ZoneInfo
         if not within_window:
             next_day = current.date() if start and current_time < start else (current + timedelta(days=1)).date()
             current = datetime.combine(next_day, start or time.min, tzinfo=zone)
+            continue
+        blackout_end = _blackout_end_for_slot(current, rule, zone)
+        if blackout_end is not None:
+            current = blackout_end
             continue
         return current
 
@@ -964,6 +1010,13 @@ def validate_publication_schedule(assignments: list[dict], channel_rules: dict[s
         within_window = not start or not end or (start <= end and start <= local_time <= end) or (start > end and (local_time >= start or local_time <= end))
         if not within_window:
             conflicts.append({"kind": "outside_window", "productionItemId": production_id, "channelId": channel_id})
+        try:
+            blackout_end = _blackout_end_for_slot(local_slot, rule, zone)
+        except ValueError:
+            conflicts.append({"kind": "invalid_blackout_period", "productionItemId": production_id, "channelId": channel_id})
+            blackout_end = None
+        if blackout_end is not None:
+            conflicts.append({"kind": "blackout_period", "productionItemId": production_id, "channelId": channel_id})
         daily_key = (channel_id, local_slot.date().isoformat())
         daily_counts[daily_key] = daily_counts.get(daily_key, 0) + 1
         daily_cap = max(0, int(rule.get("dailyCap", 0) or 0))
