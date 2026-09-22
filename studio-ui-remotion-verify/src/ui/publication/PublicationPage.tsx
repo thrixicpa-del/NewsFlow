@@ -5,6 +5,7 @@ import { UiButton } from "../components/button";
 import { ChannelSettingsSheet } from "./ChannelSettingsSheet";
 import { ChannelsTable } from "./ChannelsTable";
 import { DistributionTable } from "./DistributionTable";
+import { DistributionHealth, PublicationDayPlan } from "./PublicationDayPlan";
 import { PublicationHeader } from "./PublicationHeader";
 import { PublicationHistory } from "./PublicationHistory";
 import { PublicationQueue } from "./PublicationQueue";
@@ -263,9 +264,11 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         <UiButton variant="secondary" disabled={!bulkSchedule.date || !bulkSchedule.startTime || !bulkSchedule.endTime || !bulkSchedule.channelIds.length} onClick={() => void buildPreview(bulkSchedule)}><Clock3 size={15}/>Показать диапазон</UiButton>
       </section>
 
-      {distribution.length
-        ? <DistributionTable rows={distribution} channels={rules} onChange={updateDistribution}/>
-        : <div className="nf-empty-small"><b>Preview ещё не построен</b><span>Сохраните правила каналов и нажмите «Распределить».</span></div>}
+      {distribution.length ? <>
+        <DistributionHealth rows={distribution}/>
+        <DistributionTable rows={distribution} channels={rules} onChange={updateDistribution}/>
+        <PublicationDayPlan rows={distribution} channels={rules}/>
+      </> : <div className="nf-empty-small"><b>Preview ещё не построен</b><span>Сохраните правила каналов и нажмите «Распределить».</span></div>}
     </section> : null}
 
     {tab === "queue" ? <PublicationQueue
