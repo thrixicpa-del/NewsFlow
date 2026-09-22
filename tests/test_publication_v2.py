@@ -393,6 +393,30 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(rows["pi-short"]["channelId"], "regular")
         self.assertEqual(rows["pi-long"]["reason"], "longest_monetized")
 
+    def test_longest_monetized_returns_remaining_items_to_their_normal_order(self):
+        """After monetized quota is filled, regular channels keep their own ordered strategy."""
+        items = {
+            "pi-1": {"productionItemId": "pi-1", "metadata": {"index": 1}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 1000},
+            "pi-2": {"productionItemId": "pi-2", "metadata": {"index": 2}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 100},
+            "pi-3": {"productionItemId": "pi-3", "metadata": {"index": 3}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 900},
+            "pi-4": {"productionItemId": "pi-4", "metadata": {"index": 4}, "readiness": {"state": "VIDEO_READY"}, "durationSeconds": 800},
+        }
+        rules = [
+            {"channelId": "money", "enabled": True, "oauthConnected": True, "quota": 1, "monetized": True,
+             "distributionStrategy": "longest_monetized", "publishMode": "publish_now"},
+            {"channelId": "regular", "enabled": True, "oauthConnected": True, "quota": 3, "monetized": False,
+             "distributionStrategy": "ordered", "publishMode": "schedule", "timezone": "UTC",
+             "firstPublishAt": "2026-09-10T10:00:00+00:00", "intervalMinutes": 15},
+        ]
+
+        preview = build_distribution_preview(items, rules, {})
+        rows = {row["productionItemId"]: row for row in preview["assignments"]}
+
+        self.assertEqual(rows["pi-1"]["channelId"], "money")
+        self.assertEqual(rows["pi-2"]["publishAt"], "2026-09-10T10:00:00+00:00")
+        self.assertEqual(rows["pi-3"]["publishAt"], "2026-09-10T10:15:00+00:00")
+        self.assertEqual(rows["pi-4"]["publishAt"], "2026-09-10T10:30:00+00:00")
+
     def test_balanced_distribution_uses_fill_ratio_and_skips_auth_invalid_channels(self):
         """Balanced allocation must fill the least-used eligible channel and ignore auth-invalid channels."""
         items = {
@@ -897,6 +921,36 @@ class PublicationV2SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["publishMode"], "schedule")
         self.assertEqual(snapshot["requestedPublishAt"], "2026-09-10T18:00:00+02:00")
         self.assertTrue(snapshot["idempotencyKey"])
+
+    def test_cancelled_preupload_snapshot_can_be_reconfirmed_without_mutating_old_snapshot(self):
+        """Cancel before transport releases planning while preserving the immutable old confirmation."""
+        settings = Settings(youtube_publication_items={
+            "pi-1": {
+                "productionItemId": "pi-1",
+                "metadata": {"title": "Выпуск", "description": "Описание", "tags": ["тег"]},
+                "artifacts": {"video": {"path": "D:/out.mp4", "exists": True}},
+                "readiness": {"state": "VIDEO_READY", "contentReady": True},
+            },
+        })
+        rules = {"channel-a": {"privacy": "private", "publishMode": "schedule", "timezone": "UTC", "intervalMinutes": 15}}
+
+        first = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-09-10T10:00:00+00:00"}],
+            rules,
+        )[0]
+        cancel_publication_execution(settings, first)
+        second = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-09-10T11:00:00+00:00"}],
+            rules,
+        )[0]
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(settings.youtube_publication_snapshots[first]["requestedPublishAt"], "2026-09-10T10:00:00+00:00")
+        self.assertEqual(settings.youtube_publication_executions[first]["overallStatus"], "CANCELLED")
+        self.assertEqual(settings.youtube_publication_snapshots[second]["requestedPublishAt"], "2026-09-10T11:00:00+00:00")
+        self.assertEqual(settings.youtube_publication_executions[second]["overallStatus"], "SCHEDULED")
 
     def test_manual_datetime_local_is_frozen_with_channel_timezone_offset(self):
         settings = Settings(youtube_publication_items={
