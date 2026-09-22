@@ -189,10 +189,11 @@ describe("PublicationPage interactions", () => {
   });
 
   it("blocks confirmation in the UI when preview reports a scheduling conflict", async () => {
-    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "manual", locked: true, reason: "Ручное назначение", publishAt: "2026-09-11T22:00:00", scheduleWarning: "Вне окна публикации" }] } });
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "manual", locked: true, reason: "Ручное назначение", publishAt: "2026-09-11T22:00:00", scheduleWarning: "Вне окна публикации", scheduleSuggestion: "Перенесите ролик внутрь окна публикации канала." }] } });
     render(<PublicationPage data={base} command={command} />);
     fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
     await waitFor(() => expect(screen.getByText("Вне окна публикации")).toBeInTheDocument());
+    expect(screen.getAllByText(/Перенесите ролик внутрь окна публикации канала/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Подтвердить назначения" })).toBeDisabled();
   });
 });
