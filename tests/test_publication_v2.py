@@ -631,6 +631,50 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         settings.youtube_publication_queue_paused = True
         self.assertEqual(next_upload_candidates(settings), [])
 
+    def test_verified_youtube_description_includes_frozen_hashtags(self):
+        """Readback compares the exact final description sent to YouTube, including hashtags."""
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "metadata": {
+                        "title": "Выпуск",
+                        "description": "Описание",
+                        "tags": ["тег"],
+                        "hashtags": ["#NewsFlow", "#Новости"],
+                    },
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "overallStatus": "PROCESSING",
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "YOUTUBE_PROCESSING": {"status": "RUNNING"},
+                        "DESCRIPTION": {"status": "PENDING"},
+                    },
+                },
+            },
+        )
+
+        reconcile_youtube_video_state(settings, "snapshot-1", {
+            "snippet": {
+                "title": "Выпуск",
+                "description": "Описание\n\n#NewsFlow #Новости",
+                "tags": ["тег"],
+            },
+            "status": {"privacyStatus": "private"},
+            "processingDetails": {"processingStatus": "succeeded"},
+        })
+
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["steps"]["DESCRIPTION"]["status"],
+            "SUCCESS",
+        )
+
     def test_verified_youtube_state_completes_only_confirmed_metadata_and_keeps_unverified_stage_honest(self):
         """Verification confirms only API evidence; absent thumbnail proof is not reported as success."""
         settings = Settings(youtube_publication_snapshots={
