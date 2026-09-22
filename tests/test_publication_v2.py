@@ -1367,6 +1367,37 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(uploaded["overallStatus"], "PARTIAL")
         self.assertIsNone(uploaded["activeLease"])
 
+    def test_interrupted_unknown_upload_cannot_be_retried_into_duplicate_transport(self):
+        """Unknown interrupted transport must stay blocked until explicit reconciliation, never ordinary retry."""
+        settings = Settings(
+            youtube_publication_upload_concurrency=1,
+            youtube_publication_executions={
+                "snapshot-interrupted": {
+                    "snapshotId": "snapshot-interrupted",
+                    "overallStatus": "UPLOADING",
+                    "youtubeVideoId": None,
+                    "activeLease": {"workerId": "crashed-worker"},
+                    "steps": {"VIDEO_UPLOAD": {"status": "RUNNING", "attempts": 1}},
+                },
+            },
+        )
+
+        reconcile_publication_executions(settings)
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-interrupted"]["steps"]["VIDEO_UPLOAD"]["status"],
+            "USER_ACTION_REQUIRED",
+        )
+        self.assertEqual(next_upload_candidates(settings), [])
+
+        with self.assertRaisesRegex(ValueError, "сверк|reconcil|прерван"):
+            retry_publication_stage(settings, "snapshot-interrupted", "VIDEO_UPLOAD")
+
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-interrupted"]["steps"]["VIDEO_UPLOAD"]["status"],
+            "USER_ACTION_REQUIRED",
+        )
+        self.assertEqual(next_upload_candidates(settings), [])
+
     def test_upload_attempt_persists_lease_before_transport_and_known_id_exits_upload_queue(self):
         """The transport handoff must be crash-safe before network I/O and immutable after YouTube answers."""
         settings = Settings(youtube_publication_executions={
