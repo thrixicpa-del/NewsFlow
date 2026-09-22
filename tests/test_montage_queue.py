@@ -582,6 +582,34 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(result.item.path, older.path)
         self.assertEqual(result.fallback_level, "SAFE_REUSE")
 
+    def test_safe_reuse_prefers_cross_video_family_before_current_project_repeat(self):
+        current = FootageItem("D:/current/family-a/shot.mp4", "current.mp4", tags=["oil-tanker-port"])
+        cross_video = FootageItem("D:/history/family-b/shot.mp4", "history.mp4", tags=["oil-tanker-port"])
+        current_key = bridge._montage_clip_key(current.path)
+        current_family = bridge._montage_clip_family_key(current.path)
+        cross_key = bridge._montage_clip_key(cross_video.path)
+        cross_family = bridge._montage_clip_family_key(cross_video.path)
+
+        result = bridge._select_montage_candidate(
+            "oil tanker refinery oil terminal",
+            strict_hits=[
+                SearchHit(current, .95, duration=6.0),
+                SearchHit(cross_video, .30, duration=6.0),
+            ],
+            fallback_hits=[], required_duration=6.0, match_threshold=.22,
+            used_paths={current_key, cross_key},
+            used_families={current_family, cross_family},
+            project_used_paths={current_key},
+            project_used_families={current_family},
+            reserved_paths={cross_key},
+            reserved_families={cross_family},
+            source_exists=lambda _: True, source_duration=lambda _: 6.0,
+        )
+
+        self.assertEqual(result.item.path, cross_video.path)
+        self.assertNotIn(result.item.path, {current.path})
+        self.assertEqual(result.fallback_level, "SAFE_REUSE")
+
     def test_diagnostics_separate_unique_diversity_rejections_from_pass_events(self):
         """One candidate may be examined repeatedly but remains one unique rejection."""
         used = FootageItem("D:/used/used.mp4", "used.mp4", tags=["oil-tanker-port"])
