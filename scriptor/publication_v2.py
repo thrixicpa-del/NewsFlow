@@ -1456,6 +1456,8 @@ def publication_receipt(settings: Any, snapshot_id: str) -> dict[str, Any]:
     final_status = "PARTIAL" if has_failure or incomplete else str(execution.get("overallStatus", "DONE")).upper()
     if final_status not in {"DONE", "SCHEDULED", "PARTIAL", "NEEDS_ATTENTION", "AUTOMATION_CANCELLED", "CANCELLED"}:
         final_status = "PARTIAL"
+    ads_step = dict(steps.get("ADS", {}) or {})
+    ads_result = dict(ads_step.get("providerResult", {}) or {})
     return {
         "snapshotId": snapshot_id,
         "productionItemId": snapshot.get("productionItemId", ""),
@@ -1467,6 +1469,14 @@ def publication_receipt(settings: Any, snapshot_id: str) -> dict[str, Any]:
         "publishMode": snapshot.get("publishMode", "publish_now"),
         "requestedPublishAt": snapshot.get("requestedPublishAt"),
         "confirmedPublishAt": execution.get("confirmedPublishAt"),
+        "ads": {
+            "status": str(ads_step.get("status", "PENDING")).upper(),
+            "mode": str(ads_result.get("mode", "NONE" if str(ads_step.get("status", "")).upper() in {"NOT_REQUIRED", "SKIPPED"} else "")),
+            "automatic": bool(ads_result.get("automaticSlotsEnabled")),
+            "manualSlotsSeconds": list(ads_result.get("manualSlotsSeconds") or []),
+            "confirmedManualSlotsSeconds": list(ads_result.get("confirmedManualSlotsSeconds") or []),
+            "midRollEligible": bool(ads_result.get("midRollEligible")),
+        },
         "stages": statuses,
         "finalStatus": final_status,
     }
@@ -1503,8 +1513,16 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
             "youtubeVideoId": execution.get("youtubeVideoId"), "youtubeVideoUrl": execution.get("youtubeVideoUrl"),
             "currentStage": execution.get("currentStage", "WAITING"), "status": status,
             "ads": {
-                "status": str(dict(steps.get("ADS", {}) or {}).get("status", "PENDING")),
-                "mode": str(dict(dict(steps.get("ADS", {}) or {}).get("providerResult", {}) or {}).get("mode", "")),
+                "status": str(dict(steps.get("ADS", {}) or {}).get("status", "PENDING")).upper(),
+                "mode": str(
+                    dict(dict(steps.get("ADS", {}) or {}).get("providerResult", {}) or {}).get(
+                        "mode",
+                        "NONE" if str(dict(steps.get("ADS", {}) or {}).get("status", "")).upper() in {"NOT_REQUIRED", "SKIPPED"} else "",
+                    )
+                ),
+                "automatic": bool(dict(dict(steps.get("ADS", {}) or {}).get("providerResult", {}) or {}).get("automaticSlotsEnabled")),
+                "manualSlotsSeconds": list(dict(dict(steps.get("ADS", {}) or {}).get("providerResult", {}) or {}).get("manualSlotsSeconds", []) or []),
+                "confirmedManualSlotsSeconds": list(dict(dict(steps.get("ADS", {}) or {}).get("providerResult", {}) or {}).get("confirmedManualSlotsSeconds", []) or []),
             },
             "completion": {"completed": completed, "total": total}, "steps": steps,
             "timeline": list(execution.get("timeline", []) or [])[-100:],
