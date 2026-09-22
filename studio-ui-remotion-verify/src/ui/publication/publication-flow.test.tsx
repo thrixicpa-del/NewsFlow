@@ -31,6 +31,10 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByLabelText("Окно публикации: начало")).toHaveAttribute("step", "900");
     expect(screen.getByText(/:00 \/ :15 \/ :30 \/ :45/)).toBeInTheDocument();
     expect(screen.getByText(/реклама тоже обязательна/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Добавить исключение" }));
+    expect(screen.getByLabelText("Blackout начало 1")).toHaveAttribute("step", "900");
+    expect(screen.getByLabelText("Blackout конец 1")).toHaveAttribute("step", "900");
+    expect(screen.getByLabelText("Blackout причина 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeInTheDocument();
   });
 
