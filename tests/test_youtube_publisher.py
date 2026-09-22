@@ -17,6 +17,7 @@ from scriptor.youtube_allocation import (
 )
 from scriptor.youtube_api import (
     build_private_video_insert_body,
+    compose_youtube_description,
     normalize_youtube_tags,
     parse_analytics_rows,
     parse_current_channel,
@@ -435,6 +436,36 @@ class PublicationJobTests(unittest.TestCase):
 
         self.assertEqual(body["snippet"]["description"], "Описание #news\n\n#world")
         self.assertEqual(body["snippet"]["tags"], ["news"])
+
+    def test_youtube_description_appends_unique_hashtags_without_splitting_utf8_budget(self):
+        description = "Описание ролика #новости"
+        value = compose_youtube_description(
+            description,
+            ["#новости", "#мир", "экономика"],
+        )
+        self.assertEqual(value, "Описание ролика #новости\n\n#мир #экономика")
+
+        almost_full = "я" * 2498
+        bounded = compose_youtube_description(almost_full, ["#длинныйхэштег"])
+        self.assertEqual(bounded, almost_full)
+        self.assertLessEqual(len(bounded.encode("utf-8")), 5000)
+
+        with self.assertRaisesRegex(ValueError, "5000"):
+            compose_youtube_description("я" * 2501, [])
+
+    def test_youtube_upload_body_carries_seo_hashtags_in_description(self):
+        body = build_private_video_insert_body(
+            title="Ормуз: риски для торговли",
+            description="Описание из SEO-пакета",
+            tags=["Ормуз", "танкеры"],
+            hashtags=["#Ормуз", "#новости"],
+            publish_at="2026-08-30T04:00:00+00:00",
+        )
+
+        self.assertEqual(
+            body["snippet"]["description"],
+            "Описание из SEO-пакета\n\n#Ормуз #новости",
+        )
 
     def test_youtube_upload_body_is_private_and_carries_ready_package_metadata(self):
         body = build_private_video_insert_body(
