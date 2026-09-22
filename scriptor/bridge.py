@@ -10200,6 +10200,37 @@ def _fast_reuse_percent_for_scenario(settings: Settings, scenario_index: int) ->
     return None
 
 
+def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
+                          reuse_pool: dict[str, TimelineClip],
+                          required_duration: float,
+                          source_duration) -> dict[str, list[SearchHit]]:
+    """Restrict post-threshold matching to already prepared proxy windows.
+
+    The slider is a speed/uniqueness target, so a higher-scoring fresh source
+    must not silently expand the pool after the target.  A pooled source is
+    eligible only when the exact cached source_start still has enough moving
+    media for the current beat.  The caller may deliberately expand the pool
+    later only when this safe cached set cannot illustrate the scene.
+    """
+    result: dict[str, list[SearchHit]] = {}
+    for level in _MONTAGE_FALLBACK_LEVELS:
+        filtered: list[SearchHit] = []
+        for hit in hits_by_level.get(level, []):
+            key = _montage_clip_key(hit.item.path)
+            origin = reuse_pool.get(key)
+            if origin is None:
+                continue
+            available_from_cached_window = (
+                float(source_duration(hit.item) or 0.0)
+                - max(0.0, float(origin.source_start))
+            )
+            if available_from_cached_window + .05 < float(required_duration):
+                continue
+            filtered.append(hit)
+        result[level] = filtered
+    return result
+
+
 def _random_video(folder: str) -> str:
     root = Path(folder)
     candidates = [path for path in root.rglob("*") if path.is_file() and path.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}] if root.is_dir() else []
@@ -11412,28 +11443,9 @@ def prepare_montage(payload: dict) -> dict:
         }
         selection_started = time.perf_counter()
         if fast_reuse and scene_number > unique_scene_count and fast_reuse_pool:
-            pool_paths = set(fast_reuse_pool)
-
-            def pooled(values):
-                result = []
-                for hit in values:
-                    key = _montage_clip_key(hit.item.path)
-                    origin = fast_reuse_pool.get(key)
-                    if origin is None:
-                        continue
-                    available_from_cached_window = (
-                        float(verified_duration(hit.item) or 0.0)
-                        - max(0.0, float(origin.source_start))
-                    )
-                    if available_from_cached_window + .05 < required_source_duration:
-                        continue
-                    result.append(hit)
-                return result
-
-            pooled_hits = {
-                level: pooled(hits_by_level[level])
-                for level in _MONTAGE_FALLBACK_LEVELS
-            }
+            pooled_hits = _fast_reuse_pool_hits(
+                hits_by_level, fast_reuse_pool, required_source_duration, verified_duration,
+            )
             if any(pooled_hits.values()):
                 _reserved_paths, _reserved_families, family_buckets, _source_windows = reservation_snapshot(
                     position_bucket,
