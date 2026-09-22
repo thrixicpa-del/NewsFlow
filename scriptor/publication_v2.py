@@ -337,16 +337,11 @@ def reconcile_publication_items(settings: Any) -> dict[str, Any]:
         publication_ready = content_ready and not any(
             reason in {"ASSIGNMENT_REQUIRED", "SCHEDULE_REQUIRED"} for reason in reasons
         )
-        if not video_exists:
-            state = "VIDEO_MISSING"
-        elif content_ready and publication_ready:
-            state = "PUBLICATION_READY"
-        elif content_ready:
-            state = "CONTENT_READY"
-        elif "THUMBNAIL_MISSING" in reasons and len(set(reasons) - {"THUMBNAIL_MISSING"}) == 0:
-            state = "NEEDS_COVER"
-        else:
-            state = "NEEDS_ATTENTION"
+        # Preserve the artifact-level state contract: state answers whether
+        # the rendered MP4 exists. Content/publication readiness are separate
+        # booleans so a missing thumbnail or SEO cannot make a ready video
+        # disappear from registry counters/UI.
+        state = "VIDEO_READY" if video_exists else "VIDEO_MISSING"
 
         item["artifacts"] = artifacts
         item["metadata"] = metadata
@@ -532,14 +527,20 @@ def build_distribution_preview(items: dict[str, dict], rules: list[dict], assign
             })
             assigned_ids.add(production_id)
 
-    candidates = [
-        (production_id, item) for production_id, item in ordered_items
-        if production_id not in assigned_ids
-        and (
-            bool(dict(item.get("readiness", {}) or {}).get("contentReady"))
-            or str(dict(item.get("readiness", {}) or {}).get("state", "")) in {"VIDEO_READY", "CONTENT_READY", "PUBLICATION_READY"}
-        )
-    ]
+    candidates = []
+    for production_id, item in ordered_items:
+        if production_id in assigned_ids:
+            continue
+        readiness = dict(item.get("readiness", {}) or {})
+        # Current reconciled records have an explicit contentReady flag and
+        # must satisfy it. Legacy/synthetic records created before that field
+        # existed retain the historical VIDEO_READY fallback.
+        if "contentReady" in readiness:
+            eligible = bool(readiness.get("contentReady"))
+        else:
+            eligible = str(readiness.get("state", "")) == "VIDEO_READY"
+        if eligible:
+            candidates.append((production_id, item))
     if any(bool(rule.get("monetized")) and str(rule.get("distributionStrategy", "")) == "longest_monetized"
            for rule in active_rules):
         candidates.sort(key=lambda pair: (-(_item_duration_seconds(pair[1]) or 0.0), -_item_priority(pair[1]), item_order[pair[0]], pair[0]))
@@ -1184,10 +1185,12 @@ def confirm_publication_snapshots(settings: Any, assignments: list[dict], channe
         if not production_id or not channel_id or not item:
             raise ValueError("Подтверждение требует существующий ролик и канал")
         readiness = dict(item.get("readiness", {}) or {})
-        if not (
+        content_ready = (
             bool(readiness.get("contentReady"))
-            or str(readiness.get("state", "")) in {"VIDEO_READY", "CONTENT_READY", "PUBLICATION_READY"}
-        ):
+            if "contentReady" in readiness
+            else str(readiness.get("state", "")) == "VIDEO_READY"
+        )
+        if not content_ready:
             raise ValueError(f"Ролик {production_id} не готов к публикации")
         snapshot_id = existing_by_item.get(production_id)
         if snapshot_id:
