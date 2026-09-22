@@ -187,11 +187,18 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
       stages: Object.fromEntries(Object.entries(stages).map(([key, value]) => [key, text(value)])),
     };
   });
+  const rulePresets = (Array.isArray(rawV2.rulePresets) ? rawV2.rulePresets : [])
+    .map((value) => {
+      const preset = record(value);
+      return { name: text(preset.name), rules: record(preset.rules), updatedAt: text(preset.updatedAt) };
+    })
+    .filter((preset) => preset.name);
   return {
     videos: videoRows,
     channels: channelRows,
     queue,
     receipts,
+    rulePresets,
     uploadConcurrency: Math.max(1, Number(rawV2.uploadConcurrency || data.publication.uploadConcurrency) || 1),
     paused: Boolean(rawV2.paused),
     counters: record(rawV2.counters) as Record<string, number>,
