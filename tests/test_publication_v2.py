@@ -1345,6 +1345,37 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(execution["overallStatus"], "AUTOMATION_CANCELLED")
 
+    def test_receipt_preserves_explicit_cancelled_status_with_pending_stages(self):
+        """History must show cancellation itself, not collapse it into generic PARTIAL."""
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-pre": {"id": "snapshot-pre", "productionItemId": "pi-pre", "channelId": "channel-a", "metadata": {"title": "Pre"}},
+                "snapshot-post": {"id": "snapshot-post", "productionItemId": "pi-post", "channelId": "channel-a", "metadata": {"title": "Post"}},
+            },
+            youtube_publication_executions={
+                "snapshot-pre": {
+                    "snapshotId": "snapshot-pre",
+                    "youtubeVideoId": None,
+                    "overallStatus": "READY",
+                    "activeLease": None,
+                    "steps": {"VIDEO_UPLOAD": {"status": "PENDING"}, "TITLE": {"status": "PENDING"}},
+                },
+                "snapshot-post": {
+                    "snapshotId": "snapshot-post",
+                    "youtubeVideoId": "yt-existing",
+                    "overallStatus": "UPLOADED",
+                    "activeLease": None,
+                    "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}, "TITLE": {"status": "PENDING"}},
+                },
+            },
+        )
+
+        cancel_publication_execution(settings, "snapshot-pre")
+        cancel_publication_execution(settings, "snapshot-post")
+
+        self.assertEqual(publication_receipt(settings, "snapshot-pre")["finalStatus"], "CANCELLED")
+        self.assertEqual(publication_receipt(settings, "snapshot-post")["finalStatus"], "AUTOMATION_CANCELLED")
+
     def test_release_lease_and_receipt_preserve_known_video_identity_across_restart_projection(self):
         """A receipt must use the existing YouTube identity and expose unverified stages honestly."""
         settings = Settings(youtube_publication_snapshots={
