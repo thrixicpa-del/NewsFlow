@@ -4,7 +4,7 @@ export type PublicationCommand = <K extends NewsFlowCommand>(
   name: K,
   payload?: CommandRequest<K>,
 ) => Promise<NewsFlowSnapshot | undefined>;
-export type PublicationTab = "videos" | "channels" | "distribution" | "queue" | "history";
+export type PublicationTab = "videos" | "channels" | "distribution" | "dayplan" | "queue" | "history";
 export type PublicationStatus = "Готов" | "Требует внимания" | "Требует канала" | "Назначен" | "Запланирован" | "Загружается" | "Оформляется" | "Готово" | "Ошибка";
 
 export type ChannelRule = {
