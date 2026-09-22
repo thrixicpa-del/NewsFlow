@@ -11,6 +11,19 @@ from typing import Any, Iterable
 YOUTUBE_TAG_CHARACTER_LIMIT = 500
 
 
+def youtube_tag_character_length(tags: Iterable[object]) -> int:
+    """Return YouTube's effective tag-list length, including commas and quoted spaces."""
+
+    normalized = [" ".join(str(value or "").split()) for value in tags]
+    normalized = [value for value in normalized if value]
+    if not normalized:
+        return 0
+    return (
+        sum(len(value) + (2 if " " in value else 0) for value in normalized)
+        + max(0, len(normalized) - 1)
+    )
+
+
 def parse_google_account_email(payload: dict[str, Any]) -> str:
     """Return the verified Google identity reported for the OAuth grant."""
 
@@ -156,7 +169,7 @@ def normalize_youtube_tags(tags: Iterable[object], *, limit: int = YOUTUBE_TAG_C
         identity = tag.casefold()
         if not tag or identity in seen:
             continue
-        candidate_length = len(",".join([*normalized, tag]))
+        candidate_length = youtube_tag_character_length([*normalized, tag])
         if candidate_length > limit:
             break
         normalized.append(tag)
