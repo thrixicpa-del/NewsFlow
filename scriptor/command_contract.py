@@ -54,6 +54,7 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "preview-publication-v2-distribution": CommandRegistration(
         "preview_publication_v2_distribution", "scriptor.publication_v2", _NO_LEGACY,
     ),
+    "set-publication-v2-item-priority": CommandRegistration("set_publication_v2_item_priority", "scriptor.publication_v2", _NO_LEGACY),
     "migrate-publication-v2": CommandRegistration("migrate_publication_v2", "scriptor.publication_v2", _NO_LEGACY),
     "save-publication-v2-rule-preset": CommandRegistration("save_publication_v2_rule_preset", "scriptor.publication_v2", _NO_LEGACY),
     "save-publication-v2-plan-version": CommandRegistration("save_publication_v2_plan_version", "scriptor.publication_v2", _NO_LEGACY),
