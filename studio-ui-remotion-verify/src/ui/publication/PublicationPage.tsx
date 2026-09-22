@@ -358,7 +358,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         </div>
       </div>
 
-      <div className="nf-plan-version-toolbar" aria-label="Версии плана">
+      <div className="nf-preset-toolbar nf-plan-version-toolbar" aria-label="Версии плана">
         <div><b>Версии плана</b><small>Сохраняются между перезапусками. Frozen snapshots при восстановлении не меняются.</small></div>
         <label>Сохранённая версия<select aria-label="Сохранённая версия плана" value={selectedPlanVersionId} onChange={(event) => setSelectedPlanVersionId(event.target.value)}><option value="">Выберите…</option>{model.planVersions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.createdAt ? " · " + version.createdAt.slice(0, 16) : ""}</option>)}</select></label>
         <UiButton variant="secondary" disabled={!selectedPlanVersionId} onClick={() => void restorePlanVersion()}>Восстановить</UiButton>
