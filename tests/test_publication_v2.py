@@ -414,6 +414,55 @@ class PublicationV2SchedulerTests(unittest.TestCase):
         self.assertEqual({conflict["kind"] for conflict in conflicts}, {"manual_outside_window", "duplicate_slot"})
 
 
+class PublicationV2StateIntegrityTests(unittest.TestCase):
+    def test_later_success_cannot_hide_an_existing_downstream_failure(self):
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snap": {"id": "snap", "productionItemId": "pi", "publishMode": "publish_now"},
+            },
+            youtube_publication_executions={
+                "snap": {
+                    "snapshotId": "snap", "productionItemId": "pi", "youtubeVideoId": "yt-1",
+                    "activeLease": {"workerId": "worker"},
+                    "steps": {
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "THUMBNAIL": {"status": "FAILED"},
+                        "ADS": {"status": "RUNNING"},
+                    },
+                },
+            },
+        )
+
+        complete_publication_stage(settings, "snap", "worker", "ADS", {"mode": "AUTO_ONLY"})
+
+        self.assertEqual(settings.youtube_publication_executions["snap"]["overallStatus"], "PARTIAL")
+        self.assertEqual(settings.youtube_publication_executions["snap"]["steps"]["THUMBNAIL"]["status"], "FAILED")
+        self.assertEqual(settings.youtube_publication_executions["snap"]["steps"]["ADS"]["status"], "SUCCESS")
+
+    def test_scheduled_terminal_execution_remains_scheduled_instead_of_becoming_done(self):
+        steps = {
+            name: {"status": "SUCCESS"}
+            for name in ("AUTH_CHECK", "VIDEO_UPLOAD", "YOUTUBE_PROCESSING", "TITLE", "DESCRIPTION", "TAGS", "THUMBNAIL", "ADS", "POST", "CARDS", "END_SCREEN")
+        }
+        steps["SCHEDULE"] = {"status": "RUNNING"}
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snap": {"id": "snap", "productionItemId": "pi", "publishMode": "schedule",
+                         "requestedPublishAt": "2026-11-15T04:00:00+03:00"},
+            },
+            youtube_publication_executions={
+                "snap": {
+                    "snapshotId": "snap", "productionItemId": "pi", "youtubeVideoId": "yt-1",
+                    "activeLease": {"workerId": "worker"}, "steps": steps,
+                },
+            },
+        )
+
+        complete_publication_stage(settings, "snap", "worker", "SCHEDULE", {"verified": True})
+
+        self.assertEqual(settings.youtube_publication_executions["snap"]["overallStatus"], "SCHEDULED")
+
+
 class PublicationV2SnapshotTests(unittest.TestCase):
     def test_confirmed_assignment_creates_one_immutable_snapshot_with_explicit_publish_mode_and_privacy(self):
         """Implicit scheduling or duplicate snapshots would make retry and audit unsafe."""
@@ -435,6 +484,24 @@ class PublicationV2SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["publishMode"], "schedule")
         self.assertEqual(snapshot["requestedPublishAt"], "2026-09-10T18:00:00+02:00")
         self.assertTrue(snapshot["idempotencyKey"])
+
+    def test_manual_datetime_local_is_frozen_with_channel_timezone_offset(self):
+        settings = Settings(youtube_publication_items={
+            "pi-1": {"productionItemId": "pi-1", "metadata": {"title": "Выпуск"},
+                     "artifacts": {"video": {"path": "D:/out.mp4", "exists": True}},
+                     "readiness": {"state": "VIDEO_READY"}},
+        })
+        created = confirm_publication_snapshots(
+            settings,
+            [{"productionItemId": "pi-1", "channelId": "channel-a", "publishAt": "2026-11-15T04:15:00"}],
+            {"channel-a": {"privacy": "private", "publishMode": "schedule", "timezone": "Europe/Minsk",
+                           "intervalMinutes": 15}},
+        )
+
+        self.assertEqual(
+            settings.youtube_publication_snapshots[created[0]]["requestedPublishAt"],
+            "2026-11-15T04:15:00+03:00",
+        )
 
     def test_scheduled_snapshot_rejects_non_private_initial_privacy_before_transport(self):
         """YouTube schedule semantics require a private draft, so reject invalid input before any upload."""
