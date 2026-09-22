@@ -61,22 +61,12 @@ class ClipIndexTests(unittest.TestCase):
         }
         self.assertTrue(required <= SEMANTIC_TAG_LABELS)
 
-    def test_screen_text_gate_covers_cyrillic_and_interstitial_title_cards(self):
+    def test_screen_text_gate_keeps_obvious_interstitial_queries_but_uses_v6_storage(self):
         queries = " ".join(_SCREEN_TEXT_POSITIVE_QUERIES).casefold()
-        self.assertGreaterEqual(SCREEN_TEXT_CLASSIFIER_VERSION, 5)
+        self.assertGreaterEqual(SCREEN_TEXT_CLASSIFIER_VERSION, 6)
         self.assertIn("cyrillic", queries)
         self.assertIn("title card", queries)
         self.assertIn("interstitial", queries)
-
-    def test_screen_text_prompt_calibration_separates_clean_presenter_from_latin_title_graphic(self):
-        positive = " ".join(_SCREEN_TEXT_POSITIVE_QUERIES).casefold()
-        negative = " ".join(_SCREEN_TEXT_NEGATIVE_QUERIES).casefold()
-
-        self.assertNotIn("news broadcast frame", positive)
-        self.assertIn("single english", positive)
-        self.assertIn("title graphic", positive)
-        self.assertIn("studio presenter", negative)
-        self.assertIn("no readable english", negative)
 
     def test_neutral_filenames_retrieve_by_visual_meaning_after_deep_enrichment(self):
         class CategoryImageEmbedding:
@@ -617,49 +607,58 @@ class ClipIndexTests(unittest.TestCase):
             self.assertEqual(rows["blocked.mp4"], (1, SCREEN_TEXT_CLASSIFIER_VERSION))
             self.assertEqual(rows["safe.mp4"], (-1, SCREEN_TEXT_CLASSIFIER_VERSION))
 
-    def test_batch_screen_classifier_checks_late_text_before_persisting_safe(self):
-        """A clip cannot become durable SAFE from only the shallow five-frame pass."""
-        class ImageEmbedding:
-            def embed(self, images, **_):
-                for image in images:
-                    yield (np.asarray([1.0, 0.0], dtype=np.float32)
-                           if image == "text" else np.asarray([0.0, 1.0], dtype=np.float32))
-
+    def test_batch_screen_classifier_uses_persisted_clip_embedding_without_redecoding(self):
+        """The 2.1.136-style maintenance pass must not reopen source videos."""
         class TextEmbedding:
             def query_embed(self, queries, **_):
                 values = queries if isinstance(queries, list) else [queries]
-                positive = {value.casefold() for value in _SCREEN_TEXT_POSITIVE_QUERIES}
                 for query in values:
-                    yield (np.asarray([1.0, 0.0], dtype=np.float32)
-                           if str(query).casefold() in positive
-                           else np.asarray([0.0, 1.0], dtype=np.float32))
-
-        class LateTextIndex(ClipIndex):
-            @staticmethod
-            def _sample_frames(_path, samples=3):
-                frames = ["clean"] * samples
-                if samples > 5:
-                    frames[-1] = "text"
-                return frames, 6.0, 1920, 1080, 30.0
+                    text = str(query).casefold()
+                    if "prominent english words" in text:
+                        yield np.asarray([1.0, 0.0], dtype=np.float32)
+                    elif "no readable writing" in text:
+                        yield np.asarray([0.0, 1.0], dtype=np.float32)
+                    else:
+                        yield np.asarray([0.0, 1.0], dtype=np.float32)
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            clip = root / "late-text.mp4"
-            batch_clip = root / "batch-late-text.mp4"
-            clip.write_bytes(b"late-text")
-            batch_clip.write_bytes(b"batch-late-text")
-            index = LateTextIndex(
+            blocked = root / "blocked.mp4"
+            safe = root / "safe.mp4"
+            blocked.write_bytes(b"blocked")
+            safe.write_bytes(b"safe")
+            index = ClipIndex(
                 root / "index.sqlite3",
-                embedder_factory=lambda: (ImageEmbedding(), TextEmbedding()),
+                embedder_factory=lambda: (FakeImageEmbedding(), TextEmbedding()),
             )
-            index.index_folders([str(root)])
-
-            self.assertEqual(index.screen_text_eligibility(clip, deep=False), SCREEN_ELIGIBILITY_SAFE)
-            self.assertEqual(index.screen_text_eligibility(clip, deep=True), SCREEN_ELIGIBILITY_BLOCKED)
+            with index._connect() as connection:
+                connection.executemany(
+                    """INSERT INTO clips(
+                           path,name,size,mtime_ns,duration,width,height,fps,source_family,
+                           tags,embedding,model,indexed_at,english_text,english_text_version
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [
+                        (
+                            str(blocked.resolve()), blocked.name, blocked.stat().st_size,
+                            blocked.stat().st_mtime_ns, 6.0, 1920, 1080, 30.0, "blocked",
+                            "[]", np.asarray([1.0, 0.0], dtype=np.float32).tobytes(),
+                            "test", time.time(), 0, 0,
+                        ),
+                        (
+                            str(safe.resolve()), safe.name, safe.stat().st_size,
+                            safe.stat().st_mtime_ns, 6.0, 1920, 1080, 30.0, "safe",
+                            "[]", np.asarray([0.0, 1.0], dtype=np.float32).tobytes(),
+                            "test", time.time(), 0, 0,
+                        ),
+                    ],
+                )
+            index._sample_frames = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("batch screen classifier reopened source media")
+            )
             result = index.classify_english_screen_text()
 
-        self.assertEqual(result["checked"], 1)
-        self.assertEqual(result["blocked"], 1)
+            self.assertEqual(result, {"checked": 2, "blocked": 1, "safe": 1, "uncertain": 0})
+            self.assertEqual(index.screen_text_stats(), {"blocked": 1, "safe": 1, "unchecked": 0})
 
     def test_failed_embedding_transaction_is_recoverable_without_partial_rows(self):
         class FailingImageEmbedding:
