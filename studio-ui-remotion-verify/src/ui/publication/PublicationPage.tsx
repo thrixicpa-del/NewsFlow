@@ -51,6 +51,8 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   const [selectedVideoIds, setSelectedVideoIds] = useState<string[]>([]);
   const [presetName, setPresetName] = useState("");
   const [selectedPresetName, setSelectedPresetName] = useState("");
+  const [planVersionName, setPlanVersionName] = useState("");
+  const [selectedPlanVersionId, setSelectedPlanVersionId] = useState("");
   const [uploadConcurrency, setUploadConcurrency] = useState(model.uploadConcurrency);
   const [uploadStarting, setUploadStarting] = useState(false);
   const [continuing, setContinuing] = useState(false);
@@ -151,6 +153,58 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     if (!selectedPresetName) return;
     await command("delete-publication-v2-rule-preset", { name: selectedPresetName });
     setSelectedPresetName("");
+  };
+
+  const savePlanVersion = async () => {
+    const nameValue = planVersionName.trim();
+    if (!nameValue || !distribution.length) return;
+    const state = await command("save-publication-v2-plan-version", {
+      name: nameValue,
+      assignments: distribution.map((row) => ({
+        productionItemId: row.productionItemId,
+        channelId: row.channelId,
+        publishAt: row.publishAt || "",
+        source: row.source,
+        locked: row.locked,
+        reason: row.reason,
+      })),
+    });
+    const versions = ((state?.publication as any)?.v2?.planVersions || []) as Array<{ id?: string; name?: string }>;
+    const saved = [...versions].reverse().find((version) => version.name === nameValue);
+    if (saved?.id) setSelectedPlanVersionId(saved.id);
+    setPlanVersionName("");
+  };
+
+  const restorePlanVersion = async () => {
+    if (!selectedPlanVersionId) return;
+    const state = await command("restore-publication-v2-plan-version", { id: selectedPlanVersionId });
+    const assignments = ((state?.publication as any)?.v2?.assignments || {}) as Record<string, Record<string, unknown>>;
+    const restored = model.videos
+      .map((video) => {
+        const assignment = assignments[video.id];
+        if (!assignment) return null;
+        const channelId = String(assignment.channelId || "");
+        return {
+          productionItemId: video.id,
+          title: video.title,
+          duration: video.duration,
+          channelId,
+          channelName: name(channelId),
+          source: String(assignment.source || "manual"),
+          locked: Boolean(assignment.locked),
+          reason: String(assignment.reason || "restored_plan"),
+          publishAt: String(assignment.publishAt || ""),
+          warning: "",
+        } satisfies DistributionRow;
+      })
+      .filter((row): row is DistributionRow => row !== null);
+    rememberDistribution(restored);
+  };
+
+  const deletePlanVersion = async () => {
+    if (!selectedPlanVersionId) return;
+    await command("delete-publication-v2-plan-version", { id: selectedPlanVersionId });
+    setSelectedPlanVersionId("");
   };
 
   const hasScheduleConflicts = distribution.some((row) => Boolean(row.warning));
@@ -302,6 +356,15 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
           <UiButton variant="secondary" onClick={() => void buildPreview()}><RefreshCw size={15}/>Пересчитать</UiButton>
           <UiButton variant="primary" disabled={!distribution.some((row) => row.channelId) || hasScheduleConflicts} onClick={() => void confirm()}><CheckCircle2 size={15}/>Подтвердить назначения</UiButton>
         </div>
+      </div>
+
+      <div className="nf-plan-version-toolbar" aria-label="Версии плана">
+        <div><b>Версии плана</b><small>Сохраняются между перезапусками. Frozen snapshots при восстановлении не меняются.</small></div>
+        <label>Сохранённая версия<select aria-label="Сохранённая версия плана" value={selectedPlanVersionId} onChange={(event) => setSelectedPlanVersionId(event.target.value)}><option value="">Выберите…</option>{model.planVersions.map((version) => <option key={version.id} value={version.id}>{version.name}{version.createdAt ? " · " + version.createdAt.slice(0, 16) : ""}</option>)}</select></label>
+        <UiButton variant="secondary" disabled={!selectedPlanVersionId} onClick={() => void restorePlanVersion()}>Восстановить</UiButton>
+        <UiButton variant="ghost" disabled={!selectedPlanVersionId} onClick={() => void deletePlanVersion()}>Удалить</UiButton>
+        <label>Новая версия<input aria-label="Название версии плана" value={planVersionName} onChange={(event) => setPlanVersionName(event.target.value)} placeholder="План на вечер"/></label>
+        <UiButton variant="secondary" disabled={!planVersionName.trim() || !distribution.length} onClick={() => void savePlanVersion()}>Сохранить версию</UiButton>
       </div>
 
       <section className="nf-bulk-schedule" aria-label="Массовое планирование">
