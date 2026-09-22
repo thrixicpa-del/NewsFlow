@@ -54,6 +54,7 @@ const cases = [
   { id: "publication-empty", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube"] },
   { id: "publication-paused", fixture: "task-states", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube"] },
   { id: "publication-84", fixture: "publication-84", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube"], expectedText: "Визуальный ролик 01", performanceBudgetMs: 3000 },
+  { id: "publication-narrow", fixture: "publication-84", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube"], expectedText: "Визуальный ролик 01", viewport: { width: 390, height: 844 } },
   { id: "publication-day-plan", fixture: "publication-84", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube", "План дня"], expectedText: "04:15", performanceBudgetMs: 3000 },
   { id: "publication-queue-ads", fixture: "publication-84", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube", "Очередь"], expectedText: "AUTO + MANUAL 39s", performanceBudgetMs: 3000 },
   { id: "publication-receipt", fixture: "publication-receipt", steps: ["ПУБЛИКАЦИЯ", "Публикация YouTube", "История", "Визуальный receipt публикации"], expectedDialog: "Визуальный receipt публикации" },
