@@ -171,6 +171,7 @@ from .youtube_api import (
     fetch_youtube_video_state,
     set_youtube_thumbnail,
     upload_private_video,
+    validate_youtube_description,
     youtube_tag_character_length,
 )
 from .youtube_engagement import (
@@ -8986,6 +8987,7 @@ def generate_seo(payload: dict) -> dict:
                 ranges=settings.seo_description_prefix_ranges,
                 fixed_prefix=settings.seo_description_prefix,
             )
+            description = validate_youtube_description(description)
             item.update(status="Готово", title=parsed["title"], description=description,
                         hashtags=parsed["hashtags"], error="")
         except _BRIDGE_OPERATION_ERRORS as exc:
@@ -9090,6 +9092,7 @@ def save_seo_text(payload: dict) -> dict:
     description = str(payload.get("description", "")).strip()
     if not description:
         raise ValueError("SEO-описание не может быть пустым")
+    description = validate_youtube_description(description)
     raw_hashtags = payload.get("hashtags", [])
     if isinstance(raw_hashtags, str):
         raw_hashtags = re.split(r"[,\n\s]+", raw_hashtags)
