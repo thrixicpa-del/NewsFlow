@@ -11715,35 +11715,6 @@ def prepare_montage(payload: dict) -> dict:
                     position_rotation_reason="безопасный внешний источник после локального исчерпания")
             else:
                 selected = None
-        if selected is None:
-            fallback_started = time.perf_counter()
-            reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
-            try:
-                selection = _select_montage_candidate(
-                    scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
-                    relaxed_hits=relaxed_hits, category_hits=category_hits,
-                    safe_context_hits=safe_context_hits,
-                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
-                    used_paths=used, used_families=used_families,
-                    project_used_paths=project_used, project_used_families=project_used_families,
-                    reserved_paths=reserved_paths, reserved_families=reserved_families,
-                    source_exists=source_exists, source_duration=verified_duration,
-                    source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
-                    recent_project_paths=recent_project_paths,
-                    immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
-                    position_bucket=position_bucket, batch_family_buckets=family_buckets,
-                    diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
-                    allow_safe_reuse=True,
-                )
-                selected = selection.item
-                selected_duration = selection.duration
-                score = selection.score
-                source = f"{selected.source or 'local'} · {selection.fallback_level}"
-            except MontageSelectionFailure as error:
-                selection_failure_diagnostics = error.diagnostics
-                selection = None
-                selected = None
-            preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         # Final local rescue: exact wording may be absent from the library, but
         # a large indexed collection should still complete the timeline with
@@ -11789,6 +11760,36 @@ def prepare_montage(payload: dict) -> dict:
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
+
+        if selected is None:
+            fallback_started = time.perf_counter()
+            reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
+            try:
+                selection = _select_montage_candidate(
+                    scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
+                    relaxed_hits=relaxed_hits, category_hits=category_hits,
+                    safe_context_hits=safe_context_hits,
+                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
+                    used_paths=used, used_families=used_families,
+                    project_used_paths=project_used, project_used_families=project_used_families,
+                    reserved_paths=reserved_paths, reserved_families=reserved_families,
+                    source_exists=source_exists, source_duration=verified_duration,
+                    source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
+                    recent_project_paths=recent_project_paths,
+                    immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                    position_bucket=position_bucket, batch_family_buckets=family_buckets,
+                    diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
+                    allow_safe_reuse=True,
+                )
+                selected = selection.item
+                selected_duration = selection.duration
+                score = selection.score
+                source = f"{selected.source or 'local'} · {selection.fallback_level}"
+            except MontageSelectionFailure as error:
+                selection_failure_diagnostics = error.diagnostics
+                selection = None
+                selected = None
+            preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         if selected is None:
             diagnostics = selection.diagnostics if selection else selection_failure_diagnostics
