@@ -20,6 +20,12 @@ describe("Publication V2 accessibility", () => {
     expect(blocking.map((violation) => ({ id: violation.id, nodes: violation.nodes.map((node) => node.target) }))).toEqual([]);
   }, 15000);
 
+  it("does not expose inert row action buttons in Videos", () => {
+    render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.queryByRole("button", { name: "Действия" })).not.toBeInTheDocument();
+  });
+
   it("gives each Videos expand button a row-specific accessible name", () => {
     render(<PublicationPage data={fixture} command={vi.fn().mockResolvedValue(undefined)} />);
 
