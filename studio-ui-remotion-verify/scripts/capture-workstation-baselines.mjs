@@ -10,6 +10,10 @@ if (process.env.NEWSFLOW_TEST_MODE !== "1") {
   throw new Error("Visual capture is test-only. Set NEWSFLOW_TEST_MODE=1.");
 }
 
+// Closing the disposable window must not let Electron select a successful
+// process exit before the capture promise reaches its terminal handler.
+app.on("window-all-closed", (event) => event.preventDefault());
+
 const root = process.cwd();
 const artifactRoot = path.join(root, ".artifacts", "workstation-visual-baselines");
 const testUserData = path.join(tmpdir(), "NewsFlow-workstation-visual-test-user-data");
@@ -358,15 +362,13 @@ async function captureBaselines() {
   } finally {
     if (!window.isDestroyed()) window.destroy();
     await stopDisposableVite(vite);
-    app.exit();
   }
 }
 
 void captureBaselines().then(
-  () => process.exit(0),
+  () => app.exit(0),
   (error) => {
     console.error(error);
-    app.exit();
-    process.exit(1);
+    app.exit(1);
   },
 );

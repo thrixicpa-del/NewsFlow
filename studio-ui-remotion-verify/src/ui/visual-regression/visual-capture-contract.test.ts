@@ -51,14 +51,32 @@ describe("workstation visual capture contract", () => {
     expect(captureScript).toContain("bounds ${details.bounds}");
   });
 
-  it("force-closes the disposable capture window after an OAuth waiting-state capture", () => {
+  it("cleans up disposable visual resources before selecting the process exit code", () => {
+    const captureScript = readFileSync(
+      resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
+      "utf8",
+    );
+    const destroyWindow = captureScript.indexOf("if (!window.isDestroyed()) window.destroy();");
+    const awaitStop = captureScript.indexOf("await stopDisposableVite(vite);");
+    const terminalHandler = captureScript.indexOf("void captureBaselines().then(");
+
+    expect(destroyWindow).toBeGreaterThan(-1);
+    expect(awaitStop).toBeGreaterThan(destroyWindow);
+    expect(terminalHandler).toBeGreaterThan(awaitStop);
+    expect(captureScript.slice(destroyWindow, terminalHandler)).not.toContain("app.exit(");
+  });
+
+  it("keeps Electron alive after closing the disposable window until the terminal handler selects an exit code", () => {
     const captureScript = readFileSync(
       resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
       "utf8",
     );
 
-    expect(captureScript).toContain("if (!window.isDestroyed()) window.destroy();");
-    expect(captureScript).toContain("app.exit();");
+    const preventAutomaticExit = captureScript.indexOf('app.on("window-all-closed", (event) => event.preventDefault());');
+    const terminalHandler = captureScript.indexOf("void captureBaselines().then(");
+
+    expect(preventAutomaticExit).toBeGreaterThan(-1);
+    expect(preventAutomaticExit).toBeLessThan(terminalHandler);
   });
 
   it("waits for the disposable Vite process tree before terminating visual capture", () => {
@@ -68,12 +86,26 @@ describe("workstation visual capture contract", () => {
     );
     const stopVite = captureScript.indexOf("async function stopDisposableVite(vite)");
     const awaitStop = captureScript.indexOf("await stopDisposableVite(vite);");
-    const exit = captureScript.indexOf("app.exit();", awaitStop);
 
     expect(stopVite).toBeGreaterThan(-1);
     expect(awaitStop).toBeGreaterThan(stopVite);
-    expect(exit).toBeGreaterThan(awaitStop);
     expect(captureScript).toContain('taskkill.exe');
+  });
+
+  it("returns a failing Electron exit code when visual capture rejects", () => {
+    const captureScript = readFileSync(
+      resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
+      "utf8",
+    );
+    const terminalHandler = captureScript.indexOf("void captureBaselines().then(");
+    const successExit = captureScript.indexOf("() => app.exit(0)", terminalHandler);
+    const errorLog = captureScript.indexOf("console.error(error);", successExit);
+    const failureExit = captureScript.indexOf("app.exit(1);", errorLog);
+
+    expect(terminalHandler).toBeGreaterThan(-1);
+    expect(successExit).toBeGreaterThan(terminalHandler);
+    expect(errorLog).toBeGreaterThan(successExit);
+    expect(failureExit).toBeGreaterThan(errorLog);
   });
 
   it("clears disposable renderer preferences before loading each visual case", () => {
