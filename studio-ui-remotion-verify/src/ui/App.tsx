@@ -10807,7 +10807,7 @@ export function Outputs({
       <div className="toolbar">
         <Button kind="success" onClick={packageAll}>
           <FolderOpen size={17} />
-          Собрать папки результатов
+          Собрать пакеты для публикации
         </Button>
         <Button
           onClick={() =>
@@ -10822,10 +10822,11 @@ export function Outputs({
       <section className="panel outputs-list">
         <div className="panel-title">
           <div>
-            <b>Готовые ролики</b>
+            <b>Внутренние пакеты для публикации</b>
             <small>
-              Каждая папка содержит MP4, заголовок, сценарий, SEO, теги, хэштеги
-              и выбранную обложку.
+              Технические per-video пакеты для Publication: MP4, сценарий, SEO,
+              теги, хэштеги и выбранная обложка. Пользовательский batch-export
+              находится выше.
             </small>
           </div>
         </div>
@@ -10833,8 +10834,8 @@ export function Outputs({
           <DataTable ariaLabel="Готовые пакеты роликов" data={data.outputs} columns={outputColumns} />
         ) : (
           <Empty
-            title="Пока нет пакетов роликов"
-            text="После экспорта MP4 нажмите «Собрать папки результатов»."
+            title="Пока нет пакетов для публикации"
+            text="Если они нужны Publication, нажмите «Собрать пакеты для публикации»."
           />
         )}
       </section>
