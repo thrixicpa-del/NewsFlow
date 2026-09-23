@@ -26,6 +26,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -57,6 +58,7 @@ from .config import (
     Settings,
     VoiceGenKey,
     WProjectKey,
+    _exclusive_settings_write,
     allow_empty_release_state,
     app_data_root,
     load_settings,
@@ -166,7 +168,6 @@ from .voicer import (
     VoiceProfile,
     WProjectClient,
     open_voice_login,
-    safe_audio_name,
 )
 from .youtube_allocation import allocate_ready_jobs, build_allocation_summary
 from .youtube_api import (
@@ -428,8 +429,97 @@ def _hydrate_cover_library(settings: Settings) -> bool:
     return changed or settings.cover_queue != before
 
 
+def _production_generation_is_current(settings: Settings) -> bool:
+    """Whether a long-running worker still owns the active production release."""
+    return load_settings().production_reset_generation == settings.production_reset_generation
+
+
+@contextmanager
+def _production_artifact_fence():
+    """Serialize reset cleanup with final artifact publication across processes."""
+    with _exclusive_settings_write(app_data_root() / "production-artifact-fence"):
+        yield
+
+
+def _production_staging_folder(root: Path, generation: int, kind: str) -> Path:
+    """Return a reset-generation-owned staging root, never a canonical output root."""
+    return root / ".newsflow-staging" / str(max(0, generation)) / kind
+
+
+def _remove_staged_artifact(path: Path, root: Path) -> None:
+    """Remove one worker-owned staging artifact without touching a canonical root."""
+    try:
+        resolved_root = root.resolve()
+        resolved_path = path.resolve()
+        if resolved_path == resolved_root or not resolved_path.is_relative_to(resolved_root):
+            return
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.is_file():
+            path.unlink()
+        parent = path.parent
+        while parent != resolved_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        try:
+            resolved_root.rmdir()
+        except OSError:
+            pass
+    except OSError:
+        return
+
+
+def _remove_owned_staged_artifact(path: Path) -> None:
+    """Find the staging boundary for one path before removing it."""
+    for parent in (path, *path.parents):
+        if parent.name == ".newsflow-staging":
+            _remove_staged_artifact(path, parent)
+            return
+
+
+def _is_owned_generation_staging(path: Path, generation: int) -> bool:
+    """Only a reset-generation staging path is eligible for final publication."""
+    resolved = path.resolve()
+    for parent in resolved.parents:
+        if parent.name == ".newsflow-staging":
+            return resolved.is_relative_to(parent / str(max(0, generation)))
+    return False
+
+
+def _publish_staged_paths(settings: Settings, staged_targets: list[tuple[Path, Path]]) -> list[Path]:
+    """Publish one coherent staged batch, or remove only that batch when stale."""
+    if not all(_is_owned_generation_staging(path, settings.production_reset_generation)
+               for path, _ in staged_targets):
+        raise ValueError("Публикация разрешена только из staging текущего поколения")
+    with _production_artifact_fence():
+        if not _production_generation_is_current(settings):
+            for path, _ in staged_targets:
+                _remove_owned_staged_artifact(path)
+            return []
+        published: list[Path] = []
+        for staged, target in staged_targets:
+            if not staged.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(target)
+            published.append(target)
+        return published
+
+
+def _publish_staged_artifacts(settings: Settings, staged_paths: list[Path], output_root: Path) -> list[Path]:
+    """Publish direct staged files to an output root, preserving the reset fence."""
+    return _publish_staged_paths(
+        settings, [(path, output_root / path.name) for path in staged_paths],
+    )
+
+
 def _save_cover_state(settings: Settings) -> None:
     """Persist cover-specific state before the mutable global settings snapshot."""
+    if not _production_generation_is_current(settings):
+        return
     _assign_cover_production_ids(settings)
     CoverLibrary(_cover_library_path()).persist(
         settings.cover_queue, settings.fastgen_capabilities_cache, settings.fastgen_usage_cache,
@@ -3799,27 +3889,30 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     return scenes, provenance
 
 
-def _voice_candidate_folder(output_folder: str) -> Path:
+def _voice_candidate_folder(output_folder: str, generation: int) -> Path:
     """Keep a newly generated MP3 out of the active output path until validated."""
-    return Path(output_folder) / ".newsflow-voice-staging"
+    return _production_staging_folder(Path(output_folder), generation, "voice")
 
 
-def _save_voice_candidate(output_folder: str, index: int, title: str, content: bytes) -> Path:
+def _save_voice_candidate(settings: Settings, index: int, title: str, content: bytes) -> Path:
     """Persist a provider response where it cannot overwrite a prior ready MP3."""
     return SecretVoicerClient("browser-session").save_audio(
-        _voice_candidate_folder(output_folder), f"{index + 1:03d} — {title}", content,
+        _voice_candidate_folder(settings.voicer_output_folder, settings.production_reset_generation),
+        f"{index + 1:03d} — {title}", content,
     )
 
 
-def _promote_validated_voice_candidate(output_folder: str, candidate: str | Path) -> tuple[str, float]:
+def _promote_validated_voice_candidate(output_folder: str, candidate: str | Path,
+                                       *, settings: Settings | None = None) -> tuple[str, float]:
     """Validate first, then atomically replace the canonical output on the same volume."""
     staged = Path(candidate)
     duration = validate_voiceover_artifact(staged)
-    target_folder = Path(output_folder)
-    target_folder.mkdir(parents=True, exist_ok=True)
-    target = target_folder / safe_audio_name(staged.stem)
-    staged.replace(target)
-    return str(target), duration
+    if settings is None:
+        raise ValueError("Для публикации озвучки требуется Settings текущего производства")
+    published = _publish_staged_artifacts(settings, [staged], Path(output_folder))
+    if not published:
+        raise RuntimeError("Озвучка отменена: производство было очищено")
+    return str(published[0]), duration
 
 
 def audio_title_key(value: str) -> str:
@@ -7797,7 +7890,14 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         "operation": operation,
     }
     pool = FastGenPool(_selected_fastgen_keys(settings))
-    output = Path(settings.cover_output_folder)
+    cover_root = Path(settings.cover_output_folder)
+    cover_staging_root = _production_staging_folder(
+        cover_root, settings.production_reset_generation, "cover",
+    )
+    output = cover_staging_root
+    if not _production_generation_is_current(settings):
+        return snapshot()
+    output.mkdir(parents=True, exist_ok=True)
     for index, item in enumerate(settings.cover_queue):
         if index not in requested:
             continue
@@ -8088,6 +8188,25 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             else:
                 _cover_step(item, "Ошибка FastGen", 100, detail)
                 item.update(error=detail)
+        staged_paths = [Path(value) for value in values]
+        # A real FastGen response is synchronously materialized by the client.
+        # Keep the established provider-contract behavior for a deferred/mock
+        # response that names a path before the downloader has written it.
+        published = staged_paths
+        if all(path.exists() for path in staged_paths):
+            published = _publish_staged_paths(
+                settings,
+                [(path, cover_root / path.name) for path in staged_paths],
+            )
+            if len(published) != len(staged_paths):
+                return snapshot()
+        replacements = {str(staged): str(final) for staged, final in zip(staged_paths, published)}
+        values = [replacements.get(value, value) for value in values]
+        for prompt_paths in prompt_image_paths:
+            prompt_paths["paths"] = [replacements.get(value, value) for value in prompt_paths["paths"]]
+        if values:
+            item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
+                        selected_base_path=values[0], prompt_image_paths=prompt_image_paths)
         _save_cover_state(settings)
     # The face reference is not left to the image model alone.  When a topic
     # has a relevant portrait, apply it locally before putting typography over
@@ -9583,7 +9702,7 @@ def generate_voice(payload: dict) -> dict:
         else:
             raise last_error or RuntimeError("Secret Voicer не принял задачу")
         set_task_status(index, "API: сохраняем MP3", 95)
-        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        output = _save_voice_candidate(settings, index, job.request.title, content)
         return index, str(output)
 
     def lumean_task(index: int, key: LumeanKey, profile: VoiceProfile) -> tuple[int, str]:
@@ -9619,7 +9738,7 @@ def generate_voice(payload: dict) -> dict:
             target["template_signature"] = signature
             target["provider"] = "lumean"
         set_task_status(index, "Lumean: сохраняем MP3", 96)
-        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        output = _save_voice_candidate(settings, index, job.request.title, content)
         return index, str(output)
 
     def voicegen_task(index: int, key: VoiceGenKey, profile: VoiceProfile) -> tuple[int, str]:
@@ -9646,7 +9765,7 @@ def generate_voice(payload: dict) -> dict:
         else:
             raise last_error or RuntimeError("VoiceGen не принял задачу")
         set_task_status(index, "VoiceGen: сохраняем MP3", 96)
-        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        output = _save_voice_candidate(settings, index, job.request.title, content)
         return index, str(output)
 
     def wproject_task(index: int, key: WProjectKey, profile: VoiceProfile) -> tuple[int, str]:
@@ -9710,7 +9829,7 @@ def generate_voice(payload: dict) -> dict:
             if content is None:
                 raise last_error or RuntimeError("WProject не принял задачу")
         set_task_status(index, "WProject: сохраняем MP3", 96)
-        output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+        output = _save_voice_candidate(settings, index, job.request.title, content)
         return index, str(output)
 
     def cross_service_fallback(index: int, failed_provider: str) -> tuple[int, str]:
@@ -9766,7 +9885,7 @@ def generate_voice(payload: dict) -> dict:
                     return wproject_task(index, keys[0], profile)
                 else:
                     continue
-                output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+                output = _save_voice_candidate(settings, index, job.request.title, content)
                 return index, str(output)
             except _BRIDGE_OPERATION_ERRORS:
                 continue
@@ -9879,7 +9998,7 @@ def generate_voice(payload: dict) -> dict:
                         f"№{previous_index + 1}. Файл не сохранён: откройте вкладку этого сценария и повторите только его."
                     )
                 browser_audio_hashes[fingerprint] = index
-            output = _save_voice_candidate(settings.voicer_output_folder, index, job.request.title, content)
+            output = _save_voice_candidate(settings, index, job.request.title, content)
             return index, str(output)
 
     workers = min(len(candidates), max(1, int(settings.voice_queue_concurrency)))
@@ -9890,7 +10009,9 @@ def generate_voice(payload: dict) -> dict:
             job_snapshot = snapshots_by_index[index]
             try:
                 completed_index, output = future.result()
-                output, duration = _promote_validated_voice_candidate(settings.voicer_output_folder, output)
+                output, duration = _promote_validated_voice_candidate(
+                    settings.voicer_output_folder, output, settings=settings,
+                )
                 settings.voice_scenario_outputs[str(completed_index + 1)] = output
                 job_snapshot["state"] = "ready"
                 job_snapshot["output_path"] = output
@@ -9906,7 +10027,9 @@ def generate_voice(payload: dict) -> dict:
                 if _can_failover_voice(exc):
                     try:
                         completed_index, output = cross_service_fallback(index, str(job_snapshot.get("provider", "")))
-                        output, duration = _promote_validated_voice_candidate(settings.voicer_output_folder, output)
+                        output, duration = _promote_validated_voice_candidate(
+                            settings.voicer_output_folder, output, settings=settings,
+                        )
                         settings.voice_scenario_outputs[str(completed_index + 1)] = output
                         artifact = {"path": output, "duration_seconds": duration,
                                     "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
@@ -11227,7 +11350,8 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                              semaphore: threading.BoundedSemaphore | None = None,
                              progress=None, excluded: set[str] | None = None,
-                             excluded_families: set[str] | None = None) -> FootageItem | None:
+                             excluded_families: set[str] | None = None,
+                             created_paths: list[Path] | None = None) -> FootageItem | None:
     """Fetch one short, reusable external shot only when local search is weak.
 
     The downloader is deliberately conservative: only allowed stock/news
@@ -11273,13 +11397,41 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
                     return cached
                 with lock:
-                    folder = Path(settings.footage_download_folder) / "Автоподбор"
+                    operation_id = hashlib.sha256(cache_key.encode()).hexdigest()[:20]
+                    download_root = Path(settings.footage_download_folder)
+                    cutter_root = Path(settings.cutter_output_folder)
+                    download_staging = _production_staging_folder(
+                        download_root, settings.production_reset_generation, "external",
+                    )
+                    cutter_staging = _production_staging_folder(
+                        cutter_root, settings.production_reset_generation, "external",
+                    )
+                    folder = download_staging / operation_id
+                    clip_folder = cutter_staging / operation_id
+                    if created_paths is not None:
+                        created_paths.extend([folder, clip_folder])
                     item = download_footage(candidate, folder)
+                    if created_paths is not None:
+                        created_paths.append(Path(item.path))
                     if progress:
                         progress("Нарезка внешнего футажа", Path(item.path).name)
-                    clip = cut_single_clip(Path(item.path), Path(settings.cutter_output_folder) / "Внешние для монтажа",
+                    clip = cut_single_clip(Path(item.path), clip_folder,
                                            duration=6.0, fps=30, bitrate="4M")
-                normalized = FootageItem(str(clip), clip.name, item.source, item.source_url,
+                    if created_paths is not None:
+                        created_paths.append(Path(clip))
+                published = _publish_staged_paths(
+                    settings,
+                    [
+                        (folder, download_root / "Автоподбор" / operation_id),
+                        (clip_folder, cutter_root / "Внешние для монтажа" / operation_id),
+                    ],
+                )
+                if len(published) != 2:
+                    with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+                        _EXTERNAL_FOOTAGE_CACHE.pop(cache_key, None)
+                    return None
+                final_clip = published[1] / Path(clip).name
+                normalized = FootageItem(str(final_clip), final_clip.name, item.source, item.source_url,
                                          item.license, item.tags)
                 if _montage_item_is_excluded(normalized, excluded, excluded_families):
                     continue
@@ -11303,6 +11455,7 @@ def prepare_montage(payload: dict) -> dict:
         "fallback_expansion": 0.0, "external": 0.0, "total": 0.0,
     }
     settings = load_settings()
+    created_worker_artifacts: list[Path] = []
     # Queue workers pass one shared semaphore so simultaneous projects do not
     # download and recut the same external source. Manual "prepare one" calls
     # have no worker context; ``None`` is the intentional unlimited-local
@@ -11824,6 +11977,7 @@ def prepare_montage(payload: dict) -> dict:
                 scene, settings, index, download_semaphore,
                 progress=lambda stage, detail: progress(stage, detail) if progress else None,
                 excluded=project_used, excluded_families=project_used_families,
+                created_paths=created_worker_artifacts,
             )
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
@@ -12108,7 +12262,10 @@ def prepare_montage(payload: dict) -> dict:
     # real footage.  There is no FFmpeg looping or cloned final frame here;
     # only the final source that crosses the MP3 boundary is trimmed.
     try:
-        _complete_project_visual_tail(project, index, settings, download_semaphore)
+        _complete_project_visual_tail(
+            project, index, settings, download_semaphore,
+            created_paths=created_worker_artifacts,
+        )
     except ValueError as exc:
         raise RuntimeError(f"Не удалось завершить видеоряд реальными футажами: {exc}") from exc
     clips = project.clips
@@ -12136,15 +12293,24 @@ def prepare_montage(payload: dict) -> dict:
         *settings.montage_recent_clip_paths,
         *(clip.path for clip in clips),
     ]))[-3000:]
-    save_settings(settings)
     project_folder = Path(settings.montage_project_folder)
+    save_settings(settings)
+    path = project_folder / f"{safe_filename(title)}.newsflow"
+    project_staging = _production_staging_folder(
+        project_folder, settings.production_reset_generation, "project",
+    )
+    staged_path = project_staging / path.name
+
     try:
-        project_folder.mkdir(parents=True, exist_ok=True)
-        path = project_folder / f"{safe_filename(title)}.newsflow"
-        project.save(path)
+        project.save(staged_path)
+        staged_targets = [(staged_path, path)]
         if settings.montage_export_davinci_xml:
-            export_fcpxml(project, path.with_suffix(".fcpxml"))
-            project.save(path)
+            staged_xml = staged_path.with_suffix(".fcpxml")
+            export_fcpxml(project, staged_xml)
+            staged_targets.append((staged_xml, path.with_suffix(".fcpxml")))
+            project.save(staged_path)
+        if len(_publish_staged_paths(settings, staged_targets)) != len(staged_targets):
+            raise RuntimeError("Подготовка монтажа отменена: производство было очищено")
     except OSError as exc:
         # Do not hide the target path behind a generic "Permission denied".
         # The user can then immediately see which folder is locked or unavailable.
@@ -12163,7 +12329,14 @@ def render_montage(payload: dict) -> dict:
         raise ValueError("Сначала подготовьте или выберите проект монтажа")
     project = TimelineProject.load(project_path)
     output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
-    rendered = render_project(project, output, renderer=settings.montage_renderer,
+    output_staging = _production_staging_folder(
+        output.parent, settings.production_reset_generation, "montage",
+    )
+    project_staging = _production_staging_folder(
+        project_path.parent, settings.production_reset_generation, "project",
+    )
+    staged_output = output_staging / output.name
+    rendered = render_project(project, staged_output, renderer=settings.montage_renderer,
                               remotion_concurrency=settings.montage_remotion_frame_concurrency)
     voiceover = Path(project.voiceover_path)
     if voiceover.is_file():
@@ -12172,28 +12345,35 @@ def render_montage(payload: dict) -> dict:
             expected_duration=required_video_duration(probe_media_duration(voiceover), project.intro_duration),
         )
     davinci_warning = ""
+    staged_targets = [(Path(rendered), output)]
     if settings.montage_export_davinci_xml:
-        export_fcpxml(project, project_path.with_suffix(".fcpxml"))
-        if settings.montage_davinci_auto_import:
-            # XML/MP4 are valid even when Resolve is closed.  An optional
-            # auto-import must therefore never turn a successful render into
-            # an error visible to the user.
-            try:
-                with _DAVINCI_IMPORT_LOCK:
-                    import_fcpxml(Path(project.davinci_xml_path), project.title)
-            # Resolve is an optional hand-off.  A missing DLL, a closed
-            # project or an unexpected API exception must never invalidate an
-            # already rendered MP4 and its FCPXML plan.
-            except _BRIDGE_OPERATION_ERRORS as error:
-                davinci_warning = f"XML создан, но не импортирован в DaVinci: {error}"
-    project.save(project_path)
-    remotion_path = output.with_suffix(".remotion.json")
-    remotion_path.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
-    if str(rendered) not in settings.pipeline_montage_outputs:
-        settings.pipeline_montage_outputs.append(str(rendered))
+        staged_xml = project_staging / project_path.with_suffix(".fcpxml").name
+        export_fcpxml(project, staged_xml)
+        project.davinci_xml_path = str(project_path.with_suffix(".fcpxml"))
+        staged_targets.append((staged_xml, project_path.with_suffix(".fcpxml")))
+    staged_project = project_staging / project_path.name
+    project.save(staged_project)
+    staged_remotion = output_staging / output.with_suffix(".remotion.json").name
+    staged_remotion.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+    staged_targets.extend([(staged_project, project_path), (staged_remotion, output.with_suffix(".remotion.json"))])
+    published = _publish_staged_paths(
+        settings, staged_targets,
+    )
+    if len(published) != len(staged_targets):
+        raise RuntimeError("Монтаж отменён: производство было очищено")
+    if settings.montage_export_davinci_xml and settings.montage_davinci_auto_import:
+        # XML/MP4 are valid even when Resolve is closed.  An optional
+        # auto-import must therefore never turn a successful render into an error.
+        try:
+            with _DAVINCI_IMPORT_LOCK:
+                import_fcpxml(project_path.with_suffix(".fcpxml"), project.title)
+        except _BRIDGE_OPERATION_ERRORS as error:
+            davinci_warning = f"XML создан, но не импортирован в DaVinci: {error}"
+    if str(output) not in settings.pipeline_montage_outputs:
+        settings.pipeline_montage_outputs.append(str(output))
     save_settings(settings)
     return {**snapshot(), "operationResult": {"kind": "render", "count": 1,
-                                                 "folder": str(rendered.parent), "warning": davinci_warning}}
+                                                 "folder": str(output.parent), "warning": davinci_warning}}
 
 
 def export_davinci_xml(payload: dict) -> dict:
@@ -12704,7 +12884,8 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
 
 
 def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, settings: Settings,
-                                     download_semaphore: threading.BoundedSemaphore | None = None) -> list[FootageItem]:
+                                     download_semaphore: threading.BoundedSemaphore | None = None,
+                                     created_paths: list[Path] | None = None) -> list[FootageItem]:
     """Find a bounded, semantically relevant replacement for one broken slot."""
     query = str(clip.visual_query_en or clip.narration or "news footage").strip()
     try:
@@ -12729,12 +12910,14 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
     downloaded = _download_scene_fallback(
         {"visual_query_en": query, "narration": clip.narration, "duration": clip.duration},
         settings, index, download_semaphore,
+        created_paths=created_paths,
     )
     return [downloaded] if downloaded else []
 
 
 def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, settings: Settings,
-                                  download_semaphore: threading.BoundedSemaphore | None = None) -> int:
+                                  download_semaphore: threading.BoundedSemaphore | None = None,
+                                  created_paths: list[Path] | None = None) -> int:
     """Verify real source lengths and append clips until the MP3 is covered."""
     voice = Path(project.voiceover_path)
     if not voice.is_file():
@@ -12806,7 +12989,9 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
         if "достаточное число валидных футажей" not in str(initial_error):
             raise
     last = project.clips[-1] if project.clips else TimelineClip("", project.title, project.title, duration=6.0)
-    candidates = _replacement_candidates_for_clip(index, last, settings, download_semaphore)
+    candidates = _replacement_candidates_for_clip(
+        index, last, settings, download_semaphore, created_paths=created_paths,
+    )
     existing_paths = {_montage_clip_key(clip.path) for clip in project.clips}
     existing_families = {clip.source_family or _montage_clip_family_key(clip.path) for clip in project.clips}
     # Prefer a new source family.  If the tiny terminal remainder still cannot
@@ -13080,7 +13265,6 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                     return _replacement_candidates_for_clip(project_index, clip, settings, download_semaphore)
                 changed = _repair_missing_project_clips(project, candidates_for)
                 replaced += changed
-                project.save(Path(project_path))
                 remaining = _montage_project_missing_clips(project, project_index)
                 if not remaining:
                     break
@@ -13110,12 +13294,18 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         except ValueError as exc:
             raise RuntimeError(f"Таймлайн требует дополнительный футаж: {exc}") from exc
         if tail_added:
-            project.save(Path(project_path))
             _montage_task_update(
                 settings, index, status="Рендер", phase="Завершаем видеоряд", progress=58,
                 detail=f"Добавлено футажей для хвоста: {tail_added}", projectPath=project_path,
             )
         output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+        output_staging = _production_staging_folder(
+            output.parent, settings.production_reset_generation, "montage",
+        )
+        project_staging = _production_staging_folder(
+            Path(project_path).parent, settings.production_reset_generation, "project",
+        )
+        staged_output = output_staging / output.name
         def heartbeat(pid: int | None):
             _montage_task_update(
                 settings, index, status="Рендер", phase="Рендер футажей", progress=None,
@@ -13129,7 +13319,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 value = 60 + int(38 * done / max(1, total))
                 phase = "Склейка" if label == "Склейка" else ("Готовим MP4" if label == "Готово" else "Рендер футажей")
             _montage_task_update(settings, index, status="Рендер", phase=phase, progress=value, detail=label)
-        rendered = render_project(project, output, progress=progress, renderer=settings.montage_renderer,
+        rendered = render_project(project, staged_output, progress=progress, renderer=settings.montage_renderer,
                                   remotion_concurrency=settings.montage_remotion_frame_concurrency,
                                   remotion_parallel_jobs=rendering_workers, heartbeat=heartbeat)
         voiceover = Path(project.voiceover_path)
@@ -13137,26 +13327,37 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             probe_media_duration(voiceover), project.intro_duration,
         )
         validate_rendered_montage(Path(rendered), expected_duration=expected_duration)
+        staged_targets = [(Path(rendered), output)]
         if settings.montage_export_davinci_xml:
             _montage_task_update(settings, index, status="Рендер", phase="Создаём DaVinci XML", progress=99)
-            export_fcpxml(project, Path(project_path).with_suffix(".fcpxml"))
-            if settings.montage_davinci_auto_import:
-                try:
-                    with _DAVINCI_IMPORT_LOCK:
-                        import_fcpxml(Path(project.davinci_xml_path), project.title)
-                except _BRIDGE_OPERATION_ERRORS as error:
-                    # The video and XML are valid without a currently open Resolve;
-                    # retain the result and show the exact import issue in timeline.
-                    _montage_task_update(settings, index, detail=f"XML готов; DaVinci: {error}")
-        project.save(Path(project_path))
-        remotion_path = output.with_suffix(".remotion.json")
-        remotion_path.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+            staged_xml = project_staging / Path(project_path).with_suffix(".fcpxml").name
+            export_fcpxml(project, staged_xml)
+            project.davinci_xml_path = str(Path(project_path).with_suffix(".fcpxml"))
+            staged_targets.append((staged_xml, Path(project_path).with_suffix(".fcpxml")))
+        staged_project = project_staging / Path(project_path).name
+        project.save(staged_project)
+        staged_remotion = output_staging / output.with_suffix(".remotion.json").name
+        staged_remotion.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+        staged_targets.extend([(staged_project, Path(project_path)), (staged_remotion, output.with_suffix(".remotion.json"))])
+        published = _publish_staged_paths(
+            settings, staged_targets,
+        )
+        if len(published) != len(staged_targets):
+            raise RuntimeError("Монтаж отменён: производство было очищено")
+        if settings.montage_export_davinci_xml and settings.montage_davinci_auto_import:
+            try:
+                with _DAVINCI_IMPORT_LOCK:
+                    import_fcpxml(Path(project_path).with_suffix(".fcpxml"), project.title)
+            except _BRIDGE_OPERATION_ERRORS as error:
+                # The video and XML are valid without a currently open Resolve;
+                # retain the result and show the exact import issue in timeline.
+                _montage_task_update(settings, index, detail=f"XML готов; DaVinci: {error}")
         with _MONTAGE_QUEUE_LOCK:
-            if str(rendered) not in settings.pipeline_montage_outputs:
-                settings.pipeline_montage_outputs.append(str(rendered))
+            if str(output) not in settings.pipeline_montage_outputs:
+                settings.pipeline_montage_outputs.append(str(output))
         _montage_task_update(settings, index, status="Готово", phase="MP4 сохранён", progress=100,
-                             detail=rendered.name, outputPath=str(rendered), projectPath=project_path, error="")
-        return str(rendered)
+                             detail=output.name, outputPath=str(output), projectPath=project_path, error="")
+        return str(output)
 
     rendered_count = 0
     requested_planning_workers = min(settings.montage_planning_workers, len(valid))
@@ -13916,6 +14117,7 @@ def _clear_production_folder(folder: str) -> int:
     """Delete children of one configured output folder, never the folder itself."""
     target = Path(folder).expanduser().resolve()
     if not target.exists():
+        target.mkdir(parents=True, exist_ok=True)
         return 0
     if target == target.parent or target == app_data_root().resolve():
         raise ValueError("Небезопасный путь производственной папки")
@@ -13926,16 +14128,87 @@ def _clear_production_folder(folder: str) -> int:
         else:
             child.unlink()
         removed += 1
+    # A configured output root is reusable operator configuration.  The reset
+    # owns only its children, so keep the root available for the next release.
+    target.mkdir(parents=True, exist_ok=True)
     return removed
 
 
-def clear_production_queue(payload: dict) -> dict:
+def _production_cleanup_folders(settings: Settings) -> set[str]:
+    """Return every operator-configured folder that production reset owns."""
+    return {
+        settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
+        settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
+        settings.footage_download_folder, settings.mixer_output_folder, settings.montage_output_folder,
+        settings.montage_project_folder,
+    }
+
+
+def _reset_cleanup_preflight(settings: Settings, folders: set[str]) -> None:
+    """Refuse reset before state changes when an output root contains reusable data."""
+    targets = {Path(folder).expanduser().resolve() for folder in folders if str(folder).strip()}
+    app_root = app_data_root().resolve()
+    generated_roots = {
+        Path(value).expanduser().resolve()
+        for value in (settings.cutter_output_folder, settings.footage_download_folder)
+        if str(value).strip()
+    }
+    footage_paths = {
+        Path(value).expanduser().resolve() for value in settings.footage_folders if str(value).strip()
+    }
+    generated_footage = {
+        value for value in footage_paths
+        if any(value == root or value.is_relative_to(root) for root in generated_roots)
+    }
+    protected: list[tuple[Path, bool]] = [
+        (app_root, True),
+        *((value, True) for value in footage_paths),
+        *[(Path(value).expanduser().resolve(), False) for value in settings.cutter_sources if str(value).strip()],
+        *[(Path(value).expanduser().resolve(), True) for value in (
+            settings.results_output_folder, settings.cover_face_library_folder,
+            settings.cover_face_prepared_folder, settings.montage_intro_folder,
+            settings.montage_overlay_folder,
+        ) if str(value).strip()],
+        *[(Path(value).expanduser().resolve(), False) for value in (
+            *settings.cover_reference_paths, *settings.cover_ai_reference_paths,
+        ) if str(value).strip()],
+    ]
+    for item in settings.cover_queue:
+        if not isinstance(item, dict):
+            continue
+        for key in ("face_reference_path", "visual_reference_path", "scene_reference_path"):
+            value = str(item.get(key, "") or "").strip()
+            if value:
+                protected.append((Path(value).expanduser().resolve(), False))
+    for target in targets:
+        if target == target.parent:
+            raise ValueError("Небезопасный путь производственной папки")
+        if target == app_root or app_root.is_relative_to(target):
+            raise ValueError(
+                f"Производственная папка «{target}» пересекается с данными NewsFlow «{app_root}»."
+            )
+        for value, is_directory in protected:
+            # Cutter/download paths are reset-owned generated media, even when
+            # the montage index also exposes them as footage folders.
+            overlaps = value == target or value.is_relative_to(target)
+            if is_directory:
+                overlaps = overlaps or target.is_relative_to(value)
+            if overlaps and value not in generated_footage:
+                raise ValueError(
+                    f"Производственная папка «{target}» пересекается с сохраняемыми данными «{value}». "
+                    "Измените пути и повторите удаление производства."
+                )
+
+
+def _clear_production_queue_locked(payload: dict) -> dict:
     """Erase production artefacts and queue metadata after explicit confirmation."""
 
     if (payload.get("confirmed") is not True
             or str(payload.get("confirmationPhrase") or "").strip() != "УДАЛИТЬ ПРОИЗВОДСТВО"):
         raise ValueError("Введите контрольную фразу «УДАЛИТЬ ПРОИЗВОДСТВО» для очистки производственной очереди.")
     settings = load_settings()
+    folders = _production_cleanup_folders(settings)
+    _reset_cleanup_preflight(settings, folders)
     titles, jobs = load_session()
     # A production reset is a durable user decision. Record every current
     # scenario before clearing the queue so detached workers and emergency
@@ -13969,12 +14242,7 @@ def clear_production_queue(payload: dict) -> dict:
           for value in settings.deleted_scenario_production_ids if str(value).strip()),
         *removed_production_ids,
     })[-10000:]
-    folders = {
-        settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
-        settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
-        settings.footage_download_folder, settings.mixer_output_folder, settings.montage_output_folder,
-        settings.montage_project_folder,
-    }
+    settings.production_reset_generation += 1
     settings.youtube_publication_jobs = []
     settings.youtube_publication_activity = []
     settings.youtube_publication_items = {}
@@ -13982,6 +14250,7 @@ def clear_production_queue(payload: dict) -> dict:
     settings.youtube_publication_executions = {}
     settings.youtube_publication_receipts = {}
     settings.youtube_publication_assignments = {}
+    settings.youtube_publication_plan_versions = []
     settings.youtube_engagement_tasks = []
     settings.pipeline_montage_outputs = []
     settings.video_result_packages = {}
@@ -13991,6 +14260,7 @@ def clear_production_queue(payload: dict) -> dict:
     settings.voice_tts_batches = []
     settings.voice_active_tts_batch_id = ""
     settings.voice_tts_jobs = {}
+    settings.voice_import_summary = {}
     # Directions are the user's reusable editorial library, not production
     # artefacts. Clearing a release must never erase this library.
     settings.idea_plan = []
@@ -14008,30 +14278,52 @@ def clear_production_queue(payload: dict) -> dict:
     settings.youtube_suggested_topics = []
     settings.cover_queue = []
     settings.seo_queue = []
-    settings.cover_rate_usage_events = []
+    settings.results_last_export_folder = ""
     allow_empty_release_state(
         settings,
+        "idea_plan", "youtube_suggested_topics", "idea_title_memory", "idea_raw_signals", "idea_events",
+        "idea_rejected_items", "idea_portfolio_summary", "idea_suggested_topics",
         "idea_results", "idea_result_sources", "idea_title_metadata", "idea_scenario_context",
         "idea_production_items", "voice_scenario_outputs", "voice_task_statuses", "voice_tts_jobs",
+        "voice_tts_batches", "voice_active_tts_batch_id", "voice_import_summary",
         "pipeline_montage_outputs", "video_result_packages", "montage_task_statuses", "seo_queue",
         "youtube_publication_jobs", "youtube_publication_items", "youtube_publication_snapshots",
         "youtube_publication_executions", "youtube_publication_receipts", "youtube_publication_assignments",
-        "cover_queue",
+        "youtube_publication_activity", "youtube_publication_plan_versions", "youtube_engagement_tasks",
+        "results_last_export_folder", "cover_queue",
     )
     # Persist the logical reset before destructive artifact cleanup. If the
     # process dies between these writes and file deletion, the deletion fence
     # still prevents the stale primary/backup from becoming active again.
     save_settings(settings)
+    CoverLibrary(_cover_library_path()).clear_production_items()
+    with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+        _EXTERNAL_FOOTAGE_CACHE.clear()
     for context in removed_voice_maps:
         remove_voice_map(context)
+    voice_maps_root = app_data_root() / "voice-maps"
+    if voice_maps_root.is_dir():
+        for path in voice_maps_root.glob("*.voice-map.json"):
+            path.unlink()
     save_session([], [])
     removed_files = sum(
         _clear_production_folder(folder)
         for folder in folders
         if str(folder).strip()
     )
+    # A configured child can be removed while its parent root is being
+    # cleared. Recreate every configured root after the complete sweep.
+    for folder in folders:
+        if str(folder).strip():
+            Path(folder).expanduser().resolve().mkdir(parents=True, exist_ok=True)
     return {**snapshot(), "operationResult": {"kind": "production-reset", "count": removed_files,
             "message": f"Производство очищено: удалено объектов в рабочих папках: {removed_files}. Каналы, OAuth, ключи и настройки сохранены."}}
+
+
+def clear_production_queue(payload: dict) -> dict:
+    """Erase production only while artifact publication is fenced off."""
+    with _production_artifact_fence():
+        return _clear_production_queue_locked(payload)
 
 
 def _publication_job_from_record(record: dict) -> PublicationJob:
