@@ -318,6 +318,7 @@ export const fallback: NewsFlowSnapshot = {
   montageProjects: [],
   montageTasks: [],
   outputs: [],
+  results: { outputFolder: "", lastExportFolder: "" },
   publication: {
     jobs: [],
     presets: [],
@@ -10751,7 +10752,29 @@ export function Outputs({
   data: NewsFlowSnapshot;
   command: Command;
 }) {
+  const [busy, setBusy] = useState(false);
   const packageAll = () => void command("package-outputs");
+  const chooseResultsFolder = async () => {
+    if (busy) return;
+    const folder = await window.newsflowDesktop?.chooseFolder();
+    if (!folder) return;
+    setBusy(true);
+    try {
+      await command("save-settings", { resultsOutputFolder: folder });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const exportResults = async () => {
+    if (busy || !data.results.outputFolder) return;
+    setBusy(true);
+    try {
+      await command("export-results-batch");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const resultsOpenTarget = data.results.lastExportFolder || data.results.outputFolder;
   const outputColumns: ColumnDef<NewsFlowSnapshot["outputs"][number]>[] = [
     { id: "package", header: "Пакет", cell: ({ row }) => <b>{row.original.folder.split(/[\\/]/).pop()}</b> },
     { accessorKey: "video", header: "MP4" },
@@ -10759,6 +10782,28 @@ export function Outputs({
   ];
   return (
     <div className="nf-outputs" aria-label="Output Artifact Index">
+      <section className="panel outputs-list" aria-label="Пакетные результаты">
+        <div className="panel-title">
+          <div>
+            <b>Результаты для передачи</b>
+            <small>Одна нумерованная выгрузка TXT, выбранные обложки и готовые MP4 без изменения Publication-пакетов.</small>
+          </div>
+        </div>
+        <div className="toolbar">
+          <output aria-label="Папка Results">{data.results.outputFolder || "Папка не выбрана"}</output>
+          <Button onClick={() => void chooseResultsFolder()} disabled={busy}>Выбрать папку</Button>
+          <Button kind="success" onClick={() => void exportResults()} disabled={busy || !data.results.outputFolder}>
+            <FolderOpen size={17} />Собрать результаты
+          </Button>
+          <Button onClick={() => void window.newsflowDesktop?.openPath(resultsOpenTarget)} disabled={!resultsOpenTarget}>
+            <FolderOpen size={16} />Открыть папку
+          </Button>
+        </div>
+        {data.results.lastExportFolder ? <small>Последняя выгрузка: {data.results.lastExportFolder}</small> : null}
+        {data.operationResult?.kind === "results-batch" ? (
+          <small>Тем: {data.operationResult.topicsTotal ?? data.operationResult.count}; MP4: {(data.operationResult.mp4Linked || 0) + (data.operationResult.mp4Copied || 0)}; обложки: {data.operationResult.coversCopied || 0}; нет MP4: {(data.operationResult.missingMp4Ordinals || []).join(", ") || "—"}; нет обложек: {(data.operationResult.missingCoverOrdinals || []).join(", ") || "—"}.</small>
+        ) : null}
+      </section>
       <div className="toolbar">
         <Button kind="success" onClick={packageAll}>
           <FolderOpen size={17} />

@@ -1726,6 +1726,10 @@ def snapshot() -> dict:
         "montageProjects": montage_projects,
         "outputs": [{"video": video, "folder": folder} for video, folder in settings.video_result_packages.items()
                     if Path(video).is_file() and Path(folder).is_dir()],
+        "results": {
+            "outputFolder": settings.results_output_folder,
+            "lastExportFolder": settings.results_last_export_folder,
+        },
         "publication": {
             "jobs": settings.youtube_publication_jobs,
             "presets": settings.youtube_publication_presets,
@@ -1908,6 +1912,11 @@ def save_settings_patch(patch: dict) -> dict:
             name: bool(patch["autoPipelineStages"].get(name, enabled))
             for name, enabled in defaults.items()
         }
+    if "resultsOutputFolder" in patch:
+        destination = str(patch.get("resultsOutputFolder") or "").strip()
+        if destination and not Path(destination).is_dir():
+            raise ValueError("Выберите существующую папку для результатов")
+        settings.results_output_folder = destination
     save_settings(settings)
     return snapshot()
 
@@ -13300,6 +13309,164 @@ def _package_output_identity(settings: Settings, source: Path, jobs_by_index: di
     return "", None, {}
 
 
+def _results_export_legacy_index(rows: list[dict], key: str) -> dict[str, dict]:
+    """Return only unambiguous title-only legacy rows.
+
+    A current ProductionItem ID is authoritative. Title lookup exists solely
+    for old records that have no ID at all and must never pick an arbitrary
+    duplicate.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("production_item_id", "")).strip():
+            continue
+        title = str(row.get(key, "")).strip().casefold()
+        if title:
+            grouped.setdefault(title, []).append(row)
+    return {title: values[0] for title, values in grouped.items() if len(values) == 1}
+
+
+def _results_export_task(settings: Settings, scenario_index: int, production_item_id: str) -> dict:
+    """Resolve one task by stable scenario position and verify its identity."""
+    candidates: list[dict] = []
+    direct = settings.montage_task_statuses.get(str(scenario_index))
+    if isinstance(direct, dict):
+        candidates.append(direct)
+    for raw_key, raw_task in settings.montage_task_statuses.items():
+        if not isinstance(raw_task, dict) or raw_task is direct:
+            continue
+        try:
+            task_index = int(raw_task.get("scenarioIndex", raw_key))
+        except (TypeError, ValueError):
+            continue
+        if task_index == scenario_index:
+            candidates.append(raw_task)
+    for task in candidates:
+        task_id = str(task.get("production_item_id") or task.get("productionItemId") or "").strip()
+        # A current ProductionItem is never allowed to borrow a legacy
+        # blank-ID task.  That task may be an interrupted run from before
+        # durable ownership existed and can point at another video's MP4.
+        if production_item_id and task_id != production_item_id:
+            continue
+        return task
+    return {}
+
+
+def _results_export_folder(root: Path) -> Path:
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H-%M-%S")
+    base = root / f"NewsFlow Results — {stamp}"
+    candidate = base
+    suffix = 2
+    while candidate.exists():
+        candidate = root / f"{base.name} ({suffix})"
+        suffix += 1
+    candidate.mkdir(parents=False, exist_ok=False)
+    (candidate / "Обложки").mkdir()
+    (candidate / "MP4").mkdir()
+    return candidate
+
+
+def _results_export_link_or_copy(source: Path, target: Path) -> str:
+    try:
+        os.link(source, target)
+        return "linked"
+    except OSError:
+        shutil.copy2(source, target)
+        return "copied"
+
+
+def export_results_batch(payload: dict) -> dict:
+    """Create a non-destructive, human-facing batch hand-off from durable IDs."""
+    del payload
+    settings = load_settings()
+    root = Path(str(settings.results_output_folder or "").strip()).expanduser()
+    if not str(settings.results_output_folder or "").strip() or not root.is_dir():
+        raise ValueError("Сначала выберите существующую папку для результатов")
+    titles, jobs = load_session()
+    jobs_by_index = {
+        int(job.request.index): job for job in jobs
+        if isinstance(getattr(job.request, "index", None), int)
+    }
+    covers_by_id = {
+        str(item.get("production_item_id", "")).strip(): item for item in settings.cover_queue
+        if isinstance(item, dict) and str(item.get("production_item_id", "")).strip()
+    }
+    seo_by_id = {
+        str(item.get("production_item_id", "")).strip(): item for item in settings.seo_queue
+        if isinstance(item, dict) and str(item.get("production_item_id", "")).strip()
+    }
+    legacy_covers = _results_export_legacy_index(settings.cover_queue, "title")
+    legacy_seo = _results_export_legacy_index(settings.seo_queue, "source_title")
+    folder = _results_export_folder(root)
+    covers_folder = folder / "Обложки"
+    mp4_folder = folder / "MP4"
+    headings: list[str] = ["ЗАГОЛОВКИ", ""]
+    descriptions: list[str] = ["SEO ОПИСАНИЯ", ""]
+    tags_section: list[str] = ["ТЕГИ", ""]
+    missing_mp4: list[int] = []
+    missing_cover: list[int] = []
+    missing_description: list[int] = []
+    missing_tags: list[int] = []
+    mp4_linked = mp4_copied = covers_copied = 0
+    for scenario_index, raw_title in enumerate(titles):
+        ordinal = scenario_index + 1
+        title = str(raw_title).strip() or f"Тема {ordinal}"
+        job = jobs_by_index.get(scenario_index)
+        production_item_id = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
+        seo = seo_by_id.get(production_item_id, {}) if production_item_id else legacy_seo.get(title.casefold(), {})
+        cover = covers_by_id.get(production_item_id, {}) if production_item_id else legacy_covers.get(title.casefold(), {})
+        seo_title = (
+            str(seo.get("title", "") or "").strip()
+            if str(seo.get("status", "")) == "Готово"
+            else ""
+        ) or title
+        description = str(seo.get("description", "") or "").strip()
+        tags = seo.get("tags", []) if isinstance(seo.get("tags", []), list) else []
+        tag_text = ", ".join(str(value).strip() for value in tags if str(value).strip())
+        headings.append(f"{ordinal:03d}. {seo_title}")
+        descriptions.append(f"{ordinal:03d}. {description}")
+        tags_section.append(f"{ordinal:03d}. {tag_text}")
+        if not description:
+            missing_description.append(ordinal)
+        if not tag_text:
+            missing_tags.append(ordinal)
+        safe_title = safe_filename(title) or f"Тема {ordinal}"
+        cover_path = Path(str(cover.get("selected_path") or cover.get("path") or ""))
+        if cover_path.is_file():
+            try:
+                shutil.copy2(cover_path, covers_folder / f"{ordinal:03d} — {safe_title}{cover_path.suffix.casefold()}")
+                covers_copied += 1
+            except OSError:
+                missing_cover.append(ordinal)
+        else:
+            missing_cover.append(ordinal)
+        task = _results_export_task(settings, scenario_index, production_item_id)
+        video_path = Path(str(task.get("outputPath", "") or ""))
+        if str(task.get("status", "")) == "Готово" and _is_valid_montage_output(video_path):
+            try:
+                mode = _results_export_link_or_copy(video_path, mp4_folder / f"{ordinal:03d} — {safe_title}.mp4")
+                mp4_linked += int(mode == "linked")
+                mp4_copied += int(mode == "copied")
+            except OSError:
+                missing_mp4.append(ordinal)
+        else:
+            missing_mp4.append(ordinal)
+    (folder / "Результаты.txt").write_text(
+        "\n".join([*headings, "", *descriptions, "", *tags_section, ""]), encoding="utf-8",
+    )
+    settings.results_last_export_folder = str(folder)
+    save_settings(settings)
+    summary = {
+        "kind": "results-batch", "count": len(titles), "folder": str(folder),
+        "topicsTotal": len(titles), "txtEntries": len(titles), "mp4Linked": mp4_linked,
+        "mp4Copied": mp4_copied, "coversCopied": covers_copied,
+        "missingMp4Ordinals": missing_mp4, "missingCoverOrdinals": missing_cover,
+        "missingSeoDescriptionOrdinals": missing_description, "missingTagsOrdinals": missing_tags,
+        "message": f"Собраны результаты: {len(titles)} тем, MP4: {mp4_linked + mp4_copied}, обложки: {covers_copied}.",
+    }
+    return {**snapshot(), "operationResult": summary}
+
+
 def package_outputs(payload: dict) -> dict:
     settings = load_settings()
     _titles, jobs = load_session()
@@ -15935,6 +16102,8 @@ def main() -> None:
             result = remove_montage_projects(payload if isinstance(payload, dict) else {})
         elif command == "package-outputs":
             result = package_outputs(payload if isinstance(payload, dict) else {})
+        elif command == "export-results-batch":
+            result = export_results_batch(payload if isinstance(payload, dict) else {})
         elif command == "queue-ready-publication-outputs":
             result = queue_ready_publication_outputs(payload if isinstance(payload, dict) else {})
         elif command == "save-publication-settings":

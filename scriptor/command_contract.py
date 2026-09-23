@@ -45,6 +45,7 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "generate-covers": CommandRegistration("generate_covers", "scriptor.thumbnail_prompt_v2", _NO_LEGACY),
     "run-montage-queue": CommandRegistration("run_montage_queue", "scriptor.timeline canonical montage path", _NO_LEGACY),
     "package-outputs": CommandRegistration("package_outputs", "scriptor.bridge output packager", _NO_LEGACY),
+    "export-results-batch": CommandRegistration("export_results_batch", "scriptor.bridge batch results exporter", _NO_LEGACY),
     "generate-seo": CommandRegistration("generate_seo", "scriptor.bridge SEO service", _NO_LEGACY),
     "generate-tags": CommandRegistration("generate_tags", "scriptor.bridge tags service", _NO_LEGACY),
     "upload-publication-jobs": CommandRegistration("upload_publication_jobs", "scriptor.youtube_studio", _NO_LEGACY),

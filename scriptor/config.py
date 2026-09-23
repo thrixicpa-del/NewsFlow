@@ -540,6 +540,10 @@ class Settings:
     pipeline_target_count: int = 300
     pipeline_montage_outputs: list[str] = field(default_factory=list)
     video_result_packages: dict[str, str] = field(default_factory=dict)
+    # Batch Results is a separate operator hand-off. It never changes the
+    # Publication per-video package registry above.
+    results_output_folder: str = ""
+    results_last_export_folder: str = ""
     voice_profiles: list[dict] = field(default_factory=lambda: [{
         "name": "Новости", "voice_id": "", "stability": 0.30, "style": 0.50,
     }])
@@ -1174,6 +1178,8 @@ def load_settings() -> Settings:
             pipeline_target_count=pipeline_target,
             pipeline_montage_outputs=data.get("pipeline_montage_outputs", []),
             video_result_packages=data.get("video_result_packages", {}),
+            results_output_folder=str(data.get("results_output_folder", "") or ""),
+            results_last_export_folder=str(data.get("results_last_export_folder", "") or ""),
             voice_profiles=data.get("voice_profiles") or Settings().voice_profiles,
             template=data.get("template") or Settings().template,
             idea_topics=data.get("idea_topics", Settings().idea_topics),
@@ -1623,6 +1629,8 @@ def save_settings(settings: Settings):
         "pipeline_target_count": settings.pipeline_target_count,
         "pipeline_montage_outputs": settings.pipeline_montage_outputs,
         "video_result_packages": settings.video_result_packages,
+        "results_output_folder": settings.results_output_folder,
+        "results_last_export_folder": settings.results_last_export_folder,
         "voice_profiles": settings.voice_profiles,
         "template": settings.template,
         "idea_topics": settings.idea_topics,
