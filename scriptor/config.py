@@ -588,6 +588,10 @@ class Settings:
     # Script deletions use the source ProductionItem identity.  The legacy
     # title tombstone below remains only for scripts that predate that ID.
     deleted_scenario_production_ids: list[str] = field(default_factory=list)
+    # Monotonic durable authority for a confirmed full-production reset.  A
+    # worker can keep an older Settings object for minutes, so its later save
+    # must never revive a release that a newer reset removed.
+    production_reset_generation: int = 0
     idea_rejected_items: list[dict] = field(default_factory=list)
     idea_portfolio_summary: dict = field(default_factory=dict)
     idea_scenario_context: dict[str, dict] = field(default_factory=dict)
@@ -1199,6 +1203,7 @@ def load_settings() -> Settings:
             idea_production_items=data.get("idea_production_items", []),
             idea_deleted_production_ids=[str(value).strip() for value in data.get("idea_deleted_production_ids", []) if str(value).strip()][-10000:],
             deleted_scenario_production_ids=[str(value).strip() for value in data.get("deleted_scenario_production_ids", []) if str(value).strip()][-10000:],
+            production_reset_generation=max(0, int(data.get("production_reset_generation", 0) or 0)),
             idea_rejected_items=data.get("idea_rejected_items", []),
             idea_portfolio_summary=data.get("idea_portfolio_summary", {}),
             idea_scenario_context=data.get("idea_scenario_context", {}),
@@ -1449,12 +1454,16 @@ def _merge_cover_queue(persisted: object, incoming: object, *, tombstones: set[s
 
 
 _RELEASE_STATE_FIELDS = (
+    "idea_plan", "youtube_suggested_topics", "idea_title_memory", "idea_raw_signals", "idea_events",
+    "idea_rejected_items", "idea_portfolio_summary", "idea_suggested_topics",
     "idea_results", "idea_result_sources", "idea_title_metadata", "idea_scenario_context",
     "idea_production_items", "voice_scenario_outputs", "voice_task_statuses", "voice_tts_jobs",
+    "voice_tts_batches", "voice_active_tts_batch_id", "voice_import_summary",
     "pipeline_montage_outputs", "video_result_packages", "montage_task_statuses", "seo_queue",
     "youtube_publication_jobs", "youtube_publication_items", "youtube_publication_snapshots",
     "youtube_publication_executions", "youtube_publication_receipts", "youtube_publication_assignments",
-    "cover_queue",
+    "youtube_publication_activity", "youtube_publication_plan_versions", "youtube_engagement_tasks",
+    "results_last_export_folder", "cover_queue",
 )
 
 
@@ -1650,6 +1659,7 @@ def save_settings(settings: Settings):
         "idea_production_items": settings.idea_production_items,
         "idea_deleted_production_ids": settings.idea_deleted_production_ids[-10000:],
         "deleted_scenario_production_ids": settings.deleted_scenario_production_ids[-10000:],
+        "production_reset_generation": settings.production_reset_generation,
         "idea_rejected_items": settings.idea_rejected_items,
         "idea_portfolio_summary": settings.idea_portfolio_summary,
         "idea_scenario_context": settings.idea_scenario_context,
@@ -1761,17 +1771,30 @@ def save_settings(settings: Settings):
         else:
             raw_on_disk = ""
             on_disk = {}
-        data["montage_task_statuses"] = _merge_montage_task_statuses(
-            on_disk.get("montage_task_statuses"), data.get("montage_task_statuses"),
-        )
+        disk_generation = max(0, int(on_disk.get("production_reset_generation", 0) or 0))
+        incoming_generation = max(0, int(data.get("production_reset_generation", 0) or 0))
+        stale_release_snapshot = incoming_generation < disk_generation
+        data["production_reset_generation"] = max(disk_generation, incoming_generation)
         allowed_empty_fields = set(getattr(settings, "_allowed_empty_release_fields", set()))
+        data["montage_task_statuses"] = (
+            dict(on_disk.get("montage_task_statuses") or {})
+            if stale_release_snapshot
+            else (dict(data.get("montage_task_statuses") or {})
+                  if "montage_task_statuses" in allowed_empty_fields
+                  else _merge_montage_task_statuses(
+                      on_disk.get("montage_task_statuses"), data.get("montage_task_statuses"),
+                  ))
+        )
         for key_name in _RELEASE_STATE_FIELDS:
             if key_name == "montage_task_statuses":
                 continue
-            data[key_name] = _preserve_release_state(
-                on_disk.get(key_name), data.get(key_name),
-                allow_empty=key_name in allowed_empty_fields,
-            )
+            if stale_release_snapshot:
+                data[key_name] = on_disk.get(key_name, data.get(key_name))
+            else:
+                data[key_name] = _preserve_release_state(
+                    on_disk.get(key_name), data.get(key_name),
+                    allow_empty=key_name in allowed_empty_fields,
+                )
         for key_name in (
             "cover_api_keys", "openai_api_keys", "secret_voicer_keys",
             "lumean_api_keys", "voicegen_api_keys", "wproject_api_keys",

@@ -16,7 +16,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-
 _VERSION = 1
 _WRITE_LOCK = threading.RLock()
 _LOCK_WAIT_SECONDS = 30.0
@@ -30,7 +29,7 @@ def _identity(item: dict[str, Any]) -> str:
         return production_item_id
     title = " ".join(str(item.get("title") or "").split()).casefold()
     scenario = str(item.get("scenario_index") or "")
-    digest = hashlib.sha256(f"{scenario}|{title}".encode("utf-8")).hexdigest()[:20]
+    digest = hashlib.sha256(f"{scenario}|{title}".encode()).hexdigest()[:20]
     return f"legacy-cover:{digest}"
 
 
@@ -198,6 +197,24 @@ class CoverLibrary:
                 items.pop(key, None)
                 tombstones.add(key)
             payload["items"] = items
+            payload["tombstones"] = sorted(tombstones)[-10000:]
+            self._write(payload)
+
+    def clear_production_items(self) -> None:
+        """Forget every release-specific cover row but retain reusable caches/config.
+
+        A full production reset has no current queue from which to infer all
+        identities: an interrupted worker can have written an orphan row. A
+        tombstone for every stored identity prevents that stale worker from
+        restoring its row after the reset, while face-library configuration and
+        FastGen capability/usage caches remain operator configuration.
+        """
+        with _WRITE_LOCK, _interprocess_write_lock(self.path):
+            payload = self._read()
+            items = payload.get("items") if isinstance(payload.get("items"), dict) else {}
+            tombstones = {str(value).strip() for value in payload.get("tombstones", []) if str(value).strip()}
+            tombstones.update(str(key).strip() for key in items if str(key).strip())
+            payload["items"] = {}
             payload["tombstones"] = sorted(tombstones)[-10000:]
             self._write(payload)
 

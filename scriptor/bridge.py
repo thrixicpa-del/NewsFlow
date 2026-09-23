@@ -428,8 +428,53 @@ def _hydrate_cover_library(settings: Settings) -> bool:
     return changed or settings.cover_queue != before
 
 
+def _production_generation_is_current(settings: Settings) -> bool:
+    """Whether a long-running worker still owns the active production release."""
+    return load_settings().production_reset_generation == settings.production_reset_generation
+
+
+def _discard_stale_production_artifacts(settings: Settings, paths: list[str | Path], root: Path) -> bool:
+    """Delete post-reset output from a worker that started before the reset.
+
+    The configured output root is caller-owned; only descendants of that exact
+    root can be removed here. This makes a delayed worker harmless without
+    touching source footage or reusable libraries.
+    """
+    if _production_generation_is_current(settings):
+        return False
+    resolved_root = root.resolve()
+    for value in paths:
+        path = Path(value)
+        try:
+            resolved_path = path.resolve()
+            if (not path.exists() or resolved_path == resolved_root
+                    or not resolved_path.is_relative_to(resolved_root)):
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            if not path.exists():
+                parent = path.parent
+                while parent != resolved_root:
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+        except OSError:
+            pass
+    return True
+
+
 def _save_cover_state(settings: Settings) -> None:
     """Persist cover-specific state before the mutable global settings snapshot."""
+    if _discard_stale_production_artifacts(
+        settings,
+        [path for item in settings.cover_queue for path in _cover_render_paths(item)],
+        Path(settings.cover_output_folder),
+    ):
+        return
     _assign_cover_production_ids(settings)
     CoverLibrary(_cover_library_path()).persist(
         settings.cover_queue, settings.fastgen_capabilities_cache, settings.fastgen_usage_cache,
@@ -3811,14 +3856,19 @@ def _save_voice_candidate(output_folder: str, index: int, title: str, content: b
     )
 
 
-def _promote_validated_voice_candidate(output_folder: str, candidate: str | Path) -> tuple[str, float]:
+def _promote_validated_voice_candidate(output_folder: str, candidate: str | Path,
+                                       *, settings: Settings | None = None) -> tuple[str, float]:
     """Validate first, then atomically replace the canonical output on the same volume."""
     staged = Path(candidate)
+    if settings and _discard_stale_production_artifacts(settings, [staged], _voice_candidate_folder(output_folder)):
+        raise RuntimeError("Озвучка отменена: производство было очищено")
     duration = validate_voiceover_artifact(staged)
     target_folder = Path(output_folder)
     target_folder.mkdir(parents=True, exist_ok=True)
     target = target_folder / safe_audio_name(staged.stem)
     staged.replace(target)
+    if settings and _discard_stale_production_artifacts(settings, [target], target_folder):
+        raise RuntimeError("Озвучка отменена: производство было очищено")
     return str(target), duration
 
 
@@ -8088,6 +8138,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             else:
                 _cover_step(item, "Ошибка FastGen", 100, detail)
                 item.update(error=detail)
+        if _discard_stale_production_artifacts(settings, values, output):
+            return snapshot()
         _save_cover_state(settings)
     # The face reference is not left to the image model alone.  When a topic
     # has a relevant portrait, apply it locally before putting typography over
@@ -9890,7 +9942,9 @@ def generate_voice(payload: dict) -> dict:
             job_snapshot = snapshots_by_index[index]
             try:
                 completed_index, output = future.result()
-                output, duration = _promote_validated_voice_candidate(settings.voicer_output_folder, output)
+                output, duration = _promote_validated_voice_candidate(
+                    settings.voicer_output_folder, output, settings=settings,
+                )
                 settings.voice_scenario_outputs[str(completed_index + 1)] = output
                 job_snapshot["state"] = "ready"
                 job_snapshot["output_path"] = output
@@ -9906,7 +9960,9 @@ def generate_voice(payload: dict) -> dict:
                 if _can_failover_voice(exc):
                     try:
                         completed_index, output = cross_service_fallback(index, str(job_snapshot.get("provider", "")))
-                        output, duration = _promote_validated_voice_candidate(settings.voicer_output_folder, output)
+                        output, duration = _promote_validated_voice_candidate(
+                            settings.voicer_output_folder, output, settings=settings,
+                        )
                         settings.voice_scenario_outputs[str(completed_index + 1)] = output
                         artifact = {"path": output, "duration_seconds": duration,
                                     "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
@@ -11227,7 +11283,8 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                              semaphore: threading.BoundedSemaphore | None = None,
                              progress=None, excluded: set[str] | None = None,
-                             excluded_families: set[str] | None = None) -> FootageItem | None:
+                             excluded_families: set[str] | None = None,
+                             created_paths: list[Path] | None = None) -> FootageItem | None:
     """Fetch one short, reusable external shot only when local search is weak.
 
     The downloader is deliberately conservative: only allowed stock/news
@@ -11273,14 +11330,32 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
                     return cached
                 with lock:
-                    folder = Path(settings.footage_download_folder) / "Автоподбор"
+                    operation_id = hashlib.sha256(cache_key.encode()).hexdigest()[:20]
+                    folder = Path(settings.footage_download_folder) / "Автоподбор" / operation_id
+                    clip_folder = Path(settings.cutter_output_folder) / "Внешние для монтажа" / operation_id
+                    if created_paths is not None:
+                        created_paths.extend([folder, clip_folder])
                     item = download_footage(candidate, folder)
+                    if created_paths is not None:
+                        created_paths.append(Path(item.path))
                     if progress:
                         progress("Нарезка внешнего футажа", Path(item.path).name)
-                    clip = cut_single_clip(Path(item.path), Path(settings.cutter_output_folder) / "Внешние для монтажа",
+                    clip = cut_single_clip(Path(item.path), clip_folder,
                                            duration=6.0, fps=30, bitrate="4M")
+                    if created_paths is not None:
+                        created_paths.append(Path(clip))
                 normalized = FootageItem(str(clip), clip.name, item.source, item.source_url,
                                          item.license, item.tags)
+                stale_download = _discard_stale_production_artifacts(
+                    settings, created_paths or [], Path(settings.footage_download_folder),
+                )
+                stale_cutter = _discard_stale_production_artifacts(
+                    settings, created_paths or [], Path(settings.cutter_output_folder),
+                )
+                if stale_download or stale_cutter:
+                    with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+                        _EXTERNAL_FOOTAGE_CACHE.pop(cache_key, None)
+                    return None
                 if _montage_item_is_excluded(normalized, excluded, excluded_families):
                     continue
                 with _EXTERNAL_FOOTAGE_CACHE_LOCK:
@@ -11290,6 +11365,12 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 continue
             return normalized
         except _BRIDGE_OPERATION_ERRORS:
+            _discard_stale_production_artifacts(
+                settings, created_paths or [], Path(settings.footage_download_folder),
+            )
+            _discard_stale_production_artifacts(
+                settings, created_paths or [], Path(settings.cutter_output_folder),
+            )
             # A weak or restricted external source must never prevent the
             # local associative fallback from completing the entire video.
             continue
@@ -11303,6 +11384,7 @@ def prepare_montage(payload: dict) -> dict:
         "fallback_expansion": 0.0, "external": 0.0, "total": 0.0,
     }
     settings = load_settings()
+    created_worker_artifacts: list[Path] = []
     # Queue workers pass one shared semaphore so simultaneous projects do not
     # download and recut the same external source. Manual "prepare one" calls
     # have no worker context; ``None`` is the intentional unlimited-local
@@ -11824,6 +11906,7 @@ def prepare_montage(payload: dict) -> dict:
                 scene, settings, index, download_semaphore,
                 progress=lambda stage, detail: progress(stage, detail) if progress else None,
                 excluded=project_used, excluded_families=project_used_families,
+                created_paths=created_worker_artifacts,
             )
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
@@ -12108,7 +12191,10 @@ def prepare_montage(payload: dict) -> dict:
     # real footage.  There is no FFmpeg looping or cloned final frame here;
     # only the final source that crosses the MP3 boundary is trimmed.
     try:
-        _complete_project_visual_tail(project, index, settings, download_semaphore)
+        _complete_project_visual_tail(
+            project, index, settings, download_semaphore,
+            created_paths=created_worker_artifacts,
+        )
     except ValueError as exc:
         raise RuntimeError(f"Не удалось завершить видеоряд реальными футажами: {exc}") from exc
     clips = project.clips
@@ -12136,15 +12222,33 @@ def prepare_montage(payload: dict) -> dict:
         *settings.montage_recent_clip_paths,
         *(clip.path for clip in clips),
     ]))[-3000:]
-    save_settings(settings)
     project_folder = Path(settings.montage_project_folder)
+    save_settings(settings)
+    path = project_folder / f"{safe_filename(title)}.newsflow"
+
+    def discard_stale_project() -> None:
+        stale_download = _discard_stale_production_artifacts(
+            settings, created_worker_artifacts, Path(settings.footage_download_folder),
+        )
+        stale_cutter = _discard_stale_production_artifacts(
+            settings, created_worker_artifacts, Path(settings.cutter_output_folder),
+        )
+        stale_project = _discard_stale_production_artifacts(
+            settings, [path, path.with_suffix(".fcpxml")], project_folder,
+        )
+        if stale_download or stale_cutter or stale_project:
+            raise RuntimeError("Подготовка монтажа отменена: производство было очищено")
+
     try:
         project_folder.mkdir(parents=True, exist_ok=True)
-        path = project_folder / f"{safe_filename(title)}.newsflow"
+        discard_stale_project()
         project.save(path)
+        discard_stale_project()
         if settings.montage_export_davinci_xml:
             export_fcpxml(project, path.with_suffix(".fcpxml"))
+            discard_stale_project()
             project.save(path)
+            discard_stale_project()
     except OSError as exc:
         # Do not hide the target path behind a generic "Permission denied".
         # The user can then immediately see which folder is locked or unavailable.
@@ -12165,6 +12269,8 @@ def render_montage(payload: dict) -> dict:
     output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
     rendered = render_project(project, output, renderer=settings.montage_renderer,
                               remotion_concurrency=settings.montage_remotion_frame_concurrency)
+    if _discard_stale_production_artifacts(settings, [rendered], output.parent):
+        raise RuntimeError("Монтаж отменён: производство было очищено")
     voiceover = Path(project.voiceover_path)
     if voiceover.is_file():
         validate_rendered_montage(
@@ -12189,6 +12295,12 @@ def render_montage(payload: dict) -> dict:
     project.save(project_path)
     remotion_path = output.with_suffix(".remotion.json")
     remotion_path.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+    stale_output = _discard_stale_production_artifacts(settings, [rendered, remotion_path], output.parent)
+    stale_project = _discard_stale_production_artifacts(
+        settings, [project_path, project_path.with_suffix(".fcpxml")], Path(settings.montage_project_folder),
+    )
+    if stale_output or stale_project:
+        raise RuntimeError("Монтаж отменён: производство было очищено")
     if str(rendered) not in settings.pipeline_montage_outputs:
         settings.pipeline_montage_outputs.append(str(rendered))
     save_settings(settings)
@@ -12704,7 +12816,8 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
 
 
 def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, settings: Settings,
-                                     download_semaphore: threading.BoundedSemaphore | None = None) -> list[FootageItem]:
+                                     download_semaphore: threading.BoundedSemaphore | None = None,
+                                     created_paths: list[Path] | None = None) -> list[FootageItem]:
     """Find a bounded, semantically relevant replacement for one broken slot."""
     query = str(clip.visual_query_en or clip.narration or "news footage").strip()
     try:
@@ -12729,12 +12842,14 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
     downloaded = _download_scene_fallback(
         {"visual_query_en": query, "narration": clip.narration, "duration": clip.duration},
         settings, index, download_semaphore,
+        created_paths=created_paths,
     )
     return [downloaded] if downloaded else []
 
 
 def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, settings: Settings,
-                                  download_semaphore: threading.BoundedSemaphore | None = None) -> int:
+                                  download_semaphore: threading.BoundedSemaphore | None = None,
+                                  created_paths: list[Path] | None = None) -> int:
     """Verify real source lengths and append clips until the MP3 is covered."""
     voice = Path(project.voiceover_path)
     if not voice.is_file():
@@ -12806,7 +12921,9 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
         if "достаточное число валидных футажей" not in str(initial_error):
             raise
     last = project.clips[-1] if project.clips else TimelineClip("", project.title, project.title, duration=6.0)
-    candidates = _replacement_candidates_for_clip(index, last, settings, download_semaphore)
+    candidates = _replacement_candidates_for_clip(
+        index, last, settings, download_semaphore, created_paths=created_paths,
+    )
     existing_paths = {_montage_clip_key(clip.path) for clip in project.clips}
     existing_families = {clip.source_family or _montage_clip_family_key(clip.path) for clip in project.clips}
     # Prefer a new source family.  If the tiny terminal remainder still cannot
@@ -13132,6 +13249,8 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         rendered = render_project(project, output, progress=progress, renderer=settings.montage_renderer,
                                   remotion_concurrency=settings.montage_remotion_frame_concurrency,
                                   remotion_parallel_jobs=rendering_workers, heartbeat=heartbeat)
+        if _discard_stale_production_artifacts(settings, [rendered], Path(settings.montage_output_folder)):
+            raise RuntimeError("Монтаж отменён: производство было очищено")
         voiceover = Path(project.voiceover_path)
         expected_duration = required_video_duration(
             probe_media_duration(voiceover), project.intro_duration,
@@ -13151,6 +13270,13 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         project.save(Path(project_path))
         remotion_path = output.with_suffix(".remotion.json")
         remotion_path.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
+        stale_output = _discard_stale_production_artifacts(settings, [rendered, remotion_path], output.parent)
+        stale_project = _discard_stale_production_artifacts(
+            settings, [project_path, Path(project_path).with_suffix(".fcpxml")],
+            Path(settings.montage_project_folder),
+        )
+        if stale_output or stale_project:
+            raise RuntimeError("Монтаж отменён: производство было очищено")
         with _MONTAGE_QUEUE_LOCK:
             if str(rendered) not in settings.pipeline_montage_outputs:
                 settings.pipeline_montage_outputs.append(str(rendered))
@@ -13926,6 +14052,9 @@ def _clear_production_folder(folder: str) -> int:
         else:
             child.unlink()
         removed += 1
+    # A configured output root is reusable operator configuration.  The reset
+    # owns only its children, so keep the root available for the next release.
+    target.mkdir(parents=True, exist_ok=True)
     return removed
 
 
@@ -13969,6 +14098,7 @@ def clear_production_queue(payload: dict) -> dict:
           for value in settings.deleted_scenario_production_ids if str(value).strip()),
         *removed_production_ids,
     })[-10000:]
+    settings.production_reset_generation += 1
     folders = {
         settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
         settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
@@ -13982,6 +14112,7 @@ def clear_production_queue(payload: dict) -> dict:
     settings.youtube_publication_executions = {}
     settings.youtube_publication_receipts = {}
     settings.youtube_publication_assignments = {}
+    settings.youtube_publication_plan_versions = []
     settings.youtube_engagement_tasks = []
     settings.pipeline_montage_outputs = []
     settings.video_result_packages = {}
@@ -13991,6 +14122,7 @@ def clear_production_queue(payload: dict) -> dict:
     settings.voice_tts_batches = []
     settings.voice_active_tts_batch_id = ""
     settings.voice_tts_jobs = {}
+    settings.voice_import_summary = {}
     # Directions are the user's reusable editorial library, not production
     # artefacts. Clearing a release must never erase this library.
     settings.idea_plan = []
@@ -14008,22 +14140,33 @@ def clear_production_queue(payload: dict) -> dict:
     settings.youtube_suggested_topics = []
     settings.cover_queue = []
     settings.seo_queue = []
-    settings.cover_rate_usage_events = []
+    settings.results_last_export_folder = ""
     allow_empty_release_state(
         settings,
+        "idea_plan", "youtube_suggested_topics", "idea_title_memory", "idea_raw_signals", "idea_events",
+        "idea_rejected_items", "idea_portfolio_summary", "idea_suggested_topics",
         "idea_results", "idea_result_sources", "idea_title_metadata", "idea_scenario_context",
         "idea_production_items", "voice_scenario_outputs", "voice_task_statuses", "voice_tts_jobs",
+        "voice_tts_batches", "voice_active_tts_batch_id", "voice_import_summary",
         "pipeline_montage_outputs", "video_result_packages", "montage_task_statuses", "seo_queue",
         "youtube_publication_jobs", "youtube_publication_items", "youtube_publication_snapshots",
         "youtube_publication_executions", "youtube_publication_receipts", "youtube_publication_assignments",
-        "cover_queue",
+        "youtube_publication_activity", "youtube_publication_plan_versions", "youtube_engagement_tasks",
+        "results_last_export_folder", "cover_queue",
     )
     # Persist the logical reset before destructive artifact cleanup. If the
     # process dies between these writes and file deletion, the deletion fence
     # still prevents the stale primary/backup from becoming active again.
     save_settings(settings)
+    CoverLibrary(_cover_library_path()).clear_production_items()
+    with _EXTERNAL_FOOTAGE_CACHE_LOCK:
+        _EXTERNAL_FOOTAGE_CACHE.clear()
     for context in removed_voice_maps:
         remove_voice_map(context)
+    voice_maps_root = app_data_root() / "voice-maps"
+    if voice_maps_root.is_dir():
+        for path in voice_maps_root.glob("*.voice-map.json"):
+            path.unlink()
     save_session([], [])
     removed_files = sum(
         _clear_production_folder(folder)
