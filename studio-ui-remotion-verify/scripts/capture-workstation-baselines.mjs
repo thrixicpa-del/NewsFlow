@@ -358,15 +358,13 @@ async function captureBaselines() {
   } finally {
     if (!window.isDestroyed()) window.destroy();
     await stopDisposableVite(vite);
-    app.exit();
   }
 }
 
 void captureBaselines().then(
-  () => process.exit(0),
+  () => app.exit(0),
   (error) => {
     console.error(error);
-    app.exit();
-    process.exit(1);
+    app.exit(1);
   },
 );
