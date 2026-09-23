@@ -76,8 +76,8 @@
     "asarUnpack": ["remotion/render.mjs", "remotion-bundle/**/*"],
     "extraResources": [
       { "from": "../scriptor", "to": "core/scriptor" },
-      { "from": "D:/NewsFlow-RC/core-bin-2.1.152-observability-r11/NewsFlowCore", "to": "core-bin" },
-      { "from": "D:/NewsFlow-RC/core-bin-2.1.152-observability-r11/NewsFlowCore/_internal/_tcl_data", "to": "core-tcl-data" },
+      { "from": "D:/NewsFlow-RC/core-bin-2.1.152-observability-r12/NewsFlowCore", "to": "core-bin" },
+      { "from": "D:/NewsFlow-RC/core-bin-2.1.152-observability-r12/NewsFlowCore/_internal/_tcl_data", "to": "core-tcl-data" },
       { "from": "node_modules/.pnpm/@remotion+compositor-win32-x64-msvc@4.0.515/node_modules/@remotion/compositor-win32-x64-msvc", "to": "remotion-binaries" }
     ],
     "win": { "target": "portable", "icon": "../assets/scriptor.ico" }
