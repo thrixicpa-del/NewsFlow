@@ -14160,16 +14160,16 @@ def _reset_cleanup_preflight(settings: Settings, folders: set[str]) -> None:
         value for value in footage_paths
         if any(value == root or value.is_relative_to(root) for root in generated_roots)
     }
-    protected: list[Path] = [
-        app_root,
-        *footage_paths,
-        *[Path(value).expanduser().resolve() for value in settings.cutter_sources if str(value).strip()],
-        *[Path(value).expanduser().resolve() for value in (
+    protected: list[tuple[Path, bool]] = [
+        (app_root, True),
+        *((value, True) for value in footage_paths),
+        *[(Path(value).expanduser().resolve(), False) for value in settings.cutter_sources if str(value).strip()],
+        *[(Path(value).expanduser().resolve(), True) for value in (
             settings.results_output_folder, settings.cover_face_library_folder,
             settings.cover_face_prepared_folder, settings.montage_intro_folder,
             settings.montage_overlay_folder,
         ) if str(value).strip()],
-        *[Path(value).expanduser().resolve() for value in (
+        *[(Path(value).expanduser().resolve(), False) for value in (
             *settings.cover_reference_paths, *settings.cover_ai_reference_paths,
         ) if str(value).strip()],
     ]
@@ -14179,7 +14179,7 @@ def _reset_cleanup_preflight(settings: Settings, folders: set[str]) -> None:
         for key in ("face_reference_path", "visual_reference_path", "scene_reference_path"):
             value = str(item.get(key, "") or "").strip()
             if value:
-                protected.append(Path(value).expanduser().resolve())
+                protected.append((Path(value).expanduser().resolve(), False))
     for target in targets:
         if target == target.parent:
             raise ValueError("Небезопасный путь производственной папки")
@@ -14187,10 +14187,13 @@ def _reset_cleanup_preflight(settings: Settings, folders: set[str]) -> None:
             raise ValueError(
                 f"Производственная папка «{target}» пересекается с данными NewsFlow «{app_root}»."
             )
-        for value in protected:
+        for value, is_directory in protected:
             # Cutter/download paths are reset-owned generated media, even when
             # the montage index also exposes them as footage folders.
-            if (value == target or value.is_relative_to(target)) and value not in generated_footage:
+            overlaps = value == target or value.is_relative_to(target)
+            if is_directory:
+                overlaps = overlaps or target.is_relative_to(value)
+            if overlaps and value not in generated_footage:
                 raise ValueError(
                     f"Производственная папка «{target}» пересекается с сохраняемыми данными «{value}». "
                     "Измените пути и повторите удаление производства."

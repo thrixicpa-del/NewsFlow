@@ -420,7 +420,10 @@ class ProductionResetTests(unittest.TestCase):
             self.assertEqual(list(parent.iterdir()), [nested])
 
     def test_reset_refuses_cleanup_root_overlapping_reusable_data_before_state_change(self):
-        cases = ("source-footage", "results-and-references", "app-data-ancestor")
+        cases = (
+            "source-footage", "source-footage-descendant", "results-and-references",
+            "results-descendant", "app-data-ancestor",
+        )
         for case in cases:
             with self.subTest(case=case), TemporaryDirectory() as directory, patch.dict(
                 os.environ,
@@ -435,6 +438,13 @@ class ProductionResetTests(unittest.TestCase):
                 if case == "source-footage":
                     settings.output_folder = str(protected)
                     settings.footage_folders = [str(protected)]
+                elif case == "source-footage-descendant":
+                    cleanup_root = protected / "current-output"
+                    cleanup_root.mkdir()
+                    protected_file = cleanup_root / "keep.txt"
+                    protected_file.write_text(case, encoding="utf-8")
+                    settings.output_folder = str(cleanup_root)
+                    settings.footage_folders = [str(protected)]
                 elif case == "results-and-references":
                     settings.cover_output_folder = str(protected)
                     results = protected / "results"
@@ -447,6 +457,13 @@ class ProductionResetTests(unittest.TestCase):
                     settings.results_output_folder = str(results)
                     settings.cover_face_library_folder = str(face_library)
                     settings.cover_reference_paths = [str(reference)]
+                elif case == "results-descendant":
+                    cleanup_root = protected / "current-output"
+                    cleanup_root.mkdir()
+                    protected_file = cleanup_root / "keep.txt"
+                    protected_file.write_text(case, encoding="utf-8")
+                    settings.montage_output_folder = str(cleanup_root)
+                    settings.results_output_folder = str(protected)
                 else:
                     app_data_parent = config.app_data_root().parent
                     settings.media_output_folder = str(app_data_parent)
