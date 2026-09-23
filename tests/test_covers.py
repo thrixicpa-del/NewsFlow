@@ -193,8 +193,10 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             )
             settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
             settings.cover_queue = [{"title": "Ормуз", "image_prompt": "тестовая сцена"}]
-            output = Path(directory) / "generated.png"
-            output.write_bytes(b"generated")
+            def render(_prompt, output, *_args, **_kwargs):
+                generated = output / "generated.png"
+                generated.write_bytes(b"generated")
+                return [generated]
             with patch("scriptor.bridge.load_settings", return_value=settings), \
                     patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
                     patch("scriptor.bridge._claim_cover_generation_lock", return_value=Path("test.lock")), \
@@ -202,7 +204,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                     patch("scriptor.bridge.save_settings"), \
                     patch("scriptor.bridge._save_cover_state"), \
                     patch("scriptor.bridge.snapshot", return_value={}), \
-                    patch("scriptor.bridge.FastGenPool.generate_media", return_value=[output]) as render:
+                    patch("scriptor.bridge.FastGenPool.generate_media", side_effect=render) as render:
                 bridge.generate_covers({"indices": [0], "resumeGeneration": True})
 
         self.assertFalse(settings.cover_generation_paused)
@@ -265,12 +267,12 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 "image_prompt": "Photorealistic documentary news photograph. Trump near an oil tanker.",
                 "face_reference_label": "Donald Trump",
             }]
-            output = Path(directory) / "generated.png"
-            output.write_bytes(b"generated")
             payloads = []
-            def render(prompt, *_args, **_kwargs):
+            def render(prompt, output, *_args, **_kwargs):
                 payloads.append(prompt)
-                return [output]
+                generated = output / "generated.png"
+                generated.write_bytes(b"generated")
+                return [generated]
             with patch("scriptor.bridge.load_settings", return_value=settings), \
                     patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
                     patch("scriptor.bridge._claim_cover_generation_lock", return_value=Path("test.lock")), \
@@ -401,13 +403,13 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 "cover_subheadline": "ТАНКЕРЫ ПОД ДАВЛЕНИЕМ",
             }
             settings.cover_queue = [item]
-            output = Path(directory) / "generated.png"
-            output.write_bytes(b"generated")
             payloads = []
 
-            def render(prompt, *_args, **_kwargs):
+            def render(prompt, output, *_args, **_kwargs):
                 payloads.append(prompt)
-                return [output]
+                generated = output / "generated.png"
+                generated.write_bytes(b"generated")
+                return [generated]
 
             with patch("scriptor.bridge.load_settings", return_value=settings), \
                     patch("scriptor.bridge._hydrate_cover_library", return_value=False), \

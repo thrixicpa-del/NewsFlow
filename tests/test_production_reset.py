@@ -419,6 +419,72 @@ class ProductionResetTests(unittest.TestCase):
             self.assertEqual(list(missing.iterdir()), [])
             self.assertEqual(list(parent.iterdir()), [nested])
 
+    def test_reset_refuses_cleanup_root_overlapping_reusable_data_before_state_change(self):
+        cases = ("source-footage", "results-and-references", "app-data-ancestor")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as directory, patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io")},
+            ):
+                root = Path(directory)
+                settings = self._settings(root)
+                protected = root / f"reusable-{case}"
+                protected.mkdir(parents=True, exist_ok=True)
+                protected_file = protected / "keep.txt"
+                protected_file.write_text(case, encoding="utf-8")
+                if case == "source-footage":
+                    settings.output_folder = str(protected)
+                    settings.footage_folders = [str(protected)]
+                elif case == "results-and-references":
+                    settings.cover_output_folder = str(protected)
+                    results = protected / "results"
+                    face_library = protected / "faces"
+                    reference = protected / "reference.png"
+                    for path in (results, face_library):
+                        path.mkdir()
+                        (path / "keep.txt").write_text(case, encoding="utf-8")
+                    reference.write_bytes(b"reference")
+                    settings.results_output_folder = str(results)
+                    settings.cover_face_library_folder = str(face_library)
+                    settings.cover_reference_paths = [str(reference)]
+                else:
+                    app_data_parent = config.app_data_root().parent
+                    settings.media_output_folder = str(app_data_parent)
+                    protected = app_data_parent
+                    protected_file = config.config_path()
+
+                save_settings(settings)
+                self._seed_session()
+                before = load_settings()
+                before_session = load_session()
+                protected_content = protected_file.read_text(encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "пересекается"):
+                    bridge.clear_production_queue(self.confirmation)
+
+                after = load_settings()
+                self.assertEqual(after.production_reset_generation, before.production_reset_generation)
+                self.assertEqual(load_session(), before_session)
+                self.assertTrue(protected_file.is_file())
+                self.assertEqual(protected_file.read_text(encoding="utf-8"), protected_content)
+
+    def test_reset_allows_generated_cutter_root_listed_as_footage(self):
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io")},
+        ):
+            root = Path(directory)
+            settings = self._settings(root)
+            cutter_root = Path(settings.cutter_output_folder)
+            settings.footage_folders = [str(cutter_root)]
+            save_settings(settings)
+            self._seed_session()
+
+            bridge.clear_production_queue(self.confirmation)
+
+            self.assertTrue(cutter_root.is_dir())
+            self.assertEqual(list(cutter_root.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

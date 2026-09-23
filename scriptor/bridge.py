@@ -14134,6 +14134,69 @@ def _clear_production_folder(folder: str) -> int:
     return removed
 
 
+def _production_cleanup_folders(settings: Settings) -> set[str]:
+    """Return every operator-configured folder that production reset owns."""
+    return {
+        settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
+        settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
+        settings.footage_download_folder, settings.mixer_output_folder, settings.montage_output_folder,
+        settings.montage_project_folder,
+    }
+
+
+def _reset_cleanup_preflight(settings: Settings, folders: set[str]) -> None:
+    """Refuse reset before state changes when an output root contains reusable data."""
+    targets = {Path(folder).expanduser().resolve() for folder in folders if str(folder).strip()}
+    app_root = app_data_root().resolve()
+    generated_roots = {
+        Path(value).expanduser().resolve()
+        for value in (settings.cutter_output_folder, settings.footage_download_folder)
+        if str(value).strip()
+    }
+    footage_paths = {
+        Path(value).expanduser().resolve() for value in settings.footage_folders if str(value).strip()
+    }
+    generated_footage = {
+        value for value in footage_paths
+        if any(value == root or value.is_relative_to(root) for root in generated_roots)
+    }
+    protected: list[Path] = [
+        app_root,
+        *footage_paths,
+        *[Path(value).expanduser().resolve() for value in settings.cutter_sources if str(value).strip()],
+        *[Path(value).expanduser().resolve() for value in (
+            settings.results_output_folder, settings.cover_face_library_folder,
+            settings.cover_face_prepared_folder, settings.montage_intro_folder,
+            settings.montage_overlay_folder,
+        ) if str(value).strip()],
+        *[Path(value).expanduser().resolve() for value in (
+            *settings.cover_reference_paths, *settings.cover_ai_reference_paths,
+        ) if str(value).strip()],
+    ]
+    for item in settings.cover_queue:
+        if not isinstance(item, dict):
+            continue
+        for key in ("face_reference_path", "visual_reference_path", "scene_reference_path"):
+            value = str(item.get(key, "") or "").strip()
+            if value:
+                protected.append(Path(value).expanduser().resolve())
+    for target in targets:
+        if target == target.parent:
+            raise ValueError("Небезопасный путь производственной папки")
+        if target == app_root or app_root.is_relative_to(target):
+            raise ValueError(
+                f"Производственная папка «{target}» пересекается с данными NewsFlow «{app_root}»."
+            )
+        for value in protected:
+            # Cutter/download paths are reset-owned generated media, even when
+            # the montage index also exposes them as footage folders.
+            if (value == target or value.is_relative_to(target)) and value not in generated_footage:
+                raise ValueError(
+                    f"Производственная папка «{target}» пересекается с сохраняемыми данными «{value}». "
+                    "Измените пути и повторите удаление производства."
+                )
+
+
 def _clear_production_queue_locked(payload: dict) -> dict:
     """Erase production artefacts and queue metadata after explicit confirmation."""
 
@@ -14141,6 +14204,8 @@ def _clear_production_queue_locked(payload: dict) -> dict:
             or str(payload.get("confirmationPhrase") or "").strip() != "УДАЛИТЬ ПРОИЗВОДСТВО"):
         raise ValueError("Введите контрольную фразу «УДАЛИТЬ ПРОИЗВОДСТВО» для очистки производственной очереди.")
     settings = load_settings()
+    folders = _production_cleanup_folders(settings)
+    _reset_cleanup_preflight(settings, folders)
     titles, jobs = load_session()
     # A production reset is a durable user decision. Record every current
     # scenario before clearing the queue so detached workers and emergency
@@ -14175,12 +14240,6 @@ def _clear_production_queue_locked(payload: dict) -> dict:
         *removed_production_ids,
     })[-10000:]
     settings.production_reset_generation += 1
-    folders = {
-        settings.output_folder, settings.voicer_output_folder, settings.cover_output_folder,
-        settings.seo_output_folder, settings.media_output_folder, settings.cutter_output_folder,
-        settings.footage_download_folder, settings.mixer_output_folder, settings.montage_output_folder,
-        settings.montage_project_folder,
-    }
     settings.youtube_publication_jobs = []
     settings.youtube_publication_activity = []
     settings.youtube_publication_items = {}
