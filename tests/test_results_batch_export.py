@@ -46,9 +46,9 @@ class ResultsBatchExportTests(unittest.TestCase):
                     {"production_item_id": "production-3", "selected_path": str(root / "missing-cover.png")},
                 ],
                 seo_queue=[
-                    {"production_item_id": "production-1", "status": "Готово", "title": "SEO первая", "description": "Строка один\nСтрока два", "tags": ["тег один", "тег два"]},
+                    {"production_item_id": "production-1", "status": "Готово", "tags_status": "Готово", "title": "SEO первая", "description": "Строка один\nСтрока два", "tags": ["тег один", "тег два"]},
                     {"production_item_id": "production-2", "title": "", "description": "", "tags": []},
-                    {"production_item_id": "production-3", "status": "Ожидает", "title": "Устаревший SEO", "description": "Описание третьей", "tags": ["тег три"]},
+                    {"production_item_id": "production-3", "status": "Ожидает", "tags_status": "Готово", "title": "Устаревший SEO", "description": "Устаревшее описание", "tags": ["тег три"]},
                 ],
             )
             exporter = getattr(bridge, "export_results_batch", None)
@@ -67,7 +67,7 @@ class ResultsBatchExportTests(unittest.TestCase):
             self.assertEqual(
                 (exported / "Результаты.txt").read_text(encoding="utf-8"),
                 "ЗАГОЛОВКИ\n\n001. SEO первая\n002. Средняя тема\n003. Третья тема\n\n"
-                "SEO ОПИСАНИЯ\n\n001. Строка один\nСтрока два\n002. \n003. Описание третьей\n\n"
+                "SEO ОПИСАНИЯ\n\n001. Строка один\nСтрока два\n002. \n003. \n\n"
                 "ТЕГИ\n\n001. тег один, тег два\n002. \n003. тег три\n",
             )
             self.assertEqual(sorted(path.name for path in (exported / "MP4").iterdir()), [
@@ -78,9 +78,34 @@ class ResultsBatchExportTests(unittest.TestCase):
             ])
             self.assertEqual(result["operationResult"]["missingMp4Ordinals"], [2])
             self.assertEqual(result["operationResult"]["missingCoverOrdinals"], [2, 3])
-            self.assertEqual(result["operationResult"]["missingSeoDescriptionOrdinals"], [2])
+            self.assertEqual(result["operationResult"]["missingSeoDescriptionOrdinals"], [2, 3])
             self.assertEqual(result["operationResult"]["missingTagsOrdinals"], [2])
             self.assertEqual({path: path.read_bytes() for path in source_bytes}, source_bytes)
+
+    def test_changing_results_destination_clears_stale_last_export_folder(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_destination = root / "old"
+            new_destination = root / "new"
+            old_destination.mkdir()
+            new_destination.mkdir()
+            settings = Settings(
+                results_output_folder=str(old_destination),
+                results_last_export_folder=str(old_destination / "NewsFlow Results — old"),
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={
+                     "results": {
+                         "outputFolder": str(new_destination),
+                         "lastExportFolder": "",
+                     },
+                 }):
+                result = bridge.save_settings_patch({"resultsOutputFolder": str(new_destination)})
+
+            self.assertEqual(settings.results_output_folder, str(new_destination))
+            self.assertEqual(settings.results_last_export_folder, "")
+            self.assertEqual(result["results"]["lastExportFolder"], "")
 
     def test_reports_a_partial_mp4_as_missing_instead_of_exporting_it(self):
         with TemporaryDirectory() as directory:
