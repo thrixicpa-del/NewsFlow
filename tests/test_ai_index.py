@@ -509,12 +509,18 @@ class ClipIndexTests(unittest.TestCase):
                 )
 
             self.assertEqual(index.screen_text_stats(), {"blocked": 1, "safe": 1, "unchecked": 1})
-            self.assertEqual({item.name for item in index.all_items(exclude_english_text=True)},
-                             {safe.name})
+            self.assertEqual(
+                {item.name for item in index.all_items(exclude_english_text=True)},
+                {safe.name, unchecked.name},
+            )
             time.sleep(0.002)
             blocked.write_bytes(b"changed blocked media")
             index.index_folders([str(root)])
             self.assertEqual(index.metadata(blocked).english_text, 0)
+            self.assertEqual(
+                {item.name for item in index.all_items(exclude_english_text=True)},
+                {blocked.name, safe.name, unchecked.name},
+            )
 
     def test_indexing_obvious_text_sets_current_classifier_version_without_second_decode(self):
         class TextImageEmbedding:
