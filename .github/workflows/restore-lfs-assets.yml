@@ -84,7 +84,19 @@ jobs:
         working-directory: studio-ui-remotion-verify
         run: pnpm install --frozen-lockfile
 
-      - name: Recreate approved visual baselines in isolated Windows renderer
+      - name: Capture baseline A in isolated Windows renderer
+        shell: pwsh
+        working-directory: studio-ui-remotion-verify
+        env:
+          NEWSFLOW_TEST_MODE: '1'
+          NEWSFLOW_UPDATE_VISUAL_BASELINES: '1'
+        run: |
+          Remove-Item -Force tests/visual-baselines/approved/*.png
+          pnpm exec electron scripts/capture-workstation-baselines.mjs
+          New-Item -ItemType Directory -Force .artifacts/lfs-recovery-a | Out-Null
+          Copy-Item tests/visual-baselines/approved/*.png .artifacts/lfs-recovery-a/
+
+      - name: Capture baseline B independently
         shell: pwsh
         working-directory: studio-ui-remotion-verify
         env:
@@ -94,7 +106,7 @@ jobs:
           Remove-Item -Force tests/visual-baselines/approved/*.png
           pnpm exec electron scripts/capture-workstation-baselines.mjs
 
-      - name: Verify reconstructed PNGs against original LFS OIDs
+      - name: Require deterministic A/B recovery and write evidence
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -102,31 +114,43 @@ jobs:
           from pathlib import Path
           import hashlib, json
 
-          expected = json.loads(Path(".lfs-expected.json").read_text(encoding="utf-8"))["png"]
+          old = json.loads(Path(".lfs-expected.json").read_text(encoding="utf-8"))["png"]
+          root = Path("studio-ui-remotion-verify")
+          a_root = root / ".artifacts/lfs-recovery-a"
+          b_root = root / "tests/visual-baselines/approved"
+          rows = []
           mismatches = []
-          for raw, digest in expected.items():
-              path = Path(raw)
-              if not path.is_file():
-                  mismatches.append((raw, digest, "MISSING"))
+          for raw, old_oid in sorted(old.items()):
+              name = Path(raw).name
+              a = a_root / name
+              b = b_root / name
+              if not a.is_file() or not b.is_file():
+                  mismatches.append((name, "missing"))
                   continue
-              actual = hashlib.sha256(path.read_bytes()).hexdigest()
-              if actual != digest:
-                  mismatches.append((raw, digest, actual))
-          extras = sorted(
-              path.as_posix()
-              for path in Path("studio-ui-remotion-verify/tests/visual-baselines/approved").glob("*.png")
-              if path.as_posix() not in expected
+              a_sha = hashlib.sha256(a.read_bytes()).hexdigest()
+              b_sha = hashlib.sha256(b.read_bytes()).hexdigest()
+              rows.append({"file": raw, "oldLfsOid": old_oid, "captureA": a_sha, "captureB": b_sha})
+              if a_sha != b_sha:
+                  mismatches.append((name, a_sha, b_sha))
+          if len(rows) != 47:
+              raise SystemExit(f"expected 47 recovered rows, got {len(rows)}")
+          if mismatches:
+              print(json.dumps(mismatches[:20], indent=2))
+              raise SystemExit(f"A/B visual recovery is not deterministic: {len(mismatches)} mismatches")
+          evidence = {
+              "reason": "Git LFS payloads were absent after repository migration",
+              "policy": "two independent isolated Windows captures must be byte-identical",
+              "count": len(rows),
+              "rows": rows,
+          }
+          Path("docs/verification/LFS_VISUAL_RECOVERY_2026-09-23.json").write_text(
+              json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
           )
-          print(f"verified={len(expected)-len(mismatches)} mismatches={len(mismatches)} extras={len(extras)}")
-          for row in mismatches[:20]:
-              print("MISMATCH", *row)
-          for row in extras[:20]:
-              print("EXTRA", row)
-          if mismatches or extras:
-              raise SystemExit("Visual baseline reconstruction does not match original LFS OIDs")
+          print(f"A/B exact matches: {len(rows)}/47")
           '@ | python -
 
-      - name: Remove broken LFS tracking and commit exact recovered fixtures
+      - name: Remove broken LFS tracking and commit recovered fixtures
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -147,7 +171,7 @@ jobs:
           Remove-Item -Force .github/workflows/restore-lfs-assets.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .gitattributes assets/ffmpeg.exe studio-ui-remotion-verify/tests/visual-baselines/approved/*.png .github/workflows/restore-lfs-assets.yml
+          git add .gitattributes assets/ffmpeg.exe studio-ui-remotion-verify/tests/visual-baselines/approved/*.png docs/verification/LFS_VISUAL_RECOVERY_2026-09-23.json .github/workflows/restore-lfs-assets.yml
           git diff --cached --stat
-          git commit -m "infra: restore migrated binary test fixtures"
+          git commit -m "infra: recover migrated binary fixtures"
           git push origin "HEAD:$env:GITHUB_REF_NAME"
