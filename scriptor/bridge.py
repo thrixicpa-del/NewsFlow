@@ -1916,6 +1916,11 @@ def save_settings_patch(patch: dict) -> dict:
         destination = str(patch.get("resultsOutputFolder") or "").strip()
         if destination and not Path(destination).is_dir():
             raise ValueError("Выберите существующую папку для результатов")
+        if destination != str(settings.results_output_folder or "").strip():
+            # A batch exported under the previous destination is no longer the
+            # active Results location. Until a new batch is built, "Open folder"
+            # must point at the newly selected root rather than a stale folder.
+            settings.results_last_export_folder = ""
         settings.results_output_folder = destination
     save_settings(settings)
     return snapshot()
@@ -13415,13 +13420,11 @@ def export_results_batch(payload: dict) -> dict:
         production_item_id = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
         seo = seo_by_id.get(production_item_id, {}) if production_item_id else legacy_seo.get(title.casefold(), {})
         cover = covers_by_id.get(production_item_id, {}) if production_item_id else legacy_covers.get(title.casefold(), {})
-        seo_title = (
-            str(seo.get("title", "") or "").strip()
-            if str(seo.get("status", "")) == "Готово"
-            else ""
-        ) or title
-        description = str(seo.get("description", "") or "").strip()
-        tags = seo.get("tags", []) if isinstance(seo.get("tags", []), list) else []
+        seo_ready = str(seo.get("status", "")) == "Готово"
+        tags_ready = str(seo.get("tags_status", "")) == "Готово"
+        seo_title = (str(seo.get("title", "") or "").strip() if seo_ready else "") or title
+        description = str(seo.get("description", "") or "").strip() if seo_ready else ""
+        tags = seo.get("tags", []) if tags_ready and isinstance(seo.get("tags", []), list) else []
         tag_text = ", ".join(str(value).strip() for value in tags if str(value).strip())
         headings.append(f"{ordinal:03d}. {seo_title}")
         descriptions.append(f"{ordinal:03d}. {description}")
