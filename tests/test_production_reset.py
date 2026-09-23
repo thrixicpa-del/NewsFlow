@@ -211,7 +211,10 @@ class ProductionResetTests(unittest.TestCase):
             save_settings(settings)
             self._seed_session()
             worker_settings = load_settings()
-            late_cover = Path(worker_settings.cover_output_folder) / "late-worker.png"
+            cover_root = Path(worker_settings.cover_output_folder)
+            late_cover = bridge._production_staging_folder(
+                cover_root, worker_settings.production_reset_generation, "cover",
+            ) / "late-worker.png"
             worker_started = threading.Event()
             continue_worker = threading.Event()
             worker_error: list[Exception] = []
@@ -222,8 +225,9 @@ class ProductionResetTests(unittest.TestCase):
                 try:
                     late_cover.parent.mkdir(parents=True, exist_ok=True)
                     late_cover.write_bytes(b"late")
-                    worker_settings.cover_queue[0]["paths"] = [str(late_cover)]
-                    worker_settings.cover_queue[0]["path"] = str(late_cover)
+                    published = bridge._publish_staged_artifacts(worker_settings, [late_cover], cover_root)
+                    worker_settings.cover_queue[0]["paths"] = [str(path) for path in published]
+                    worker_settings.cover_queue[0]["path"] = str(published[0]) if published else ""
                     bridge._save_cover_state(worker_settings)
                 except (OSError, RuntimeError, TypeError, ValueError) as error:  # pragma: no cover - assertion below reports it
                     worker_error.append(error)
@@ -232,12 +236,8 @@ class ProductionResetTests(unittest.TestCase):
             worker.start()
             self.assertTrue(worker_started.wait(timeout=5))
             bridge.clear_production_queue(self.confirmation)
-            cover_root = Path(worker_settings.cover_output_folder)
             new_release_sentinel = cover_root / "new-release.txt"
             new_release_sentinel.write_bytes(b"new")
-            self.assertTrue(bridge._discard_stale_production_artifacts(
-                worker_settings, [cover_root], cover_root,
-            ))
             continue_worker.set()
             worker.join(timeout=5)
 
@@ -367,6 +367,57 @@ class ProductionResetTests(unittest.TestCase):
             for folder in (Path(settings.footage_download_folder), Path(settings.cutter_output_folder)):
                 self.assertTrue(folder.is_dir())
                 self.assertEqual(list(folder.iterdir()), [])
+
+    def test_stale_staging_cannot_replace_new_same_path_artifacts(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io")}):
+            root = Path(directory)
+            settings = self._settings(root)
+            save_settings(settings)
+            self._seed_session()
+            stale_settings = load_settings()
+            bridge.clear_production_queue(self.confirmation)
+
+            for kind, final_root, name in (
+                ("voice", Path(stale_settings.voicer_output_folder), "001 — Старая тема.mp3"),
+                ("montage", Path(stale_settings.montage_output_folder), "Старая тема.mp4"),
+                ("project", Path(stale_settings.montage_project_folder), "Старая тема.newsflow"),
+                ("external", Path(stale_settings.cutter_output_folder), "same-source.mp4"),
+            ):
+                final_root.mkdir(parents=True, exist_ok=True)
+                current = final_root / name
+                current.write_bytes(b"new-generation")
+                staged = bridge._production_staging_folder(final_root, stale_settings.production_reset_generation, kind) / name
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_bytes(b"old-generation")
+
+                self.assertEqual(bridge._publish_staged_artifacts(stale_settings, [staged], final_root), [])
+                self.assertEqual(current.read_bytes(), b"new-generation")
+                self.assertFalse(staged.exists())
+
+    def test_reset_recreates_missing_and_nested_configured_roots(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io")}):
+            root = Path(directory)
+            settings = self._settings(root)
+            parent = root / "production" / "nested-parent"
+            nested = parent / "nested-voice"
+            missing = root / "production" / "missing-seo"
+            settings.output_folder = str(parent)
+            settings.voicer_output_folder = str(nested)
+            settings.seo_output_folder = str(missing)
+            for folder in (parent, nested):
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "old.txt").write_text("old", encoding="utf-8")
+            save_settings(settings)
+            self._seed_session()
+
+            bridge.clear_production_queue(self.confirmation)
+
+            self.assertTrue(parent.is_dir())
+            self.assertTrue(nested.is_dir())
+            self.assertTrue(missing.is_dir())
+            self.assertEqual(list(nested.iterdir()), [])
+            self.assertEqual(list(missing.iterdir()), [])
+            self.assertEqual(list(parent.iterdir()), [nested])
 
 
 if __name__ == "__main__":
