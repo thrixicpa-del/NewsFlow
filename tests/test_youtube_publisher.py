@@ -137,8 +137,12 @@ class PublicationJobTests(unittest.TestCase):
             root = Path(directory)
             first_video = root / "first-render.mp4"
             second_video = root / "second-render.mp4"
-            first_video.write_bytes(b"mp4")
-            second_video.write_bytes(b"mp4")
+            first_cover = root / "cover-a.png"
+            second_cover = root / "cover-b.png"
+            first_video.write_bytes(b"video-a")
+            second_video.write_bytes(b"video-b")
+            first_cover.write_bytes(b"cover-a")
+            second_cover.write_bytes(b"cover-b")
             title = "Одинаковый title: проверка / Windows?"
             settings = Settings(
                 montage_output_folder=str(root),
@@ -147,6 +151,12 @@ class PublicationJobTests(unittest.TestCase):
                     "0": {"outputPath": str(first_video), "production_item_id": "production-a", "title": title},
                     "1": {"outputPath": str(second_video), "production_item_id": "production-b", "title": title},
                 },
+                cover_queue=[
+                    {"production_item_id": "production-a", "title": title,
+                     "path": str(first_cover), "selected_path": str(first_cover)},
+                    {"production_item_id": "production-b", "title": title,
+                     "path": str(second_cover), "selected_path": str(second_cover)},
+                ],
                 seo_queue=[
                     {"production_item_id": "production-a", "source_title": title, "status": "Готово",
                      "title": "SEO A", "description": "Описание A", "hashtags": ["#a"], "tags": ["тег A"]},
@@ -173,12 +183,18 @@ class PublicationJobTests(unittest.TestCase):
             self.assertEqual((second_package / "ProductionItem ID.txt").read_text(encoding="utf-8-sig").strip(), "production-b")
             self.assertEqual((first_package / "Описание.txt").read_text(encoding="utf-8-sig").strip(), "Описание A")
             self.assertEqual((second_package / "Описание.txt").read_text(encoding="utf-8-sig").strip(), "Описание B")
+            self.assertEqual((first_package / "Обложка.png").read_bytes(), b"cover-a")
+            self.assertEqual((second_package / "Обложка.png").read_bytes(), b"cover-b")
             records_by_id = {item["productionItemId"]: item for item in settings.youtube_publication_jobs}
+            self.assertEqual(Path(records_by_id["production-a"]["videoPath"]).read_bytes(), b"video-a")
+            self.assertEqual(Path(records_by_id["production-a"]["thumbnailPath"]).read_bytes(), b"cover-a")
             self.assertEqual(records_by_id["production-a"]["title"], title)
             self.assertEqual(records_by_id["production-a"]["seoTitle"], "SEO A")
             self.assertEqual(records_by_id["production-a"]["seoDescription"], "Описание A")
             self.assertEqual(records_by_id["production-a"]["tags"], ["тег A"])
             self.assertEqual(records_by_id["production-a"]["hashtags"], ["#a"])
+            self.assertEqual(Path(records_by_id["production-b"]["videoPath"]).read_bytes(), b"video-b")
+            self.assertEqual(Path(records_by_id["production-b"]["thumbnailPath"]).read_bytes(), b"cover-b")
             self.assertEqual(records_by_id["production-b"]["seoDescription"], "Описание B")
             self.assertEqual(records_by_id["production-b"]["seoTitle"], "SEO B")
             self.assertEqual(records_by_id["production-b"]["tags"], ["тег B"])
