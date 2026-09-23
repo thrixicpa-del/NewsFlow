@@ -66,6 +66,19 @@ describe("workstation visual capture contract", () => {
     expect(captureScript.slice(destroyWindow, terminalHandler)).not.toContain("app.exit(");
   });
 
+  it("keeps Electron alive after closing the disposable window until the terminal handler selects an exit code", () => {
+    const captureScript = readFileSync(
+      resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
+      "utf8",
+    );
+
+    const preventAutomaticExit = captureScript.indexOf('app.on("window-all-closed", (event) => event.preventDefault());');
+    const terminalHandler = captureScript.indexOf("void captureBaselines().then(");
+
+    expect(preventAutomaticExit).toBeGreaterThan(-1);
+    expect(preventAutomaticExit).toBeLessThan(terminalHandler);
+  });
+
   it("waits for the disposable Vite process tree before terminating visual capture", () => {
     const captureScript = readFileSync(
       resolve(process.cwd(), "scripts", "capture-workstation-baselines.mjs"),
