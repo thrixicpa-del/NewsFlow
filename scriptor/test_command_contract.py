@@ -1,6 +1,6 @@
 import unittest
-from pathlib import Path
 from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -13,7 +13,7 @@ class CommandContractTests(unittest.TestCase):
             "import-manual-scenario", "remove-scenarios",
             "generate-voice-queue",
             "generate-voice-range", "generate-covers", "run-montage-queue",
-            "package-outputs", "generate-seo", "generate-tags",
+            "package-outputs", "export-results-batch", "generate-seo", "generate-tags",
             "upload-publication-jobs", "confirm-publication-v2-distribution",
             "migrate-publication-v2",
         }
@@ -25,7 +25,10 @@ class CommandContractTests(unittest.TestCase):
             self.assertTrue(entry.forbidden_legacy_modules)
 
     def test_contract_rejects_non_object_critical_payload_and_unknown_command(self):
-        from scriptor.command_contract import CommandContractError, validate_command_request
+        from scriptor.command_contract import (
+            CommandContractError,
+            validate_command_request,
+        )
 
         with self.assertRaises(CommandContractError):
             validate_command_request("generate-covers", [1, 2])
@@ -33,7 +36,10 @@ class CommandContractTests(unittest.TestCase):
             validate_command_request("not-a-newsflow-command", {})
 
     def test_contract_accepts_object_payload_and_snapshot_response(self):
-        from scriptor.command_contract import validate_command_request, validate_command_result
+        from scriptor.command_contract import (
+            validate_command_request,
+            validate_command_result,
+        )
 
         validate_command_request("generate-ideas", {"requirements": "проверка"})
         validate_command_result("generate-ideas", {"ideaResults": [], "operationResult": {"kind": "ideas"}})
