@@ -80,6 +80,26 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].actual_chars, 13)
         self.assertEqual(jobs[0].length_repair_attempts, 1)
 
+    async def test_minimum_only_contract_uses_a_valid_repair_instruction(self):
+        class MinimumClient:
+            fresh_prompts = []
+
+            async def generate(self, prompt, on_progress=None):
+                return "мало"
+
+            async def generate_fresh(self, prompt, on_progress=None):
+                self.fresh_prompts.append(prompt)
+                return "достаточно текста"
+
+        client = MinimumClient()
+        request = ScenarioRequest(0, "S", "P", target_chars=10, allowed_min=10, allowed_max=0)
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertTrue(client.fresh_prompts)
+        self.assertIn("не менее 10 знаков", client.fresh_prompts[0])
+        self.assertNotIn("до 0 знаков", client.fresh_prompts[0])
+
     async def test_unresolved_length_is_not_marked_ready_after_two_repairs(self):
         class AlwaysShortClient:
             fresh_calls = 0
