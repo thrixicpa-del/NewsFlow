@@ -36,25 +36,59 @@ class ScenarioRequest:
     allowed_max: int = 0
 
 
-def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
-    """Read an unambiguous human length range without treating arbitrary numbers as one.
+def _normalise_character_contract(target_chars: int = 0, allowed_min: int = 0,
+                                  allowed_max: int = 0) -> tuple[int, int, int]:
+    """Return a deterministic target/min/max contract without inventing hidden hard bounds."""
+    target = max(0, int(target_chars or 0))
+    minimum = max(0, int(allowed_min or 0))
+    maximum = max(0, int(allowed_max or 0))
+    if minimum and maximum and minimum > maximum:
+        raise ValueError("Минимальная длина больше максимальной")
+    if target:
+        if not minimum:
+            minimum = max(1, int(round(target * .9)))
+        if not maximum:
+            maximum = max(minimum, int(round(target * 1.1)))
+    elif minimum and maximum:
+        target = (minimum + maximum) // 2
+    elif minimum:
+        target = minimum
+    elif maximum:
+        target = maximum
+    return target, minimum, maximum
 
-    Presets already have structured range fields.  This is only the safe
-    compatibility bridge for an existing saved writer prompt that explicitly
-    states a character/sign range (for example ``10 000 - 15 000 символов``).
-    Dates, episode ranges and other numeric text are deliberately ignored.
+
+def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
+    """Read an unambiguous human length rule without treating arbitrary numbers as one.
+
+    Structured preset fields are authoritative. This compatibility bridge
+    recognises a character range such as 9 000–11 000 символов and a single
+    approximate target such as 10 000 символов.
     """
     text = str(prompt or "")
-    for match in re.finditer(r"(?P<minimum>\d[\d\s\u00a0]{0,8})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,8})", text, re.IGNORECASE):
+    for match in re.finditer(
+        r"(?P<minimum>\d[\d\s\u00a0]{0,8})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,8})",
+        text,
+        re.IGNORECASE,
+    ):
         nearby = text[max(0, match.start() - 120):match.end() + 120].casefold()
         if not re.search(r"символ|знак|character", nearby):
             continue
         minimum = int(re.sub(r"\D", "", match.group("minimum")))
         maximum = int(re.sub(r"\D", "", match.group("maximum")))
         if 0 < minimum <= maximum:
-            return (minimum + maximum) // 2, minimum, maximum
-    return None
+            return _normalise_character_contract((minimum + maximum) // 2, minimum, maximum)
 
+    single_patterns = (
+        r"(?P<target>\d[\d\s\u00a0]{0,8})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
+        r"(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)\s*[:=]?\s*(?P<target>\d[\d\s\u00a0]{0,8})",
+    )
+    for pattern in single_patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            target = int(re.sub(r"\D", "", match.group("target")))
+            if target > 0:
+                return _normalise_character_contract(target)
+    return None
 
 def read_text_file(path: Path | str) -> str:
     file_path = Path(path)
@@ -78,38 +112,58 @@ def parse_titles(text: str) -> list[str]:
     return titles
 
 
-def build_requests(titles: list[str], template: str, ranges: list[PromptRange]) -> list[ScenarioRequest]:
+def build_requests(titles: list[str], template: str, ranges: list[PromptRange],
+                   default_target_chars: int = 0, default_allowed_min: int = 0,
+                   default_allowed_max: int = 0) -> list[ScenarioRequest]:
     if not template.strip():
         raise ValueError("Заполните общий шаблон")
     result = []
+    has_default_contract = bool(default_target_chars or default_allowed_min or default_allowed_max)
+    default_contract = (
+        _normalise_character_contract(default_target_chars, default_allowed_min, default_allowed_max)
+        if has_default_contract else None
+    )
     for position, title in enumerate(titles, start=1):
         base = template.replace("{title}", title) if "{title}" in template else f"{template.rstrip()}\n\nНазвание сценария: {title}"
         applicable = [item for item in ranges if item.start <= position <= item.end]
         extras = [item.prompt.strip() for item in applicable if item.prompt.strip()]
-        length_range = next((item for item in reversed(applicable) if item.target_chars or item.allowed_min or item.allowed_max), None)
-        inferred_contract = _explicit_character_contract(template) if length_range is None else None
+        length_range = next(
+            (item for item in reversed(applicable)
+             if item.target_chars or item.allowed_min or item.allowed_max),
+            None,
+        )
         if length_range:
-            minimum = length_range.allowed_min or max(1, int(length_range.target_chars * .9))
-            maximum = length_range.allowed_max or max(minimum, int(length_range.target_chars * 1.1))
-            extras.append(
-                f"Длина готового сценария: цель {length_range.target_chars or 'по диапазону'} символов; "
-                f"допустимо {minimum}–{maximum} символов."
+            contract = _normalise_character_contract(
+                length_range.target_chars, length_range.allowed_min, length_range.allowed_max,
             )
-        elif inferred_contract:
-            target, minimum, maximum = inferred_contract
+        elif default_contract:
+            contract = default_contract
+        else:
+            contract = _explicit_character_contract(template)
+
+        target = minimum = maximum = 0
+        if contract:
+            target, minimum, maximum = contract
+            if minimum and maximum:
+                bounds = f"{minimum}–{maximum}"
+            elif minimum:
+                bounds = f"не менее {minimum}"
+            else:
+                bounds = f"не более {maximum}"
             extras.append(
-                f"Runtime-проверка длины: цель {target} символов; "
-                f"допустимо строго {minimum}–{maximum} символов."
+                f"Runtime-проверка длины: цель {target} символов; допустимо {bounds} символов. "
+                "Фактическое количество символов считает Python после ответа."
             )
         prompt = base + ("\n\nДополнительные требования:\n" + "\n".join(extras) if extras else "")
         result.append(ScenarioRequest(
-            position - 1, title, prompt,
-            target_chars=length_range.target_chars if length_range else (inferred_contract[0] if inferred_contract else 0),
-            allowed_min=minimum if length_range or inferred_contract else 0,
-            allowed_max=maximum if length_range or inferred_contract else 0,
+            position - 1,
+            title,
+            prompt,
+            target_chars=target,
+            allowed_min=minimum,
+            allowed_max=maximum,
         ))
     return result
-
 
 def safe_filename(title: str, fallback: str = "Сценарий") -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title)
