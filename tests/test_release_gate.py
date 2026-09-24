@@ -29,6 +29,19 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("$packagedSmokeRoot = Join-Path $candidateRoot 'win-unpacked'", script)
         self.assertIn("Get-ChildItem -LiteralPath $packagedSmokeRoot", script)
 
+    def test_gate_installs_locked_javascript_dependencies_before_audit_and_typecheck(self):
+        script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
+
+        install = "Invoke-GateStep -Name 'dependencies-install' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'install', '--frozen-lockfile')"
+        audit = "Invoke-GateStep -Name 'dependencies' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'verify:dependencies')"
+        typecheck = "Invoke-GateStep -Name 'frontend-typecheck' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'typecheck')"
+
+        self.assertIn(install, script)
+        self.assertIn(audit, script)
+        self.assertIn(typecheck, script)
+        self.assertLess(script.index(install), script.index(audit))
+        self.assertLess(script.index(audit), script.index(typecheck))
+
     def test_ci_provisions_the_pinned_python_dependency_auditor_required_by_release(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         audit_script = (ROOT / "scripts" / "audit-python-dependencies.ps1").read_text(encoding="utf-8")
@@ -60,13 +73,16 @@ class ReleaseGateTests(unittest.TestCase):
                 "repo-state",
                 "toolchain",
                 "production-integrity-capture",
+                "dependencies-install",
                 "dependencies",
+                "dependencies-python",
                 "lint",
                 "frontend-typecheck",
                 "python-suite",
                 "frontend-suite",
                 "visual-regression",
                 "security",
+                "security-secrets",
                 "performance",
                 "core-runtime",
                 "immutable-package",
