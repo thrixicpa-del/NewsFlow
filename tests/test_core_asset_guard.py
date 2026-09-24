@@ -94,13 +94,22 @@ class CoreAssetGuardTests(unittest.TestCase):
         core = candidate / "win-unpacked/resources/core-bin/NewsFlowCore.exe"
         core.parent.mkdir(parents=True)
         core.write_bytes(b"fixture-core")
+        scriptor_files = []
+        for relative in (
+            "win-unpacked/resources/core/scriptor/__init__.py",
+            "win-unpacked/resources/core/scriptor/bridge.py",
+        ):
+            file = candidate / relative
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("# fixture\n", encoding="utf-8")
+            scriptor_files.append(file)
         asset = candidate / PACKAGED
         if not omit_asset:
             asset.parent.mkdir(parents=True)
             asset.write_bytes(payload)
         identity = {"gitSha": "1" * 40, "coreBinSha256": hashlib.sha256(core.read_bytes()).hexdigest()}
         (candidate / "build-manifest.json").write_text(json.dumps({**identity, "buildType": "RC"}))
-        files = [core] + ([] if omit_inventory or omit_asset else [asset])
+        files = [core, *scriptor_files] + ([] if omit_inventory or omit_asset else [asset])
         entries = [{"path": file.relative_to(candidate).as_posix(),
                     "size": file.stat().st_size,
                     "sha256": hashlib.sha256(file.read_bytes()).hexdigest()} for file in files]
