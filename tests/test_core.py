@@ -62,9 +62,22 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(request.target_chars, 10000)
         self.assertEqual(request.allowed_min, 9000)
         self.assertEqual(request.allowed_max, 11000)
-        self.assertIn("цель 10000 символов", request.prompt)
-        self.assertIn("9000–11000", request.prompt)
-        self.assertIn("посчитана Python", request.prompt)
+        self.assertIn("около 10 000 символов", request.prompt)
+        self.assertIn("от 9 000 до 11 000 символов", request.prompt)
+        self.assertIn("пересчитает фактическое количество символов Python", request.prompt)
+
+    def test_legacy_unit_before_character_range_is_still_recognized(self):
+        request = build_requests(
+            ["Тема"],
+            "КОЛИЧЕСТВО СИМВОЛОВ: 10 000 - 15 000. Считать при помощи Python. Тема: {title}",
+            [],
+        )[0]
+
+        self.assertEqual(
+            (request.target_chars, request.allowed_min, request.allowed_max),
+            (12500, 10000, 15000),
+        )
+        self.assertIn("от 10 000 до 15 000 символов", request.prompt)
 
     def test_structured_range_length_overrides_template_free_text_target(self):
         request = build_requests(
@@ -76,7 +89,8 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(request.target_chars, 5000)
         self.assertEqual(request.allowed_min, 4500)
         self.assertEqual(request.allowed_max, 5500)
-        self.assertIn("цель 5000 символов", request.prompt)
+        self.assertIn("около 5 000 символов", request.prompt)
+        self.assertIn("от 4 500 до 5 500 символов", request.prompt)
 
     def test_title_placeholder_and_fallback_append(self):
         first = build_requests(["Имя"], "Напиши: {title}", [])[0]
