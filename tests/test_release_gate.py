@@ -29,6 +29,23 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("$packagedSmokeRoot = Join-Path $candidateRoot 'win-unpacked'", script)
         self.assertIn("Get-ChildItem -LiteralPath $packagedSmokeRoot", script)
 
+    def test_gate_hydrates_git_history_before_lfs_and_release_lint(self):
+        script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
+        history_script = (ROOT / "scripts" / "prepare-git-history.ps1").read_text(encoding="utf-8")
+
+        hydrate_history = "Invoke-GateStep -Name 'git-history' -FilePath $powerShellExecutable"
+        hydrate_lfs = "Invoke-GateStep -Name 'lfs-hydration' -FilePath $powerShellExecutable"
+        lint = "Invoke-GateStep -Name 'lint'"
+
+        self.assertIn(hydrate_history, script)
+        self.assertIn("scripts/prepare-git-history.ps1", script)
+        self.assertLess(script.index(hydrate_history), script.index(hydrate_lfs))
+        self.assertLess(script.index(hydrate_history), script.index(lint))
+        self.assertIn("fetch', '--unshallow', '--no-tags', 'origin'", history_script)
+        self.assertIn("654bdadc9ce673c072991298ad410687fdd6213b", history_script)
+        self.assertIn("merge-base', '--is-ancestor'", history_script)
+        self.assertIn("GIT_HISTORY_VERIFY=PASS", history_script)
+
     def test_gate_hydrates_lfs_before_production_capture_and_test_suites(self):
         script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
 
@@ -97,6 +114,7 @@ class ReleaseGateTests(unittest.TestCase):
             [
                 "repo-state",
                 "toolchain",
+                "git-history",
                 "lfs-hydration",
                 "production-integrity-capture",
                 "dependencies-install",
