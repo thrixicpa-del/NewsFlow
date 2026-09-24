@@ -22,6 +22,7 @@ if (-not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
 $steps = @(
     'repo-state',
     'toolchain',
+    'lfs-hydration',
     'production-integrity-capture',
     'dependencies-install',
     'dependencies',
@@ -100,6 +101,7 @@ try {
     Set-Location $repoRoot
     if (git status --porcelain) { throw 'repo-state failed: release gate requires a clean Git worktree.' }
     Invoke-GateStep -Name 'toolchain' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/verify-toolchain.ps1')
+    Invoke-GateStep -Name 'lfs-hydration' -FilePath $powerShellExecutable -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/prepare-lfs-assets.ps1')
     Invoke-GateStep -Name 'production-integrity-capture' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/check-production-integrity.ps1', '-Mode', 'Capture', '-SnapshotPath', $integritySnapshot)
     $integrityCaptured = $true
     Invoke-GateStep -Name 'dependencies-install' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'install', '--frozen-lockfile')
