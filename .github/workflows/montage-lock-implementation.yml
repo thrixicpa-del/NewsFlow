@@ -44,8 +44,9 @@ jobs:
           expected = 'f8148a3ab36183a3dc2d7e460c4fe769592a28f3'
           actual = subprocess.check_output(['git', 'hash-object', 'scriptor/bridge.py'], text=True).strip()
           assert actual == expected, (actual, expected)
-          assert subprocess.check_output(['git', 'hash-object', 'tests/test_montage_queue_lock.py'], text=True).strip() == '1c20d8c0b9999c492f7fdda336d316c702404cea'
+          assert subprocess.check_output(['git', 'hash-object', 'tests/test_montage_queue_lock.py'], text=True).strip() == '45007063be0808bd20ba32685b91ff1c4959c119'
           assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
+          subprocess.run([sys.executable, '-m', 'ruff', 'check', 'tests/test_montage_queue_lock.py'], check=True)
           result = subprocess.run([sys.executable, 'tests/run_isolated.py', 'tests.test_montage_queue_lock', '-v'], text=True, encoding='utf-8', errors='replace', capture_output=True, timeout=100)
           output = result.stdout + result.stderr
           print(output)
@@ -140,6 +141,8 @@ jobs:
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert changed == {'scriptor/bridge.py', 'tests/test_montage_queue.py'}, changed
           subprocess.run(['git', 'diff', '--check'], check=True)
+          for file in sorted(changed):
+              print(file, subprocess.check_output(['git', 'hash-object', file], text=True).strip())
       - name: Source Montage regression GREEN
         run: python tests/run_isolated.py tests.test_montage_queue_lock tests.test_montage_queue tests.test_build_montage_runtime_guard tests.test_runtime_action_map -v
       - name: Repeat contention and overlap contracts ten times
