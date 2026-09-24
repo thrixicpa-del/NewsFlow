@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { BUNDLED_FFMPEG, verifyCoreAssets, runCoreMediaSmoke } from "./verify-core-assets.mjs";
 
 const args = process.argv.slice(2);
 const directoryArgument = args.includes("--directory") ? args[args.indexOf("--directory") + 1] : "";
@@ -39,5 +40,15 @@ for (const entry of hashes.artifacts) {
     throw new Error(`Artifact hash mismatch: ${relative}`);
   }
 }
+
+// A generated hash list can consistently describe a broken resource.
+// Validate the exact runtime-preferred file against the independent asset lock.
+const coreDirectory = path.join(artifactRoot, "win-unpacked", "resources", "core-bin");
+const asset = verifyCoreAssets(coreDirectory);
+const requiredAsset = `win-unpacked/resources/core-bin/${BUNDLED_FFMPEG}`;
+if (!hashes.artifacts.some((entry) => String(entry.path).replace(/\\/g, "/") === requiredAsset)) {
+  throw new Error("Artifact hashes omit required FFmpeg resource");
+}
+if (args.includes("--media-smoke")) runCoreMediaSmoke(asset.executable);
 
 process.stdout.write(`IMMUTABLE_RC_VERIFY=PASS ${artifactRoot}\n`);

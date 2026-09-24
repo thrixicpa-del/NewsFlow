@@ -43,6 +43,23 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             fixture_app / "scripts" / "verify-core-runtime.mjs",
         )
 
+        shutil.copy2(
+            APP_ROOT / "scripts" / "verify-core-assets.mjs",
+            fixture_app / "scripts" / "verify-core-assets.mjs",
+        )
+        # Structural fixture for hash validation, not a Windows execution smoke.
+        asset_bytes = bytearray(512)
+        asset_bytes[:2] = b"MZ"
+        asset_bytes[60:64] = (128).to_bytes(4, "little")
+        asset_bytes[128:132] = b"PE\0\0"
+        asset = fixture_core / "_internal" / "assets" / "ffmpeg.exe"
+        asset.parent.mkdir(parents=True)
+        asset.write_bytes(asset_bytes)
+        (fixture_app / "core-assets-lock.json").write_text(json.dumps({
+            "format": 1,
+            "ffmpeg": {"size": len(asset_bytes), "sha256": hashlib.sha256(asset_bytes).hexdigest()},
+        }), encoding="utf-8")
+
         package = {
             "version": "2.1.152",
             "build": {
