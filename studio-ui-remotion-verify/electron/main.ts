@@ -228,7 +228,7 @@ function createWindow() {
   const window = new BrowserWindow({
     width: 1440, height: 900, minWidth: 720, minHeight: 720,
     backgroundColor: '#07101d', title: environmentWindowTitle(process.env),
-    webPreferences: { preload: path.join(dirname, 'preload.mjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: { preload: path.join(dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   window.setMenuBarVisibility(false);
   window.webContents.setWindowOpenHandler(({ url }) => {
