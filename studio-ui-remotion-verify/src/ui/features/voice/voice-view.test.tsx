@@ -216,6 +216,29 @@ describe("Voice Light views", () => {
     expect(screen.getByText("Фактический параллелизм = минимум из этого значения и доступных потоков API-ключей; Chrome работает в 1 браузерный поток.")).toBeTruthy();
   });
 
+  it("saves a voice-range preset through an in-app dialog", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    render(<VoiceProfiles data={fallback} command={command} go={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить пресет" }));
+    expect(screen.getByRole("dialog", { name: "Сохранить пресет голосов" })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Название пресета"), {
+      target: { value: "Новости 1–10" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Подтвердить сохранение" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("save-voice-range-preset", {
+        name: "Новости 1–10",
+        profiles: fallback.voiceProfiles,
+        ranges: fallback.voiceRanges,
+        defaultProfileId: fallback.voiceDefaultProfileId,
+        keyFailover: fallback.voiceKeyFailover,
+      }),
+    );
+  });
+
   it("keeps ready MP3 removal on the current command", () => {
     const command = vi.fn();
     const data = { ...fallback, voiceItems: [{ index: 3, title: "Готовый MP3", state: "Готово", path: "D:/test.mp3" }] };
