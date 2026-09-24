@@ -56,8 +56,10 @@ if (!timelineSource.includes('renderer: str = "ffmpeg"')
     || !timelineSource.includes('"libx264", "-preset", "veryfast"')) {
   fail('FAST NEWS Montage is missing the current FFmpeg default, cache generation or encoder preset.');
 }
+const montageQueueRender = /render_project\(\s*project,\s*staged_output,\s*progress=progress,\s*renderer=settings\.montage_renderer,/m;
 if (!bridgeSource.includes('def run_montage_queue(payload: dict)')
-    || !bridgeSource.includes('render_project(project, output, progress=progress, renderer=settings.montage_renderer,')) {
+    || !bridgeSource.includes('def _run_montage_queue_unlocked(payload: dict)')
+    || !montageQueueRender.test(bridgeSource)) {
   fail('FAST NEWS Montage queue is not wired to the current bridge and render service.');
 }
 
