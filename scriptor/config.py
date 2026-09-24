@@ -552,6 +552,11 @@ class Settings:
         "Отделяй подтверждённые факты от оценок и не выдумывай детали. "
         "Верни только готовый текст для диктора без заголовков, Markdown, списков и пояснений."
     )
+    # Structured default length contract for the active scenario template.
+    # Per-range values override these fields for matching scenario positions.
+    scenario_target_chars: int = 0
+    scenario_allowed_min: int = 0
+    scenario_allowed_max: int = 0
     idea_topics: list[str] = field(default_factory=lambda: list(NEWS_TOPICS))
     # Agent proposals are deliberately separate from the user's permanent
     # direction library. They become favourites only after explicit approval.
@@ -1186,6 +1191,9 @@ def load_settings() -> Settings:
             results_last_export_folder=str(data.get("results_last_export_folder", "") or ""),
             voice_profiles=data.get("voice_profiles") or Settings().voice_profiles,
             template=data.get("template") or Settings().template,
+            scenario_target_chars=max(0, int(data.get("scenario_target_chars", 0) or 0)),
+            scenario_allowed_min=max(0, int(data.get("scenario_allowed_min", 0) or 0)),
+            scenario_allowed_max=max(0, int(data.get("scenario_allowed_max", 0) or 0)),
             idea_topics=data.get("idea_topics", Settings().idea_topics),
             idea_suggested_topics=data.get("idea_suggested_topics", []),
             idea_reference_channels=[item for item in data.get("idea_reference_channels", []) if isinstance(item, dict)],
@@ -1642,6 +1650,9 @@ def save_settings(settings: Settings):
         "results_last_export_folder": settings.results_last_export_folder,
         "voice_profiles": settings.voice_profiles,
         "template": settings.template,
+        "scenario_target_chars": settings.scenario_target_chars,
+        "scenario_allowed_min": settings.scenario_allowed_min,
+        "scenario_allowed_max": settings.scenario_allowed_max,
         "idea_topics": settings.idea_topics,
         "idea_suggested_topics": settings.idea_suggested_topics,
         "idea_reference_channels": settings.idea_reference_channels,
