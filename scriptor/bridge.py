@@ -4982,13 +4982,15 @@ def add_scenarios(payload: dict) -> dict:
         raise ValueError("Добавьте хотя бы один заголовок сценария")
     titles, jobs = load_session()
     known = {title.casefold() for title in titles}
-    titles.extend(title for title in incoming if title.casefold() not in known)
+    added = [title for title in incoming if title.casefold() not in known]
+    titles.extend(added)
     # Adding a title is an explicit write action. Persist its current
     # ProductionItem identity here instead of letting a later read-only
     # snapshot invent a transient UUID that cannot survive the next command.
-    settings = load_settings()
-    ensure_idea_production_items(settings, active_titles=titles)
-    save_settings(settings)
+    if added:
+        settings = load_settings()
+        ensure_idea_production_items(settings, active_titles=added)
+        save_settings(settings)
     save_session(titles, jobs)
     return snapshot()
 
@@ -5031,11 +5033,18 @@ def production_item_prompt(item: dict) -> str:
 def generate_scenarios(payload: dict) -> dict:
     settings = load_settings()
     titles, existing_jobs = load_session()
+    existing_jobs_by_index = {job.request.index: job for job in existing_jobs}
     # Older desktop builds could persist manually-added titles before their
-    # ProductionItem identity. Repair that state on this explicit generation
-    # action so every downstream cover/voice/montage command sees one stable ID.
-    identity_changed = ensure_idea_production_items(settings, active_titles=titles)
-    if identity_changed:
+    # ProductionItem identity. Repair only rows that do not already carry the
+    # durable ID inside the current session job; an existing Job is authority.
+    missing_identity_titles = [
+        title for index, title in enumerate(titles)
+        if not str(existing_jobs_by_index.get(index).request.production_item_id
+                   if existing_jobs_by_index.get(index) else "").strip()
+    ]
+    if missing_identity_titles and ensure_idea_production_items(
+        settings, active_titles=missing_identity_titles,
+    ):
         save_settings(settings)
     provider = str(payload.get("provider", settings.scenario_provider)).strip()
     if provider not in {"agent", "openai"}:
@@ -5054,6 +5063,11 @@ def generate_scenarios(payload: dict) -> dict:
         for item in settings.idea_production_items
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     }
+    for index, title in enumerate(titles):
+        job = existing_jobs_by_index.get(index)
+        job_identity = str(job.request.production_item_id if job else "").strip()
+        if job_identity:
+            production_id_by_title[str(title).casefold()] = job_identity
     all_requests = [ScenarioRequest(
         request.index, request.title, request.prompt,
         production_id_by_title.get(request.title.casefold(), ""),
@@ -5438,8 +5452,16 @@ def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Jo
 def _sync_current_scenario_covers(settings: Settings) -> bool:
     """Project exactly one cover row for each current scenario identity."""
     titles, jobs = load_session()
-    changed = ensure_idea_production_items(settings, active_titles=titles)
     jobs_by_index = {job.request.index: job for job in jobs}
+    missing_identity_titles = [
+        title for index, title in enumerate(titles)
+        if not str(jobs_by_index.get(index).request.production_item_id
+                   if jobs_by_index.get(index) else "").strip()
+    ]
+    changed = (
+        ensure_idea_production_items(settings, active_titles=missing_identity_titles)
+        if missing_identity_titles else False
+    )
 
     # Migrate only a blank-ID row that already matches the exact current
     # scenario position and title. A non-empty historical identity is never
