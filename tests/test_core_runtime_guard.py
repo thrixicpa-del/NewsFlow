@@ -17,6 +17,7 @@ APP_ROOT = ROOT / "studio-ui-remotion-verify"
 
 REQUIRED_SOURCES = (
     "scriptor/bridge.py",
+    "scriptor/ai_index.py",
     "scriptor/timeline.py",
     "scriptor/core.py",
     "scriptor/thumbnail_prompt_v2.py",
@@ -116,15 +117,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r14")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r15")
         self.assertEqual(
             lock["coreExeSha256"],
-            "a69969b47ae23a9f8557c8ef0580a3503dc57623dd2166c3d7e0c0f574d3c40f",
+            "4a549c58cb61c40d489b580a388b0c80795344c2d86b477f934bfd584123ac5d",
         )
-        self.assertEqual(lock["coreExeSize"], 34225663)
+        self.assertEqual(lock["coreExeSize"], 34226546)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "c9e29f68cb1dae8d90ec2e21fef6aedc12b8179b",
+            "1d8650efa92e72fabc0933609315d853a8ad2a93",
         )
 
         resources = package["build"]["extraResources"]
@@ -157,6 +158,20 @@ class CoreRuntimeGuardTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("актуально по содержимому", result.stdout)
+
+    def test_guard_rejects_changed_footage_index_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "ai_index.py").write_text(
+                "# changed footage index\n",
+                encoding="utf-8",
+            )
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scriptor/ai_index.py", result.stderr)
+            self.assertIn("Пересоберите core-bin", result.stderr)
 
     def test_guard_rejects_changed_montage_timeline_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:

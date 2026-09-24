@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { Cutter, fallback, Footage } from "../../App";
 import { describe, expect, it, vi } from "vitest";
 
@@ -35,6 +35,97 @@ describe("Media ingest workspaces", () => {
 
     expect(command).toHaveBeenCalledTimes(1);
     expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("classifies persisted English/Latin verdicts without starting a media rescan", async () => {
+    const command = vi.fn().mockResolvedValue({
+      indexResult: {
+        total: 5,
+        processed: 5,
+        indexed: 5,
+        skipped: 0,
+        failed: 0,
+        screenText: { checked: 5, blocked: 2, safe: 3, uncertain: 0 },
+      },
+    });
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          footageIndex: { ...fallback.footageIndex, indexed: 5, total: 5, englishUnchecked: 5 },
+        }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+
+    screen.getByRole("button", { name: "Проверить English/Latin текст" }).click();
+
+    await waitFor(() => {
+      expect(command).toHaveBeenCalledWith("index-footage", { screenText: true });
+    });
+    expect(screen.getByText(/Проверка English\/Latin текста завершена/i)).toBeTruthy();
+  });
+
+  it("does not describe an unavailable local text model as an up-to-date check", async () => {
+    const command = vi.fn().mockResolvedValue({
+      indexResult: {
+        total: 5,
+        processed: 0,
+        indexed: 0,
+        skipped: 0,
+        failed: 0,
+        screenText: { checked: 0, blocked: 0, safe: 0, uncertain: 5, modelReady: false },
+      },
+    });
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          footageIndex: { ...fallback.footageIndex, indexed: 5, total: 5, englishUnchecked: 5 },
+        }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Проверить English/Latin текст" }).click();
+    });
+
+    expect(await screen.findByText(/Локальная text-модель недоступна/i)).toBeTruthy();
+  });
+
+  it("shows truthful screen-text maintenance progress instead of the full base-index count", () => {
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          footageIndex: {
+            ...fallback.footageIndex,
+            indexed: 27797,
+            total: 27797,
+            englishUnchecked: 5,
+            status: {
+              stage: "screen-text",
+              active: true,
+              total: 5,
+              processed: 2,
+              indexed: 2,
+              failed: 0,
+              current: "clip-2.mp4",
+            },
+          },
+        }}
+        command={vi.fn()}
+        refresh={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/прочитано: 2 из 5 · осталось: 3 · 40%/i)).toBeTruthy();
   });
 
   it("shows interrupted progress and truthful resumable counts", () => {

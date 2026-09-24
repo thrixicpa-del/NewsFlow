@@ -434,22 +434,24 @@ class MontageQueueStateTests(unittest.TestCase):
             bridge.save_montage_settings({"excludeEnglishText": False})
         self.assertTrue(settings.montage_exclude_english_text)
 
-    def test_screen_candidate_rejects_only_explicit_block_and_keeps_uncertain_eligible(self):
+    def test_screen_candidate_deep_checks_uncertain_and_rejects_a_confirmed_block(self):
         calls = []
 
         class FakeIndex:
-            def __init__(self, state):
-                self.state = state
+            def __init__(self, shallow, deep=None):
+                self.shallow = shallow
+                self.deep = deep if deep is not None else shallow
 
             def screen_text_eligibility(self, _path, *, deep=False):
                 calls.append(deep)
-                return self.state
+                return self.deep if deep else self.shallow
 
         item = FootageItem("D:/library/russian-caption.mp4", "russian-caption.mp4")
-        self.assertTrue(bridge._montage_screen_text_safe(FakeIndex("UNCERTAIN"), item))
+        self.assertFalse(bridge._montage_screen_text_safe(FakeIndex("UNCERTAIN", "BLOCKED"), item))
+        self.assertTrue(bridge._montage_screen_text_safe(FakeIndex("UNCERTAIN", "UNCERTAIN"), item))
         self.assertTrue(bridge._montage_screen_text_safe(FakeIndex("SAFE"), item))
         self.assertFalse(bridge._montage_screen_text_safe(FakeIndex("BLOCKED"), item))
-        self.assertEqual(calls, [False, False, False])
+        self.assertEqual(calls, [False, True, False, True, False, False])
 
     def test_semantic_rescue_can_use_best_safe_hit_below_normal_score_floor(self):
         candidate = FootageItem(
