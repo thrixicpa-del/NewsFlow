@@ -23,13 +23,16 @@ $steps = @(
     'repo-state',
     'toolchain',
     'production-integrity-capture',
+    'dependencies-install',
     'dependencies',
+    'dependencies-python',
     'lint',
     'frontend-typecheck',
     'python-suite',
     'frontend-suite',
     'visual-regression',
     'security',
+    'security-secrets',
     'performance',
     'core-runtime',
     'immutable-package',
@@ -99,6 +102,7 @@ try {
     Invoke-GateStep -Name 'toolchain' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/verify-toolchain.ps1')
     Invoke-GateStep -Name 'production-integrity-capture' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/check-production-integrity.ps1', '-Mode', 'Capture', '-SnapshotPath', $integritySnapshot)
     $integrityCaptured = $true
+    Invoke-GateStep -Name 'dependencies-install' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'install', '--frozen-lockfile')
     Invoke-GateStep -Name 'dependencies' -FilePath 'pnpm' -Arguments @('--dir', $appRoot, 'verify:dependencies')
     Invoke-GateStep -Name 'dependencies-python' -FilePath $powerShellExecutable -Arguments @('-ExecutionPolicy', 'Bypass', '-File', 'scripts/audit-python-dependencies.ps1')
     Invoke-GateStep -Name 'lint' -FilePath $powerShellExecutable -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/release-lint.ps1')
