@@ -22,12 +22,15 @@ describe("NewsFlow renderer command contract", () => {
   });
 
   it("keeps the preload, Electron IPC and Python bridge command boundary wired", () => {
-    const preload = readFileSync(resolve(process.cwd(), "electron/preload.mts"), "utf8");
+    const preload = readFileSync(resolve(process.cwd(), "electron/preload.cts"), "utf8");
     const main = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
     const bridge = readFileSync(resolve(process.cwd(), "../scriptor/bridge.py"), "utf8");
     const observability = readFileSync(resolve(process.cwd(), "../scriptor/observability.py"), "utf8");
 
     expect(preload).toContain("newsflow:command");
+    expect(preload).toContain("require('electron')");
+    expect(preload).not.toContain("from 'electron'");
+    expect(main).toContain("preload.cjs");
     expect(main).toContain("handleTrusted('newsflow:command'");
     expect(main).toContain("assertAllowedCoreCommand(command)");
     expect(main).toContain("_actionTrace");
