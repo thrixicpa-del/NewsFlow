@@ -29,7 +29,59 @@ describe("Template writing desk", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template: "Новый шаблон {title}",
       ranges: fallback.templateSettings.ranges,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
     }));
+  });
+
+  it("saves a Python-owned target length with the current template", async () => {
+    const command = vi.fn(async () => fallback);
+    render(<TemplateEditor data={fallback} command={command} />);
+
+    fireEvent.change(screen.getByLabelText("Целевая длина сценария"), {
+      target: { value: "10000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить шаблон" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
+      template: fallback.templateSettings.template,
+      ranges: fallback.templateSettings.ranges,
+      targetChars: 10000,
+      allowedMin: 0,
+      allowedMax: 0,
+    }));
+    expect(screen.getByText(/Runtime-контракт: цель 10000 · допустимо 9000–11000/)).toBeTruthy();
+  });
+
+  it("restores each saved template preset's own length contract", () => {
+    render(
+      <TemplateEditor
+        data={{
+          ...fallback,
+          templateSettings: {
+            ...fallback.templateSettings,
+            presets: [{
+              name: "Длинный",
+              template: "Длинный шаблон {title}",
+              ranges: [],
+              targetChars: 10000,
+              allowedMin: 9500,
+              allowedMax: 10500,
+            }],
+          },
+        }}
+        command={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Сохранённый пресет"), {
+      target: { value: "Длинный" },
+    });
+
+    expect((screen.getByLabelText("Целевая длина сценария") as HTMLInputElement).value).toBe("10000");
+    expect((screen.getByLabelText("Минимальная длина сценария") as HTMLInputElement).value).toBe("9500");
+    expect((screen.getByLabelText("Максимальная длина сценария") as HTMLInputElement).value).toBe("10500");
   });
 
   it("saves a distinctive operator prompt and returns Prompt Studio to a clean state", async () => {
@@ -44,6 +96,9 @@ describe("Template writing desk", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template,
       ranges: fallback.templateSettings.ranges,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
     }));
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
     expect(screen.getByText("Все изменения сохранены")).toBeTruthy();
@@ -61,6 +116,9 @@ describe("Template writing desk", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template,
       ranges: fallback.templateSettings.ranges,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
     }));
     expect((screen.getByLabelText("Базовый шаблон сценария") as HTMLTextAreaElement).value).toBe(template);
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
@@ -115,6 +173,9 @@ describe("Template writing desk", () => {
     expect(command).toHaveBeenCalledWith("save-template", {
       template: "Черновик для сохранения",
       ranges: fallback.templateSettings.ranges,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
     });
   });
 
@@ -135,6 +196,9 @@ describe("Template writing desk", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template: "Ctrl+S шаблон",
       ranges: fallback.templateSettings.ranges,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
     }));
   });
 
