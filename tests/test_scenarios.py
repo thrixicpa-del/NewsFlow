@@ -114,6 +114,28 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(saved_batches[-1][0].state, RunState.DONE)
         self.assertEqual(saved_batches[-1][0].result, "Готовый сценарий по проверочной теме.")
 
+    def test_add_scenarios_persists_identity_before_any_read_only_snapshot(self):
+        """A typed title gets one durable ID on the explicit Add action."""
+        title = "Ручной заголовок до генерации"
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {
+                    "NEWSFLOW_TEST_MODE": "1",
+                    "NEWSFLOW_TEST_ROOT": directory,
+                    "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(directory) / "production"),
+                    "LOCALAPPDATA": directory,
+                }), \
+                patch("scriptor.config._newsflow_auth_library_candidates", return_value=[]), \
+                patch("scriptor.config.storyflow_documents_root", return_value=Path(directory) / "media"):
+            bridge.add_scenarios({"titles": title})
+            settings = load_settings()
+            titles, _jobs = load_session()
+
+        self.assertEqual(titles, [title])
+        self.assertEqual(len(settings.idea_production_items), 1)
+        production_item_id = str(settings.idea_production_items[0]["id"])
+        self.assertTrue(production_item_id)
+        self.assertEqual(settings.idea_scenario_context[title]["id"], production_item_id)
+
     def test_manual_scenario_persists_current_production_identity_for_covers(self):
         """A manually completed script must enter Covers through a durable current ID."""
         title = "Ручной сценарий для обложки"
