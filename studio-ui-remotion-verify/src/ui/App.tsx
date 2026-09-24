@@ -338,6 +338,9 @@ export const fallback: NewsFlowSnapshot = {
   templateSettings: {
     template: "Напиши точный новостной сценарий на тему «{title}».",
     ranges: [],
+    targetChars: 0,
+    allowedMin: 0,
+    allowedMax: 0,
   },
   keyStatus: {
     fastgen: [],
@@ -3210,28 +3213,60 @@ export function TemplateEditor({
 }) {
   const [template, setTemplate] = useState(data.templateSettings.template);
   const [ranges, setRanges] = useState(data.templateSettings.ranges);
+  const [targetChars, setTargetChars] = useState(Number(data.templateSettings.targetChars || 0));
+  const [allowedMin, setAllowedMin] = useState(Number(data.templateSettings.allowedMin || 0));
+  const [allowedMax, setAllowedMax] = useState(Number(data.templateSettings.allowedMax || 0));
   const [savedTemplate, setSavedTemplate] = useState(data.templateSettings.template);
   const [savedRanges, setSavedRanges] = useState(data.templateSettings.ranges);
+  const [savedTargetChars, setSavedTargetChars] = useState(Number(data.templateSettings.targetChars || 0));
+  const [savedAllowedMin, setSavedAllowedMin] = useState(Number(data.templateSettings.allowedMin || 0));
+  const [savedAllowedMax, setSavedAllowedMax] = useState(Number(data.templateSettings.allowedMax || 0));
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [selectedPreset, setSelectedPreset] = useState("");
   const presets = data.templateSettings.presets || [];
   useEffect(() => {
+    const nextTarget = Number(data.templateSettings.targetChars || 0);
+    const nextMinimum = Number(data.templateSettings.allowedMin || 0);
+    const nextMaximum = Number(data.templateSettings.allowedMax || 0);
     setTemplate(data.templateSettings.template);
     setRanges(data.templateSettings.ranges);
+    setTargetChars(nextTarget);
+    setAllowedMin(nextMinimum);
+    setAllowedMax(nextMaximum);
     setSavedTemplate(data.templateSettings.template);
     setSavedRanges(data.templateSettings.ranges);
+    setSavedTargetChars(nextTarget);
+    setSavedAllowedMin(nextMinimum);
+    setSavedAllowedMax(nextMaximum);
     setSaveFailed(false);
-  }, [data.templateSettings.template, data.templateSettings.ranges]);
-  const dirty = template !== savedTemplate || JSON.stringify(ranges) !== JSON.stringify(savedRanges);
+  }, [
+    data.templateSettings.template,
+    data.templateSettings.ranges,
+    data.templateSettings.targetChars,
+    data.templateSettings.allowedMin,
+    data.templateSettings.allowedMax,
+  ]);
+  const dirty =
+    template !== savedTemplate ||
+    JSON.stringify(ranges) !== JSON.stringify(savedRanges) ||
+    targetChars !== savedTargetChars ||
+    allowedMin !== savedAllowedMin ||
+    allowedMax !== savedAllowedMax;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const save = async () => {
     if (saving || !dirty) return !dirty;
     setSaving(true);
     setSaveFailed(false);
-    const result = await command("save-template", { template, ranges });
+    const result = await command("save-template", {
+      template,
+      ranges,
+      targetChars,
+      allowedMin,
+      allowedMax,
+    });
     setSaving(false);
     if (!result) {
       setSaveFailed(true);
@@ -3239,6 +3274,9 @@ export function TemplateEditor({
     }
     setSavedTemplate(template);
     setSavedRanges(ranges);
+    setSavedTargetChars(targetChars);
+    setSavedAllowedMin(allowedMin);
+    setSavedAllowedMax(allowedMax);
     return true;
   };
   const saveRef = useRef(save);
@@ -3258,6 +3296,9 @@ export function TemplateEditor({
       setPresetName(preset.name);
       setTemplate(preset.template);
       setRanges(preset.ranges || []);
+      setTargetChars(Number(preset.targetChars || 0));
+      setAllowedMin(Number(preset.allowedMin || 0));
+      setAllowedMax(Number(preset.allowedMax || 0));
     }
   };
   const savePreset = async () => {
@@ -3267,6 +3308,9 @@ export function TemplateEditor({
       name,
       template,
       ranges,
+      targetChars,
+      allowedMin,
+      allowedMax,
     });
     if (result) setSelectedPreset(name);
   };
@@ -3323,6 +3367,8 @@ export function TemplateEditor({
         prompt: "",
       },
     ]);
+  const effectiveMinimum = allowedMin || (targetChars ? Math.max(1, Math.round(targetChars * 0.9)) : 0);
+  const effectiveMaximum = allowedMax || (targetChars ? Math.max(effectiveMinimum, Math.round(targetChars * 1.1)) : 0);
   return (
     <section
       className="panel cover-template nf-template-workspace"
@@ -3385,6 +3431,59 @@ export function TemplateEditor({
         }}
         placeholder="Вставьте общий промпт сценария или загрузите TXT/MD…"
       />
+      <section className="template-global-length" aria-label="Длина сценария для текущего пресета">
+        <div>
+          <b>Длина сценария для этого пресета</b>
+          <small>
+            Python считает фактические символы после генерации. Если указать только цель,
+            NewsFlow автоматически принимает диапазон ±10%. Диапазоны сценариев ниже могут
+            переопределить эти значения для отдельных номеров.
+          </small>
+        </div>
+        <div className="range-length-inputs">
+          <label>
+            Цель, знаков
+            <input
+              aria-label="Целевая длина сценария"
+              value={targetChars || ""}
+              type="number"
+              min="0"
+              onChange={(event) => setTargetChars(Math.max(0, Number(event.target.value) || 0))}
+              placeholder="например 10000"
+            />
+          </label>
+          <label>
+            Мин.
+            <input
+              aria-label="Минимальная длина сценария"
+              value={allowedMin || ""}
+              type="number"
+              min="0"
+              onChange={(event) => setAllowedMin(Math.max(0, Number(event.target.value) || 0))}
+              placeholder={targetChars ? String(effectiveMinimum) : "авто"}
+            />
+          </label>
+          <label>
+            Макс.
+            <input
+              aria-label="Максимальная длина сценария"
+              value={allowedMax || ""}
+              type="number"
+              min="0"
+              onChange={(event) => setAllowedMax(Math.max(0, Number(event.target.value) || 0))}
+              placeholder={targetChars ? String(effectiveMaximum) : "авто"}
+            />
+          </label>
+        </div>
+        {targetChars || allowedMin || allowedMax ? (
+          <small>
+            Runtime-контракт: цель {targetChars || "по диапазону"} · допустимо{" "}
+            {effectiveMinimum || "0"}–{effectiveMaximum || "∞"} знаков.
+          </small>
+        ) : (
+          <small>Контракт длины выключен: применяется только текст промпта.</small>
+        )}
+      </section>
       <div className="template-ranges">
         <div className="ranges-title">
           <div>
