@@ -22,7 +22,7 @@ function commandsFrom(source, declaration, terminator) {
 }
 
 const main = read("electron/main.ts");
-const preload = read("electron/preload.mts");
+const preload = read("electron/preload.cts");
 const html = read("index.html");
 const rendererCommands = commandsFrom(read("src/contracts/newsflowCommands.ts"), "export const NEWSFLOW_COMMANDS", "] as const");
 const electronCommands = commandsFrom(read("electron/allowed-core-commands.ts"), "export const ALLOWED_CORE_COMMANDS", "]);\n");
@@ -37,6 +37,9 @@ requireSource(main, "setWindowOpenHandler", "new-window policy");
 requireSource(main, "will-navigate", "navigation policy");
 requireSource(main, "openApprovedPath", "approved filesystem-open capability");
 requireSource(preload, "contextBridge.exposeInMainWorld", "narrow preload bridge");
+requireSource(main, "preload.cjs", "sandbox-compatible CommonJS preload path");
+requireSource(preload, "require('electron')", "sandbox-compatible Electron preload import");
+if (/\bimport\s+.*from\s+['"]electron['"]/.test(preload)) fail("sandboxed preload cannot use Electron ESM imports");
 const ipcHandleCount = [...main.matchAll(/\bipcMain\.handle\(/g)].length;
 if (ipcHandleCount !== 1 || !main.includes("ipcMain.handle(channel,")) fail("unwrapped ipcMain.handle detected");
 if (!/http-equiv=["']Content-Security-Policy["']/.test(html)) fail("Content-Security-Policy is missing");
