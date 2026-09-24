@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$BaseRef = '654bdad',
+    [string]$BaseRef = '654bdadc9ce673c072991298ad410687fdd6213b',
     [string[]]$Files = @()
 )
 
