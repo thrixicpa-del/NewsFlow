@@ -763,6 +763,11 @@ class Settings:
     # one-based range wins, so an operator can deliberately layer presets.
     seo_description_prefix_ranges: list[dict] = field(default_factory=list)
     seo_description_prefix_presets: list[dict] = field(default_factory=list)
+    # Default length contract for the active writer template. Per-scenario
+    # prompt ranges may override it. Zero keeps legacy unbounded behaviour.
+    scenario_target_chars: int = 0
+    scenario_allowed_min: int = 0
+    scenario_allowed_max: int = 0
     prompt_ranges: list[dict] = field(default_factory=lambda: [
         {"start": 1, "end": 5, "prompt": ""},
         {"start": 6, "end": 10, "prompt": ""},
@@ -1301,6 +1306,9 @@ def load_settings() -> Settings:
             seo_description_prefix=str(data.get("seo_description_prefix") or "")[:4000],
             seo_description_prefix_ranges=[item for item in data.get("seo_description_prefix_ranges", []) if isinstance(item, dict)],
             seo_description_prefix_presets=[item for item in data.get("seo_description_prefix_presets", []) if isinstance(item, dict)],
+            scenario_target_chars=max(0, int(data.get("scenario_target_chars", 0) or 0)),
+            scenario_allowed_min=max(0, int(data.get("scenario_allowed_min", 0) or 0)),
+            scenario_allowed_max=max(0, int(data.get("scenario_allowed_max", 0) or 0)),
             prompt_ranges=data.get("prompt_ranges") or Settings().prompt_ranges,
             scenario_provider=data.get("scenario_provider", "agent") if data.get("scenario_provider", "agent") in {"agent", "openai"} else "agent",
         )
@@ -1749,6 +1757,9 @@ def save_settings(settings: Settings):
         "seo_description_prefix": settings.seo_description_prefix,
         "seo_description_prefix_ranges": settings.seo_description_prefix_ranges,
         "seo_description_prefix_presets": settings.seo_description_prefix_presets,
+        "scenario_target_chars": settings.scenario_target_chars,
+        "scenario_allowed_min": settings.scenario_allowed_min,
+        "scenario_allowed_max": settings.scenario_allowed_max,
         "prompt_ranges": settings.prompt_ranges,
         "scenario_provider": settings.scenario_provider,
         "chrome_sessions": [
