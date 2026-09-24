@@ -40,13 +40,21 @@ describe("Settings Light views", () => {
     expect(screen.queryByLabelText("API-ключ")).toBeNull();
   });
 
-  it("keeps session creation in the established command path", () => {
-    const command = vi.fn();
-    const prompt = vi.spyOn(window, "prompt").mockReturnValue("Рабочая сессия");
+  it("keeps session creation in the established command path through an in-app dialog", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
     render(<Sessions data={fallback} command={command} />);
+
     fireEvent.click(screen.getByRole("button", { name: "Добавить сессию" }));
-    expect(command).toHaveBeenCalledWith("add-session", { label: "Рабочая сессия" });
-    prompt.mockRestore();
+    expect(screen.getByRole("dialog", { name: "Добавить Chrome-сессию" })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Название Chrome-сессии"), {
+      target: { value: "Рабочая сессия" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Создать сессию" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("add-session", { label: "Рабочая сессия" }),
+    );
   });
 
   it("keeps a dirty Obsidian connection open until the user discards it before navigation", () => {

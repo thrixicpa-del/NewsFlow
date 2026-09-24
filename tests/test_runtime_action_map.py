@@ -54,6 +54,11 @@ class RuntimeActionMapTests(unittest.TestCase):
         self.assertIn("callCore('start-youtube-channel-handoff'", main)
         self.assertIn("callCore('finish-youtube-channel-handoff'", main)
 
+    def test_desktop_ui_does_not_use_unsupported_browser_prompt_dialogs(self):
+        """Electron does not provide browser prompt(); use NewsFlow-owned dialogs."""
+        source = (APP_ROOT / "src" / "ui" / "App.tsx").read_text(encoding="utf-8")
+        self.assertNotIn("window.prompt(", source)
+
     def test_current_bridge_path_excludes_legacy_app_and_prompt_fallbacks(self):
         """Current UI commands must not import retired desktop/prompt implementations."""
         bridge = (ROOT / "scriptor" / "bridge.py").read_text(encoding="utf-8")

@@ -149,6 +149,28 @@ describe("Scenarios and scripts Light views", () => {
     expect(go).toHaveBeenCalledWith("scripts");
   });
 
+  it("renames a selected scenario through an in-app dialog", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 0, title: "Старая тема", state: "Ожидает", result: "", error: "" }],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Старая тема" }));
+    fireEvent.click(screen.getByRole("button", { name: "Изменить тему" }));
+    expect(screen.getByRole("dialog", { name: "Изменить тему сценария" })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Новое название сценария"), {
+      target: { value: "Новая тема" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить название" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("rename-scenario", { index: 0, title: "Новая тема" }),
+    );
+  });
+
   it("preserves manual import fields when the import command fails", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);

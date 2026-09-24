@@ -248,20 +248,19 @@ describe("Ideas Light view", () => {
     expect(go).toHaveBeenCalledWith("scenarios");
   });
 
-  it("sends the confirmed delete-all-production action through the current command", async () => {
+  it("sends the confirmed delete-all-production action through an in-app dialog", async () => {
     const command = vi.fn().mockResolvedValue(fallback);
     const onNotice = vi.fn();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const prompt = vi.spyOn(window, "prompt").mockReturnValue("УДАЛИТЬ ПРОИЗВОДСТВО");
     render(<Ideas data={fallback} go={vi.fn()} command={command} onNotice={onNotice} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Удалить всё производство" }));
+    expect(screen.getByRole("dialog", { name: "Удалить всё производство" })).toBeTruthy();
 
-    expect(confirm).toHaveBeenCalledWith("Вы действительно хотите удалить всё производство?");
-    expect(prompt).toHaveBeenCalledWith(
-      "Для подтверждения введите:\nУДАЛИТЬ ПРОИЗВОДСТВО",
-      "",
-    );
+    fireEvent.change(screen.getByLabelText("Контрольная фраза"), {
+      target: { value: "УДАЛИТЬ ПРОИЗВОДСТВО" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Подтвердить удаление" }));
+
     await waitFor(() =>
       expect(command).toHaveBeenCalledWith("clear-production-queue", {
         confirmed: true,
@@ -269,72 +268,60 @@ describe("Ideas Light view", () => {
       }),
     );
     expect(onNotice).toHaveBeenCalledWith("Производство удалено.");
-    confirm.mockRestore();
-    prompt.mockRestore();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Удалить всё производство" })).toBeNull(),
+    );
   });
 
-  it("reports a cancelled delete-all-production confirmation without calling the core", () => {
+  it("cancels delete-all-production in-app without calling the core", () => {
     const command = vi.fn();
     const onNotice = vi.fn();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<Ideas data={fallback} go={vi.fn()} command={command} onNotice={onNotice} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Удалить всё производство" }));
+    fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
 
     expect(command).not.toHaveBeenCalled();
     expect(onNotice).toHaveBeenCalledWith("Удаление производства отменено.");
-    confirm.mockRestore();
+    expect(screen.queryByRole("dialog", { name: "Удалить всё производство" })).toBeNull();
   });
 
-  it("reports a mismatched delete phrase and does not call the core", () => {
+  it("rejects a mismatched delete phrase without calling the core", () => {
     const command = vi.fn();
     const onNotice = vi.fn();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const prompt = vi.spyOn(window, "prompt").mockReturnValue("удалить производство");
     render(<Ideas data={fallback} go={vi.fn()} command={command} onNotice={onNotice} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Удалить всё производство" }));
+    fireEvent.change(screen.getByLabelText("Контрольная фраза"), {
+      target: { value: "удалить производство" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Подтвердить удаление" }));
 
     expect(command).not.toHaveBeenCalled();
     expect(onNotice).toHaveBeenCalledWith(
       "Фраза подтверждения не совпадает. Производство не удалено.",
     );
-    confirm.mockRestore();
-    prompt.mockRestore();
-  });
-
-  it("reports a cancelled delete phrase prompt without calling the core", () => {
-    const command = vi.fn();
-    const onNotice = vi.fn();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const prompt = vi.spyOn(window, "prompt").mockReturnValue(null);
-    render(<Ideas data={fallback} go={vi.fn()} command={command} onNotice={onNotice} />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Удалить всё производство" }));
-
-    expect(command).not.toHaveBeenCalled();
-    expect(onNotice).toHaveBeenCalledWith("Удаление производства отменено.");
-    confirm.mockRestore();
-    prompt.mockRestore();
+    expect(screen.getByRole("dialog", { name: "Удалить всё производство" })).toBeTruthy();
   });
 
   it("submits confirmed delete-all-production only once while the current command is running", async () => {
     let resolve!: (value: typeof fallback) => void;
     const command = vi.fn(() => new Promise<typeof fallback>((done) => { resolve = done; }));
     const onNotice = vi.fn();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const prompt = vi.spyOn(window, "prompt").mockReturnValue("УДАЛИТЬ ПРОИЗВОДСТВО");
     render(<Ideas data={fallback} go={vi.fn()} command={command} onNotice={onNotice} />);
 
-    const remove = screen.getByRole("button", { name: "Удалить всё производство" });
-    fireEvent.click(remove);
-    fireEvent.click(remove);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить всё производство" }));
+    fireEvent.change(screen.getByLabelText("Контрольная фраза"), {
+      target: { value: "УДАЛИТЬ ПРОИЗВОДСТВО" },
+    });
+    const submit = screen.getByRole("button", { name: "Подтвердить удаление" });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
 
     expect(command).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Удаление производства…" })).toHaveProperty("disabled", true);
     resolve(fallback);
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Производство удалено."));
-    confirm.mockRestore();
-    prompt.mockRestore();
   });
 
   it("does not render implementation diagnostics in the editorial workspace", () => {
