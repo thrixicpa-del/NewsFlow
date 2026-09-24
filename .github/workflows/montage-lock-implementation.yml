@@ -10,10 +10,9 @@ permissions:
 
 jobs:
   implement-and-verify:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 8
     env:
-      LOCALAPPDATA: /tmp/newsflow-production-sentinel
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
@@ -28,6 +27,14 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '24.19.0'
+      - name: Establish disposable storage sentinel
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          sentinel = Path(os.environ['RUNNER_TEMP']) / 'newsflow-production-sentinel'
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+              stream.write(f'LOCALAPPDATA={sentinel}\n')
       - run: python -m pip install ruff==0.16.6 pip-audit==2.10.1
       - name: Prove both owner races on unchanged product source
         shell: python
@@ -37,7 +44,7 @@ jobs:
           actual = subprocess.check_output(['git', 'hash-object', 'scriptor/bridge.py'], text=True).strip()
           assert actual == expected, (actual, expected)
           assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
-          result = subprocess.run([sys.executable, 'tests/run_isolated.py', 'tests.test_montage_queue_lock', '-v'], text=True, capture_output=True, timeout=100)
+          result = subprocess.run([sys.executable, 'tests/run_isolated.py', 'tests.test_montage_queue_lock', '-v'], text=True, encoding='utf-8', errors='replace', capture_output=True, timeout=100)
           output = result.stdout + result.stderr
           print(output)
           assert result.returncode == 1, result.returncode
@@ -65,7 +72,7 @@ jobs:
               lines[start:end] = [comment + guard] + ['    ' + line if line.strip() else line for line in body]
               text = ''.join(lines)
           ast.parse(text)
-          source.write_text(text, encoding='utf-8')
+          source.write_text(text, encoding='utf-8', newline='\n')
           test = Path('tests/test_montage_queue.py')
           assert subprocess.check_output(['git', 'hash-object', str(test)], text=True).strip() == '32e4cf770fdf38ae9edfae6b0254167719c57e19'
           text = test.read_text(encoding='utf-8')
@@ -127,7 +134,7 @@ jobs:
           lines[target.lineno - 1:target.end_lineno] = [replacement]
           text = ''.join(lines)
           ast.parse(text)
-          test.write_text(text, encoding='utf-8')
+          test.write_text(text, encoding='utf-8', newline='\n')
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert changed == {'scriptor/bridge.py', 'tests/test_montage_queue.py'}, changed
           subprocess.run(['git', 'diff', '--check'], check=True)
@@ -141,7 +148,9 @@ jobs:
           subprocess.run([sys.executable, 'tests/run_isolated.py', *cases, '-v'], check=True, timeout=150)
           print('SOL_CONTENTION_STRESS=PASS cycles=10 tests=40')
       - name: Static and integrity checks
+        shell: bash
         run: |
+          set -euo pipefail
           python -m ruff check tests/test_montage_queue_lock.py
           python -m ruff check --select E9,F63,F7,F82 scriptor/bridge.py tests/test_montage_queue.py
           python scripts/secret-scan.py
