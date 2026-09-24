@@ -1821,6 +1821,69 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
                 self.assertEqual(result["operationResult"]["kind"], result_kind)
                 self.assertEqual(result["operationResult"]["count"], 0)
 
+    def test_current_session_job_adopts_blank_cover_id_for_selected_and_all_scope(self):
+        """Old RC rows without an ID become the current row, not an unselectable ghost."""
+        from scriptor import bridge
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        title = "Ручная текущая тема"
+        settings = Settings()
+        settings.cover_queue = [{
+            "title": title,
+            "scenario_index": 1,
+            "script": "Текущий сценарий",
+            "production_item_id": "",
+        }]
+        job = Job(
+            ScenarioRequest(0, title, "", "production:current"),
+            RunState.DONE,
+            "Текущий сценарий",
+        )
+
+        with patch("scriptor.bridge.load_session", return_value=([title], [job])):
+            changed = bridge._sync_current_scenario_covers(settings)
+            selected = bridge._current_cover_generation_scope(
+                settings,
+                {"indices": [0], "productionItemIds": ["production:current"]},
+                "Выберите сценарии",
+            )
+            all_rows = bridge._current_cover_generation_scope(
+                settings, {}, "Выберите сценарии",
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(settings.cover_queue[0]["production_item_id"], "production:current")
+        self.assertEqual([index for index, _item in selected], [0])
+        self.assertEqual([index for index, _item in all_rows], [0])
+
+    def test_stale_nonempty_cover_id_is_not_reauthorized_by_matching_title(self):
+        """A historical ID never becomes current merely because its title matches."""
+        from scriptor import bridge
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        title = "Повторяющийся заголовок"
+        settings = Settings()
+        settings.cover_queue = [{
+            "title": title,
+            "scenario_index": 1,
+            "script": "Старый текст",
+            "production_item_id": "legacy-cover:old",
+        }]
+        job = Job(
+            ScenarioRequest(0, title, "", "production:new"),
+            RunState.DONE,
+            "Новый текущий текст",
+        )
+
+        with patch("scriptor.bridge.load_session", return_value=([title], [job])):
+            bridge._sync_current_scenario_covers(settings)
+
+        self.assertEqual(len(settings.cover_queue), 1)
+        self.assertEqual(settings.cover_queue[0]["production_item_id"], "production:new")
+        self.assertEqual(settings.cover_queue[0]["script"], "Новый текущий текст")
+
     def test_partial_stale_selected_scope_is_rejected_before_any_generation(self):
         from scriptor import bridge
 
