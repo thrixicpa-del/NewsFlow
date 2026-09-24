@@ -110,6 +110,85 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                 "removed": 1,
             })
 
+    def test_screen_text_maintenance_reuses_existing_index_without_media_roots(self):
+        """The desktop command must classify stored vectors, not rescan footage."""
+        states = []
+
+        class FakeIndex:
+            db_path = Path("isolated-index.sqlite3")
+
+            def __init__(self, _path):
+                pass
+
+            def classify_english_screen_text(self, progress=None):
+                state = IndexProgress(
+                    total=5, processed=5, indexed=5, skipped=0, failed=0,
+                    stage="screen-text",
+                )
+                if progress:
+                    progress(state)
+                state.stage = "complete"
+                if progress:
+                    progress(state)
+                return {"checked": 5, "blocked": 2, "safe": 3, "uncertain": 0}
+
+            def screen_text_stats(self):
+                return {"blocked": 2, "safe": 3, "unchecked": 0}
+
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-text-command-") as temporary:
+            root = Path(temporary)
+            settings = SimpleNamespace(footage_folders=[])
+            with patch.object(bridge, "app_data_root", return_value=root), \
+                 patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "ClipIndex", FakeIndex), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_write_footage_index_status", side_effect=states.append):
+                result = bridge.index_footage({"screenText": True})
+
+        self.assertEqual(result["operationResult"]["kind"], "screen-text")
+        self.assertEqual(result["indexResult"], {
+            "total": 5,
+            "processed": 5,
+            "indexed": 5,
+            "skipped": 0,
+            "failed": 0,
+            "removed": 0,
+            "screenText": {
+                "checked": 5, "blocked": 2, "safe": 3, "uncertain": 0, "modelReady": True,
+            },
+        })
+        self.assertEqual(states[-1]["stage"], "complete")
+
+    def test_screen_text_maintenance_reports_a_missing_local_text_model(self):
+        class FakeIndex:
+            db_path = Path("isolated-index.sqlite3")
+
+            def __init__(self, _path):
+                pass
+
+            def classify_english_screen_text(self, progress=None):
+                state = IndexProgress(
+                    total=2, processed=0, indexed=0, skipped=0, failed=0,
+                    stage="screen-text",
+                )
+                if progress:
+                    progress(state)
+                state.stage = "complete"
+                if progress:
+                    progress(state)
+                return {"checked": 0, "blocked": 0, "safe": 0, "uncertain": 2}
+
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-text-model-") as temporary:
+            root = Path(temporary)
+            settings = SimpleNamespace(footage_folders=[])
+            with patch.object(bridge, "app_data_root", return_value=root), \
+                 patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "ClipIndex", FakeIndex), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                result = bridge.index_footage({"screenText": True})
+
+        self.assertFalse(result["indexResult"]["screenText"]["modelReady"])
+
 
 if __name__ == "__main__":
     unittest.main()

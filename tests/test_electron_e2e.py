@@ -133,6 +133,29 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             )
             browser.close()
 
+    def test_screen_text_maintenance_round_trip_does_not_require_footage_roots(self):
+        """The existing-vector maintenance action remains safe for an empty library."""
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            result = page.evaluate("""async () => {
+                const state = await window.newsflowDesktop.command("index-footage", { screenText: true });
+                return {
+                    kind: state.operationResult?.kind,
+                    result: state.indexResult,
+                    folders: state.footageFolders,
+                };
+            }""")
+            self.assertEqual("screen-text", result["kind"])
+            self.assertEqual([], result["folders"])
+            self.assertEqual(0, result["result"]["processed"])
+            browser.close()
+
     def test_accessibility_and_ux_guards(self):
         self._launch()
         self._wait_for_cdp()

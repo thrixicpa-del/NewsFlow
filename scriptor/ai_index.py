@@ -1084,7 +1084,9 @@ class ClipIndex:
         """Compatibility helper: reject only an explicit current BLOCKED verdict."""
         return self.screen_text_eligibility(path, deep=False) != SCREEN_ELIGIBILITY_BLOCKED
 
-    def classify_english_screen_text(self) -> dict[str, int]:
+    def classify_english_screen_text(self, progress: Callable[[IndexProgress], None] | None = None,
+                                     cancel: threading.Event | None = None,
+                                     batch_clips: int = 384) -> dict[str, int]:
         """Persist the conservative 2.1.136-style clip-level text verdict.
 
         The stored clip embedding already averages the 15% / 50% / 85%
@@ -1102,12 +1104,22 @@ class ClipIndex:
                    ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
+        state = IndexProgress(total=len(rows), processed=0, indexed=0, skipped=0, failed=0,
+                              stage="screen-text")
+        if progress:
+            progress(state)
         if not rows:
             stats = self.screen_text_stats()
+            state.stage = "complete"
+            if progress:
+                progress(state)
             return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
                     "uncertain": stats["unchecked"]}
         if not self._text_model_is_cached():
             stats = self.screen_text_stats()
+            state.stage = "complete"
+            if progress:
+                progress(state)
             return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
                     "uncertain": stats["unchecked"]}
 
@@ -1115,32 +1127,45 @@ class ClipIndex:
             _SCREEN_TEXT_COARSE_POSITIVE_QUERY,
             _SCREEN_TEXT_COARSE_NEGATIVE_QUERY,
         ])
-        updates: list[tuple[int, int, str]] = []
         blocked = safe = 0
-        for row in rows:
-            vector = np.frombuffer(row["embedding"], dtype=np.float32)
-            if vector.size != positive.size:
-                continue
-            is_blocked = (
-                float(np.dot(vector, positive))
-                >= float(np.dot(vector, negative)) + _SCREEN_TEXT_COARSE_MARGIN
-            )
-            updates.append((
-                1 if is_blocked else -1,
-                SCREEN_TEXT_CLASSIFIER_VERSION,
-                row["path"],
-            ))
-            blocked += int(is_blocked)
-            safe += int(not is_blocked)
-
-        if updates:
-            with self._lock, self._connect() as connection:
-                connection.executemany(
-                    "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
-                    updates,
+        for offset in range(0, len(rows), max(1, int(batch_clips))):
+            if cancel and cancel.is_set():
+                state.stage = "cancelled"
+                break
+            updates: list[tuple[int, int, str]] = []
+            for row in rows[offset:offset + max(1, int(batch_clips))]:
+                vector = np.frombuffer(row["embedding"], dtype=np.float32)
+                state.processed += 1
+                state.current = Path(row["path"]).name
+                if vector.size != positive.size:
+                    state.failed += 1
+                    continue
+                is_blocked = (
+                    float(np.dot(vector, positive))
+                    >= float(np.dot(vector, negative)) + _SCREEN_TEXT_COARSE_MARGIN
                 )
-            self._invalidate_search_cache()
-        return {"checked": len(updates), "blocked": blocked, "safe": safe, "uncertain": 0}
+                updates.append((
+                    1 if is_blocked else -1,
+                    SCREEN_TEXT_CLASSIFIER_VERSION,
+                    row["path"],
+                ))
+                blocked += int(is_blocked)
+                safe += int(not is_blocked)
+            if updates:
+                with self._lock, self._connect() as connection:
+                    connection.executemany(
+                        "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
+                        updates,
+                    )
+                self._invalidate_search_cache()
+                state.indexed += len(updates)
+            if progress:
+                progress(state)
+        if state.stage != "cancelled":
+            state.stage = "complete"
+        if progress:
+            progress(state)
+        return {"checked": state.indexed, "blocked": blocked, "safe": safe, "uncertain": 0}
 
     def screen_text_stats(self) -> dict[str, int]:
         """Count only current classifier verdicts; stale rows remain unchecked."""
