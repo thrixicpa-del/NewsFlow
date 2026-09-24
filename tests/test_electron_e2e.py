@@ -131,6 +131,42 @@ class ElectronE2ESmokeTests(unittest.TestCase):
                 any(item.get("topic") == "E2E preload bridge" and item.get("count") == 2 for item in refreshed),
                 refreshed,
             )
+
+            generated = page.evaluate("""async () => {
+                const state = await window.newsflowDesktop.command("generate-ideas", {
+                    topics: ["E2E preload bridge"],
+                    count: 1,
+                    provider: "agent",
+                    requirements: "",
+                });
+                return {
+                    operation: state.operationResult,
+                    suggestions: state.ideaSuggestedTopics,
+                };
+            }""")
+            self.assertEqual("ideas", generated["operation"]["kind"])
+            self.assertGreaterEqual(generated["operation"]["generation"]["generated"], 1)
+            self.assertTrue(generated["suggestions"], generated)
+            browser.close()
+
+    def test_production_reset_uses_in_app_dialog(self):
+        """The desktop must not depend on unsupported browser prompt() dialogs."""
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            page.get_by_role("button", name="Генерация идей").click()
+            page.get_by_role("button", name="Удалить всё производство").click()
+
+            dialog = page.get_by_role("dialog", name="Удалить всё производство")
+            dialog.wait_for(timeout=10_000)
+            self.assertEqual("", page.get_by_label("Контрольная фраза").input_value())
+            page.get_by_role("button", name="Отмена").click()
+            dialog.wait_for(state="detached", timeout=10_000)
             browser.close()
 
     def test_accessibility_and_ux_guards(self):
