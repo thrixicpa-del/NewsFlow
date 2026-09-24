@@ -106,30 +106,38 @@ def _format_character_count(value: int) -> str:
 
 
 def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
-    """Read a legacy free-form character requirement from the writer prompt."""
+    """Read a legacy free-form character requirement from the writer prompt.
+
+    Older presets can mention the unit either before or after the number, for
+    example "КОЛИЧЕСТВО СИМВОЛОВ: 10 000 - 15 000" or "около 10 000 символов".
+    Keep that compatibility while ignoring unrelated dates/numbers.
+    """
     text = str(prompt or "")
+    unit_pattern = r"(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)"
     for match in re.finditer(
-        r"(?P<minimum>\d[\d\s\u00a0]{0,12})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,12})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
+        r"(?P<minimum>\d[\d\s\u00a0]{0,12})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,12})",
         text,
         re.IGNORECASE,
     ):
+        nearby = text[max(0, match.start() - 80):match.end() + 80]
+        if not re.search(unit_pattern, nearby, re.IGNORECASE):
+            continue
         try:
             return parse_character_length_spec(
                 f"{match.group('minimum')}-{match.group('maximum')}"
             )
         except ValueError:
             continue
-    for match in re.finditer(
-        r"(?P<target>\d[\d\s\u00a0]{0,12})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
-        text,
-        re.IGNORECASE,
+    for pattern in (
+        rf"(?P<target>\d[\d\s\u00a0]{{0,12}})\s*{unit_pattern}",
+        rf"{unit_pattern}\s*[:=—-]?\s*(?P<target>\d[\d\s\u00a0]{{0,12}})",
     ):
-        try:
-            return parse_character_length_spec(match.group("target"))
-        except ValueError:
-            continue
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                return parse_character_length_spec(match.group("target"))
+            except ValueError:
+                continue
     return None
-
 
 def read_text_file(path: Path | str) -> str:
     file_path = Path(path)
@@ -172,12 +180,6 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange]) 
         length_contract = structured_contract or inferred_contract
         if length_contract:
             target, minimum, maximum = length_contract
-            if minimum and maximum:
-                bounds = f"{minimum}–{maximum}"
-            elif minimum:
-                bounds = f"не меньше {minimum}"
-            else:
-                bounds = f"не больше {maximum}"
             formatted_target = _format_character_count(target)
             if minimum and maximum:
                 requested = (
