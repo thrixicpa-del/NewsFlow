@@ -120,17 +120,26 @@ class ParallelRunner:
             return True
 
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+        if job.request.allowed_min and job.request.allowed_max:
+            required = f"от {job.request.allowed_min} до {job.request.allowed_max} знаков"
+            required_label = f"{job.request.allowed_min}–{job.request.allowed_max}"
+        elif job.request.allowed_min:
+            required = f"не меньше {job.request.allowed_min} знаков"
+            required_label = f"не меньше {job.request.allowed_min}"
+        else:
+            required = f"не больше {job.request.allowed_max} знаков"
+            required_label = f"не больше {job.request.allowed_max}"
         for attempt in range(1, 3):
             job.length_repair_attempts = attempt
             job.error = (
-                f"Длина {actual_chars} знаков вне диапазона "
-                f"{job.request.allowed_min}–{job.request.allowed_max}; корректировка {attempt}/2"
+                f"Длина {actual_chars} знаков вне требования {required_label}; "
+                f"корректировка {attempt}/2"
             )
             self._notify(job)
             repair_prompt = (
                 "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
-                f"Верни только готовый сценарий длиной строго от {job.request.allowed_min} "
-                f"до {job.request.allowed_max} знаков (цель: {job.request.target_chars} знаков). "
+                f"Верни только готовый сценарий длиной строго {required} "
+                f"(цель: {job.request.target_chars} знаков). "
                 "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
                 f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
             )
@@ -151,8 +160,7 @@ class ParallelRunner:
         job.state = RunState.ERROR
         job.error = (
             f"После {job.length_repair_attempts} корректировок длина сценария "
-            f"осталась {job.actual_chars} знаков; требуется {job.request.allowed_min}–"
-            f"{job.request.allowed_max}"
+            f"осталась {job.actual_chars} знаков; требуется {required_label}"
         )
         return False
 
