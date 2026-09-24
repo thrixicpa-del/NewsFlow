@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:
-      LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-sentinel
+      LOCALAPPDATA: /tmp/newsflow-production-sentinel
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
@@ -33,7 +33,6 @@ jobs:
         shell: python
         run: |
           import os, subprocess, sys
-          from pathlib import Path
           expected = 'f8148a3ab36183a3dc2d7e460c4fe769592a28f3'
           actual = subprocess.check_output(['git', 'hash-object', 'scriptor/bridge.py'], text=True).strip()
           assert actual == expected, (actual, expected)
@@ -124,10 +123,6 @@ jobs:
                   self.assertEqual(render_calls, ["Only row"])
                   self.assertEqual(sorted(result["operationResult"]["count"] for result in results), [0, 1])
           '''
-          # The YAML scalar strips its common indentation; the method body
-          # retains eight additional spaces from this Python literal.
-          replacement_lines = replacement.splitlines(keepends=True)
-          replacement = replacement_lines[0] + ''.join(line[8:] if line.startswith('        ') else line for line in replacement_lines[1:])
           lines = text.splitlines(keepends=True)
           lines[target.lineno - 1:target.end_lineno] = [replacement]
           text = ''.join(lines)
