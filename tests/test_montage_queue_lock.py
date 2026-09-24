@@ -74,7 +74,7 @@ def _claim_contender(root, role, mode, owner_pid, paused, contender_ready, publi
             try:
                 lock_path = bridge._claim_montage_queue_lock()
                 results.put((role, lock_path is not None, ""))
-            except Exception as exc:
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 results.put((role, False, f"{type(exc).__name__}: {exc}"))
             finally:
                 if role == "owner":
