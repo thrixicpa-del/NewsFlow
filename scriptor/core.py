@@ -142,8 +142,12 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange]) 
             else:
                 bounds = f"не больше {maximum}"
             extras.append(
-                f"Runtime-проверка длины: цель {target} символов; допустимо {bounds} символов. "
-                "Фактическая длина будет посчитана Python после ответа."
+                "ОБЯЗАТЕЛЬНОЕ ТРЕБОВАНИЕ К ДЛИНЕ: "
+                f"требуемый объём готового сценария — {bounds} символов с пробелами; "
+                f"ориентир — около {target} символов. "
+                "Для подсчёта количества символов используй Python. "
+                "Сразу верни готовый сценарий нужного объёма без служебного текста. "
+                "После ответа NewsFlow независимо пересчитает фактическую длину Python."
             )
         prompt = base + ("\n\nДополнительные требования:\n" + "\n".join(extras) if extras else "")
         result.append(ScenarioRequest(
