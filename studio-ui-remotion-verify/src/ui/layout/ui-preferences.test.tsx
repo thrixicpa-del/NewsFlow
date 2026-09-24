@@ -6,7 +6,8 @@ function PreferenceProbe() {
   const [preferences, setPreferences] = useUiPreferences();
   return <>
     <output aria-label="sidebar state">{String(preferences.sidebarCollapsed)}</output>
-    <button onClick={() => setPreferences((current) => ({ ...current, sidebarCollapsed: true, inspectorWidth: 420 }))}>Изменить layout</button>
+    <output aria-label="inspector state">{String(preferences.inspectorCollapsed)}</output>
+    <button onClick={() => setPreferences((current) => ({ ...current, sidebarCollapsed: true, inspectorCollapsed: true, inspectorWidth: 420 }))}>Изменить layout</button>
   </>;
 }
 
@@ -20,9 +21,22 @@ describe("useUiPreferences", () => {
     expect(screen.getByLabelText("sidebar state").textContent).toBe("true");
     expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_STORAGE_KEY) || "{}")).toMatchObject({
       sidebarCollapsed: true,
+      inspectorCollapsed: true,
       inspectorWidth: 420,
     });
     expect(Object.keys(localStorage)).toEqual([UI_PREFERENCES_STORAGE_KEY]);
+  });
+
+  it("migrates old preferences with the inspector visible by default", () => {
+    localStorage.setItem(UI_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      sidebarCollapsed: true,
+      inspectorWidth: 420,
+      density: "compact",
+    }));
+    render(<PreferenceProbe />);
+
+    expect(screen.getByLabelText("sidebar state").textContent).toBe("true");
+    expect(screen.getByLabelText("inspector state").textContent).toBe("false");
   });
 
   it("rejects malformed layout values without reading or changing business state", () => {
