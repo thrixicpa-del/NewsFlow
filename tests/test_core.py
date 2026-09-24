@@ -58,6 +58,48 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(first.prompt, "Напиши: Имя")
         self.assertTrue(second.prompt.endswith("Название сценария: Имя"))
 
+    def test_single_character_target_in_prompt_becomes_runtime_contract(self):
+        request = build_requests(
+            ["Тема"],
+            "Напиши сценарий {title}. Нужно около 10 000 символов, считать Python.",
+            [],
+        )[0]
+
+        self.assertEqual(
+            (request.target_chars, request.allowed_min, request.allowed_max),
+            (10000, 9000, 11000),
+        )
+        self.assertIn("9000–11000", request.prompt)
+
+    def test_template_default_length_applies_without_rewriting_operator_prompt(self):
+        operator_prompt = "FULL_USER_PROMPT_START\nСтиль и структура пользователя.\nFULL_USER_PROMPT_END {title}"
+        request = build_requests(
+            ["Тема"],
+            operator_prompt,
+            [],
+            default_target_chars=10000,
+        )[0]
+
+        self.assertIn("FULL_USER_PROMPT_START", request.prompt)
+        self.assertIn("FULL_USER_PROMPT_END Тема", request.prompt)
+        self.assertEqual(
+            (request.target_chars, request.allowed_min, request.allowed_max),
+            (10000, 9000, 11000),
+        )
+
+    def test_matching_range_length_overrides_template_default(self):
+        request = build_requests(
+            ["Тема"],
+            "Шаблон {title}",
+            [PromptRange(1, 1, "", target_chars=6000)],
+            default_target_chars=10000,
+        )[0]
+
+        self.assertEqual(
+            (request.target_chars, request.allowed_min, request.allowed_max),
+            (6000, 5400, 6600),
+        )
+
 
 class ExportTests(unittest.TestCase):
     def test_safe_filename_removes_windows_forbidden_characters(self):
