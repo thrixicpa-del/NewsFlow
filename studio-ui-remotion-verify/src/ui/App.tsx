@@ -337,7 +337,12 @@ export const fallback: NewsFlowSnapshot = {
   mediaResults: [],
   templateSettings: {
     template: "Напиши точный новостной сценарий на тему «{title}».",
+    targetChars: 0,
+    allowedMin: 0,
+    allowedMax: 0,
     ranges: [],
+    presets: [],
+    rangePresets: [],
   },
   keyStatus: {
     fastgen: [],
@@ -3209,8 +3214,26 @@ export function TemplateEditor({
   onSaveRequest?: (save: (() => Promise<boolean>) | null) => void;
 }) {
   const [template, setTemplate] = useState(data.templateSettings.template);
+  const [targetChars, setTargetChars] = useState(
+    data.templateSettings.targetChars ? String(data.templateSettings.targetChars) : "",
+  );
+  const [allowedMin, setAllowedMin] = useState(
+    data.templateSettings.allowedMin ? String(data.templateSettings.allowedMin) : "",
+  );
+  const [allowedMax, setAllowedMax] = useState(
+    data.templateSettings.allowedMax ? String(data.templateSettings.allowedMax) : "",
+  );
   const [ranges, setRanges] = useState(data.templateSettings.ranges);
   const [savedTemplate, setSavedTemplate] = useState(data.templateSettings.template);
+  const [savedTargetChars, setSavedTargetChars] = useState(
+    data.templateSettings.targetChars ? String(data.templateSettings.targetChars) : "",
+  );
+  const [savedAllowedMin, setSavedAllowedMin] = useState(
+    data.templateSettings.allowedMin ? String(data.templateSettings.allowedMin) : "",
+  );
+  const [savedAllowedMax, setSavedAllowedMax] = useState(
+    data.templateSettings.allowedMax ? String(data.templateSettings.allowedMax) : "",
+  );
   const [savedRanges, setSavedRanges] = useState(data.templateSettings.ranges);
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
@@ -3218,26 +3241,58 @@ export function TemplateEditor({
   const [selectedPreset, setSelectedPreset] = useState("");
   const presets = data.templateSettings.presets || [];
   useEffect(() => {
+    const nextTarget = data.templateSettings.targetChars ? String(data.templateSettings.targetChars) : "";
+    const nextMin = data.templateSettings.allowedMin ? String(data.templateSettings.allowedMin) : "";
+    const nextMax = data.templateSettings.allowedMax ? String(data.templateSettings.allowedMax) : "";
     setTemplate(data.templateSettings.template);
+    setTargetChars(nextTarget);
+    setAllowedMin(nextMin);
+    setAllowedMax(nextMax);
     setRanges(data.templateSettings.ranges);
     setSavedTemplate(data.templateSettings.template);
+    setSavedTargetChars(nextTarget);
+    setSavedAllowedMin(nextMin);
+    setSavedAllowedMax(nextMax);
     setSavedRanges(data.templateSettings.ranges);
     setSaveFailed(false);
-  }, [data.templateSettings.template, data.templateSettings.ranges]);
-  const dirty = template !== savedTemplate || JSON.stringify(ranges) !== JSON.stringify(savedRanges);
+  }, [
+    data.templateSettings.template,
+    data.templateSettings.targetChars,
+    data.templateSettings.allowedMin,
+    data.templateSettings.allowedMax,
+    data.templateSettings.ranges,
+  ]);
+  const dirty =
+    template !== savedTemplate ||
+    targetChars !== savedTargetChars ||
+    allowedMin !== savedAllowedMin ||
+    allowedMax !== savedAllowedMax ||
+    JSON.stringify(ranges) !== JSON.stringify(savedRanges);
+  const numericLengthContract = () => ({
+    targetChars: Math.max(0, Number(targetChars) || 0),
+    allowedMin: Math.max(0, Number(allowedMin) || 0),
+    allowedMax: Math.max(0, Number(allowedMax) || 0),
+  });
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const save = async () => {
     if (saving || !dirty) return !dirty;
     setSaving(true);
     setSaveFailed(false);
-    const result = await command("save-template", { template, ranges });
+    const result = await command("save-template", {
+      template,
+      ...numericLengthContract(),
+      ranges,
+    });
     setSaving(false);
     if (!result) {
       setSaveFailed(true);
       return false;
     }
     setSavedTemplate(template);
+    setSavedTargetChars(targetChars);
+    setSavedAllowedMin(allowedMin);
+    setSavedAllowedMax(allowedMax);
     setSavedRanges(ranges);
     return true;
   };
@@ -3257,6 +3312,9 @@ export function TemplateEditor({
     if (preset) {
       setPresetName(preset.name);
       setTemplate(preset.template);
+      setTargetChars(preset.targetChars ? String(preset.targetChars) : "");
+      setAllowedMin(preset.allowedMin ? String(preset.allowedMin) : "");
+      setAllowedMax(preset.allowedMax ? String(preset.allowedMax) : "");
       setRanges(preset.ranges || []);
     }
   };
@@ -3266,6 +3324,7 @@ export function TemplateEditor({
     const result = await command("save-template-preset", {
       name,
       template,
+      ...numericLengthContract(),
       ranges,
     });
     if (result) setSelectedPreset(name);
@@ -3385,6 +3444,60 @@ export function TemplateEditor({
         }}
         placeholder="Вставьте общий промпт сценария или загрузите TXT/MD…"
       />
+      <section className="template-default-length" aria-label="Длина сценария по умолчанию">
+        <div>
+          <b>Длина сценария для этого шаблона</b>
+          <small>
+            Python считает фактические символы после генерации. Если указана только цель,
+            допустимый диапазон автоматически ±10%. Диапазон сценариев ниже может
+            переопределить эти значения для отдельных номеров.
+          </small>
+        </div>
+        <div className="range-length-inputs">
+          <label>
+            Цель, знаков
+            <input
+              aria-label="Цель знаков шаблона"
+              value={targetChars}
+              type="number"
+              min="0"
+              onChange={(event) => {
+                setSaveFailed(false);
+                setTargetChars(event.target.value);
+              }}
+              placeholder="10000"
+            />
+          </label>
+          <label>
+            Мин. допустимо
+            <input
+              aria-label="Минимум знаков шаблона"
+              value={allowedMin}
+              type="number"
+              min="0"
+              onChange={(event) => {
+                setSaveFailed(false);
+                setAllowedMin(event.target.value);
+              }}
+              placeholder="авто"
+            />
+          </label>
+          <label>
+            Макс. допустимо
+            <input
+              aria-label="Максимум знаков шаблона"
+              value={allowedMax}
+              type="number"
+              min="0"
+              onChange={(event) => {
+                setSaveFailed(false);
+                setAllowedMax(event.target.value);
+              }}
+              placeholder="авто"
+            />
+          </label>
+        </div>
+      </section>
       <div className="template-ranges">
         <div className="ranges-title">
           <div>
