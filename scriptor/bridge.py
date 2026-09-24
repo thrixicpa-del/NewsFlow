@@ -13084,40 +13084,44 @@ def _montage_queue_lock_path() -> Path:
 def _claim_montage_queue_lock() -> Path | None:
     """Claim the one cross-process Montage owner, reclaiming a dead owner."""
     lock_path = _montage_queue_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if lock_path.exists():
+    # Keep this stable mutex separate from the replaceable PID record. The
+    # whole read/reclaim/publish transaction must exclude other claimants.
+    with _exclusive_settings_write(lock_path.with_name("montage-queue-owner.json")):
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if lock_path.exists():
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                existing = {}
+            if _montage_process_is_running(existing.get("pid")):
+                return None
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
         try:
-            existing = json.loads(lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            existing = {}
-        if _montage_process_is_running(existing.get("pid")):
+            with lock_path.open("x", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
+        except FileExistsError:
             return None
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return None
-    try:
-        with lock_path.open("x", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
-    except FileExistsError:
-        return None
-    return lock_path
+        return lock_path
 
 
 def _release_montage_queue_lock(lock_path: Path) -> None:
     """Release only the Montage owner record created by this process."""
-    try:
-        owner = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        owner = {}
-    if owner.get("pid") != os.getpid():
-        return
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
+    with _exclusive_settings_write(lock_path.with_name("montage-queue-owner.json")):
+        try:
+            owner = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            owner = {}
+        if owner.get("pid") != os.getpid():
+            return
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def run_montage_queue(payload: dict) -> dict:
