@@ -16,8 +16,10 @@ const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
 const requiredSources = [
   'scriptor/bridge.py',
   'scriptor/ai_index.py',
-  'scriptor/timeline.py',
+  'scriptor/config.py',
   'scriptor/core.py',
+  'scriptor/runner.py',
+  'scriptor/timeline.py',
   'scriptor/thumbnail_prompt_v2.py',
   'scriptor/observability.py',
   'bridge_main.py',
