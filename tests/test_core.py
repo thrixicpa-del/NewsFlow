@@ -52,6 +52,32 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("подробно", requests[4].prompt)
         self.assertIn("подробно", requests[5].prompt)
 
+    def test_single_explicit_character_target_gets_python_runtime_bounds(self):
+        request = build_requests(
+            ["Тема"],
+            "Напиши сценарий на тему {title}. Нужно примерно 10 000 символов. Считай через Python.",
+            [],
+        )[0]
+
+        self.assertEqual(request.target_chars, 10000)
+        self.assertEqual(request.allowed_min, 9000)
+        self.assertEqual(request.allowed_max, 11000)
+        self.assertIn("цель 10000 символов", request.prompt)
+        self.assertIn("9000–11000", request.prompt)
+        self.assertIn("посчитана Python", request.prompt)
+
+    def test_structured_range_length_overrides_template_free_text_target(self):
+        request = build_requests(
+            ["Тема"],
+            "Напиши сценарий на тему {title}. Нужно примерно 10 000 символов.",
+            [PromptRange(1, 1, "", target_chars=5000)],
+        )[0]
+
+        self.assertEqual(request.target_chars, 5000)
+        self.assertEqual(request.allowed_min, 4500)
+        self.assertEqual(request.allowed_max, 5500)
+        self.assertIn("цель 5000 символов", request.prompt)
+
     def test_title_placeholder_and_fallback_append(self):
         first = build_requests(["Имя"], "Напиши: {title}", [])[0]
         second = build_requests(["Имя"], "Напиши сценарий", [])[0]
