@@ -1,7 +1,8 @@
-"""Executable checks for the pre-package Python-core freshness gate."""
+"""Executable checks for deterministic Frozen Core content identity."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,121 +15,149 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "studio-ui-remotion-verify"
 
+REQUIRED_SOURCES = (
+    "scriptor/bridge.py",
+    "scriptor/timeline.py",
+    "scriptor/core.py",
+    "scriptor/thumbnail_prompt_v2.py",
+    "scriptor/observability.py",
+    "bridge_main.py",
+)
+
+
+def _git_blob_sha(content: bytes) -> str:
+    header = f"blob {len(content)}\0".encode("utf-8")
+    return hashlib.sha1(header + content).hexdigest()
+
 
 class CoreRuntimeGuardTests(unittest.TestCase):
-    def test_guard_rejects_a_core_older_than_current_montage_timeline(self):
-        """A rebuilt bridge alone must not hide stale FFmpeg montage code."""
-        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
-            fixture_root = Path(temporary)
-            fixture_app = fixture_root / "studio-ui-remotion-verify"
-            fixture_scriptor = fixture_root / "scriptor"
-            fixture_core = fixture_root / ".core-bin-current" / "NewsFlowCore"
-            (fixture_app / "scripts").mkdir(parents=True)
-            fixture_scriptor.mkdir()
-            fixture_core.mkdir(parents=True)
+    def _fixture(self, temporary: str):
+        fixture_root = Path(temporary)
+        fixture_app = fixture_root / "studio-ui-remotion-verify"
+        fixture_core = fixture_root / "core-bin-test" / "NewsFlowCore"
+        (fixture_app / "scripts").mkdir(parents=True)
+        fixture_core.mkdir(parents=True)
 
-            package = {
-                "build": {"extraResources": [{"from": "../.core-bin-current/NewsFlowCore", "to": "core-bin"}]},
-            }
-            (fixture_app / "package.json").write_text(json.dumps(package), encoding="utf-8")
-            shutil.copy2(APP_ROOT / "scripts" / "verify-core-runtime.mjs", fixture_app / "scripts" / "verify-core-runtime.mjs")
-            for filename in ("bridge.py", "timeline.py"):
-                (fixture_scriptor / filename).write_text("# fixture\n", encoding="utf-8")
-            (fixture_root / "bridge_main.py").write_text("# fixture\n", encoding="utf-8")
-            executable = fixture_core / "NewsFlowCore.exe"
-            executable.write_bytes(b"fixture")
+        shutil.copy2(
+            APP_ROOT / "scripts" / "verify-core-runtime.mjs",
+            fixture_app / "scripts" / "verify-core-runtime.mjs",
+        )
+
+        package = {
+            "version": "2.1.152",
+            "build": {
+                "extraResources": [
+                    {"from": "../core-bin-test/NewsFlowCore", "to": "core-bin"},
+                ],
+            },
+        }
+        (fixture_app / "package.json").write_text(json.dumps(package), encoding="utf-8")
+
+        source_bytes = {}
+        for index, relative in enumerate(REQUIRED_SOURCES, start=1):
+            content = f"# fixture {index}\n".encode("utf-8")
+            source_bytes[relative] = content
+            target = fixture_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+
+        core_bytes = b"fixture-core-binary"
+        executable = fixture_core / "NewsFlowCore.exe"
+        executable.write_bytes(core_bytes)
+
+        lock = {
+            "format": 1,
+            "appVersion": "2.1.152",
+            "coreRevision": "core-bin-test",
+            "coreExeSha256": hashlib.sha256(core_bytes).hexdigest(),
+            "coreExeSize": len(core_bytes),
+            "builtFromGitSha": "0" * 40,
+            "sourceGitBlobs": {
+                relative: _git_blob_sha(content)
+                for relative, content in source_bytes.items()
+            },
+        }
+        (fixture_app / "core-runtime-lock.json").write_text(
+            json.dumps(lock),
+            encoding="utf-8",
+        )
+        return fixture_root, fixture_app, executable
+
+    def _run(self, fixture_app: Path):
+        return subprocess.run(
+            ["node", "scripts/verify-core-runtime.mjs"],
+            cwd=fixture_app,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    def test_guard_accepts_matching_content_even_when_checkout_mtimes_are_newer(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, executable = self._fixture(temporary)
 
             now = time.time()
-            for source in (fixture_scriptor / "bridge.py", fixture_root / "bridge_main.py"):
-                os.utime(source, (now - 20, now - 20))
-            os.utime(executable, (now - 10, now - 10))
-            os.utime(fixture_scriptor / "timeline.py", (now, now))
+            os.utime(executable, (now - 3600, now - 3600))
+            for relative in REQUIRED_SOURCES:
+                source = fixture_root / relative
+                os.utime(source, (now, now))
 
-            result = subprocess.run(
-                ["node", "scripts/verify-core-runtime.mjs"], cwd=fixture_app,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                check=False,
-            )
+            result = self._run(fixture_app)
 
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("timeline.py", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("актуально по содержимому", result.stdout)
 
-    def test_guard_rejects_a_core_older_than_current_scenario_core(self):
-        """Prompt-contract fixes in core.py must be frozen into the packaged engine."""
+    def test_guard_rejects_changed_montage_timeline_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
-            fixture_root = Path(temporary)
-            fixture_app = fixture_root / "studio-ui-remotion-verify"
-            fixture_scriptor = fixture_root / "scriptor"
-            fixture_core = fixture_root / ".core-bin-current" / "NewsFlowCore"
-            (fixture_app / "scripts").mkdir(parents=True)
-            fixture_scriptor.mkdir()
-            fixture_core.mkdir(parents=True)
-
-            package = {
-                "build": {"extraResources": [{"from": "../.core-bin-current/NewsFlowCore", "to": "core-bin"}]},
-            }
-            (fixture_app / "package.json").write_text(json.dumps(package), encoding="utf-8")
-            shutil.copy2(APP_ROOT / "scripts" / "verify-core-runtime.mjs", fixture_app / "scripts" / "verify-core-runtime.mjs")
-            for filename in ("bridge.py", "timeline.py", "core.py"):
-                (fixture_scriptor / filename).write_text("# fixture\n", encoding="utf-8")
-            (fixture_root / "bridge_main.py").write_text("# fixture\n", encoding="utf-8")
-            executable = fixture_core / "NewsFlowCore.exe"
-            executable.write_bytes(b"fixture")
-
-            now = time.time()
-            for source in (fixture_scriptor / "bridge.py", fixture_scriptor / "timeline.py", fixture_root / "bridge_main.py"):
-                os.utime(source, (now - 20, now - 20))
-            os.utime(executable, (now - 10, now - 10))
-            os.utime(fixture_scriptor / "core.py", (now, now))
-
-            result = subprocess.run(
-                ["node", "scripts/verify-core-runtime.mjs"], cwd=fixture_app,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                check=False,
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "timeline.py").write_text(
+                "# changed timeline\n",
+                encoding="utf-8",
             )
 
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("core.py", result.stderr)
+            result = self._run(fixture_app)
 
-    def test_guard_rejects_a_core_older_than_the_imported_observability_runtime(self):
-        """A bridge import must be frozen even when bridge.py itself is unchanged."""
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scriptor/timeline.py", result.stderr)
+            self.assertIn("Пересоберите core-bin", result.stderr)
+
+    def test_guard_rejects_changed_scenario_core_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
-            fixture_root = Path(temporary)
-            fixture_app = fixture_root / "studio-ui-remotion-verify"
-            fixture_scriptor = fixture_root / "scriptor"
-            fixture_core = fixture_root / ".core-bin-current" / "NewsFlowCore"
-            (fixture_app / "scripts").mkdir(parents=True)
-            fixture_scriptor.mkdir()
-            fixture_core.mkdir(parents=True)
-
-            package = {
-                "build": {"extraResources": [{"from": "../.core-bin-current/NewsFlowCore", "to": "core-bin"}]},
-            }
-            (fixture_app / "package.json").write_text(json.dumps(package), encoding="utf-8")
-            shutil.copy2(APP_ROOT / "scripts" / "verify-core-runtime.mjs", fixture_app / "scripts" / "verify-core-runtime.mjs")
-            for filename in ("bridge.py", "timeline.py", "core.py", "thumbnail_prompt_v2.py", "observability.py"):
-                (fixture_scriptor / filename).write_text("# fixture\n", encoding="utf-8")
-            (fixture_root / "bridge_main.py").write_text("# fixture\n", encoding="utf-8")
-            executable = fixture_core / "NewsFlowCore.exe"
-            executable.write_bytes(b"fixture")
-
-            now = time.time()
-            for source in (
-                fixture_scriptor / "bridge.py", fixture_scriptor / "timeline.py", fixture_scriptor / "core.py",
-                fixture_scriptor / "thumbnail_prompt_v2.py", fixture_root / "bridge_main.py",
-            ):
-                os.utime(source, (now - 20, now - 20))
-            os.utime(executable, (now - 10, now - 10))
-            os.utime(fixture_scriptor / "observability.py", (now, now))
-
-            result = subprocess.run(
-                ["node", "scripts/verify-core-runtime.mjs"], cwd=fixture_app,
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                check=False,
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "core.py").write_text(
+                "# changed scenario core\n",
+                encoding="utf-8",
             )
 
+            result = self._run(fixture_app)
+
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("observability.py", result.stderr)
+            self.assertIn("scriptor/core.py", result.stderr)
+
+    def test_guard_rejects_changed_observability_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "observability.py").write_text(
+                "# changed observability\n",
+                encoding="utf-8",
+            )
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scriptor/observability.py", result.stderr)
+
+    def test_guard_rejects_core_binary_hash_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            _, fixture_app, executable = self._fixture(temporary)
+            executable.write_bytes(b"different-core-binary")
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Frozen Core SHA-256", result.stderr)
 
 
 if __name__ == "__main__":
