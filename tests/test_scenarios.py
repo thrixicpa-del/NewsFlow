@@ -165,6 +165,69 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(jobs[0].request.production_item_id, production_item_id)
         self.assertEqual(result["covers"][0]["production_item_id"], production_item_id)
 
+    def test_template_length_contract_is_persisted_and_used_by_generation(self):
+        template = "Напиши сценарий по теме {title}."
+        settings = Settings(scenario_provider="openai", template=template, prompt_ranges=[])
+        saved_batches = []
+
+        class FakePool:
+            concurrency = 1
+
+            async def generate(self, _prompt):
+                return "а" * 10000
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_template({
+                "template": template,
+                "ranges": [],
+                "targetChars": 10000,
+                "allowedMin": 9000,
+                "allowedMax": 11000,
+            })
+
+        self.assertEqual(
+            (settings.scenario_target_chars, settings.scenario_allowed_min, settings.scenario_allowed_max),
+            (10000, 9000, 11000),
+        )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=(["Тема"], [])), \
+             patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved_batches.append(jobs)), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=FakePool()):
+            bridge.generate_scenarios({"provider": "openai"})
+
+        request = saved_batches[-1][0].request
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
+        self.assertEqual(saved_batches[-1][0].length_status, "READY")
+
+    def test_template_preset_keeps_its_own_dynamic_length_contract(self):
+        settings = Settings()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_template_preset({
+                "name": "10k",
+                "template": "Шаблон {title}",
+                "ranges": [],
+                "targetChars": 10000,
+                "allowedMin": 9000,
+                "allowedMax": 11000,
+            })
+
+        preset = settings.scenario_templates[0]
+        self.assertEqual(
+            (preset["target_chars"], preset["allowed_min"], preset["allowed_max"]),
+            (10000, 9000, 11000),
+        )
+        self.assertEqual(
+            (settings.scenario_target_chars, settings.scenario_allowed_min, settings.scenario_allowed_max),
+            (10000, 9000, 11000),
+        )
+
     def test_range_target_is_included_in_the_python_owned_scenario_contract(self):
         from scriptor.core import PromptRange, build_requests
 
