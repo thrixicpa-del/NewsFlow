@@ -1848,10 +1848,16 @@ def snapshot() -> dict:
         "templateSettings": {
             "template": settings.template,
             "ranges": settings.prompt_ranges,
+            "targetChars": settings.scenario_target_chars,
+            "allowedMin": settings.scenario_allowed_min,
+            "allowedMax": settings.scenario_allowed_max,
             "scenarioProvider": settings.scenario_provider,
             "presets": [
                 {"name": str(item.get("name", "Шаблон")), "template": str(item.get("template", "")),
-                 "ranges": item.get("ranges", [])}
+                 "ranges": item.get("ranges", []),
+                 "targetChars": max(0, int(item.get("target_chars", 0) or 0)),
+                 "allowedMin": max(0, int(item.get("allowed_min", 0) or 0)),
+                 "allowedMax": max(0, int(item.get("allowed_max", 0) or 0))}
                 for item in settings.scenario_templates
                 if item.get("topic") == "__newsflow_desktop__"
             ],
@@ -5036,7 +5042,14 @@ def generate_scenarios(payload: dict) -> dict:
         request.index, request.title, request.prompt,
         production_id_by_title.get(request.title.casefold(), ""),
         request.target_chars, request.allowed_min, request.allowed_max,
-    ) for request in build_requests(titles, settings.template, ranges)]
+    ) for request in build_requests(
+        titles,
+        settings.template,
+        ranges,
+        settings.scenario_target_chars,
+        settings.scenario_allowed_min,
+        settings.scenario_allowed_max,
+    )]
     completed = {
         job.request.index for job in existing_jobs
         if job.state == RunState.DONE and str(job.result or "").strip()
@@ -15725,12 +15738,30 @@ def generate_media(payload: dict) -> dict:
     return {**snapshot(), "operationResult": {"kind": "media", "count": len(paths), "folder": str(output)}}
 
 
+def _template_length_values(payload: dict, settings: Settings) -> tuple[int, int, int]:
+    """Read the active template's structured character contract."""
+    target = max(0, int(payload.get("targetChars", settings.scenario_target_chars) or 0))
+    minimum = max(0, int(payload.get("allowedMin", settings.scenario_allowed_min) or 0))
+    maximum = max(0, int(payload.get("allowedMax", settings.scenario_allowed_max) or 0))
+    if minimum and maximum and minimum > maximum:
+        raise ValueError("Минимальная длина больше максимальной")
+    if target and minimum and target < minimum:
+        raise ValueError("Целевая длина меньше допустимого минимума")
+    if target and maximum and target > maximum:
+        raise ValueError("Целевая длина больше допустимого максимума")
+    return target, minimum, maximum
+
+
 def save_template(payload: dict) -> dict:
     settings = load_settings()
     template = str(payload.get("template", "")).strip()
     if not template:
         raise ValueError("Введите общий шаблон сценария")
+    target, minimum, maximum = _template_length_values(payload, settings)
     settings.template = template
+    settings.scenario_target_chars = target
+    settings.scenario_allowed_min = minimum
+    settings.scenario_allowed_max = maximum
     ranges = payload.get("ranges")
     if isinstance(ranges, list):
         settings.prompt_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
@@ -15748,19 +15779,26 @@ def save_template_preset(payload: dict) -> dict:
         raise ValueError("Укажите название пресета")
     if not template:
         raise ValueError("Заполните общий промпт перед сохранением пресета")
+    target, minimum, maximum = _template_length_values(payload, settings)
     ranges = payload.get("ranges", [])
     safe_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
                     "prompt": str(item.get("prompt", "")), "target_chars": max(0, int(item.get("target_chars", 0) or 0)),
                     "allowed_min": max(0, int(item.get("allowed_min", 0) or 0)), "allowed_max": max(0, int(item.get("allowed_max", 0) or 0))} for item in ranges if isinstance(item, dict)] if isinstance(ranges, list) else []
     existing = next((item for item in settings.scenario_templates
                      if item.get("topic") == "__newsflow_desktop__" and str(item.get("name", "")).casefold() == name.casefold()), None)
-    value = {"name": name, "topic": "__newsflow_desktop__", "template": template, "ranges": safe_ranges}
+    value = {
+        "name": name, "topic": "__newsflow_desktop__", "template": template, "ranges": safe_ranges,
+        "target_chars": target, "allowed_min": minimum, "allowed_max": maximum,
+    }
     if existing is None:
         settings.scenario_templates.append(value)
     else:
         existing.update(value)
     settings.template = template
     settings.prompt_ranges = safe_ranges
+    settings.scenario_target_chars = target
+    settings.scenario_allowed_min = minimum
+    settings.scenario_allowed_max = maximum
     save_settings(settings)
     return {**snapshot(), "operationResult": {"kind": "template-preset", "count": 1,
                                                 "message": f"Пресет «{name}» сохранён."}}
