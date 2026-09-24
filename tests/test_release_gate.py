@@ -29,6 +29,31 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("$packagedSmokeRoot = Join-Path $candidateRoot 'win-unpacked'", script)
         self.assertIn("Get-ChildItem -LiteralPath $packagedSmokeRoot", script)
 
+    def test_gate_hydrates_lfs_before_production_capture_and_test_suites(self):
+        script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
+
+        hydrate = "Invoke-GateStep -Name 'lfs-hydration' -FilePath $powerShellExecutable"
+        capture = "Invoke-GateStep -Name 'production-integrity-capture'"
+        python_suite = "Invoke-GateStep -Name 'python-suite'"
+        visual_suite = "Invoke-GateStep -Name 'visual-regression'"
+
+        self.assertIn(hydrate, script)
+        self.assertIn("scripts/prepare-lfs-assets.ps1", script)
+        self.assertLess(script.index(hydrate), script.index(capture))
+        self.assertLess(script.index(hydrate), script.index(python_suite))
+        self.assertLess(script.index(hydrate), script.index(visual_suite))
+
+    def test_lfs_prepare_script_hydrates_fscks_and_hash_verifies_tracked_assets(self):
+        script = (ROOT / "scripts" / "prepare-lfs-assets.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("Invoke-GitLfs -Arguments @('pull')", script)
+        self.assertIn("Invoke-GitLfs -Arguments @('fsck')", script)
+        self.assertIn("Invoke-GitLfs -Arguments @('ls-files', '--long')", script)
+        self.assertIn("version https://git-lfs.github.com/spec/v1", script)
+        self.assertIn("Get-FileHash -LiteralPath $path -Algorithm SHA256", script)
+        self.assertIn("assets/ffmpeg.exe", script)
+        self.assertIn("GIT_LFS_VERIFY=PASS", script)
+
     def test_gate_installs_locked_javascript_dependencies_before_audit_and_typecheck(self):
         script = (ROOT / "scripts" / "release-gate.ps1").read_text(encoding="utf-8")
 
@@ -72,6 +97,7 @@ class ReleaseGateTests(unittest.TestCase):
             [
                 "repo-state",
                 "toolchain",
+                "lfs-hydration",
                 "production-integrity-capture",
                 "dependencies-install",
                 "dependencies",
