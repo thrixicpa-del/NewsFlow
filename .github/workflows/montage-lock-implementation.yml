@@ -15,6 +15,7 @@ jobs:
     env:
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v6
         with:
@@ -43,6 +44,7 @@ jobs:
           expected = 'f8148a3ab36183a3dc2d7e460c4fe769592a28f3'
           actual = subprocess.check_output(['git', 'hash-object', 'scriptor/bridge.py'], text=True).strip()
           assert actual == expected, (actual, expected)
+          assert subprocess.check_output(['git', 'hash-object', 'tests/test_montage_queue_lock.py'], text=True).strip() == '1c20d8c0b9999c492f7fdda336d316c702404cea'
           assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == os.environ['GITHUB_SHA']
           result = subprocess.run([sys.executable, 'tests/run_isolated.py', 'tests.test_montage_queue_lock', '-v'], text=True, encoding='utf-8', errors='replace', capture_output=True, timeout=100)
           output = result.stdout + result.stderr
