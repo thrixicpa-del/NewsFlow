@@ -1,0 +1,23 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('newsflowDesktop', {
+  snapshot: () => ipcRenderer.invoke('newsflow:snapshot'),
+  footageIndexStatus: () => ipcRenderer.invoke('newsflow:footage-index-status'),
+  saveSettings: (patch: unknown) => ipcRenderer.invoke('newsflow:save-settings', patch),
+  command: (command: string, payload: unknown = {}) => ipcRenderer.invoke('newsflow:command', command, payload),
+  startYoutubeOAuthHandoff: (input: { index: number; includeMonetary: boolean }) => ipcRenderer.invoke('newsflow:youtube-oauth-start', input),
+  youtubeOAuthHandoffStatus: (id: string) => ipcRenderer.invoke('newsflow:youtube-oauth-status', id),
+  cancelYoutubeOAuthHandoff: (id: string) => ipcRenderer.invoke('newsflow:youtube-oauth-cancel', id),
+  openPath: (target: string) => ipcRenderer.invoke('newsflow:open-path', target),
+  chooseFolder: () => ipcRenderer.invoke('newsflow:choose-folder'),
+  chooseVideos: () => ipcRenderer.invoke('newsflow:choose-videos'),
+  chooseImages: () => ipcRenderer.invoke('newsflow:choose-images'),
+  chooseAudio: () => ipcRenderer.invoke('newsflow:choose-audio'),
+  chooseAudioFiles: () => ipcRenderer.invoke('newsflow:choose-audio-files'),
+  chooseJson: () => ipcRenderer.invoke('newsflow:choose-json'),
+  choosePromptText: () => ipcRenderer.invoke('newsflow:choose-prompt-text'),
+  chooseScenarioTexts: () => ipcRenderer.invoke('newsflow:choose-scenario-texts'),
+  chooseSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-save-path', suggestedName),
+  chooseZipSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-zip-save-path', suggestedName),
+  chooseAudioSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-audio-save-path', suggestedName),
+});
