@@ -18,8 +18,10 @@ APP_ROOT = ROOT / "studio-ui-remotion-verify"
 REQUIRED_SOURCES = (
     "scriptor/bridge.py",
     "scriptor/ai_index.py",
-    "scriptor/timeline.py",
+    "scriptor/config.py",
     "scriptor/core.py",
+    "scriptor/runner.py",
+    "scriptor/timeline.py",
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
     "bridge_main.py",
@@ -158,6 +160,18 @@ class CoreRuntimeGuardTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("актуально по содержимому", result.stdout)
+
+    def test_guard_rejects_changed_scenario_runtime_support_content(self):
+        for relative in ("scriptor/config.py", "scriptor/runner.py"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+                fixture_root, fixture_app, _ = self._fixture(temporary)
+                (fixture_root / relative).write_text("# changed scenario runtime support\n", encoding="utf-8")
+
+                result = self._run(fixture_app)
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(relative, result.stderr)
+                self.assertIn("Пересоберите core-bin", result.stderr)
 
     def test_guard_rejects_changed_footage_index_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
