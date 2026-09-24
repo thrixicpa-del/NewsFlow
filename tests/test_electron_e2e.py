@@ -88,7 +88,6 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             self.assertTrue(artifact.is_file())
             browser.close()
 
-
     def test_preload_bridge_and_safe_core_command_round_trip(self):
         """A packaged renderer must expose preload IPC and persist one local command."""
         self._launch()
