@@ -58,6 +58,29 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.fresh_calls, 1)
         self.assertEqual(jobs[0].state, RunState.DONE)
 
+    async def test_realistic_five_thousand_character_response_is_repaired_toward_ten_thousand(self):
+        class LengthClient:
+            fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None):
+                return "а" * 5000
+
+            async def generate_fresh(self, prompt, on_progress=None):
+                self.fresh_calls += 1
+                return "б" * 10000
+
+        client = LengthClient()
+        request = ScenarioRequest(
+            0, "S", "P", target_chars=10000, allowed_min=9000, allowed_max=11000,
+        )
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].length_status, "READY")
+        self.assertEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(jobs[0].length_repair_attempts, 1)
+
     async def test_short_script_is_repaired_within_the_configured_bounds(self):
         class LengthClient:
             fresh_calls = 0
