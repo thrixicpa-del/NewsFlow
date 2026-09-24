@@ -17,11 +17,13 @@ _DEAD_PID = 2147483647
 _WAIT_SECONDS = 15
 
 
-def _claim_contender(root, role, mode, paused, contender_ready, publish, claimed, finish, results):
+def _claim_contender(root, role, mode, owner_pid, paused, contender_ready, publish, claimed, finish, results):
     """Keep a real child owner alive until both acquisition results are known."""
     real_dump = bridge.json.dump
     real_running = bridge._montage_process_is_running
     real_guard = bridge._exclusive_settings_write
+    if role == "owner":
+        owner_pid.value = os.getpid()
 
     def wait_for(event, message):
         if not event.wait(_WAIT_SECONDS):
@@ -56,6 +58,11 @@ def _claim_contender(root, role, mode, paused, contender_ready, publish, claimed
             wait_for(claimed, "first owner did not finish its claim")
         if pid == _DEAD_PID:
             return False
+        if pid == owner_pid.value:
+            # Windows intentionally recognises NewsFlowCore.exe, not this
+            # fixture's python.exe. Model ONLY the known-live owner child as
+            # packaged Core; keep the file operations and OS mutex real.
+            return True
         return real_running(pid)
 
     lock_path = None
@@ -87,11 +94,12 @@ class MontageQueueLockTests(unittest.TestCase):
             lock_path = root / "montage-queue.lock"
             if mode == "stale":
                 lock_path.write_text(json.dumps({"pid": _DEAD_PID}), encoding="utf-8")
+            owner_pid = context.Value("q", 0)
             paused, ready, publish, claimed, finish = [context.Event() for _ in range(5)]
             results = context.Queue()
             processes = [context.Process(
                 target=_claim_contender,
-                args=(str(root), role, mode, paused, ready, publish, claimed, finish, results),
+                args=(str(root), role, mode, owner_pid, paused, ready, publish, claimed, finish, results),
                 name=f"montage-lock-{role}",
             ) for role in ("owner", "contender")]
             started = []
