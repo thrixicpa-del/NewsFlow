@@ -41,6 +41,22 @@ for (const entry of hashes.artifacts) {
   }
 }
 
+// A self-consistent inventory does not prove that declared sources were copied.
+// This catches the RC02 subst omission even when hashes were finalized afterward.
+const requiredScriptor = [
+  "win-unpacked/resources/core/scriptor/__init__.py",
+  "win-unpacked/resources/core/scriptor/bridge.py",
+];
+for (const relative of requiredScriptor) {
+  const file = path.join(artifactRoot, relative);
+  if (!existsSync(file) || !statSync(file).isFile() || statSync(file).size === 0) {
+    throw new Error(`Missing or empty packaged Scriptor file: ${relative}`);
+  }
+  if (!hashes.artifacts.some((entry) => String(entry.path).replace(/\\/g, "/") === relative)) {
+    throw new Error(`Artifact hashes omit required Scriptor file: ${relative}`);
+  }
+}
+
 // A generated hash list can consistently describe a broken resource.
 // Validate the exact runtime-preferred file against the independent asset lock.
 const coreDirectory = path.join(artifactRoot, "win-unpacked", "resources", "core-bin");

@@ -29,6 +29,14 @@ class ImmutableRcTests(unittest.TestCase):
         self.assertIn('"subst.exe"', wrapper)
         self.assertIn("{ cwd: packagingWorkdir.cwd }", wrapper)
 
+    def test_windows_subst_keeps_declared_parent_resources_available(self):
+        """The short drive must include ../scriptor used by electron-builder."""
+        wrapper = (APP / "scripts" / "package-immutable-rc.mjs").read_text(encoding="utf-8")
+
+        self.assertIn('const repositoryRoot = path.resolve(appRoot, "..");', wrapper)
+        self.assertIn('execFileSync("subst.exe", [drive, repositoryRoot]', wrapper)
+        self.assertIn('cwd: `${drive}\\\\${path.basename(appRoot)}`', wrapper)
+
     def test_rc_directory_is_commit_addressed_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             command = ["node", "scripts/prepare-immutable-rc.mjs", "--output-root", directory, "--type", "TEST", "--rc", "01"]
@@ -94,6 +102,10 @@ class ImmutableRcTests(unittest.TestCase):
             artifact_root = Path(directory) / "candidate"
             core_root = artifact_root / "win-unpacked/resources/core-bin"
             shutil.copytree(fixture_core.parent, core_root)
+            source_root = artifact_root / "win-unpacked/resources/core/scriptor"
+            source_root.mkdir(parents=True)
+            for name in ("__init__.py", "bridge.py"):
+                (source_root / name).write_text("# packaged source fixture\n", encoding="utf-8")
             (artifact_root / "build-manifest.json").write_text(json.dumps({
                 "gitSha": "1" * 40,
                 "coreBinSha256": hashlib.sha256(fixture_core.read_bytes()).hexdigest(),

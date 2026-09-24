@@ -33,16 +33,19 @@ const createWindowsPackagingWorkdir = () => {
 
   // NSIS cannot resolve electron-builder template paths beyond MAX_PATH. A
   // nested worktree plus pnpm's virtual store can exceed that limit even
-  // though the template exists. Map only this disposable packaging command
-  // through a free DOS drive and always remove the mapping in `finally`.
+  // though the template exists. The package declares ../scriptor as an
+  // extra resource, so map the repository root rather than the app alone.
+  // Run electron-builder from the app child on that short drive and always
+  // remove the mapping in `finally`.
   const drive = ["N", "M", "L", "K", "J", "I", "H", "G"]
     .map((letter) => `${letter}:`)
     .find((candidate) => !existsSync(`${candidate}\\`));
   if (!drive) throw new Error("No free DOS drive is available for Windows packaging");
 
-  execFileSync("subst.exe", [drive, appRoot], { stdio: "inherit" });
+  const repositoryRoot = path.resolve(appRoot, "..");
+  execFileSync("subst.exe", [drive, repositoryRoot], { stdio: "inherit" });
   return {
-    cwd: `${drive}\\`,
+    cwd: `${drive}\\${path.basename(appRoot)}`,
     dispose: () => execFileSync("subst.exe", [drive, "/D"], { stdio: "inherit" }),
   };
 };
