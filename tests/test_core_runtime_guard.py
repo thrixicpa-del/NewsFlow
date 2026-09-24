@@ -26,7 +26,7 @@ REQUIRED_SOURCES = (
 
 
 def _git_blob_sha(content: bytes) -> str:
-    header = f"blob {len(content)}\0".encode("utf-8")
+    header = f"blob {len(content)}\0".encode()
     return hashlib.sha1(header + content).hexdigest()
 
 
@@ -43,6 +43,23 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             fixture_app / "scripts" / "verify-core-runtime.mjs",
         )
 
+        shutil.copy2(
+            APP_ROOT / "scripts" / "verify-core-assets.mjs",
+            fixture_app / "scripts" / "verify-core-assets.mjs",
+        )
+        # Structural fixture for hash validation, not a Windows execution smoke.
+        asset_bytes = bytearray(512)
+        asset_bytes[:2] = b"MZ"
+        asset_bytes[60:64] = (128).to_bytes(4, "little")
+        asset_bytes[128:132] = b"PE\0\0"
+        asset = fixture_core / "_internal" / "assets" / "ffmpeg.exe"
+        asset.parent.mkdir(parents=True)
+        asset.write_bytes(asset_bytes)
+        (fixture_app / "core-assets-lock.json").write_text(json.dumps({
+            "format": 1,
+            "ffmpeg": {"size": len(asset_bytes), "sha256": hashlib.sha256(asset_bytes).hexdigest()},
+        }), encoding="utf-8")
+
         package = {
             "version": "2.1.152",
             "build": {
@@ -55,7 +72,7 @@ class CoreRuntimeGuardTests(unittest.TestCase):
 
         source_bytes = {}
         for index, relative in enumerate(REQUIRED_SOURCES, start=1):
-            content = f"# fixture {index}\n".encode("utf-8")
+            content = f"# fixture {index}\n".encode()
             source_bytes[relative] = content
             target = fixture_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -99,15 +116,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r13")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r14")
         self.assertEqual(
             lock["coreExeSha256"],
-            "251b35eecf1c6a61051abce30c1a08b51e69bffa746a5415bd6d3785784c0db3",
+            "a69969b47ae23a9f8557c8ef0580a3503dc57623dd2166c3d7e0c0f574d3c40f",
         )
         self.assertEqual(lock["coreExeSize"], 34225663)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "f6404e70a5d867eb24865df33237dcac6f70eea1",
+            "c9e29f68cb1dae8d90ec2e21fef6aedc12b8179b",
         )
 
         resources = package["build"]["extraResources"]

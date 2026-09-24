@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from tests import test_core_runtime_guard as core_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "studio-ui-remotion-verify"
@@ -84,27 +87,30 @@ class ImmutableRcTests(unittest.TestCase):
 
     def test_rc_verifier_rejects_a_tampered_packaged_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
-            prepared = subprocess.run(
-                ["node", "scripts/prepare-immutable-rc.mjs", "--output-root", directory, "--type", "TEST", "--rc", "04"],
-                cwd=APP,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(0, prepared.returncode, prepared.stdout + prepared.stderr)
-            artifact_root = Path(prepared.stdout.strip().splitlines()[-1])
+            # Hash verification uses structural fixtures, not a claimed EXE smoke.
+            _, fixture_app, fixture_core = core_tests.CoreRuntimeGuardTests()._fixture(directory)
+            for name in ("finalize-immutable-rc.mjs", "verify-immutable-rc.mjs"):
+                shutil.copy2(APP / "scripts" / name, fixture_app / "scripts" / name)
+            artifact_root = Path(directory) / "candidate"
+            core_root = artifact_root / "win-unpacked/resources/core-bin"
+            shutil.copytree(fixture_core.parent, core_root)
+            (artifact_root / "build-manifest.json").write_text(json.dumps({
+                "gitSha": "1" * 40,
+                "coreBinSha256": hashlib.sha256(fixture_core.read_bytes()).hexdigest(),
+                "buildType": "TEST",
+            }), encoding="utf-8")
             exe = artifact_root / "NewsFlow Studio.exe"
             exe.write_bytes(b"verified portable artifact")
             subprocess.run(
                 ["node", "scripts/finalize-immutable-rc.mjs", "--directory", str(artifact_root)],
-                cwd=APP,
+                cwd=fixture_app,
                 text=True,
                 capture_output=True,
                 check=True,
             )
             verified = subprocess.run(
                 ["node", "scripts/verify-immutable-rc.mjs", "--directory", str(artifact_root)],
-                cwd=APP,
+                cwd=fixture_app,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -113,9 +119,10 @@ class ImmutableRcTests(unittest.TestCase):
             exe.write_bytes(b"tampered portable artifact")
             rejected = subprocess.run(
                 ["node", "scripts/verify-immutable-rc.mjs", "--directory", str(artifact_root)],
-                cwd=APP,
+                cwd=fixture_app,
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertNotEqual(0, rejected.returncode)
+            self.assertIn("Artifact hash mismatch", rejected.stderr)

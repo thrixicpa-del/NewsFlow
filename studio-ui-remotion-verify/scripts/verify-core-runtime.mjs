@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { verifyCoreAssets } from './verify-core-assets.mjs';
 
 const appRoot = process.cwd();
 const repoRoot = path.resolve(appRoot, '..');
@@ -96,6 +97,8 @@ for (const relative of requiredSources) {
     );
   }
 }
+
+verifyCoreAssets(path.dirname(executable));
 
 console.log(
   `Ядро NewsFlow актуально по содержимому: ${executable}; ` +
