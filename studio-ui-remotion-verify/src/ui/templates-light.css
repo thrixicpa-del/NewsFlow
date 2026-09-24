@@ -53,6 +53,47 @@
   line-height: 1.55;
 }
 
+.nf-template-workspace .template-default-length {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(320px, auto);
+  gap: 18px;
+  align-items: end;
+  margin: 12px 24px 4px;
+  padding: 14px 16px;
+  border: 1px solid rgba(65, 116, 156, .42);
+  border-radius: 10px;
+  background: rgba(7, 24, 40, .72);
+}
+
+.nf-template-workspace .template-default-length b,
+.nf-template-workspace .template-default-length small {
+  display: block;
+}
+
+.nf-template-workspace .template-default-length small {
+  margin-top: 5px;
+  max-width: 760px;
+  color: #7f9ab3;
+  line-height: 1.45;
+}
+
+.nf-template-workspace .template-default-length .range-length-inputs {
+  min-width: 320px;
+}
+
+.nf-template-workspace .template-default-length .range-length-inputs label {
+  width: 112px;
+}
+
+@media (max-width: 880px) {
+  .nf-template-workspace .template-default-length {
+    grid-template-columns: 1fr;
+  }
+  .nf-template-workspace .template-default-length .range-length-inputs {
+    min-width: 0;
+  }
+}
+
 .nf-template-workspace .template-ranges {
   margin-top: 16px;
   padding: 20px 24px 24px;
