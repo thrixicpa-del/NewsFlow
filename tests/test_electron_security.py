@@ -57,7 +57,6 @@ class ElectronSecurityGateTests(unittest.TestCase):
         self.assertIn('run(pnpm, ["verify:secrets"])', immutable_wrapper)
         self.assertIn('run(pnpm, ["verify:dependencies"])', immutable_wrapper)
 
-
     def test_sandboxed_preload_uses_commonjs_bridge(self):
         """Sandboxed Electron renderers cannot load an ESM-import preload."""
         main = (APP_ROOT / "electron" / "main.ts").read_text(encoding="utf-8")
