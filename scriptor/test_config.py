@@ -92,6 +92,30 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(result, str(persistent_root / "Готовые ролики"))
 
 
+class ScenarioLengthSettingsTests(unittest.TestCase):
+    def test_global_scenario_length_contract_survives_settings_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            isolated = root / "isolated"
+            with patch.dict(os.environ, {
+                "NEWSFLOW_TEST_MODE": "1",
+                "NEWSFLOW_TEST_ROOT": str(isolated),
+                "LOCALAPPDATA": str(isolated),
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(root / "production"),
+            }, clear=False):
+                save_settings(Settings(
+                    scenario_target_chars=10000,
+                    scenario_allowed_min=9000,
+                    scenario_allowed_max=11000,
+                ))
+                restored = load_settings()
+
+        self.assertEqual(
+            (restored.scenario_target_chars, restored.scenario_allowed_min, restored.scenario_allowed_max),
+            (10000, 9000, 11000),
+        )
+
+
 class AuthRecoveryTests(unittest.TestCase):
     def test_recovery_fills_only_missing_auth_and_channels_from_complete_library(self):
         """A blank upgraded profile must recover auth without touching production data."""
