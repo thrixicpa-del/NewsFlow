@@ -39,6 +39,7 @@ from .ai_index import (
     SCREEN_ELIGIBILITY_UNCERTAIN,
     SEMANTIC_TAG_LABELS,
     ClipIndex,
+    IndexProgress,
     SearchHit,
     source_family_identity_text,
 )
@@ -10230,22 +10231,28 @@ def download_web_footage(payload: dict) -> dict:
 
 
 def index_footage(payload: dict) -> dict:
-    """Build the incremental index or enrich existing vectors with semantic labels."""
+    """Build, enrich, or classify an existing local footage index."""
     settings = load_settings()
     enhance = bool(payload.get("enhance"))
+    screen_text = bool(payload.get("screenText"))
+    if enhance and screen_text:
+        raise ValueError("Выберите только один режим ИИ-индексации")
     folders = [str(item) for item in payload.get("folders", settings.footage_folders)
                if isinstance(item, str) and Path(item).is_dir()]
-    if not folders:
+    if not screen_text and not folders:
         raise ValueError("Добавьте хотя бы одну папку с футажами")
     lock = _claim_footage_index_lock()
-    progress = payload.get("_progress") if callable(payload.get("_progress")) else None
+    progress_callback = payload.get("_progress") if callable(payload.get("_progress")) else None
     index = ClipIndex(app_data_root() / "footage-index.sqlite3")
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    latest_progress: IndexProgress | None = None
 
     def report(state) -> None:
+        nonlocal latest_progress
+        latest_progress = state
         _write_footage_index_status({
             "stage": state.stage,
-            "active": state.stage in {"scan", "embedding", "semantic"},
+            "active": state.stage in {"scan", "embedding", "semantic", "screen-text"},
             "total": state.total,
             "processed": state.processed,
             "indexed": state.indexed,
@@ -10259,20 +10266,40 @@ def index_footage(payload: dict) -> dict:
             "message": (f"Завершено с ошибками: {state.failed}. Проверьте повреждённые или недоступные файлы."
                         if state.stage == "complete" and state.failed else ""),
         })
+        if progress_callback:
+            progress_callback(state)
 
     try:
-        if enhance:
+        screen_text_result = None
+        if screen_text:
+            # The batch reads only persisted CLIP vectors. It never discovers
+            # folders or reopens the user's source videos.
+            screen_text_result = index.classify_english_screen_text(progress=report)
+            progress = latest_progress or IndexProgress(
+                total=0, processed=0, indexed=0, skipped=0, failed=0, stage="complete",
+            )
+        elif enhance:
             # Uses already stored CLIP vectors; source files are not decoded again.
             progress = index.enrich_semantic_tags(progress=report)
         else:
             media_progress = index.index_folders(folders, progress=report)
             progress = media_progress
         report(progress)
-        return {**snapshot(), "operationResult": {"kind": "semantic-index" if enhance else "index", "count": progress.indexed,
+        operation_kind = "screen-text" if screen_text else "semantic-index" if enhance else "index"
+        index_result = {"total": progress.total, "processed": progress.processed,
+                        "indexed": progress.indexed, "skipped": progress.skipped,
+                        "failed": progress.failed, "removed": progress.removed}
+        if screen_text_result is not None:
+            # A cached text model is intentionally never downloaded from this
+            # maintenance action. Distinguish that safe no-op from an already
+            # current index so the desktop cannot claim a false success.
+            index_result["screenText"] = {
+                **screen_text_result,
+                "modelReady": not (progress.total > 0 and progress.processed == 0),
+            }
+        return {**snapshot(), "operationResult": {"kind": operation_kind, "count": progress.indexed,
                                                     "folder": str(index.db_path)},
-                "indexResult": {"total": progress.total, "processed": progress.processed,
-                                "indexed": progress.indexed, "skipped": progress.skipped,
-                                "failed": progress.failed, "removed": progress.removed}}
+                "indexResult": index_result}
     except _BRIDGE_OPERATION_ERRORS as exc:
         current = _read_footage_index_status()
         current.update({"stage": "error", "active": False, "error": str(exc),
@@ -11295,7 +11322,14 @@ def _montage_screen_text_safe(index, item: FootageItem, *, allow_uncertain: bool
     The allow_uncertain argument is retained for call-site compatibility.
     """
     del allow_uncertain
-    return _montage_screen_text_state(index, item, deep=False) != SCREEN_ELIGIBILITY_BLOCKED
+    state = _montage_screen_text_state(index, item, deep=False)
+    if state == SCREEN_ELIGIBILITY_BLOCKED:
+        return False
+    if state == SCREEN_ELIGIBILITY_UNCERTAIN:
+        # Uncertainty remains eligible, but the actual candidate path receives
+        # the more complete sample before it can reach a timeline.
+        return _montage_screen_text_state(index, item, deep=True) != SCREEN_ELIGIBILITY_BLOCKED
+    return True
 
 
 def _select_visual_continuity_candidate(items: list[FootageItem], *,
