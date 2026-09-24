@@ -165,6 +165,67 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(jobs[0].request.production_item_id, production_item_id)
         self.assertEqual(result["covers"][0]["production_item_id"], production_item_id)
 
+    def test_template_preset_persists_its_default_character_contract(self):
+        settings = Settings()
+        snapshot = {"templateSettings": {"presets": []}}
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings") as save, \
+             patch.object(bridge, "snapshot", return_value=snapshot):
+            result = bridge.save_template_preset({
+                "name": "Длинный",
+                "template": "Сценарий {title}",
+                "targetChars": 10000,
+                "allowedMin": 9000,
+                "allowedMax": 11000,
+                "ranges": [],
+            })
+
+        self.assertEqual(settings.scenario_target_chars, 10000)
+        self.assertEqual(settings.scenario_allowed_min, 9000)
+        self.assertEqual(settings.scenario_allowed_max, 11000)
+        self.assertEqual(settings.scenario_templates[0]["target_chars"], 10000)
+        self.assertEqual(settings.scenario_templates[0]["allowed_min"], 9000)
+        self.assertEqual(settings.scenario_templates[0]["allowed_max"], 11000)
+        save.assert_called_once_with(settings)
+        self.assertEqual(result["operationResult"]["kind"], "template-preset")
+
+    def test_template_default_length_is_overridden_by_a_specific_scenario_range(self):
+        settings = Settings(
+            scenario_provider="agent",
+            template="Напиши сценарий {title}",
+            scenario_target_chars=10000,
+            prompt_ranges=[{
+                "start": 2, "end": 2, "prompt": "",
+                "target_chars": 5000, "allowed_min": 4500, "allowed_max": 5500,
+            }],
+        )
+        saved_batches = []
+
+        class FakePool:
+            concurrency = 2
+
+            async def generate(self, prompt):
+                return "а" * (5000 if "от 4 500 до 5 500" in prompt else 10000)
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=(["Первая", "Вторая"], [])), \
+             patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved_batches.append(jobs)), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=FakePool()):
+            bridge.generate_scenarios({"provider": "agent"})
+
+        jobs = saved_batches[-1]
+        self.assertEqual(
+            (jobs[0].request.target_chars, jobs[0].request.allowed_min, jobs[0].request.allowed_max),
+            (10000, 9000, 11000),
+        )
+        self.assertEqual(
+            (jobs[1].request.target_chars, jobs[1].request.allowed_min, jobs[1].request.allowed_max),
+            (5000, 4500, 5500),
+        )
+        self.assertTrue(all(job.state == RunState.DONE for job in jobs))
+
     def test_range_target_is_included_in_the_python_owned_scenario_contract(self):
         from scriptor.core import PromptRange, build_requests
 
@@ -176,7 +237,7 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(request.target_chars, 1000)
         self.assertEqual(request.allowed_min, 900)
         self.assertEqual(request.allowed_max, 1100)
-        self.assertIn("900–1100", request.prompt)
+        self.assertIn("от 900 до 1 100 символов", request.prompt)
 
     def test_explicit_user_prompt_character_range_becomes_the_runtime_contract(self):
         """A saved human prompt must not leave a textual 10k–15k rule unenforced."""
@@ -193,7 +254,7 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(request.target_chars, 12500)
         self.assertEqual(request.allowed_min, 10000)
         self.assertEqual(request.allowed_max, 15000)
-        self.assertIn("10000–15000", request.prompt)
+        self.assertIn("от 10 000 до 15 000 символов", request.prompt)
 
     def test_scenario_length_contract_survives_session_roundtrip(self):
         from scriptor.session import _read_session, _session_data
@@ -281,7 +342,7 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(len(all_prompts), 2)
         self.assertEqual(len(selected_prompts), 1)
         self.assertTrue(all("CURRENT USER RULE" in prompt for prompt in [*all_prompts, *selected_prompts]))
-        self.assertTrue(all("10000–15000" in prompt for prompt in [*all_prompts, *selected_prompts]))
+        self.assertTrue(all("от 10 000 до 15 000 символов" in prompt for prompt in [*all_prompts, *selected_prompts]))
         self.assertTrue(all(job.length_status == "READY" for job in [*all_jobs, *selected_jobs]))
         self.assertTrue(all((job.request.target_chars, job.request.allowed_min, job.request.allowed_max) == (12500, 10000, 15000)
                             for job in [*all_jobs, *selected_jobs]))
