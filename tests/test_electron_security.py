@@ -57,6 +57,19 @@ class ElectronSecurityGateTests(unittest.TestCase):
         self.assertIn('run(pnpm, ["verify:secrets"])', immutable_wrapper)
         self.assertIn('run(pnpm, ["verify:dependencies"])', immutable_wrapper)
 
+
+    def test_sandboxed_preload_uses_commonjs_bridge(self):
+        """Sandboxed Electron renderers cannot load an ESM-import preload."""
+        main = (APP_ROOT / "electron" / "main.ts").read_text(encoding="utf-8")
+        preload = (APP_ROOT / "electron" / "preload.cts").read_text(encoding="utf-8")
+        tsconfig = (APP_ROOT / "electron" / "tsconfig.json").read_text(encoding="utf-8")
+
+        self.assertIn("sandbox: true", main)
+        self.assertIn("preload.cjs", main)
+        self.assertIn("require('electron')", preload)
+        self.assertNotIn("from 'electron'", preload)
+        self.assertIn('"*.cts"', tsconfig)
+
     def test_renderer_styles_do_not_require_remote_google_fonts_blocked_by_csp(self):
         """A secure packaged renderer must not depend on an external stylesheet for its base font."""
         styles = (APP_ROOT / "src" / "ui" / "styles.css").read_text(encoding="utf-8")
