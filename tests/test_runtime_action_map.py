@@ -38,12 +38,15 @@ class RuntimeActionMapTests(unittest.TestCase):
 
     def test_direct_preload_actions_have_electron_handlers_and_current_core_routes(self):
         """Dialog, snapshot, settings and OAuth APIs cannot bypass the current runtime."""
-        preload = (APP_ROOT / "electron" / "preload.mts").read_text(encoding="utf-8")
+        preload = (APP_ROOT / "electron" / "preload.cts").read_text(encoding="utf-8")
         main = (APP_ROOT / "electron" / "main.ts").read_text(encoding="utf-8")
         channels = set(re.findall(r"ipcRenderer\.invoke\('([^']+)'", preload))
         handled = set(re.findall(r"handleTrusted\('([^']+)'", main))
 
         self.assertFalse(channels - handled, f"Preload channels without Electron handler: {sorted(channels - handled)}")
+        self.assertIn("preload.cjs", main)
+        self.assertIn("require('electron')", preload)
+        self.assertNotIn("from 'electron'", preload)
         self.assertIn("assertTrustedIpcSender(event)", main)
         self.assertIn("assertAllowedCoreCommand(command)", main)
         self.assertIn("callCore('snapshot')", main)
