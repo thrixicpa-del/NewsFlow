@@ -98,6 +98,36 @@ describe("Media ingest workspaces", () => {
     expect(await screen.findByText(/Локальная text-модель недоступна/i)).toBeTruthy();
   });
 
+  it("shows truthful screen-text maintenance progress instead of the full base-index count", () => {
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          footageIndex: {
+            ...fallback.footageIndex,
+            indexed: 27797,
+            total: 27797,
+            englishUnchecked: 5,
+            status: {
+              stage: "screen-text",
+              active: true,
+              total: 5,
+              processed: 2,
+              indexed: 2,
+              failed: 0,
+              current: "clip-2.mp4",
+            },
+          },
+        }}
+        command={vi.fn()}
+        refresh={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/прочитано: 2 из 5 · осталось: 3 · 40%/i)).toBeTruthy();
+  });
+
   it("shows interrupted progress and truthful resumable counts", () => {
     render(
       <Footage
