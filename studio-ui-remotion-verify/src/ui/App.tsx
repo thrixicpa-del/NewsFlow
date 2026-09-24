@@ -13394,7 +13394,7 @@ export function VoiceProfiles({
         <div className="toolbar">
           <Button onClick={() => setPresetDialogOpen(false)}>Отмена</Button>
           <Button kind="primary" onClick={() => void confirmSavePreset()} disabled={!presetNameDraft.trim()}>
-            Сохранить пресет
+            Подтвердить сохранение
           </Button>
         </div>
       </Dialog>
