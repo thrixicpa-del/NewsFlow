@@ -1,4 +1,33 @@
 # -*- mode: python ; coding: utf-8 -*-
+import hashlib
+import json
+from pathlib import Path
+
+# Validate build inputs BEFORE collect_all/import hooks can start the build.
+# Hydrating a later Electron checkout cannot repair an existing Frozen Core.
+asset_contract = json.loads(
+    (Path(SPECPATH) / "studio-ui-remotion-verify" / "frozen-core-assets.json").read_text(encoding="utf-8")
+)
+asset = asset_contract["ffmpeg"]
+if (asset_contract.get("format") != 1 or asset.get("sourcePath") != "assets/ffmpeg.exe"
+        or asset.get("bundledPath") != "_internal/assets/ffmpeg.exe"):
+    raise RuntimeError("Invalid frozen-core-assets.json FFmpeg contract")
+ffmpeg_path = Path(SPECPATH) / asset["sourcePath"]
+if not ffmpeg_path.is_file():
+    raise RuntimeError(f"FFmpeg payload missing: {ffmpeg_path}; hydrate Git LFS before building Core")
+ffmpeg_bytes = ffmpeg_path.read_bytes()
+if ffmpeg_bytes.startswith(b"version https://git-lfs.github.com/spec/v1"):
+    raise RuntimeError("Git LFS pointer in assets/ffmpeg.exe; run Git LFS preparation before building Core")
+if len(ffmpeg_bytes) != asset["size"]:
+    raise RuntimeError("FFmpeg size mismatch; hydrate Git LFS before building Core")
+pe_offset = int.from_bytes(ffmpeg_bytes[60:64], "little")
+if (len(ffmpeg_bytes) < 64 or ffmpeg_bytes[:2] != b"MZ" or pe_offset < 64
+        or ffmpeg_bytes[pe_offset:pe_offset + 4] != b"PE\0\0"):
+    raise RuntimeError("FFmpeg is not a PE executable")
+if hashlib.sha256(ffmpeg_bytes).hexdigest() != asset["sha256"]:
+    raise RuntimeError("FFmpeg SHA-256 mismatch; hydrate Git LFS before building Core")
+del ffmpeg_bytes
+
 from PyInstaller.utils.hooks import collect_all
 
 datas = [("assets", "assets")]

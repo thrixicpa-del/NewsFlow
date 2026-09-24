@@ -1,3 +1,4 @@
+import { bundledFfmpegPath, verifyFrozenCoreAssets } from "./verify-frozen-core-assets.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
@@ -39,5 +40,23 @@ for (const entry of hashes.artifacts) {
     throw new Error(`Artifact hash mismatch: ${relative}`);
   }
 }
+
+// A self-consistent inventory can still describe an unusable LFS pointer.
+// Require and verify the exact preferred runtime path, not an imageio fallback.
+const coreRelative = "win-unpacked/resources/core-bin";
+const coreExeRelative = `${coreRelative}/NewsFlowCore.exe`;
+const ffmpegRelative = `${coreRelative}/${bundledFfmpegPath}`;
+for (const required of [coreExeRelative, ffmpegRelative]) {
+  const entries = hashes.artifacts.filter((entry) => String(entry.path).replace(/\\/g, "/") === required);
+  if (entries.length !== 1) {
+    throw new Error(`Required Core artifact absent from inventory or duplicated: ${required}`);
+  }
+}
+const packagedCoreSha = createHash("sha256")
+  .update(readFileSync(path.join(artifactRoot, coreExeRelative))).digest("hex");
+if (packagedCoreSha !== String(manifest.coreBinSha256).toLowerCase()) {
+  throw new Error("Packaged Core identity mismatch with build manifest");
+}
+verifyFrozenCoreAssets(path.join(artifactRoot, coreRelative), { smoke: args.includes("--media-smoke") });
 
 process.stdout.write(`IMMUTABLE_RC_VERIFY=PASS ${artifactRoot}\n`);

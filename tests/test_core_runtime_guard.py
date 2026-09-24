@@ -12,6 +12,8 @@ import time
 import unittest
 from pathlib import Path
 
+from tests.test_frozen_core_assets import install_fixture_asset
+
 ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "studio-ui-remotion-verify"
 
@@ -64,6 +66,7 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         core_bytes = b"fixture-core-binary"
         executable = fixture_core / "NewsFlowCore.exe"
         executable.write_bytes(core_bytes)
+        install_fixture_asset(fixture_app, fixture_core)
 
         lock = {
             "format": 1,

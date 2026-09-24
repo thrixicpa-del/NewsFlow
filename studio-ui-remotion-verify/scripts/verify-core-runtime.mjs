@@ -1,3 +1,4 @@
+import { verifyFrozenCoreAssets } from './verify-frozen-core-assets.mjs';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -96,6 +97,8 @@ for (const relative of requiredSources) {
     );
   }
 }
+
+verifyFrozenCoreAssets(path.dirname(executable));
 
 console.log(
   `Ядро NewsFlow актуально по содержимому: ${executable}; ` +

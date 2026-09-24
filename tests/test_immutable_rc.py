@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_frozen_core_assets import create_asset_fixture, run_node
+
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "studio-ui-remotion-verify"
 
@@ -84,38 +86,10 @@ class ImmutableRcTests(unittest.TestCase):
 
     def test_rc_verifier_rejects_a_tampered_packaged_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
-            prepared = subprocess.run(
-                ["node", "scripts/prepare-immutable-rc.mjs", "--output-root", directory, "--type", "TEST", "--rc", "04"],
-                cwd=APP,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(0, prepared.returncode, prepared.stdout + prepared.stderr)
-            artifact_root = Path(prepared.stdout.strip().splitlines()[-1])
-            exe = artifact_root / "NewsFlow Studio.exe"
-            exe.write_bytes(b"verified portable artifact")
-            subprocess.run(
-                ["node", "scripts/finalize-immutable-rc.mjs", "--directory", str(artifact_root)],
-                cwd=APP,
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-            verified = subprocess.run(
-                ["node", "scripts/verify-immutable-rc.mjs", "--directory", str(artifact_root)],
-                cwd=APP,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            fixture = create_asset_fixture(Path(directory))
+            verified = run_node(fixture.app, "verify-immutable-rc.mjs", "--directory", fixture.candidate)
             self.assertEqual(0, verified.returncode, verified.stdout + verified.stderr)
-            exe.write_bytes(b"tampered portable artifact")
-            rejected = subprocess.run(
-                ["node", "scripts/verify-immutable-rc.mjs", "--directory", str(artifact_root)],
-                cwd=APP,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            (fixture.candidate / "NewsFlow Studio.exe").write_bytes(b"tampered portable artifact")
+            rejected = run_node(fixture.app, "verify-immutable-rc.mjs", "--directory", fixture.candidate)
             self.assertNotEqual(0, rejected.returncode)
+            self.assertIn("Artifact hash mismatch", rejected.stderr)

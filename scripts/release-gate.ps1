@@ -132,7 +132,7 @@ try {
         Where-Object { $_.Name -notmatch 'uninstall' } |
         Select-Object -First 1
     if (-not $executable) { throw 'packaged-smoke failed: immutable package does not contain a launchable unpacked Electron EXE.' }
-    Invoke-GateStep -Name 'artifact-manifest' -FilePath 'node' -Arguments @('scripts/verify-immutable-rc.mjs', '--directory', $candidateRoot) -WorkingDirectory $appRoot
+    Invoke-GateStep -Name 'artifact-manifest' -FilePath 'node' -Arguments @('scripts/verify-immutable-rc.mjs', '--directory', $candidateRoot, '--media-smoke') -WorkingDirectory $appRoot
     Invoke-GateStep -Name 'packaged-smoke' -FilePath 'python' -Arguments @('tests/run_isolated.py', 'tests.test_electron_e2e', '-v') -Environment @{
         NEWSFLOW_RUN_ELECTRON_E2E = '1'
         NEWSFLOW_E2E_TARGET = 'packaged'
