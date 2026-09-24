@@ -8,6 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseLintTests(unittest.TestCase):
+    def test_release_lint_defaults_to_the_full_phase_zero_baseline_sha(self):
+        script = (ROOT / "scripts" / "release-lint.ps1").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "[string]$BaseRef = '654bdadc9ce673c072991298ad410687fdd6213b'",
+            script,
+        )
+
     def test_release_lint_checks_only_the_explicit_candidate_python_files(self):
         result = subprocess.run(
             [
