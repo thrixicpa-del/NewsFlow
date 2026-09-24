@@ -86,6 +86,7 @@ def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
             return _normalise_character_contract(target)
     return None
 
+
 def read_text_file(path: Path | str) -> str:
     file_path = Path(path)
     if file_path.suffix.lower() != ".txt":
@@ -150,6 +151,7 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange],
             allowed_max=contract[2] if contract else 0,
         ))
     return result
+
 
 def safe_filename(title: str, fallback: str = "Сценарий") -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', " ", title)
