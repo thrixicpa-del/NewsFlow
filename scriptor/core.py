@@ -36,13 +36,43 @@ class ScenarioRequest:
     allowed_max: int = 0
 
 
-def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
-    """Read an unambiguous human length range without treating arbitrary numbers as one.
+def _resolved_character_contract(target: int = 0, minimum: int = 0,
+                                 maximum: int = 0) -> tuple[int, int, int] | None:
+    """Normalize one structured character-length contract.
 
-    Presets already have structured range fields.  This is only the safe
-    compatibility bridge for an existing saved writer prompt that explicitly
-    states a character/sign range (for example ``10 000 - 15 000 символов``).
-    Dates, episode ranges and other numeric text are deliberately ignored.
+    A target by itself means "about this length" and receives a conservative
+    +/-10% runtime band. Explicit min/max always win. A min/max pair without a
+    target uses its midpoint so the repair prompt has a useful target too.
+    """
+    target = max(0, int(target or 0))
+    minimum = max(0, int(minimum or 0))
+    maximum = max(0, int(maximum or 0))
+    if not target and not minimum and not maximum:
+        return None
+    if target:
+        minimum = minimum or max(1, int(target * .9))
+        maximum = maximum or max(minimum, int(target * 1.1))
+    elif minimum and maximum:
+        target = (minimum + maximum) // 2
+    elif minimum:
+        target = minimum
+    elif maximum:
+        target = maximum
+    if minimum and maximum and minimum > maximum:
+        raise ValueError("Минимальная длина больше максимальной")
+    if minimum and target < minimum:
+        target = minimum
+    if maximum and target > maximum:
+        target = maximum
+    return target, minimum, maximum
+
+
+def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
+    """Read an explicit character contract from a legacy free-form prompt.
+
+    Structured preset fields are authoritative. This compatibility bridge also
+    understands a single target such as "10 000 символов", which older
+    versions previously ignored and therefore never verified with Python.
     """
     text = str(prompt or "")
     for match in re.finditer(r"(?P<minimum>\d[\d\s\u00a0]{0,8})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,8})", text, re.IGNORECASE):
@@ -52,7 +82,15 @@ def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
         minimum = int(re.sub(r"\D", "", match.group("minimum")))
         maximum = int(re.sub(r"\D", "", match.group("maximum")))
         if 0 < minimum <= maximum:
-            return (minimum + maximum) // 2, minimum, maximum
+            return _resolved_character_contract(0, minimum, maximum)
+    for match in re.finditer(
+        r"(?P<target>\d[\d\s\u00a0]{0,8})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
+        text,
+        re.IGNORECASE,
+    ):
+        target = int(re.sub(r"\D", "", match.group("target")))
+        if target > 0:
+            return _resolved_character_contract(target)
     return None
 
 
@@ -87,26 +125,32 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange]) 
         applicable = [item for item in ranges if item.start <= position <= item.end]
         extras = [item.prompt.strip() for item in applicable if item.prompt.strip()]
         length_range = next((item for item in reversed(applicable) if item.target_chars or item.allowed_min or item.allowed_max), None)
-        inferred_contract = _explicit_character_contract(template) if length_range is None else None
-        if length_range:
-            minimum = length_range.allowed_min or max(1, int(length_range.target_chars * .9))
-            maximum = length_range.allowed_max or max(minimum, int(length_range.target_chars * 1.1))
-            extras.append(
-                f"Длина готового сценария: цель {length_range.target_chars or 'по диапазону'} символов; "
-                f"допустимо {minimum}–{maximum} символов."
+        structured_contract = (
+            _resolved_character_contract(
+                length_range.target_chars, length_range.allowed_min, length_range.allowed_max,
             )
-        elif inferred_contract:
-            target, minimum, maximum = inferred_contract
+            if length_range else None
+        )
+        inferred_contract = _explicit_character_contract(template) if structured_contract is None else None
+        length_contract = structured_contract or inferred_contract
+        if length_contract:
+            target, minimum, maximum = length_contract
+            if minimum and maximum:
+                bounds = f"{minimum}–{maximum}"
+            elif minimum:
+                bounds = f"не меньше {minimum}"
+            else:
+                bounds = f"не больше {maximum}"
             extras.append(
-                f"Runtime-проверка длины: цель {target} символов; "
-                f"допустимо строго {minimum}–{maximum} символов."
+                f"Runtime-проверка длины: цель {target} символов; допустимо {bounds} символов. "
+                "Фактическая длина будет посчитана Python после ответа."
             )
         prompt = base + ("\n\nДополнительные требования:\n" + "\n".join(extras) if extras else "")
         result.append(ScenarioRequest(
             position - 1, title, prompt,
-            target_chars=length_range.target_chars if length_range else (inferred_contract[0] if inferred_contract else 0),
-            allowed_min=minimum if length_range or inferred_contract else 0,
-            allowed_max=maximum if length_range or inferred_contract else 0,
+            target_chars=length_contract[0] if length_contract else 0,
+            allowed_min=length_contract[1] if length_contract else 0,
+            allowed_max=length_contract[2] if length_contract else 0,
         ))
     return result
 
