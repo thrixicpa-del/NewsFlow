@@ -93,45 +93,49 @@ class MontageQueueStateTests(unittest.TestCase):
         return patches, plan_calls, render_calls
 
     def test_overlapping_queue_starts_have_one_owner_and_one_render(self):
-        """Two bridge calls racing before status persistence must not duplicate work."""
+        """Keep the owner before status persistence until the contender returns."""
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             settings, jobs = self._queue_settings(root, ["Only row"])
             patches, plan_calls, render_calls = self._queue_runtime_patches(
                 root, settings, ["Only row"], jobs,
             )
-            entered_session = 0
-            session_lock = threading.Lock()
-            both_entered = threading.Event()
+            owner_entered = threading.Event()
+            release_owner = threading.Event()
 
             def overlapping_session():
-                nonlocal entered_session
-                with session_lock:
-                    entered_session += 1
-                    if entered_session == 2:
-                        both_entered.set()
-                both_entered.wait(.3)
+                owner_entered.set()
+                if not release_owner.wait(10):
+                    raise RuntimeError("queue owner was not released by the test")
                 return ["Only row"], jobs
 
             results = []
             errors = []
+
+            def launch():
+                try:
+                    results.append(bridge.run_montage_queue({"indices": [0]}))
+                except Exception as exc:
+                    errors.append(str(exc))
+
+            threads = [threading.Thread(target=launch) for _ in range(2)]
             for context in patches:
                 context.start()
             try:
                 with patch.object(bridge, "load_session", side_effect=overlapping_session):
-                    def launch():
-                        try:
-                            results.append(bridge.run_montage_queue({"indices": [0]}))
-                        except (RuntimeError, ValueError) as exc:
-                            errors.append(str(exc))
-
-                    threads = [threading.Thread(target=launch) for _ in range(2)]
+                    try:
+                        threads[0].start()
+                        self.assertTrue(owner_entered.wait(5), "queue owner did not enter load_session")
+                        threads[1].start()
+                        threads[1].join(5)
+                        self.assertFalse(threads[1].is_alive(), "overlapping start was not rejected")
+                    finally:
+                        release_owner.set()
+                        for thread in threads:
+                            if thread.ident is not None:
+                                thread.join(5)
                     for thread in threads:
-                        thread.start()
-                    for thread in threads:
-                        thread.join(5)
-                        if thread.is_alive():
-                            errors.append("queue thread did not finish")
+                        self.assertFalse(thread.is_alive(), "queue thread did not finish")
             finally:
                 for context in reversed(patches):
                     context.stop()
