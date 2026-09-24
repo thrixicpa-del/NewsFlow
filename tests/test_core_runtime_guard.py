@@ -94,6 +94,38 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             check=False,
         )
 
+    def test_repository_lock_matches_current_source_and_package_revision(self):
+        lock = json.loads((APP_ROOT / "core-runtime-lock.json").read_text(encoding="utf-8"))
+        package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(lock["appVersion"], package["version"])
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r13")
+        self.assertEqual(
+            lock["coreExeSha256"],
+            "251b35eecf1c6a61051abce30c1a08b51e69bffa746a5415bd6d3785784c0db3",
+        )
+        self.assertEqual(lock["coreExeSize"], 34225663)
+        self.assertEqual(
+            lock["builtFromGitSha"],
+            "f6404e70a5d867eb24865df33237dcac6f70eea1",
+        )
+
+        resources = package["build"]["extraResources"]
+        core_resource = next(resource for resource in resources if resource.get("to") == "core-bin")
+        tcl_resource = next(resource for resource in resources if resource.get("to") == "core-tcl-data")
+        normalized_core = str(core_resource["from"]).replace("\\", "/")
+        normalized_tcl = str(tcl_resource["from"]).replace("\\", "/")
+        self.assertIn(lock["coreRevision"], normalized_core.split("/"))
+        self.assertIn(lock["coreRevision"], normalized_tcl.split("/"))
+
+        for relative in REQUIRED_SOURCES:
+            actual = _git_blob_sha((ROOT / relative).read_bytes())
+            self.assertEqual(
+                actual,
+                lock["sourceGitBlobs"][relative],
+                f"tracked Frozen Core lock is stale for {relative}",
+            )
+
     def test_guard_accepts_matching_content_even_when_checkout_mtimes_are_newer(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
             fixture_root, fixture_app, executable = self._fixture(temporary)
