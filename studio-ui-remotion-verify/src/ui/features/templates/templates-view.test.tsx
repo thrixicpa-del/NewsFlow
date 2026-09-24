@@ -28,8 +28,72 @@ describe("Template writing desk", () => {
 
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template: "Новый шаблон {title}",
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
       ranges: fallback.templateSettings.ranges,
     }));
+  });
+
+  it("sends the template character target to Core and persists it with a preset", async () => {
+    const command = vi.fn(async () => fallback);
+    render(<TemplateEditor data={fallback} command={command} />);
+
+    fireEvent.change(screen.getByLabelText("Цель знаков шаблона"), {
+      target: { value: "10000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить шаблон" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
+      template: fallback.templateSettings.template,
+      targetChars: 10000,
+      allowedMin: 0,
+      allowedMax: 0,
+      ranges: fallback.templateSettings.ranges,
+    }));
+
+    fireEvent.change(screen.getByPlaceholderText("Название нового пресета"), {
+      target: { value: "Десять тысяч" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить пресет" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-template-preset", {
+      name: "Десять тысяч",
+      template: fallback.templateSettings.template,
+      targetChars: 10000,
+      allowedMin: 0,
+      allowedMax: 0,
+      ranges: fallback.templateSettings.ranges,
+    }));
+  });
+
+  it("restores a preset-specific character target into the editor", () => {
+    const data = {
+      ...fallback,
+      templateSettings: {
+        ...fallback.templateSettings,
+        presets: [{
+          name: "Пятнадцать тысяч",
+          template: "Большой сценарий {title}",
+          targetChars: 15000,
+          allowedMin: 14000,
+          allowedMax: 16000,
+          ranges: [],
+        }],
+      },
+    };
+    render(<TemplateEditor data={data} command={vi.fn(async () => data)} />);
+
+    fireEvent.change(screen.getByLabelText("Сохранённый пресет"), {
+      target: { value: "Пятнадцать тысяч" },
+    });
+
+    expect((screen.getByLabelText("Цель знаков шаблона") as HTMLInputElement).value).toBe("15000");
+    expect((screen.getByLabelText("Минимум знаков шаблона") as HTMLInputElement).value).toBe("14000");
+    expect((screen.getByLabelText("Максимум знаков шаблона") as HTMLInputElement).value).toBe("16000");
+    expect((screen.getByLabelText("Базовый шаблон сценария") as HTMLTextAreaElement).value).toBe(
+      "Большой сценарий {title}",
+    );
   });
 
   it("saves a distinctive operator prompt and returns Prompt Studio to a clean state", async () => {
@@ -43,6 +107,9 @@ describe("Template writing desk", () => {
 
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
       ranges: fallback.templateSettings.ranges,
     }));
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
@@ -60,6 +127,9 @@ describe("Template writing desk", () => {
 
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template,
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
       ranges: fallback.templateSettings.ranges,
     }));
     expect((screen.getByLabelText("Базовый шаблон сценария") as HTMLTextAreaElement).value).toBe(template);
@@ -114,6 +184,9 @@ describe("Template writing desk", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Центр управления" })).toBeTruthy());
     expect(command).toHaveBeenCalledWith("save-template", {
       template: "Черновик для сохранения",
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
       ranges: fallback.templateSettings.ranges,
     });
   });
@@ -134,6 +207,9 @@ describe("Template writing desk", () => {
 
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-template", {
       template: "Ctrl+S шаблон",
+      targetChars: 0,
+      allowedMin: 0,
+      allowedMax: 0,
       ranges: fallback.templateSettings.ranges,
     }));
   });
