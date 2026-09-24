@@ -118,9 +118,12 @@ interface NewsFlowSnapshot {
   mediaResults: string[];
   templateSettings: {
     template: string;
+    targetChars?: number;
+    allowedMin?: number;
+    allowedMax?: number;
     ranges: Array<{ start: number; end: number; prompt: string; target_chars?: number; allowed_min?: number; allowed_max?: number }>;
     scenarioProvider?: 'agent' | 'openai';
-    presets?: Array<{ name: string; template: string; ranges: Array<{ start: number; end: number; prompt: string; target_chars?: number; allowed_min?: number; allowed_max?: number }> }>;
+    presets?: Array<{ name: string; template: string; targetChars?: number; allowedMin?: number; allowedMax?: number; ranges: Array<{ start: number; end: number; prompt: string; target_chars?: number; allowed_min?: number; allowed_max?: number }> }>;
     rangePresets?: Array<{ name: string; ranges: Array<{ start: number; end: number; prompt: string; target_chars?: number; allowed_min?: number; allowed_max?: number }> }>;
   };
   keyStatus: { fastgen: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; streams?: number; balance?: string; balanceStatus?: string }>; openai: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; streams?: number; balance?: string; balanceStatus?: string }>; voicer: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; streams?: number; balance?: string; balanceStatus?: string }>; lumean: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; streams?: number; balance?: string; balanceStatus?: string }>; voicegen: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; streams?: number; balance?: string; balanceStatus?: string }>; wproject: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; streams?: number; balance?: string; balanceStatus?: string }>; youtube: Array<{ label: string; active: boolean; fingerprint?: string; note?: string; balance?: string; balanceStatus?: string }> };
