@@ -78,6 +78,84 @@ class ScenarioGenerationTests(unittest.TestCase):
         save.assert_called_once_with(settings)
         self.assertIs(result, expected_snapshot)
 
+    def test_template_length_defaults_persist_with_the_active_template_and_preset(self):
+        template = "FULL_USER_PROMPT :: Напиши сценарий {title}"
+        settings = Settings()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_template({
+                "template": template,
+                "targetChars": 10000,
+                "allowedMin": 9500,
+                "allowedMax": 10500,
+            })
+            bridge.save_template_preset({
+                "name": "10k",
+                "template": template,
+                "ranges": [],
+                "targetChars": 10000,
+                "allowedMin": 9500,
+                "allowedMax": 10500,
+            })
+
+        self.assertEqual(
+            (settings.scenario_target_chars, settings.scenario_allowed_min, settings.scenario_allowed_max),
+            (10000, 9500, 10500),
+        )
+        preset = settings.scenario_templates[0]
+        self.assertEqual(
+            (preset["target_chars"], preset["allowed_min"], preset["allowed_max"]),
+            (10000, 9500, 10500),
+        )
+
+    def test_full_operator_prompt_reaches_both_scenario_provider_modes(self):
+        template = (
+            "FULL_USER_PROMPT_START\n"
+            "Не сокращай эти инструкции. Сохрани структуру и стиль пользователя.\n"
+            "Тема: {title}\n"
+            "FULL_USER_PROMPT_END"
+        )
+        title = "Проверочная тема"
+
+        class FakePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                return "а" * 10000
+
+        for provider in ("openai", "agent"):
+            settings = Settings(
+                scenario_provider=provider,
+                template=template,
+                prompt_ranges=[],
+                scenario_target_chars=10000,
+            )
+            pool = FakePool()
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=([title], [])), \
+                 patch.object(bridge, "save_session"), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=pool):
+                bridge.generate_scenarios({"provider": provider, "indices": [0]})
+
+            self.assertEqual(len(pool.prompts), 1)
+            prompt = pool.prompts[0]
+            expected_user_block = template.replace("{title}", title)
+            self.assertIn(expected_user_block, prompt)
+            self.assertIn("FULL_USER_PROMPT_START", prompt)
+            self.assertIn("FULL_USER_PROMPT_END", prompt)
+            self.assertIn("9000–11000", prompt)
+            if provider == "agent":
+                self.assertIn("Ты редактор новостных сценариев NewsFlow", prompt)
+            else:
+                self.assertNotIn("Ты редактор новостных сценариев NewsFlow", prompt)
+
     def test_openai_generation_preserves_saved_operator_prompt_and_persists_completed_script(self):
         template = "USER_PROMPT_MARKER :: Напиши сценарий именно по моей инструкции для {title}. Не заменяй этот текст."
         title = "Проверочная тема"
@@ -177,6 +255,22 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(request.allowed_min, 900)
         self.assertEqual(request.allowed_max, 1100)
         self.assertIn("900–1100", request.prompt)
+
+    def test_explicit_single_character_target_becomes_the_runtime_contract(self):
+        from scriptor.core import build_requests
+
+        prompt = (
+            "Напиши один готовый сценарий по теме {title}.\n"
+            "НЕОБХОДИМОЕ КОЛИЧЕСТВО СИМВОЛОВ: 10 000 символов. "
+            "Считать итоговую длину при помощи Python."
+        )
+
+        request = build_requests(["Текущая тема"], prompt, [])[0]
+
+        self.assertEqual(request.target_chars, 10000)
+        self.assertEqual(request.allowed_min, 9000)
+        self.assertEqual(request.allowed_max, 11000)
+        self.assertIn("9000–11000", request.prompt)
 
     def test_explicit_user_prompt_character_range_becomes_the_runtime_contract(self):
         """A saved human prompt must not leave a textual 10k–15k rule unenforced."""
