@@ -67,30 +67,67 @@ def _resolved_character_contract(target: int = 0, minimum: int = 0,
     return target, minimum, maximum
 
 
-def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
-    """Read an explicit character contract from a legacy free-form prompt.
+def parse_character_length_spec(value: str) -> tuple[int, int, int] | None:
+    """Parse an operator length field such as 10000 or 10 000–15 000.
 
-    Structured preset fields are authoritative. This compatibility bridge also
-    understands a single target such as "10 000 символов", which older
-    versions previously ignored and therefore never verified with Python.
+    A single number is an approximate target and receives +/-10% bounds for
+    reporting. A range keeps the exact requested min/max and uses its midpoint
+    as the prompt orientation target.
     """
+    text = " ".join(str(value or "").replace("\u00a0", " ").split()).strip()
+    if not text:
+        return None
+    range_match = re.fullmatch(
+        r"(?P<minimum>\d[\d ]{0,12})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d ]{0,12})(?:\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?))?",
+        text,
+        re.IGNORECASE,
+    )
+    if range_match:
+        minimum = int(re.sub(r"\D", "", range_match.group("minimum")))
+        maximum = int(re.sub(r"\D", "", range_match.group("maximum")))
+        if not minimum or not maximum or minimum > maximum:
+            raise ValueError("Некорректный диапазон длины сценария")
+        return _resolved_character_contract(0, minimum, maximum)
+    target_match = re.fullmatch(
+        r"(?P<target>\d[\d ]{0,12})(?:\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?))?",
+        text,
+        re.IGNORECASE,
+    )
+    if target_match:
+        target = int(re.sub(r"\D", "", target_match.group("target")))
+        if target <= 0:
+            raise ValueError("Длина сценария должна быть больше нуля")
+        return _resolved_character_contract(target)
+    raise ValueError("Укажите длину как 10000 или диапазон 10000-15000")
+
+
+def _format_character_count(value: int) -> str:
+    return f"{max(0, int(value or 0)):,}".replace(",", " ")
+
+
+def _explicit_character_contract(prompt: str) -> tuple[int, int, int] | None:
+    """Read a legacy free-form character requirement from the writer prompt."""
     text = str(prompt or "")
-    for match in re.finditer(r"(?P<minimum>\d[\d\s\u00a0]{0,8})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,8})", text, re.IGNORECASE):
-        nearby = text[max(0, match.start() - 120):match.end() + 120].casefold()
-        if not re.search(r"символ|знак|character", nearby):
-            continue
-        minimum = int(re.sub(r"\D", "", match.group("minimum")))
-        maximum = int(re.sub(r"\D", "", match.group("maximum")))
-        if 0 < minimum <= maximum:
-            return _resolved_character_contract(0, minimum, maximum)
     for match in re.finditer(
-        r"(?P<target>\d[\d\s\u00a0]{0,8})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
+        r"(?P<minimum>\d[\d\s\u00a0]{0,12})\s*(?:-|–|—|to)\s*(?P<maximum>\d[\d\s\u00a0]{0,12})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
         text,
         re.IGNORECASE,
     ):
-        target = int(re.sub(r"\D", "", match.group("target")))
-        if target > 0:
-            return _resolved_character_contract(target)
+        try:
+            return parse_character_length_spec(
+                f"{match.group('minimum')}-{match.group('maximum')}"
+            )
+        except ValueError:
+            continue
+    for match in re.finditer(
+        r"(?P<target>\d[\d\s\u00a0]{0,12})\s*(?:символ(?:ов|а)?|знак(?:ов|а)?|characters?)",
+        text,
+        re.IGNORECASE,
+    ):
+        try:
+            return parse_character_length_spec(match.group("target"))
+        except ValueError:
+            continue
     return None
 
 
@@ -141,13 +178,23 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange]) 
                 bounds = f"не меньше {minimum}"
             else:
                 bounds = f"не больше {maximum}"
+            formatted_target = _format_character_count(target)
+            if minimum and maximum:
+                requested = (
+                    f"от {_format_character_count(minimum)} до "
+                    f"{_format_character_count(maximum)} символов с пробелами"
+                )
+            elif minimum:
+                requested = f"не меньше {_format_character_count(minimum)} символов с пробелами"
+            else:
+                requested = f"не больше {_format_character_count(maximum)} символов с пробелами"
             extras.append(
                 "ОБЯЗАТЕЛЬНОЕ ТРЕБОВАНИЕ К ДЛИНЕ: "
-                f"требуемый объём готового сценария — {bounds} символов с пробелами; "
-                f"ориентир — около {target} символов. "
+                f"требуемый объём готового сценария — {requested}; "
+                f"ориентир — около {formatted_target} символов. "
                 "Для подсчёта количества символов используй Python. "
-                "Сразу верни готовый сценарий нужного объёма без служебного текста. "
-                "После ответа NewsFlow независимо пересчитает фактическую длину Python."
+                "Сразу верни только готовый сценарий нужного объёма без служебного текста. "
+                "NewsFlow после ответа независимо пересчитает фактическое количество символов Python."
             )
         prompt = base + ("\n\nДополнительные требования:\n" + "\n".join(extras) if extras else "")
         result.append(ScenarioRequest(
