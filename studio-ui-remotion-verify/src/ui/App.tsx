@@ -1833,7 +1833,10 @@ export function Ideas({
         onOpenChange={(open) => {
           if (deletingProduction) return;
           setProductionResetOpen(open);
-          if (!open) setProductionResetPhrase("");
+          if (!open) {
+            setProductionResetPhrase("");
+            onNotice?.("Удаление производства отменено.");
+          }
         }}
         title="Удалить всё производство"
         description="Ключи, каналы, OAuth и постоянные настройки сохранятся. Очереди и результаты текущего выпуска будут очищены."
