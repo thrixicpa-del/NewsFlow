@@ -263,6 +263,30 @@ class SchemaVersionSafetyTests(unittest.TestCase):
             self.assertEqual(restored_covers[0]["title"], "Текущая обложка")
 
 
+class ScenarioLengthSettingsTests(unittest.TestCase):
+    def test_template_length_defaults_survive_settings_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            isolated = root / "isolated"
+            with patch.dict(os.environ, {
+                "NEWSFLOW_TEST_MODE": "1",
+                "NEWSFLOW_TEST_ROOT": str(isolated),
+                "LOCALAPPDATA": str(isolated),
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(root / "production"),
+            }, clear=False), patch("scriptor.config.storyflow_documents_root", return_value=root / "media"):
+                save_settings(Settings(
+                    scenario_target_chars=10000,
+                    scenario_allowed_min=9500,
+                    scenario_allowed_max=10500,
+                ))
+                restored = load_settings()
+
+        self.assertEqual(
+            (restored.scenario_target_chars, restored.scenario_allowed_min, restored.scenario_allowed_max),
+            (10000, 9500, 10500),
+        )
+
+
 class CorruptSettingsSafetyTests(unittest.TestCase):
     def test_load_does_not_convert_corrupt_settings_into_default_state(self):
         """Replacing this error path with `data = {}` would destroy user state on a later save."""
