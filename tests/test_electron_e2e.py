@@ -88,6 +88,51 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             self.assertTrue(artifact.is_file())
             browser.close()
 
+    def test_preload_bridge_and_safe_core_command_round_trip(self):
+        """A packaged renderer must expose preload IPC and persist one local command."""
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+
+            bridge_types = page.evaluate("""() => ({
+                desktop: typeof window.newsflowDesktop,
+                snapshot: typeof window.newsflowDesktop?.snapshot,
+                command: typeof window.newsflowDesktop?.command,
+            })""")
+            self.assertEqual(
+                {"desktop": "object", "snapshot": "function", "command": "function"},
+                bridge_types,
+            )
+
+            plan = page.evaluate("""async () => {
+                const state = await window.newsflowDesktop.command("add-topics-to-plan", {
+                    topics: ["E2E preload bridge"],
+                    count: 2,
+                    provider: "agent",
+                    requirements: "",
+                });
+                return state.ideaPlan;
+            }""")
+            self.assertTrue(
+                any(item.get("topic") == "E2E preload bridge" and item.get("count") == 2 for item in plan),
+                plan,
+            )
+
+            refreshed = page.evaluate("""async () => {
+                const state = await window.newsflowDesktop.snapshot();
+                return state.ideaPlan;
+            }""")
+            self.assertTrue(
+                any(item.get("topic") == "E2E preload bridge" and item.get("count") == 2 for item in refreshed),
+                refreshed,
+            )
+            browser.close()
+
     def test_accessibility_and_ux_guards(self):
         self._launch()
         self._wait_for_cdp()
