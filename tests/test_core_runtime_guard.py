@@ -18,6 +18,7 @@ APP_ROOT = ROOT / "studio-ui-remotion-verify"
 REQUIRED_SOURCES = (
     "scriptor/bridge.py",
     "scriptor/ai_index.py",
+    "scriptor/config.py",
     "scriptor/timeline.py",
     "scriptor/core.py",
     "scriptor/thumbnail_prompt_v2.py",
@@ -158,6 +159,20 @@ class CoreRuntimeGuardTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("актуально по содержимому", result.stdout)
+
+    def test_guard_rejects_changed_settings_contract_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "config.py").write_text(
+                "# changed settings contract\n",
+                encoding="utf-8",
+            )
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scriptor/config.py", result.stderr)
+            self.assertIn("Пересоберите core-bin", result.stderr)
 
     def test_guard_rejects_changed_footage_index_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
