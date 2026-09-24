@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "appVersion": "2.1.152",
+  "coreRevision": "core-bin-2.1.152-observability-r12",
+  "coreExeSha256": "ed18c14b122bca2f8a49de3c4dd497d4cc3e1f733c20564f0c3d2687bdb83023",
+  "coreExeSize": 29741194,
+  "builtFromGitSha": "09a191d735300e2c4af9af5a0802c3a9c1620f59",
+  "sourceGitBlobs": {
+    "scriptor/bridge.py": "f8148a3ab36183a3dc2d7e460c4fe769592a28f3",
+    "scriptor/timeline.py": "d2eec941cda44972256fb7f1020b930dec95c0e9",
+    "scriptor/core.py": "cae9d10f0863df38169cfa6134b6a1a435568a43",
+    "scriptor/thumbnail_prompt_v2.py": "36afbb3f135857b8cb2f68774620f90f07ca5865",
+    "scriptor/observability.py": "cd4524d258b41f3b659395d3772561a24632e3bd",
+    "bridge_main.py": "abb479996f873ca96d8f9efc6805608cb4a4dd7b"
+  }
+}
