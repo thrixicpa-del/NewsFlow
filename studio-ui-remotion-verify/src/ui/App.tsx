@@ -1255,6 +1255,8 @@ export function Ideas({
   const [deletingSelectedTopics, setDeletingSelectedTopics] = useState(false);
   const clearProductionLock = useRef(false);
   const [deletingProduction, setDeletingProduction] = useState(false);
+  const [productionResetOpen, setProductionResetOpen] = useState(false);
+  const [productionResetPhrase, setProductionResetPhrase] = useState("");
   const generationLock = useRef(false);
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
   const suggestDirectionsLock = useRef(false);
@@ -1599,21 +1601,14 @@ export function Ideas({
         "Не удалось очистить список. Проверьте уведомление сверху.",
       );
   };
-  const startNewRelease = async () => {
+  const startNewRelease = () => {
     if (clearProductionLock.current) return;
-    if (!window.confirm("Вы действительно хотите удалить всё производство?")) {
-      onNotice?.("Удаление производства отменено.");
-      return;
-    }
-    const confirmationPhrase = window.prompt(
-      "Для подтверждения введите:\nУДАЛИТЬ ПРОИЗВОДСТВО",
-      "",
-    );
-    if (confirmationPhrase === null) {
-      onNotice?.("Удаление производства отменено.");
-      return;
-    }
-    const normalizedPhrase = confirmationPhrase.trim();
+    setProductionResetPhrase("");
+    setProductionResetOpen(true);
+  };
+  const confirmNewRelease = async () => {
+    if (clearProductionLock.current) return;
+    const normalizedPhrase = productionResetPhrase.trim();
     if (normalizedPhrase !== "УДАЛИТЬ ПРОИЗВОДСТВО") {
       onNotice?.("Фраза подтверждения не совпадает. Производство не удалено.");
       return;
@@ -1625,7 +1620,11 @@ export function Ideas({
         confirmed: true,
         confirmationPhrase: normalizedPhrase,
       });
-      if (result) onNotice?.("Производство удалено.");
+      if (result) {
+        setProductionResetOpen(false);
+        setProductionResetPhrase("");
+        onNotice?.("Производство удалено.");
+      }
     } finally {
       clearProductionLock.current = false;
       setDeletingProduction(false);
@@ -1829,6 +1828,40 @@ export function Ideas({
           {deletingProduction ? "Удаление производства…" : "Удалить всё производство"}
         </Button>
       </Toolbar>
+      <Dialog
+        open={productionResetOpen}
+        onOpenChange={(open) => {
+          if (deletingProduction) return;
+          setProductionResetOpen(open);
+          if (!open) setProductionResetPhrase("");
+        }}
+        title="Удалить всё производство"
+        description="Ключи, каналы, OAuth и постоянные настройки сохранятся. Очереди и результаты текущего выпуска будут очищены."
+      >
+        <Input
+          label="Контрольная фраза"
+          value={productionResetPhrase}
+          onChange={(event) => setProductionResetPhrase(event.target.value)}
+          placeholder="УДАЛИТЬ ПРОИЗВОДСТВО"
+          autoFocus
+        />
+        <small>Для подтверждения введите точно: УДАЛИТЬ ПРОИЗВОДСТВО</small>
+        <div className="toolbar">
+          <Button
+            onClick={() => {
+              setProductionResetOpen(false);
+              setProductionResetPhrase("");
+              onNotice?.("Удаление производства отменено.");
+            }}
+            disabled={deletingProduction}
+          >
+            Отмена
+          </Button>
+          <Button kind="danger" onClick={() => void confirmNewRelease()} disabled={deletingProduction}>
+            {deletingProduction ? "Удаление производства…" : "Подтвердить удаление"}
+          </Button>
+        </div>
+      </Dialog>
       <section className="panel publication-target-widget">
         <b>
           План публикации: нужно {data.publication.allocation.counters.required}{" "}
@@ -2453,6 +2486,8 @@ export function Scenarios({
   const [draft, setDraft] = useState("");
   const [manualTitle, setManualTitle] = useState("");
   const [manualText, setManualText] = useState("");
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameTitle, setRenameTitle] = useState("");
   const manualImportLock = useRef(false);
   const [importingManualScenario, setImportingManualScenario] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -2542,9 +2577,19 @@ export function Scenarios({
     const item = data.scenarios.find(
       (scenario) => scenario.index === selected[0],
     );
-    const title = window.prompt("Название сценария", item?.title ?? "");
-    if (title?.trim())
-      void command("rename-scenario", { index: selected[0], title });
+    setRenameTitle(item?.title ?? "");
+    setRenameOpen(true);
+  };
+  const confirmRename = async () => {
+    if (selected.length !== 1 || !renameTitle.trim()) return;
+    const result = await command("rename-scenario", {
+      index: selected[0],
+      title: renameTitle.trim(),
+    });
+    if (result) {
+      setRenameOpen(false);
+      setRenameTitle("");
+    }
   };
   const remove = () => {
     if (selected.length) {
@@ -2605,6 +2650,28 @@ export function Scenarios({
   };
   return (
     <div className="nf-scenarios">
+      <Dialog
+        open={renameOpen}
+        onOpenChange={(open) => {
+          setRenameOpen(open);
+          if (!open) setRenameTitle("");
+        }}
+        title="Изменить тему сценария"
+        description="Введите новое название выбранного сценария."
+      >
+        <Input
+          label="Новое название сценария"
+          value={renameTitle}
+          onChange={(event) => setRenameTitle(event.target.value)}
+          autoFocus
+        />
+        <div className="toolbar">
+          <Button onClick={() => setRenameOpen(false)}>Отмена</Button>
+          <Button kind="primary" onClick={() => void confirmRename()} disabled={!renameTitle.trim()}>
+            Сохранить название
+          </Button>
+        </div>
+      </Dialog>
       <Toolbar label="Действия со сценариями">
         <Button kind="primary" onClick={add}>
           <Upload size={17} />
@@ -13187,6 +13254,8 @@ export function VoiceProfiles({
   const [defaultProfileId, setDefaultProfileId] = useState(data.voiceDefaultProfileId || data.voiceProfiles[0]?.id || "");
   const [queueConcurrency, setQueueConcurrency] = useState(data.voiceQueueConcurrency || 20);
   const [active, setActive] = useState(0);
+  const [presetDialogOpen, setPresetDialogOpen] = useState(false);
+  const [presetNameDraft, setPresetNameDraft] = useState("");
   useEffect(() => {
     setProfiles(data.voiceProfiles);
     setRanges(data.voiceRanges);
@@ -13247,15 +13316,23 @@ export function VoiceProfiles({
     profiles, ranges, defaultProfileId, queueConcurrency,
   });
   const savePreset = () => {
-    const name = window.prompt("Название пресета диапазонов и голосов");
-    if (name?.trim())
-      void command("save-voice-range-preset", {
-        name,
-        profiles,
-        ranges,
-        defaultProfileId,
-        keyFailover: data.voiceKeyFailover,
-      });
+    setPresetNameDraft("");
+    setPresetDialogOpen(true);
+  };
+  const confirmSavePreset = async () => {
+    const name = presetNameDraft.trim();
+    if (!name) return;
+    const result = await command("save-voice-range-preset", {
+      name,
+      profiles,
+      ranges,
+      defaultProfileId,
+      keyFailover: data.voiceKeyFailover,
+    });
+    if (result) {
+      setPresetDialogOpen(false);
+      setPresetNameDraft("");
+    }
   };
   const addRange = () =>
     setRanges((current) => [
@@ -13296,6 +13373,28 @@ export function VoiceProfiles({
   );
   return (
     <div className="split">
+      <Dialog
+        open={presetDialogOpen}
+        onOpenChange={(open) => {
+          setPresetDialogOpen(open);
+          if (!open) setPresetNameDraft("");
+        }}
+        title="Сохранить пресет голосов"
+        description="Название будет использоваться для набора профилей и диапазонов."
+      >
+        <Input
+          label="Название пресета"
+          value={presetNameDraft}
+          onChange={(event) => setPresetNameDraft(event.target.value)}
+          autoFocus
+        />
+        <div className="toolbar">
+          <Button onClick={() => setPresetDialogOpen(false)}>Отмена</Button>
+          <Button kind="primary" onClick={() => void confirmSavePreset()} disabled={!presetNameDraft.trim()}>
+            Сохранить пресет
+          </Button>
+        </div>
+      </Dialog>
       <section className="panel list-panel">
         <div className="panel-title">
           <div>
@@ -14441,12 +14540,45 @@ export function Sessions({
   data: NewsFlowSnapshot;
   command: Command;
 }) {
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
+  const [sessionLabel, setSessionLabel] = useState("");
   const add = () => {
-    const label = window.prompt("Название новой Chrome-сессии");
-    if (label?.trim()) void command("add-session", { label });
+    setSessionLabel("");
+    setSessionDialogOpen(true);
+  };
+  const confirmAddSession = async () => {
+    const label = sessionLabel.trim();
+    if (!label) return;
+    const result = await command("add-session", { label });
+    if (result) {
+      setSessionDialogOpen(false);
+      setSessionLabel("");
+    }
   };
   return (
     <div className="nf-settings nf-structured-settings" aria-label="Structured settings: sessions">
+      <Dialog
+        open={sessionDialogOpen}
+        onOpenChange={(open) => {
+          setSessionDialogOpen(open);
+          if (!open) setSessionLabel("");
+        }}
+        title="Добавить Chrome-сессию"
+        description="Создайте отдельный постоянный профиль авторизации."
+      >
+        <Input
+          label="Название Chrome-сессии"
+          value={sessionLabel}
+          onChange={(event) => setSessionLabel(event.target.value)}
+          autoFocus
+        />
+        <div className="toolbar">
+          <Button onClick={() => setSessionDialogOpen(false)}>Отмена</Button>
+          <Button kind="primary" onClick={() => void confirmAddSession()} disabled={!sessionLabel.trim()}>
+            Создать сессию
+          </Button>
+        </div>
+      </Dialog>
       <SessionUsagePanel data={data} command={command} />
       <div className="toolbar">
         <Button kind="primary" onClick={add}>
