@@ -120,17 +120,31 @@ class ParallelRunner:
             return True
 
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+        if job.request.allowed_min and job.request.allowed_max:
+            bounds_label = f"{job.request.allowed_min}–{job.request.allowed_max}"
+            length_instruction = (
+                f"строго от {job.request.allowed_min} до {job.request.allowed_max} знаков"
+            )
+        elif job.request.allowed_min:
+            bounds_label = f"не менее {job.request.allowed_min}"
+            length_instruction = f"не менее {job.request.allowed_min} знаков"
+        else:
+            bounds_label = f"не более {job.request.allowed_max}"
+            length_instruction = f"не более {job.request.allowed_max} знаков"
+        target_hint = (
+            f" Цель: {job.request.target_chars} знаков."
+            if job.request.target_chars else ""
+        )
         for attempt in range(1, 3):
             job.length_repair_attempts = attempt
             job.error = (
-                f"Длина {actual_chars} знаков вне диапазона "
-                f"{job.request.allowed_min}–{job.request.allowed_max}; корректировка {attempt}/2"
+                f"Длина {actual_chars} знаков вне требования {bounds_label}; "
+                f"корректировка {attempt}/2"
             )
             self._notify(job)
             repair_prompt = (
                 "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
-                f"Верни только готовый сценарий длиной строго от {job.request.allowed_min} "
-                f"до {job.request.allowed_max} знаков (цель: {job.request.target_chars} знаков). "
+                f"Верни только готовый сценарий длиной {length_instruction}.{target_hint} "
                 "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
                 f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
             )
@@ -151,8 +165,7 @@ class ParallelRunner:
         job.state = RunState.ERROR
         job.error = (
             f"После {job.length_repair_attempts} корректировок длина сценария "
-            f"осталась {job.actual_chars} знаков; требуется {job.request.allowed_min}–"
-            f"{job.request.allowed_max}"
+            f"осталась {job.actual_chars} знаков; требуется {bounds_label}"
         )
         return False
 
