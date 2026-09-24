@@ -8623,7 +8623,7 @@ export function Footage({
   // there are no new clips. Keep its result visible instead of replacing the
   // progress strip with the generic global "saved" toast.
   const [lastIndexRun, setLastIndexRun] = useState<{
-    mode: "scan" | "semantic";
+    mode: "scan" | "semantic" | "screenText";
     startedAt: number;
     finishedAt?: number;
     message: string;
@@ -8663,11 +8663,15 @@ export function Footage({
     data.footageIndex.indexed,
     Number(indexStatus.indexed || 0),
   );
-  const indexTotal = Math.max(
-    data.footageIndex.total,
-    Number(indexStatus.total || 0),
+  const maintenanceStage = ["semantic", "screen-text"].includes(
+    String(indexStatus.stage || ""),
   );
-  const processed = Math.max(indexed, Number(indexStatus.processed || 0));
+  const indexTotal = maintenanceStage
+    ? Number(indexStatus.total || 0)
+    : Math.max(data.footageIndex.total, Number(indexStatus.total || 0));
+  const processed = maintenanceStage
+    ? Number(indexStatus.processed || 0)
+    : Math.max(indexed, Number(indexStatus.processed || 0));
   const remaining = Math.max(0, indexTotal - processed);
   const progress = indexTotal
     ? Math.min(100, Math.round((processed / indexTotal) * 100))
@@ -8707,28 +8711,29 @@ export function Footage({
       indexRequested &&
       indexStatus.active === false &&
       indexStatus.stage &&
-      !["scan", "embedding", "semantic"].includes(indexStatus.stage)
+      !["scan", "embedding", "semantic", "screen-text"].includes(indexStatus.stage)
     ) {
       setIndexRequested(false);
     }
   }, [indexRequested, indexStatus.active, indexStatus.stage]);
-  const indexLibrary = async (enhance = false) => {
+  const indexLibrary = async (mode: "scan" | "semantic" | "screenText" = "scan") => {
     if (indexLock.current) return;
     indexLock.current = true;
-    const mode = enhance ? "semantic" : "scan";
     const startedAt = Date.now();
     setIndexRequested(true);
     setLastIndexRun({
       mode,
       startedAt,
-      message: enhance
+      message: mode === "semantic"
         ? "Уточняются смысловые метки уже проиндексированных клипов…"
-        : "Проверяются новые и изменённые файлы…",
+        : mode === "screenText"
+          ? "Проверяются сохранённые векторы English/Latin текста…"
+          : "Проверяются новые и изменённые файлы…",
     });
     try {
       const state = await command(
         "index-footage",
-        enhance ? { enhance: true } : undefined,
+        mode === "semantic" ? { enhance: true } : mode === "screenText" ? { screenText: true } : undefined,
       );
       const result = (
         state as
@@ -8739,6 +8744,7 @@ export function Footage({
                 indexed?: number;
                 skipped?: number;
                 failed?: number;
+                screenText?: { checked?: number; blocked?: number; safe?: number; uncertain?: number; modelReady?: boolean };
               };
             })
           | undefined
@@ -8749,12 +8755,18 @@ export function Footage({
         startedAt,
         finishedAt: Date.now(),
         message: result?.processed
-          ? enhance
+          ? mode === "semantic"
             ? "Смысловые метки обновлены."
-            : "ИИ-индекс обновлён."
-          : enhance
+            : mode === "screenText"
+              ? "Проверка English/Latin текста завершена."
+              : "ИИ-индекс обновлён."
+          : mode === "semantic"
             ? "Новых клипов для улучшения нет: все доступные клипы уже уточнены."
-            : "Новых или изменённых файлов не найдено.",
+            : mode === "screenText"
+              ? result?.screenText?.modelReady === false
+                ? "Локальная text-модель недоступна: проверка не запускалась. Сначала выполните «Улучшить ИИ-индекс» в этом приложении."
+                : "Проверка English/Latin текста уже актуальна: новых векторов нет."
+              : "Новых или изменённых файлов не найдено.",
         processed: Number(result?.processed || 0),
         total: Number(result?.total || 0),
         indexed: Number(result?.indexed || 0),
@@ -8810,7 +8822,7 @@ export function Footage({
               onClick={
                 indexing || !data.footageIndex.indexed
                   ? undefined
-                  : () => void indexLibrary(true)
+                  : () => void indexLibrary("semantic")
               }
             >
               <WandSparkles size={16} />
@@ -8856,6 +8868,30 @@ export function Footage({
             </small>
           </div>
         )}
+      </section>
+      <section className="panel footage-semantic-tools">
+        <div className="panel-title">
+          <div>
+            <b>Проверка English/Latin текста</b>
+            <small>
+              Проверяет уже сохранённые векторы клипов и исключает только
+              явные английские/латинские надписи. Исходные видео повторно не
+              открываются и базовая индексация не запускается.
+            </small>
+          </div>
+          <div className="toolbar compact">
+            <Button
+              onClick={
+                indexing || !data.footageIndex.indexed
+                  ? undefined
+                  : () => void indexLibrary("screenText")
+              }
+            >
+              <WandSparkles size={16} />
+              Проверить English/Latin текст
+            </Button>
+          </div>
+        </div>
       </section>
       <section className="panel footage-folders">
         <div className="panel-title">
