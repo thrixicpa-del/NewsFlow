@@ -78,7 +78,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.fresh_calls += 1
                 self.budgets.append(max_output_tokens)
                 self.repair_prompt = prompt
-                return "б" * 10000
+                return "б" * 5000
 
         client = LengthClient()
         request = ScenarioRequest(
@@ -90,11 +90,36 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.budgets, [9216, 9216])
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].length_status, "READY")
-        self.assertEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(jobs[0].actual_chars, 10002)
         self.assertEqual(jobs[0].length_repair_attempts, 1)
+        self.assertIn("ПРОДОЛЖИ", client.repair_prompt)
         self.assertIn("len(text.strip())", client.repair_prompt)
         self.assertIn("9000", client.repair_prompt)
         self.assertIn("11000", client.repair_prompt)
+
+    async def test_fifteen_thousand_character_contract_is_completed_from_short_provider_segments(self):
+        class SegmentedClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                return "а" * 5000
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                return "б" * 5000
+
+        client = SegmentedClient()
+        request = ScenarioRequest(
+            0, "S", "P", target_chars=15000, allowed_min=13500, allowed_max=120000,
+        )
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 2)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].length_status, "READY")
+        self.assertEqual(jobs[0].actual_chars, 15004)
+        self.assertEqual(jobs[0].length_repair_attempts, 2)
 
     async def test_one_sided_minimum_length_is_repaired_with_a_truthful_instruction(self):
         class MinimumClient:
@@ -156,7 +181,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 return "мало"
 
         client = AlwaysShortClient()
-        request = ScenarioRequest(0, "S", "P", target_chars=12, allowed_min=10, allowed_max=14)
+        request = ScenarioRequest(0, "S", "P", target_chars=120, allowed_min=100, allowed_max=140)
         jobs = await ParallelRunner(client, 1).run([request])
 
         self.assertEqual(client.fresh_calls, 2)

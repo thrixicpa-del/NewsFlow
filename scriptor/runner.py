@@ -122,6 +122,23 @@ def scenario_length_repair_instruction(request: ScenarioRequest) -> str:
     return "Верни только полный готовый сценарий."
 
 
+def scenario_length_continuation_instruction(request: ScenarioRequest, actual_chars: int) -> str:
+    """Tell the provider to extend one short result instead of restarting it."""
+    needed_total = max(request.target_chars, request.allowed_min)
+    remaining = max(1, needed_total - actual_chars)
+    maximum = max(0, request.allowed_max - actual_chars) if request.allowed_max else 0
+    upper_bound = f" Не добавляй более {maximum} знаков." if maximum else ""
+    return (
+        "Это продолжение уже написанного сценария, а не новая версия. ПРОДОЛЖИ текст строго с места, "
+        "на котором он заканчивается: не повторяй начало, не пересказывай готовые абзацы и не добавляй "
+        "заголовки или комментарии. "
+        f"Уже сохранено {actual_chars} знаков; добавь примерно {remaining} знаков, чтобы общий текст "
+        f"соответствовал требованию {scenario_length_requirement(request)}.{upper_bound} "
+        "Перед отправкой сам проверь длину добавленного продолжения и помни: NewsFlow склеит оба фрагмента "
+        "и проверит итог через len(text.strip()). Верни только следующий фрагмент сценария."
+    )
+
+
 
 
 class ParallelRunner:
@@ -185,22 +202,32 @@ class ParallelRunner:
                 f"Корректировка длины {attempt}/2."
             )
             self._notify(job)
-            repair_prompt = (
-                "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
-                f"{scenario_length_repair_instruction(job.request)} "
-                "ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину готового сценария "
-                "по правилу Python len(text.strip()); не печатай собственный подсчет символов и не считай "
-                "его доказательством соответствия. NewsFlow после ответа независимо повторит ту же проверку. "
-                "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
-                f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
-            )
-            job.result = await self._generate_for_request(generate_fresh, repair_prompt, job.request)
-            if looks_like_action_required(job.result):
+            if status == "SHORT":
+                repair_prompt = (
+                    f"{scenario_length_continuation_instruction(job.request, actual_chars)}\n\n"
+                    f"УЖЕ НАПИСАННЫЙ ТЕКСТ:\n{job.result.strip()}"
+                )
+            else:
+                repair_prompt = (
+                    "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
+                    f"{scenario_length_repair_instruction(job.request)} "
+                    "ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину готового сценария "
+                    "по правилу Python len(text.strip()); не печатай собственный подсчет символов и не считай "
+                    "его доказательством соответствия. NewsFlow после ответа независимо повторит ту же проверку. "
+                    "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
+                    f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
+                )
+            repaired_text = await self._generate_for_request(generate_fresh, repair_prompt, job.request)
+            if looks_like_action_required(repaired_text):
                 job.length_status = "FAILED"
-                job.actual_chars = len(str(job.result or "").strip())
+                job.actual_chars = len(str(repaired_text or "").strip())
                 job.state = RunState.PAUSED
                 job.error = "Текстовый агент не вернул сценарий при корректировке длины"
                 return False
+            if status == "SHORT":
+                job.result = f"{job.result.rstrip()}\n\n{repaired_text.strip()}"
+            else:
+                job.result = repaired_text
             status, actual_chars = scenario_length_status(job.request, job.result)
             job.length_status = status
             job.actual_chars = actual_chars
