@@ -102,6 +102,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("len(text.strip())", client.repair_prompt)
         self.assertIn("9000", client.repair_prompt)
         self.assertIn("11000", client.repair_prompt)
+        self.assertIn("следующий нераскрытый смысловой блок", client.repair_prompt)
 
     async def test_fifteen_thousand_character_contract_is_completed_from_short_provider_segments(self):
         class SegmentedClient:
@@ -226,7 +227,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("не менее 9000 знаков", client.prompts[0])
         self.assertNotIn("9000 до 0", client.prompts[0])
 
-    async def test_one_sided_maximum_length_is_repaired_with_a_truthful_instruction(self):
+    async def test_one_sided_maximum_length_is_trimmed_without_a_rewrite(self):
         class MaximumClient:
             def __init__(self):
                 self.fresh_calls = 0
@@ -237,20 +238,18 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             async def generate_fresh(self, prompt, on_progress=None):
                 self.fresh_calls += 1
-                self.prompts.append(prompt)
-                return "а" * 10000
+                raise AssertionError("long result must be trimmed, not rewritten")
 
         client = MaximumClient()
         request = ScenarioRequest(0, "S", "P", target_chars=10000, allowed_max=10000)
         jobs = await ParallelRunner(client, 1).run([request])
 
-        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].length_status, "READY")
-        self.assertIn("не более 10000 знаков", client.prompts[0])
-        self.assertNotIn("0 до 10000", client.prompts[0])
+        self.assertLessEqual(jobs[0].actual_chars, 10000)
 
-    async def test_exhausted_length_repairs_need_user_action_instead_of_terminal_error(self):
+    async def test_exhausted_length_repairs_keep_the_best_script_without_an_error(self):
         class AlwaysShortClient:
             fresh_calls = 0
 
@@ -266,11 +265,10 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         jobs = await ParallelRunner(client, 1).run([request])
 
         self.assertEqual(client.fresh_calls, 2)
-        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].length_status, "SHORT")
         self.assertEqual(jobs[0].length_repair_attempts, 2)
-        self.assertNotEqual(jobs[0].state, RunState.ERROR)
-        self.assertIn("После 2 корректировок", jobs[0].error)
+        self.assertEqual(jobs[0].error, "")
 
     async def test_in_range_script_finishes_after_one_provider_response(self):
         class LengthClient:

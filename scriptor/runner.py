@@ -132,7 +132,9 @@ def scenario_length_continuation_instruction(request: ScenarioRequest, actual_ch
     return (
         "Это продолжение уже написанного сценария, а не новая версия. ПРОДОЛЖИ текст строго с места, "
         "на котором он заканчивается: не повторяй начало, не пересказывай готовые абзацы и не добавляй "
-        "заголовки или комментарии. "
+        "заголовки или комментарии. Молча выдели уже раскрытые тезисы и напиши только следующий "
+        "нераскрытый смысловой блок: новый факт, контекст, позицию участника, последствие, риск, "
+        "хронологический этап или вывод — без повторения прежних общих формулировок. "
         f"Уже сохранено {actual_chars} знаков; добавь примерно {remaining} знаков, чтобы общий текст "
         f"соответствовал требованию {scenario_length_requirement(request)}.{upper_bound} "
         "Перед отправкой сам проверь длину добавленного продолжения и помни: NewsFlow склеит оба фрагмента "
@@ -153,6 +155,18 @@ def continuation_repeats_draft(draft: str, continuation: str) -> bool:
     return repeated >= max(3, math.ceil(len(continuation_ngrams) * .10))
 
 
+def trim_text_to_sentence_boundary(text: str, allowed_max: int) -> str:
+    """Keep text inside a maximum without asking the provider to rewrite it."""
+    text = str(text or "").strip()
+    if not allowed_max or len(text) <= allowed_max:
+        return text
+    prefix = text[:allowed_max]
+    endpoint = max(prefix.rfind(mark) for mark in ".!?…")
+    if endpoint >= 0:
+        return prefix[:endpoint + 1].strip()
+    return prefix.rstrip()
+
+
 def trim_continuation_to_fit(draft: str, continuation: str, allowed_max: int) -> str:
     """Keep a unique continuation within the contract without restarting it.
 
@@ -160,19 +174,12 @@ def trim_continuation_to_fit(draft: str, continuation: str, allowed_max: int) ->
     range.  Do not ask it to rewrite the complete scenario in that case: keep
     only complete sentences that fit after the already accepted draft.
     """
-    text = str(continuation or "").strip()
-    if not allowed_max or not text:
-        return text
+    if not allowed_max:
+        return str(continuation or "").strip()
     available = allowed_max - len(str(draft or "").rstrip()) - 2
-    if available <= 0 or len(text) <= available:
-        return text if available > 0 else ""
-
-    prefix = text[:available]
-    endpoint = max(prefix.rfind(mark) for mark in ".!?…")
-    # Do not append a tiny, contextless fragment merely to satisfy the range.
-    if endpoint + 1 < min(120, max(1, available // 2)):
+    if available <= 0:
         return ""
-    return prefix[:endpoint + 1].strip()
+    return trim_text_to_sentence_boundary(continuation, available)
 
 
 def scenario_length_repair_limit(request: ScenarioRequest, actual_chars: int) -> int:
@@ -232,7 +239,7 @@ class ParallelRunner:
         return await method(prompt)
 
     async def _repair_length_if_needed(self, job: Job) -> bool:
-        """Make at most two explicit repairs before asking the operator to decide."""
+        """Finish a single scenario without full-text rewrites or length errors."""
         status, actual_chars = scenario_length_status(job.request, job.result)
         job.length_status = status
         job.actual_chars = actual_chars
@@ -240,31 +247,23 @@ class ParallelRunner:
             job.length_repair_attempts = 0
             return True
 
+        if status == "LONG":
+            job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
+            status, actual_chars = scenario_length_status(job.request, job.result)
+            job.length_status = status
+            job.actual_chars = actual_chars
+            if status != "SHORT":
+                job.length_repair_attempts = 0
+                return True
+
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
         repair_limit = scenario_length_repair_limit(job.request, actual_chars)
         for attempt in range(1, repair_limit + 1):
             job.length_repair_attempts = attempt
-            job.error = (
-                f"Длина {actual_chars} знаков вне требования "
-                f"{scenario_length_requirement(job.request)}. "
-                f"Корректировка длины {attempt}/{repair_limit}."
+            repair_prompt = (
+                f"{scenario_length_continuation_instruction(job.request, actual_chars)}\n\n"
+                f"УЖЕ НАПИСАННЫЙ ТЕКСТ:\n{job.result.strip()}"
             )
-            self._notify(job)
-            if status == "SHORT":
-                repair_prompt = (
-                    f"{scenario_length_continuation_instruction(job.request, actual_chars)}\n\n"
-                    f"УЖЕ НАПИСАННЫЙ ТЕКСТ:\n{job.result.strip()}"
-                )
-            else:
-                repair_prompt = (
-                    "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
-                    f"{scenario_length_repair_instruction(job.request)} "
-                    "ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину готового сценария "
-                    "по правилу Python len(text.strip()); не печатай собственный подсчет символов и не считай "
-                    "его доказательством соответствия. NewsFlow после ответа независимо повторит ту же проверку. "
-                    "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
-                    f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
-                )
             repaired_text = await self._generate_for_request(generate_fresh, repair_prompt, job.request)
             if looks_like_action_required(repaired_text):
                 job.length_status = "FAILED"
@@ -274,11 +273,6 @@ class ParallelRunner:
                 return False
             if status == "SHORT":
                 if continuation_repeats_draft(job.result, repaired_text):
-                    job.error = (
-                        f"Корректировка длины {attempt}/{repair_limit} повторяет уже написанный текст; "
-                        "она не добавлена к сценарию."
-                    )
-                    self._notify(job)
                     continue
                 accepted_continuation = trim_continuation_to_fit(
                     job.result,
@@ -286,20 +280,10 @@ class ParallelRunner:
                     job.request.allowed_max,
                 )
                 if not accepted_continuation:
-                    job.error = (
-                        f"Корректировка длины {attempt}/{repair_limit} не содержит полного предложения, "
-                        "которое помещается в верхнюю границу; она не добавлена к сценарию."
-                    )
-                    self._notify(job)
                     continue
                 candidate = f"{job.result.rstrip()}\n\n{accepted_continuation}"
                 candidate_status, _candidate_chars = scenario_length_status(job.request, candidate)
                 if candidate_status == "LONG":
-                    job.error = (
-                        f"Корректировка длины {attempt}/{repair_limit} превышает верхнюю границу; "
-                        "она не добавлена к сценарию."
-                    )
-                    self._notify(job)
                     continue
                 job.result = candidate
             else:
@@ -310,13 +294,11 @@ class ParallelRunner:
             if status == "READY":
                 return True
 
-        job.state = RunState.PAUSED
-        job.error = (
-            f"После {job.length_repair_attempts} корректировок длина сценария "
-            f"осталась {job.actual_chars} знаков; требуется "
-            f"{scenario_length_requirement(job.request)}. Проверьте текст и запустите выбранный сценарий повторно."
-        )
-        return False
+        # A usable script is preferable to turning a completed creative task
+        # into an error merely because the model stopped early.  Its actual
+        # length remains in the snapshot for an informative UI label.
+        job.error = ""
+        return True
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:
