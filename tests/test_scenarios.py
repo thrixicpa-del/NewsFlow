@@ -157,7 +157,10 @@ class ScenarioGenerationTests(unittest.TestCase):
                 self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", prompt)
                 self.assertIn("Целевой объем: 10000 символов", prompt)
                 self.assertIn("Допустимый итоговый диапазон: 9000–11000 символов", prompt)
+                self.assertIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", prompt)
+                self.assertIn("ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину", prompt)
                 self.assertIn("len(text.strip())", prompt)
+                self.assertIn("а не слова, токены или приблизительный объем", prompt)
                 self.assertLess(
                     prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
                     prompt.index("FULL_USER_PROMPT_BEGIN"),
