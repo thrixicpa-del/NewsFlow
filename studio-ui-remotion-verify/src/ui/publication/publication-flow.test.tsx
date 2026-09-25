@@ -62,6 +62,54 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
   });
 
+  it("navigates assignments both channel-to-video and video-to-channel with stable numbers", async () => {
+    const data = {
+      ...base,
+      channels: [
+        { id: "channel-a", channel: "channel-a", name: "Первый канал", subscribers: "30 000", status: "Подключён", oauthConnected: true, monetaryAccess: true },
+        { id: "channel-b", channel: "channel-b", name: "Второй канал", subscribers: "20 000", status: "Подключён", oauthConnected: true, monetaryAccess: false },
+      ],
+      publication: {
+        ...base.publication,
+        v2: {
+          ...base.publication.v2,
+          channelRules: {
+            "channel-a": { channelId: "channel-a", enabled: true, quota: 2, monetized: true, channelPriority: 10 },
+            "channel-b": { channelId: "channel-b", enabled: true, quota: 2, monetized: false, channelPriority: 0 },
+          },
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+    const command = vi.fn().mockResolvedValue({
+      ...data,
+      publicationPreview: {
+        assignments: [
+          { productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "" },
+          { productionItemId: "item-uploaded", channelId: "channel-b", source: "auto", locked: false, reason: "balanced", publishAt: "" },
+        ],
+      },
+    });
+
+    render(<PublicationPage data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+
+    const channelFilter = await screen.findByLabelText("Фильтр назначений по каналу");
+    const videoFilter = screen.getByLabelText("Фильтр назначений по ролику");
+    expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Канал 2 — Второй канал" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Ролик 1 — Готовый ролик" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Ролик 2 — Уже загруженный ролик" })).toBeInTheDocument();
+
+    fireEvent.change(channelFilter, { target: { value: "channel-b" } });
+    expect(screen.getByLabelText("Канал для Уже загруженный ролик")).toHaveValue("channel-b");
+    expect(screen.queryByLabelText("Канал для Готовый ролик")).toBeNull();
+
+    fireEvent.change(channelFilter, { target: { value: "all" } });
+    fireEvent.change(videoFilter, { target: { value: "item-ready" } });
+    expect(screen.getByLabelText("Канал для Готовый ролик")).toHaveValue("channel-a");
+    expect(screen.queryByLabelText("Канал для Уже загруженный ролик")).toBeNull();
+  });
+
   it("applies and saves named channel-rule presets through the command contract", async () => {
     const command = vi.fn().mockResolvedValue(base);
     render(<PublicationPage data={base} command={command} />);
