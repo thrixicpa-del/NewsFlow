@@ -5154,13 +5154,25 @@ def refresh_analytics(payload: dict) -> dict:
                     continue
                 if window_start <= metric_at <= now:
                     recent_views += int(metric.get("views", 0) or 0)
+            monetized = bool(channel.get("monetary_access", False) or report.get("financialAvailable", False))
             channel.update({
                 "channel_id": profile["channelId"], "name": profile["name"],
                 "thumbnail_url": profile.get("thumbnailUrl", ""),
                 "subscribers": str(profile["subscribers"]), "views_total": profile["viewsTotal"],
                 "views_hour": str(views_delta), "views_48h": str(recent_views),
+                "monetary_access": monetized,
                 "status": "Аналитика обновлена",
             })
+            if monetized and profile_id not in (settings.youtube_channel_publication_rules or {}):
+                rules = dict(settings.youtube_channel_publication_rules or {})
+                rules[profile_id] = normalize_channel_publication_rule({
+                    "channelId": profile_id,
+                    "enabled": True,
+                    "quota": 0,
+                    "monetized": True,
+                    "channelPriority": 10,
+                })
+                settings.youtube_channel_publication_rules = rules
             if report.get("errors"):
                 channel["analytics_note"] = "Часть метрик пока недоступна: " + str(report["errors"][0])
             else:
@@ -15304,13 +15316,17 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
         if not selected_channels:
             raise ValueError("Выберите хотя бы один канал для массового диапазона.")
         try:
-            max_per_channel = max(1, int(bulk_schedule.get("maxPerChannel", 1)))
+            max_per_channel = max(0, int(bulk_schedule.get("maxPerChannel", 0) or 0))
         except (TypeError, ValueError) as error:
-            raise ValueError("Укажите положительный лимит роликов на канал.") from error
+            raise ValueError("Дополнительный лимит роликов на канал должен быть неотрицательным числом.") from error
         rules = [
             {
                 **rule,
-                "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel),
+                "quota": (
+                    min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel)
+                    if max_per_channel
+                    else max(0, int(rule.get("quota", 0) or 0))
+                ),
             }
             for rule in rules
             if str(rule.get("channelId", "")).strip() in selected_channels

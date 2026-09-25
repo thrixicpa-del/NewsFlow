@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -238,6 +239,36 @@ class PublicationV2DistributionTests(unittest.TestCase):
         ])
         self.assertEqual(settings.youtube_publication_assignments, {})
 
+
+    def test_bridge_bulk_range_without_extra_cap_preserves_channel_quota(self):
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "name": "A"}],
+            youtube_oauth_tokens={"channel-a": "{\"token\": \"a\"}"},
+            youtube_publication_items={
+                f"pi-{index}": {
+                    "productionItemId": f"pi-{index}",
+                    "readiness": {"state": "VIDEO_READY"},
+                }
+                for index in range(3)
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 3},
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({"bulkSchedule": {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "12:00",
+                "timezone": "Europe/Minsk",
+                "channelIds": ["channel-a"],
+                "maxPerChannel": 0,
+            }})
+
+        rows = result["publicationPreview"]["assignments"]
+        self.assertEqual([row["channelId"] for row in rows], ["channel-a", "channel-a", "channel-a"])
 
     def test_bridge_auto_preview_excludes_orphan_channel_rule_when_real_channels_are_known(self):
         """A stale rule for a removed/unconnected channel must never receive new auto assignments."""
@@ -768,6 +799,175 @@ class PublicationV2PresetTests(unittest.TestCase):
         self.assertEqual(restored.youtube_publication_plan_versions, settings.youtube_publication_plan_versions)
 
 class PublicationV2SchedulerTests(unittest.TestCase):
+    def test_adaptive_bulk_range_enforces_three_hour_minimum_per_channel(self):
+        """Three auto-planned videos on one channel must be at least 180 minutes apart."""
+        assignments = [
+            {
+                "productionItemId": f"{channel}-{number}",
+                "channelId": channel,
+                "source": "auto",
+                "locked": False,
+                "reason": "balanced",
+            }
+            for channel in ("channel-a", "channel-b")
+            for number in range(1, 4)
+        ]
+        rules = {
+            channel: {
+                "channelId": channel,
+                "timezone": "Europe/Minsk",
+                "intervalMinutes": 180,
+            }
+            for channel in ("channel-a", "channel-b")
+        }
+
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "12:00",
+                "timezone": "Europe/Minsk",
+                "spacingStrategy": "adaptive_jittered",
+            },
+            rules,
+        )
+
+        self.assertTrue(all(not row.get("scheduleWarning") for row in scheduled))
+        slots = [datetime.fromisoformat(str(row["publishAt"])) for row in scheduled]
+        self.assertEqual(len(slots), 6)
+        self.assertEqual(len(set(slots)), 6)
+        self.assertTrue(all(slot.minute in {0, 15, 30, 45} for slot in slots))
+        for channel in ("channel-a", "channel-b"):
+            channel_slots = sorted(
+                datetime.fromisoformat(str(row["publishAt"]))
+                for row in scheduled
+                if row["channelId"] == channel
+            )
+            gaps = [int((after - before).total_seconds() // 60) for before, after in pairwise(channel_slots)]
+            self.assertTrue(all(gap >= 180 for gap in gaps), gaps)
+
+    def test_adaptive_bulk_range_reports_interval_conflict_in_too_small_window(self):
+        assignments = [
+            {
+                "productionItemId": f"item-{number}",
+                "channelId": "channel-a",
+                "source": "auto",
+                "locked": False,
+                "reason": "balanced",
+            }
+            for number in range(1, 4)
+        ]
+
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "08:00",
+                "timezone": "Europe/Minsk",
+                "spacingStrategy": "adaptive_jittered",
+            },
+            {"channel-a": {"channelId": "channel-a", "timezone": "Europe/Minsk", "intervalMinutes": 180}},
+        )
+
+        ready = [row for row in scheduled if row.get("publishAt")]
+        blocked = [row for row in scheduled if row.get("scheduleWarning")]
+        self.assertEqual(len(ready), 2)
+        self.assertEqual(len(blocked), 1)
+        self.assertIn("минимальный интервал 180 минут", blocked[0]["scheduleWarning"])
+        self.assertNotIn("publishAt", blocked[0])
+
+    def test_adaptive_bulk_range_honors_operator_window_quotas(self):
+        """Window priorities cap their own slots without changing channel assignment."""
+        assignments = [
+            {
+                "productionItemId": f"item-{number}",
+                "channelId": "channel-a" if number % 2 else "channel-b",
+                "source": "auto",
+                "locked": False,
+                "reason": "balanced",
+            }
+            for number in range(1, 7)
+        ]
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "22:00",
+                "timezone": "Europe/Minsk",
+                "spacingStrategy": "adaptive_jittered",
+                "timeWindows": [
+                    {"id": "morning", "startTime": "03:00", "endTime": "12:00", "quota": 2, "enabled": True},
+                    {"id": "day", "startTime": "12:00", "endTime": "17:00", "quota": 4, "enabled": True},
+                    {"id": "evening", "startTime": "17:00", "endTime": "22:00", "quota": 0, "enabled": False},
+                ],
+            },
+            {
+                "channel-a": {"channelId": "channel-a", "timezone": "Europe/Minsk"},
+                "channel-b": {"channelId": "channel-b", "timezone": "Europe/Minsk"},
+            },
+        )
+
+        slots = [datetime.fromisoformat(str(row["publishAt"])) for row in scheduled]
+        self.assertTrue(all(not row.get("scheduleWarning") for row in scheduled))
+        self.assertEqual(sum(3 * 60 <= slot.hour * 60 + slot.minute < 12 * 60 for slot in slots), 2)
+        self.assertEqual(sum(12 * 60 <= slot.hour * 60 + slot.minute <= 17 * 60 for slot in slots), 4)
+        self.assertEqual(len(set(slots)), 6)
+
+    def test_adaptive_bulk_range_keeps_channel_safety_rules_when_compacting(self):
+        """A dense selected period may not bypass a channel's own hard limits."""
+        assignments = [
+            {
+                "productionItemId": f"item-{number}",
+                "channelId": "channel-a",
+                "source": "auto",
+                "locked": False,
+                "reason": "balanced",
+            }
+            for number in range(1, 4)
+        ]
+        rules = {
+            "channel-a": {
+                "channelId": "channel-a",
+                "timezone": "Europe/Minsk",
+                "publishWindowStart": "06:00",
+                "publishWindowEnd": "12:00",
+                "maxVideosPerHour": 1,
+                "topicCooldownMinutes": 90,
+                "dailyCap": 3,
+                "blackoutPeriods": [{
+                    "start": "2026-11-15T08:00:00+03:00",
+                    "end": "2026-11-15T08:45:00+03:00",
+                    "label": "операционное окно",
+                }],
+            },
+        }
+
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "12:00",
+                "timezone": "Europe/Minsk",
+                "spacingStrategy": "adaptive_jittered",
+            },
+            rules,
+            item_topics={"item-1": "iran", "item-2": "iran", "item-3": "iran"},
+        )
+
+        self.assertTrue(all(not row.get("scheduleWarning") for row in scheduled))
+        self.assertEqual(
+            validate_publication_schedule(
+                scheduled,
+                rules,
+                item_topics={"item-1": "iran", "item-2": "iran", "item-3": "iran"},
+            ),
+            [],
+        )
+
     def test_bulk_range_schedules_each_channel_independently_on_quarter_hour_grid(self):
         """A bulk window is a per-channel boundary, never one global timeline shared by every channel."""
         assignments = [

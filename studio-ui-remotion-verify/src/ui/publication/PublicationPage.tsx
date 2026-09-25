@@ -26,6 +26,14 @@ type Preview = {
     scheduleSuggestion?: string;
   }>;
 };
+type TimeWindow = {
+  id: "morning" | "day" | "evening";
+  label: string;
+  startTime: string;
+  endTime: string;
+  quota: number;
+  enabled: boolean;
+};
 type BulkSchedule = {
   date: string;
   startTime: string;
@@ -33,6 +41,7 @@ type BulkSchedule = {
   timezone: string;
   channelIds: string[];
   maxPerChannel: number;
+  timeWindows: TimeWindow[];
 };
 
 const uploadableStatuses = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED"]);
@@ -64,7 +73,12 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     endTime: "10:00",
     timezone: "Europe/Minsk",
     channelIds: model.channels.filter((channel) => channel.enabled).map((channel) => channel.channelId),
-    maxPerChannel: 1,
+    maxPerChannel: 0,
+    timeWindows: [
+      { id: "morning", label: "Первая половина дня · 03:00–12:00", startTime: "03:00", endTime: "12:00", quota: 0, enabled: true },
+      { id: "day", label: "Днём · 12:00–17:00", startTime: "12:00", endTime: "17:00", quota: 0, enabled: false },
+      { id: "evening", label: "Вечером · 17:00–22:00", startTime: "17:00", endTime: "22:00", quota: 0, enabled: false },
+    ],
   }));
   const uploadStartRef = useRef(false);
   const confirmRef = useRef(false);
@@ -101,7 +115,13 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   const buildPreview = async (range?: BulkSchedule) => {
     const payload = {
       ...(selectedVideoIds.length ? { productionItemIds: selectedVideoIds } : {}),
-      ...(range ? { bulkSchedule: range } : {}),
+      ...(range ? {
+        bulkSchedule: {
+          ...range,
+          timeWindows: range.timeWindows.map(({ id, startTime, endTime, quota, enabled }) => ({ id, startTime, endTime, quota, enabled })),
+          spacingStrategy: "adaptive_jittered" as const,
+        },
+      } : {}),
     };
     const result = Object.keys(payload).length
       ? await command("preview-publication-v2-distribution", payload)
@@ -304,6 +324,11 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
   };
   const updateDistribution = (id: string, patch: Partial<DistributionRow>) =>
     rememberDistribution(distribution.map((row) => row.productionItemId === id ? { ...row, ...patch } : row));
+  const updateTimeWindow = (id: TimeWindow["id"], patch: Partial<TimeWindow>) =>
+    setBulkSchedule((current) => ({
+      ...current,
+      timeWindows: current.timeWindows.map((window) => window.id === id ? { ...window, ...patch } : window),
+    }));
 
   const dayPlanRows: DistributionRow[] = distribution.length
     ? distribution
@@ -333,7 +358,8 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     <PublicationHeader
       model={model}
       onReadiness={refreshReadiness}
-      onPreview={() => void buildPreview()}
+      onPreview={() => void buildPreview(bulkSchedule.date ? bulkSchedule : undefined)}
+      onOpenPlanner={() => setTab("distribution")}
       onStart={() => void start()}
       starting={uploadStarting}
       canStart={headerCanStart}
@@ -362,6 +388,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         <label>Пресет<select aria-label="Пресет правил каналов" value={selectedPresetName} onChange={(event) => setSelectedPresetName(event.target.value)}><option value="">Выберите…</option>{model.rulePresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}</select></label>
         <UiButton variant="secondary" disabled={!selectedPresetName} onClick={() => void applyPreset()}>Применить</UiButton>
         <UiButton variant="ghost" disabled={!selectedPresetName} onClick={() => void deletePreset()}>Удалить</UiButton>
+        <UiButton variant="secondary" onClick={() => void command("refresh-analytics")}><RefreshCw size={15}/>Обновить каналы</UiButton>
         <label>Новый пресет<input aria-label="Название нового пресета" value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder="Будни / Срочные новости"/></label>
         <UiButton variant="secondary" disabled={!presetName.trim()} onClick={() => void savePreset()}>Сохранить текущие</UiButton>
       </div>
@@ -397,12 +424,13 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       <section className="nf-bulk-schedule" aria-label="Массовое планирование">
         <div>
           <b>Массовый диапазон по каналам</b>
-          <small>Каждый канал строит собственную сетку с собственным интервалом/timezone. Время только :00 / :15 / :30 / :45.</small>
+          <small>Каждый канал строит собственную сетку по своему timezone/окну; авто-распределение держит минимум 3 часа между роликами одного канала. Время только :00 / :15 / :30 / :45.</small>
         </div>
         <label>Дата диапазона<input aria-label="Дата диапазона" type="date" value={bulkSchedule.date} onChange={(event) => setBulkSchedule((current) => ({ ...current, date: event.target.value }))}/></label>
         <label>Начало диапазона<input aria-label="Начало диапазона" type="time" step="900" value={bulkSchedule.startTime} onChange={(event) => setBulkSchedule((current) => ({ ...current, startTime: event.target.value }))}/></label>
         <label>Конец диапазона<input aria-label="Конец диапазона" type="time" step="900" value={bulkSchedule.endTime} onChange={(event) => setBulkSchedule((current) => ({ ...current, endTime: event.target.value }))}/></label>
-        <label>Максимум роликов на канал<input aria-label="Максимум роликов на канал" type="number" min="1" value={bulkSchedule.maxPerChannel} onChange={(event) => setBulkSchedule((current) => ({ ...current, maxPerChannel: Math.max(1, Number(event.target.value) || 1) }))}/></label>
+        <label>Доп. максимум на канал<input aria-label="Максимум роликов на канал" type="number" min="0" value={bulkSchedule.maxPerChannel || ""} placeholder="по квоте канала" onChange={(event) => setBulkSchedule((current) => ({ ...current, maxPerChannel: Math.max(0, Number(event.target.value) || 0) }))}/></label>
+        <fieldset className="nf-time-window-priorities"><legend>Приоритет времени</legend><small>Включите нужные окна. «Авто» распределит оставшиеся ролики между активными окнами; числом задаётся точная квота.</small>{bulkSchedule.timeWindows.map((window) => <div key={window.id} className="nf-time-window-priority"><label><input aria-label={`Включить ${window.label}`} type="checkbox" checked={window.enabled} onChange={(event) => updateTimeWindow(window.id, { enabled: event.target.checked })}/>{window.label}</label><label>Роликов <input aria-label={`Роликов ${window.label}`} type="range" min="0" max="20" value={window.quota} onChange={(event) => updateTimeWindow(window.id, { quota: Number(event.target.value) || 0 })}/><output>{window.quota || "Авто"}</output></label></div>)}</fieldset>
         <div className="nf-bulk-channel-list" aria-label="Каналы диапазона">
           {rules.filter((channel) => channel.enabled).map((channel) => <label key={channel.channelId}>
             <input

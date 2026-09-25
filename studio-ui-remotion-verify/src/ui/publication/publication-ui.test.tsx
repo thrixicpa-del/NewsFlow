@@ -3,6 +3,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { PublicationPage } from "./PublicationPage";
 import { PublicationHistory } from "./PublicationHistory";
+import { DistributionTable } from "./DistributionTable";
+import { buildPublicationView } from "./view-model";
 
 const command = vi.fn().mockResolvedValue(undefined);
 
@@ -130,6 +132,66 @@ describe("PublicationPage", () => {
     expect(metricValue("MP4 готовы")).toHaveTextContent("84");
     expect(metricValue("Новые packages")).toHaveTextContent("0");
     expect(metricValue("Свободно по квотам")).toHaveTextContent("88");
+  });
+
+  it("uses refreshed monetization as default priority while preserving an explicit override", () => {
+    const discovered = buildPublicationView(fixture);
+    expect(discovered.channels.slice(0, 3).map((channel) => channel.channelPriority)).toEqual([10, 10, 0]);
+
+    const overridden = buildPublicationView({
+      ...fixture,
+      publication: {
+        ...fixture.publication,
+        v2: {
+          ...fixture.publication.v2,
+          channelRules: {
+            "channel-1": { channelId: "channel-1", monetized: true, channelPriority: 0 },
+          },
+        },
+      },
+    } as unknown as NewsFlowSnapshot);
+
+    expect(overridden.channels[0].monetized).toBe(true);
+    expect(overridden.channels[0].channelPriority).toBe(0);
+  });
+
+  it("keeps channel numbers stable when earlier channels are excluded", () => {
+    const channels = buildPublicationView({
+      ...fixture,
+      publication: {
+        ...fixture.publication,
+        v2: {
+          ...fixture.publication.v2,
+          channelRules: {
+            "channel-1": { channelId: "channel-1", enabled: false, quota: 0 },
+            "channel-2": { channelId: "channel-2", enabled: true, quota: 2 },
+          },
+        },
+      },
+    } as unknown as NewsFlowSnapshot).channels;
+
+    expect(channels[0].number).toBe(1);
+    expect(channels[1].number).toBe(2);
+
+    render(<DistributionTable
+      rows={[{
+        productionItemId: "item-1",
+        title: "Ролик 1",
+        duration: "10:00",
+        channelId: "channel-2",
+        channelName: "Канал 2",
+        source: "auto",
+        locked: false,
+        reason: "balanced",
+        publishAt: "",
+        warning: "",
+      }]}
+      channels={channels}
+      onChange={vi.fn()}
+    />);
+
+    expect(screen.queryByRole("option", { name: "Канал 1 — Канал 1" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Канал 2 — Канал 2" })).toBeInTheDocument();
   });
 
   it("keeps ProductionItem ID inspectable without replacing the human video title", () => {

@@ -36,7 +36,7 @@ export interface CriticalCommandPayloads {
   "generate-seo": { indices?: number[]; provider?: "agent" | "openai" };
   "generate-tags": { indices?: number[]; provider?: "agent" | "openai" };
   "set-publication-v2-item-priority": { productionItemId: string; priority: number };
-  "preview-publication-v2-distribution": { productionItemIds?: string[]; bulkSchedule?: { date: string; startTime: string; endTime: string; timezone: string; channelIds: string[]; maxPerChannel: number } };
+  "preview-publication-v2-distribution": { productionItemIds?: string[]; bulkSchedule?: { date: string; startTime: string; endTime: string; timezone: string; channelIds: string[]; maxPerChannel: number; spacingStrategy?: "adaptive_jittered"; timeWindows?: Array<{ id: "morning" | "day" | "evening"; startTime: string; endTime: string; quota: number; enabled: boolean }> } };
   "confirm-publication-v2-distribution": { assignments?: Array<Record<string, unknown>> };
   "save-publication-v2-rule-preset": { name: string; rules: Record<string, Record<string, unknown>> };
   "apply-publication-v2-rule-preset": { name: string };

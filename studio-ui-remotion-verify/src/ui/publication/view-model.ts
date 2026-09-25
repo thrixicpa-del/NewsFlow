@@ -72,9 +72,10 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
   })) as QueueRow[];
   const queueByProduction = new Map(queue.map((item) => [item.productionItemId, item]));
   const assignments = record(rawV2.assignments);
-  const channels = data.channels.map((channel, index) => ({ channel, id: channelId(channel, index) }));
+  const channels = data.channels.map((channel, index) => ({ channel, id: channelId(channel, index), number: index + 1 }));
   const rules = record(rawV2.channelRules);
   const names = new Map(channels.map(({ channel, id }) => [id, channel.name || channel.channel || id]));
+  const channelNumbers = new Map(channels.map(({ id, number }) => [id, number]));
 
   const coverByProduction = new Map(
     (data.covers || [])
@@ -161,6 +162,7 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
       mp3Ready,
       metadataReady,
       channelId: assignedChannel,
+      channelNumber: channelNumbers.get(assignedChannel) || 0,
       channelName: names.get(assignedChannel) || (assignedChannel ? assignedChannel : "—"),
       publishAt: text(execution?.publishAt || assignment.publishAt),
       assignmentType: assignment.locked ? "LOCKED" : text(assignment.source || (execution ? "AUTO" : "—")),
@@ -170,13 +172,25 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
     return { ...row, status: statusFor(row) };
   }).sort((a, b) => a.number - b.number);
 
-  const channelRows: ChannelRow[] = channels.map(({ channel, id }) => ({
-    ...defaultRule(id, record(rules[id])),
+  const channelRows: ChannelRow[] = channels.map(({ channel, id, number }) => {
+    const savedRule = record(rules[id]);
+    const detectedMonetization = Boolean((channel as any).monetaryAccess ?? (channel as any).monetary_access);
+    const hasSavedPriority = Object.prototype.hasOwnProperty.call(savedRule, "channelPriority");
+    return {
+    ...defaultRule(id, {
+      ...savedRule,
+      // Fresh channel metadata is the default for a newly discovered channel.
+      // Saved values, including explicit false/0, remain operator overrides.
+      monetized: typeof savedRule.monetized === "boolean" ? savedRule.monetized : detectedMonetization,
+      channelPriority: hasSavedPriority ? savedRule.channelPriority : (detectedMonetization ? 10 : 0),
+    }),
+    number,
     name: channel.name || channel.channel || id,
     oauthConnected: Boolean(channel.oauthConnected),
     subscribers: channel.subscribers || "—",
     assigned: videoRows.filter((video) => video.channelId === id).length,
-  }));
+    };
+  });
   const receiptsRaw = record(rawV2.receipts);
   const receipts: ReceiptRow[] = Object.entries(receiptsRaw).map(([snapshotId, raw]) => {
     const receipt = record(raw);

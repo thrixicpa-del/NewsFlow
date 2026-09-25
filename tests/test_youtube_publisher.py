@@ -1088,6 +1088,52 @@ class PublicationJobTests(unittest.TestCase):
 
         self.assertEqual(rows, [{"averageViewPercentage": 62.5, "video": "abc123", "views": 210}])
 
+    def test_analytics_refresh_seeds_new_monetized_channel_priority_without_overwriting_saved_rule(self):
+        settings = Settings(
+            youtube_oauth_tokens={
+                "profile-new": '{"token":"new"}',
+                "profile-saved": '{"token":"saved"}',
+            },
+            analytics_channels=[
+                {"profile_id": "profile-new", "name": "Новый", "subscribers": "10", "views_total": 100, "monetary_access": True},
+                {"profile_id": "profile-saved", "name": "Сохранённый", "subscribers": "10", "views_total": 100, "monetary_access": True},
+            ],
+            youtube_channel_publication_rules={
+                "profile-saved": {
+                    "channelId": "profile-saved",
+                    "enabled": True,
+                    "quota": 2,
+                    "monetized": False,
+                    "channelPriority": 0,
+                },
+            },
+        )
+        profiles = {
+            "new": ({"channelId": "UC-new", "name": "Новый", "subscribers": 11, "viewsTotal": 120}, {"token": "new-fresh"}),
+            "saved": ({"channelId": "UC-saved", "name": "Сохранённый", "subscribers": 11, "viewsTotal": 120}, {"token": "saved-fresh"}),
+        }
+
+        def current_channel(token):
+            return profiles["saved" if token.get("token") == "saved" else "new"]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "fetch_current_channel", side_effect=current_channel), \
+             patch.object(bridge, "fetch_youtube_analytics", return_value={"videos": [], "financialAvailable": True, "errors": []}):
+            bridge.refresh_analytics({})
+
+        new_rule = settings.youtube_channel_publication_rules["profile-new"]
+        self.assertTrue(new_rule["enabled"])
+        self.assertTrue(new_rule["monetized"])
+        self.assertEqual(new_rule["channelPriority"], 10)
+        self.assertEqual(new_rule["quota"], 0)
+
+        saved_rule = settings.youtube_channel_publication_rules["profile-saved"]
+        self.assertFalse(saved_rule["monetized"])
+        self.assertEqual(saved_rule["channelPriority"], 0)
+        self.assertEqual(saved_rule["quota"], 2)
+
     def test_analytics_refresh_binds_video_metrics_to_a_connected_channel(self):
         settings = Settings(
             youtube_oauth_tokens={"profile-a": '{"token":"old"}'},

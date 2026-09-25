@@ -19,6 +19,17 @@ const base = {
 } as unknown as NewsFlowSnapshot;
 
 describe("PublicationPage interactions", () => {
+  it("opens the date-and-time planner from the header without starting an upload", () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить дату и время" }));
+
+    expect(screen.getByRole("tab", { name: "Распределение" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Дата диапазона")).toBeInTheDocument();
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("opens compact channel settings with range and quarter-hour scheduling controls", () => {
     render(<PublicationPage data={base} command={vi.fn().mockResolvedValue(undefined)} />);
     fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
@@ -38,6 +49,19 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByRole("button", { name: "Сохранить" })).toBeInTheDocument();
   });
 
+  it("keeps stable channel numbers in the channel table and assignment selector", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "" }] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
+    expect(screen.getByRole("columnheader", { name: "№" })).toBeInTheDocument();
+    expect(screen.getByText("Канал 1")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+    await screen.findByLabelText("Канал для Готовый ролик");
+    expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
+  });
+
   it("applies and saves named channel-rule presets through the command contract", async () => {
     const command = vi.fn().mockResolvedValue(base);
     render(<PublicationPage data={base} command={command} />);
@@ -53,6 +77,16 @@ describe("PublicationPage interactions", () => {
       "save-publication-v2-rule-preset",
       expect.objectContaining({ name: "Мой план" }),
     ));
+  });
+
+  it("refreshes channel metadata only after an explicit operator action", async () => {
+    const command = vi.fn().mockResolvedValue(base);
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
+    fireEvent.click(screen.getByRole("button", { name: "Обновить каналы" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("refresh-analytics"));
   });
 
   it("lets the operator set item priority and any IANA channel timezone", async () => {
@@ -233,6 +267,16 @@ describe("PublicationPage interactions", () => {
     expect(command).toHaveBeenCalledWith("preview-publication-v2-distribution");
   });
 
+  it("numbers channels in the distribution selector so assignments are unambiguous", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [{ productionItemId: "item-ready", channelId: "channel-a", source: "auto", locked: false, reason: "balanced", publishAt: "" }] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+
+    await screen.findByLabelText("Канал для Готовый ролик");
+    expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
+  });
+
   it("sends an operator-selected time range to the non-uploading distribution preview", async () => {
     const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [] } });
     render(<PublicationPage data={base} command={command} />);
@@ -247,9 +291,52 @@ describe("PublicationPage interactions", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("preview-publication-v2-distribution", {
       bulkSchedule: {
         date: "2026-11-15", startTime: "04:00", endTime: "10:00", timezone: "Europe/Minsk",
-        channelIds: ["channel-a"], maxPerChannel: 4,
+        channelIds: ["channel-a"], maxPerChannel: 4, spacingStrategy: "adaptive_jittered",
+        timeWindows: [
+          { id: "morning", startTime: "03:00", endTime: "12:00", quota: 0, enabled: true },
+          { id: "day", startTime: "12:00", endTime: "17:00", quota: 0, enabled: false },
+          { id: "evening", startTime: "17:00", endTime: "22:00", quota: 0, enabled: false },
+        ],
       },
     }));
+  });
+
+  it("uses the date setup when the header distribution button is pressed", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Распределение" }));
+    fireEvent.change(screen.getByLabelText("Дата диапазона"), { target: { value: "2026-11-15" } });
+    fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("preview-publication-v2-distribution", expect.objectContaining({
+      bulkSchedule: expect.objectContaining({
+        date: "2026-11-15",
+        spacingStrategy: "adaptive_jittered",
+      }),
+    })));
+  });
+
+  it("lets the operator select priority windows and their quotas before preview", async () => {
+    const command = vi.fn().mockResolvedValue({ ...base, publicationPreview: { assignments: [] } });
+    render(<PublicationPage data={base} command={command} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Распределение" }));
+    expect(screen.getByRole("group", { name: "Приоритет времени" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Дата диапазона"), { target: { value: "2026-11-15" } });
+    fireEvent.change(screen.getByLabelText("Роликов Первая половина дня · 03:00–12:00"), { target: { value: "3" } });
+    fireEvent.click(screen.getByLabelText("Включить Днём · 12:00–17:00"));
+    fireEvent.click(screen.getByRole("button", { name: "Показать диапазон" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("preview-publication-v2-distribution", expect.objectContaining({
+      bulkSchedule: expect.objectContaining({
+        timeWindows: [
+          { id: "morning", startTime: "03:00", endTime: "12:00", quota: 3, enabled: true },
+          { id: "day", startTime: "12:00", endTime: "17:00", quota: 0, enabled: true },
+          { id: "evening", startTime: "17:00", endTime: "22:00", quota: 0, enabled: false },
+        ],
+      }),
+    })));
   });
 
   it("explains channel-capacity exhaustion in Russian instead of exposing the raw runtime code", async () => {
