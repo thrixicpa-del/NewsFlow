@@ -3,18 +3,22 @@ import { Progress } from "../components/progress";
 import { StatusBadge } from "../components/status-badge";
 import type { TaskCenterEntry } from "../features/task-center/task-model";
 
-export function ContextInspector({ entry, width, density, onDensityChange, onWidthChange, onClose }: {
+export function ContextInspector({ entry, width, density, onDensityChange, onWidthChange, onClose, onHide }: {
   entry: TaskCenterEntry | null;
   width: number;
   density: "comfortable" | "compact";
   onDensityChange(density: "comfortable" | "compact"): void;
   onWidthChange(width: number): void;
   onClose(): void;
+  onHide(): void;
 }) {
   return <section className="nf-context-inspector" aria-label="Контекстный инспектор">
     <header>
       <div><span>CONTEXT INSPECTOR</span><h2>{entry?.title || "Выберите задачу"}</h2></div>
-      {entry ? <Button size="icon" variant="ghost" onClick={onClose} aria-label="Закрыть контекст задачи">×</Button> : null}
+      <div className="nf-context-inspector-actions">
+        <Button size="sm" variant="ghost" onClick={onHide} aria-label="Скрыть инспектор">Скрыть</Button>
+        {entry ? <Button size="icon" variant="ghost" onClick={onClose} aria-label="Закрыть контекст задачи">×</Button> : null}
+      </div>
     </header>
     {entry ? <div className="nf-context-inspector-body">
       <StatusBadge status={entry.status} />
