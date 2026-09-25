@@ -2871,6 +2871,11 @@ _GENERIC_IDEA_TITLE_WORDS = {
     "неопределенность", "неопределённость", "международный", "международная", "международные",
     "ситуация", "ситуации", "обстановка", "происходит", "события", "новости",
 }
+_ABSTRACT_FORMULA_SUBJECTS = {"стороны", "участники", "они", "все"}
+_IDEA_ENTITY_EQUIVALENTS = {
+    "россия": {"россия", "москва"},
+    "украина": {"украина", "киев"},
+}
 
 
 def _clean_idea_title(value: object) -> str:
@@ -3015,9 +3020,75 @@ def _formula_part(value: object) -> str:
     return text
 
 
+def _formula_topic_context(topic: str) -> tuple[list[str], str]:
+    """Extract only explicit, scriptable anchors from a plan direction.
+
+    A direction such as ``Россия-Украина — тупик переговоров`` supplies two
+    named sides and an object.  We may use those words in a local fallback,
+    but never invent a person, city, event or consequence that is absent from
+    the direction.
+    """
+    clean_topic = _clean_idea_title(topic)
+    left, _separator, right = clean_topic.partition("—")
+    entities: list[str] = []
+    if re.search(r"(?<!\s)-(?!\s)", left):
+        for part in re.split(r"(?<!\s)-(?!\s)", left):
+            name = _formula_part(part)
+            if len(name) >= 3:
+                entities.append(name)
+    lowered = clean_topic.casefold()
+    if "переговор" in lowered:
+        object_name = "переговоры"
+    elif "санкц" in lowered:
+        object_name = "санкции"
+    elif "постав" in lowered:
+        object_name = "поставки"
+    elif "порт" in lowered:
+        object_name = "порт"
+    elif right:
+        object_name = _formula_part(right)
+    else:
+        object_name = ""
+    return entities[:2], object_name
+
+
+def _formula_parts_need_contextual_fallback(parts: tuple[str, str, str], topic: str) -> bool:
+    """Reject a mood-only formula when the direction names concrete sides."""
+    entities, object_name = _formula_topic_context(topic)
+    combined = " ".join(parts).casefold()
+    combined_words = set(re.findall(r"[a-zа-яё]{3,}", combined))
+    action_words = set(re.findall(r"[a-zа-яё]{3,}", parts[1].casefold()))
+    if action_words & _ABSTRACT_FORMULA_SUBJECTS:
+        return True
+    if entities and not all(
+        combined_words & _IDEA_ENTITY_EQUIVALENTS.get(entity.casefold(), {entity.casefold()})
+        for entity in entities
+    ):
+        return True
+    return bool(object_name and object_name.casefold() not in combined)
+
+
 def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
     """Return concise complete phrases when a provider part does not fit."""
-    del topic
+    entities, object_name = _formula_topic_context(topic)
+    if len(entities) == 2 and object_name == "переговоры":
+        subject = " и ".join(entities)
+        hooks = (
+            "Договориться не смогли", "Переговоры зашли в стену",
+            "Компромисс не сработал", "Новый раунд под угрозой",
+        )
+        actions = (
+            f"{subject} не уступают", f"{subject} держат позиции",
+            f"{subject} спорят об условиях", f"{subject} не сближают позиции",
+        )
+        consequences = (
+            "переговоры снова в тупике", "компромисс снова под угрозой",
+            "новый раунд под вопросом", "шанс на сделку тает",
+        )
+        return (
+            hooks[variant % len(hooks)], actions[variant % len(actions)],
+            consequences[variant % len(consequences)],
+        )
     hooks = (
         "Ставки растут", "Новый разлом", "Решающий поворот", "Напряжение усиливается",
         "Риск выходит наружу", "Баланс меняется", "Конфликт обостряется", "Вопрос становится жёстче",
@@ -3067,17 +3138,44 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
     elif len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
         hook = raw_title.strip("?") if raw_title and not _has_unresolved_headline_template(raw_title) else fallback_parts[0]
         parts = (hook, fallback_parts[1], fallback_parts[2])
+    elif _formula_parts_need_contextual_fallback(parts, topic):
+        parts = fallback_parts
     parts = tuple(
         part if len(part) <= limit and "…" not in part else fallback
         for part, limit, fallback in zip(parts, _IDEA_FORMULA_PART_LIMITS, fallback_parts)
     )
     title = _IDEA_TITLE_FORMULA_SEPARATOR.join(parts)
+    entities, object_name = _formula_topic_context(topic)
+    supplied_subjects = candidate.get("subjects")
+    subjects = ([str(value).strip() for value in supplied_subjects if str(value).strip()]
+                if isinstance(supplied_subjects, list) else []) or entities
+    information_payload = candidate.get("information_payload")
+    payload = dict(information_payload) if isinstance(information_payload, dict) else {}
+    # A provider-supplied payload is part of the durable idea metadata.  Add a
+    # local fallback only when the candidate did not carry that metadata.
+    if not payload:
+        payload["core"] = parts[1]
+        if object_name:
+            payload["object"] = object_name
+    script_requirements = candidate.get("script_requirements")
+    requirements = ([str(value).strip() for value in script_requirements if str(value).strip()]
+                    if isinstance(script_requirements, list) else [])
+    if not requirements:
+        requirements = [
+            f"Назвать субъектов: {', '.join(subjects)}" if subjects else "Назвать участников события",
+            f"Объяснить объект: {object_name}" if object_name else "Объяснить предмет конфликта",
+            f"Показать последствие: {parts[2]}",
+        ]
     return {
         **candidate,
         "title": title,
         "provocative_headline": parts[0],
         "subject_action": parts[1],
         "object_consequence": parts[2],
+        "subjects": subjects,
+        "main_consequence": str(candidate.get("main_consequence") or candidate.get("consequence") or parts[2]),
+        "information_payload": payload,
+        "script_requirements": requirements,
     }
 
 
@@ -3279,6 +3377,11 @@ def _title_generation_prompt(topic: str, requirements: str, candidate_count: int
         "заголовки «Почему снова обсуждают», «Что дальше», «Что происходит вокруг» без самостоятельной "
         "конфликтной ставки. Не выдумывай факты, даты, "
         "цифры, цитаты, обвинения и последствия. "
+        "В формульном Title назови конкретный субъект (страна, организация, человек или явно названная сторона), "
+        "а не «стороны» или «участники»; назови объект действия и понятное последствие. "
+        "Включи 2–5 естественных SEO-якорей из направления или доказательной выборки: имена, страны, города, "
+        "предмет спора, отрасль или событие. Пиши их в естественном русском предложении, без набора ключевых слов "
+        "и без искусственных слов вроде «лихорадит». "
         f"{uncertainty_instruction}"
         f"{formula_instruction}"
         f"Недавние начала, которые нельзя повторять: {banned_openings}.\n"

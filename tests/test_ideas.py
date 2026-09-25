@@ -17,6 +17,42 @@ class IdeaParsingTests(unittest.TestCase):
         self.assertFalse(validation["valid"])
         self.assertIn("generic_topic", validation["reasons"])
 
+    def test_formula_candidate_replaces_an_abstract_title_with_a_concrete_script_vector(self):
+        candidate = bridge._formula_candidate({
+            "title": (
+                "Переговоры вязнут в паузе — Стороны не сдвигают позиции — "
+                "шанс на прорыв тает"
+            ),
+        }, topic="Россия-Украина — тупик переговоров")
+
+        self.assertEqual(
+            candidate["title"],
+            "Договориться не смогли — Россия и Украина не уступают — переговоры снова в тупике",
+        )
+        self.assertLessEqual(len(candidate["title"]), 100)
+        self.assertEqual(len(candidate["title"].split(" — ")), 3)
+        self.assertEqual(candidate.get("subjects"), ["Россия", "Украина"])
+        self.assertEqual(candidate.get("main_consequence"), "переговоры снова в тупике")
+        self.assertEqual(candidate.get("information_payload", {}).get("core"), "Россия и Украина не уступают")
+
+    def test_formula_candidate_keeps_a_concrete_capital_city_variant_for_named_countries(self):
+        title = "Давление растёт — Москва и Киев держат позиции — переговоры снова в тупике"
+
+        candidate = bridge._formula_candidate({"title": title}, topic="Россия-Украина — тупик переговоров")
+
+        self.assertEqual(candidate["title"], title)
+        self.assertLessEqual(len(candidate["title"]), 100)
+
+    def test_formula_prompt_requires_named_subject_object_and_natural_seo_anchors(self):
+        prompt = bridge._title_generation_prompt(
+            "Трамп-Зеленский — давление и переговоры", "", 10, [], formula_only=True,
+        )
+
+        self.assertIn("конкретный субъект", prompt)
+        self.assertIn("объект действия", prompt)
+        self.assertIn("SEO-якор", prompt)
+        self.assertIn("естественном русском", prompt)
+
     def test_newsflow_has_seventeen_default_news_directions(self):
         self.assertEqual(len(NEWS_TOPICS), 17)
         self.assertEqual(Settings().idea_topics, NEWS_TOPICS)
