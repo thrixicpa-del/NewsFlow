@@ -2827,7 +2827,9 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
                 item["conflict"] = str(payload["object"]).strip()
             if consequence:
                 item["promised_question"] = f"Проверить и объяснить последствие: {consequence}"
-        item["legacy"] = True
+        item["legacy"] = not bool(detail)
+        if detail and str(detail.get("review_status", "")).strip():
+            item["status"] = str(detail["review_status"]).strip().upper()
         ensure_production_item_ids([item])
         settings.idea_production_items.append(item)
         existing.add(title.casefold())
@@ -3179,10 +3181,11 @@ def _formula_parts_need_contextual_fallback(parts: tuple[str, str, str], topic: 
         if not concrete_action_subject:
             return True
     else:
-        # A topic label such as "Продовольственный кризис" is not a concrete
-        # actor. Without an explicit named side the local fallback must not
-        # invent who acted; keep the deficit visible for research/clarification.
-        return True
+        left, _right = _formula_direction_parts(topic)
+        left_stems = _formula_keyword_stems(left)
+        action_stems = _formula_keyword_stems(parts[1])
+        if left_stems and not (left_stems & action_stems):
+            return True
 
     object_stems = _formula_keyword_stems(object_name)
     return bool(object_stems and not (object_stems & combined_stems))
@@ -3203,71 +3206,115 @@ def _fit_formula_part(value: object, limit: int) -> str:
 
 
 def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
-    """Materialise only claims that are already explicit in the direction.
+    """Create a direction-specific local fallback without dropping a requested title.
 
-    A local repair is allowed to restate an explicit negotiation deadlock with
-    named sides. Other directions may need provider evidence before a concrete
-    subject-action-consequence title is safe, so returning empty parts is
-    preferable to inventing an action or outcome.
+    Strong factual wording is used only when the direction already contains it.
+    Otherwise the fallback stays editorial: it names the direction subject and
+    object, but does not invent dates, figures, attacks, accusations or outcomes.
     """
     entities, object_name = _formula_topic_context(topic)
-    _left, right = _formula_direction_parts(topic)
+    left, right = _formula_direction_parts(topic)
+    subject = " и ".join(entities) if entities else left
+    object_label = object_name or right or topic
     lowered_right = right.casefold()
-    if not (
+
+    if (
         len(entities) == 2
         and object_name == "переговоры"
         and "тупик" in lowered_right
     ):
-        return "", "", ""
+        hooks = (
+            "Договориться не смогли",
+            "Переговоры снова в тупике",
+            "Выход из тупика не найден",
+            "Компромисс пока не найден",
+            "Тупик переговоров сохраняется",
+            "Переговоры остаются в тупике",
+            "Прорыва в переговорах пока нет",
+            "Сделка пока не складывается",
+            "Сближения позиций пока нет",
+            "Переговоры без прорыва",
+        )
+        actions = (
+            f"{entities[0]} и {entities[1]} не уступают",
+            f"{entities[0]} и {entities[1]} держат позиции",
+            f"{entities[0]} и {entities[1]} не сближаются",
+            "Москва и Киев держат позиции"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} держат позиции",
+            "Москва и Киев не сближаются"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не сближаются",
+            f"{entities[0]} и {entities[1]} расходятся",
+            "Москва и Киев не уступают"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не уступают",
+            "Москва и Киев без компромисса"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} без компромисса",
+            f"{entities[0]} и {entities[1]} стоят на своём",
+            "Москва и Киев стоят на своём"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} стоят на своём",
+        )
+        consequences = (
+            "переговоры снова в тупике",
+            "компромисс под вопросом",
+            "выход из тупика не найден",
+            "сделка пока не складывается",
+            "тупик сохраняется",
+            "переговоры без прорыва",
+            "компромисс пока не найден",
+            "сближения позиций пока нет",
+            "договорённости пока нет",
+            "выход из тупика под вопросом",
+        )
+        index = variant % len(hooks)
+        values = hooks[index], actions[index], consequences[index]
+        return tuple(
+            _fit_formula_part(value, limit)
+            for value, limit in zip(values, _IDEA_FORMULA_PART_LIMITS)
+        )
 
+    # The general fallback is intentionally editorial rather than factual.
+    # Its claims are about the selected direction itself, so it can preserve
+    # output count without pretending an unverified event already happened.
     hooks = (
-        "Договориться не смогли",
-        "Переговоры снова в тупике",
-        "Выход из тупика не найден",
-        "Компромисс пока не найден",
-        "Тупик переговоров сохраняется",
-        "Переговоры остаются в тупике",
-        "Прорыва в переговорах пока нет",
-        "Сделка пока не складывается",
-        "Сближения позиций пока нет",
-        "Переговоры без прорыва",
+        f"Фокус на теме {object_label}",
+        f"{object_label} выходит в фокус",
+        f"{object_label} требует внимания",
+        f"Главный вопрос {object_label}",
+        f"{object_label} в центре разбора",
+        f"В центре темы {object_label}",
+        f"{object_label} становится ключевым",
+        f"Разбор темы {object_label}",
+        f"{object_label} задаёт повестку",
+        f"Почему важен {object_label}",
     )
     actions = (
-        f"{entities[0]} и {entities[1]} не уступают",
-        f"{entities[0]} и {entities[1]} держат позиции",
-        f"{entities[0]} и {entities[1]} не сближаются",
-        "Москва и Киев держат позиции"
-        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} держат позиции",
-        "Москва и Киев не сближаются"
-        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не сближаются",
-        f"{entities[0]} и {entities[1]} расходятся",
-        "Москва и Киев не уступают"
-        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не уступают",
-        "Москва и Киев без компромисса"
-        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} без компромисса",
-        f"{entities[0]} и {entities[1]} стоят на своём",
-        "Москва и Киев стоят на своём"
-        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} стоят на своём",
+        f"{subject} в центре темы",
+        f"{subject} задаёт контекст",
+        f"{subject} остаётся в фокусе",
+        f"{subject} ключевая сторона",
+        f"{subject} в центре разбора",
+        f"{subject} определяет контекст",
+        f"{subject} задаёт рамку темы",
+        f"{subject} остаётся ключевым",
+        f"{subject} формирует контекст",
+        f"{subject} в центре повестки",
     )
     consequences = (
-        "переговоры снова в тупике",
-        "компромисс под вопросом",
-        "выход из тупика не найден",
-        "сделка пока не складывается",
-        "тупик сохраняется",
-        "переговоры без прорыва",
-        "компромисс пока не найден",
-        "сближения позиций пока нет",
-        "договорённости пока нет",
-        "выход из тупика под вопросом",
+        f"{object_label} требует разбора",
+        f"{object_label} остаётся вопросом",
+        "последствия требуют проверки",
+        f"фокус остаётся на {object_label}",
+        "риски нужно отделить от фактов",
+        f"{object_label} остаётся в центре",
+        "выводы требуют проверки",
+        f"важен контекст {object_label}",
+        "последствия пока неясны",
+        f"ключевой вопрос {object_label}",
     )
     index = variant % len(hooks)
+    values = hooks[index], actions[index], consequences[index]
     return tuple(
         _fit_formula_part(value, limit)
-        for value, limit in zip(
-            (hooks[index], actions[index], consequences[index]),
-            _IDEA_FORMULA_PART_LIMITS,
-        )
+        for value, limit in zip(values, _IDEA_FORMULA_PART_LIMITS)
     )
 
 
@@ -3309,9 +3356,9 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
         for part, limit, fallback in zip(parts, _IDEA_FORMULA_PART_LIMITS, fallback_parts)
     )
     if _formula_parts_need_contextual_fallback(parts, topic):
-        parts = ("", "", "")
+        parts = fallback_parts
 
-    title = _IDEA_TITLE_FORMULA_SEPARATOR.join(parts) if all(parts) else ""
+    title = _IDEA_TITLE_FORMULA_SEPARATOR.join(parts)
     entities, object_name = _formula_topic_context(topic)
     left, _right = _formula_direction_parts(topic)
     supplied_subjects = candidate.get("subjects")
