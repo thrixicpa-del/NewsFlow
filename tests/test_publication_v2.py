@@ -1801,6 +1801,44 @@ class PublicationV2ExecutionTests(unittest.TestCase):
         self.assertEqual(projected["reupload"]["oldVideoId"], "yt-old")
         self.assertNotIn("resumableUpload", projected)
 
+    def test_reupload_failure_state_follows_upload_failure_classification(self):
+        for category, expected in (
+            ("RETRYABLE", "RETRYABLE"),
+            ("USER_ACTION_REQUIRED", "FAILED"),
+            ("PERMANENT_FAILED", "FAILED"),
+        ):
+            with self.subTest(category=category):
+                settings = Settings(youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "youtubeVideoId": None,
+                        "overallStatus": "UPLOADING",
+                        "activeLease": None,
+                        "reupload": {
+                            "status": "RUNNING",
+                            "oldVideoId": "yt-old",
+                            "reason": "Контролируемый повтор",
+                        },
+                        "steps": {"VIDEO_UPLOAD": {"status": "RUNNING"}},
+                    },
+                })
+
+                fail_publication_stage(
+                    settings,
+                    "snapshot-1",
+                    "VIDEO_UPLOAD",
+                    category,
+                    "transport failed",
+                )
+
+                reupload = settings.youtube_publication_executions["snapshot-1"]["reupload"]
+                self.assertEqual(reupload["status"], expected)
+                self.assertEqual(reupload["error"]["category"], category)
+                if expected == "FAILED":
+                    self.assertTrue(reupload.get("failedAt"))
+                else:
+                    self.assertNotIn("failedAt", reupload)
+
     def test_restart_with_saved_resumable_session_retries_same_transport_instead_of_unknown_state(self):
         settings = Settings(
             youtube_publication_upload_concurrency=1,
