@@ -922,6 +922,32 @@ def normalize_channel_publication_rule(rule: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def ensure_refreshed_channel_publication_rule(settings: Any, channel_id: str, *, monetized: bool) -> bool:
+    """Add a safe local auto-planning default for a newly discovered monetized channel.
+
+    Existing operator rules are immutable here: refresh may discover metadata,
+    but it must never overwrite manual quota, priority, enablement or scheduling
+    choices. The default quota is one preview slot and remains a local NewsFlow
+    setting; no YouTube channel setting is changed.
+    """
+    channel_key = str(channel_id or "").strip()
+    if not channel_key or not monetized:
+        return False
+    current = dict(getattr(settings, "youtube_channel_publication_rules", {}) or {})
+    if channel_key in current:
+        return False
+    current[channel_key] = normalize_channel_publication_rule({
+        "channelId": channel_key,
+        "enabled": True,
+        "quota": 1,
+        "monetized": True,
+        "distributionStrategy": "balanced",
+        "channelPriority": 10,
+    })
+    settings.youtube_channel_publication_rules = current
+    return True
+
+
 def _next_allowed_slot(candidate: datetime, rule: dict[str, Any], zone: ZoneInfo) -> datetime:
     allowed = rule.get("allowedWeekdays")
     weekdays = {int(value) for value in allowed} if isinstance(allowed, list) and allowed else set(range(7))
