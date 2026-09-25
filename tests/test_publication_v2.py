@@ -26,6 +26,7 @@ from scriptor.publication_v2 import (
     persist_publication_receipt,
     publication_queue_projection,
     publication_receipt,
+    queue_publication_reupload,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
@@ -1745,6 +1746,126 @@ class PublicationV2ExecutionTests(unittest.TestCase):
             retry_publication_stage(settings, "snapshot-1", "THUMBNAIL")
 
 
+    def test_reupload_queue_preserves_old_identity_resets_downstream_and_is_uploadable(self):
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "privacy": "public",
+                    "publishMode": "schedule",
+                    "requestedPublishAt": "2026-10-01T12:00:00+00:00",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-old",
+                    "youtubeVideoUrl": "https://youtu.be/yt-old",
+                    "overallStatus": "DONE",
+                    "activeLease": None,
+                    "steps": {
+                        "AUTH_CHECK": {"status": "SUCCESS"},
+                        "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                        "TITLE": {"status": "SUCCESS"},
+                        "DESCRIPTION": {"status": "SUCCESS"},
+                        "THUMBNAIL": {"status": "SUCCESS"},
+                        "CARDS": {"status": "SUCCESS"},
+                    },
+                    "timeline": [],
+                },
+            },
+        )
+
+        queue_publication_reupload(
+            settings,
+            "snapshot-1",
+            "Проверенный повтор",
+            metadata_confirmed=True,
+        )
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertIsNone(execution["youtubeVideoId"])
+        self.assertIsNone(execution["youtubeVideoUrl"])
+        self.assertEqual(execution["overallStatus"], "REUPLOAD_QUEUED")
+        self.assertEqual(execution["reupload"]["oldVideoId"], "yt-old")
+        self.assertEqual(execution["reupload"]["originalPublishAt"], "2026-10-01T12:00:00+00:00")
+        self.assertEqual(execution["reupload"]["replacementPrivacy"], "private")
+        self.assertFalse(execution["reupload"]["scheduleApplied"])
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "PENDING")
+        self.assertEqual(execution["steps"]["TITLE"]["status"], "PENDING")
+        self.assertEqual(execution["steps"]["THUMBNAIL"]["status"], "PENDING")
+        self.assertEqual(execution["steps"]["CARDS"]["status"], "PENDING")
+        self.assertEqual(next_upload_candidates(settings), ["snapshot-1"])
+
+        projected = publication_queue_projection(settings)["queue"][0]
+        self.assertEqual(projected["reupload"]["oldVideoId"], "yt-old")
+        self.assertNotIn("resumableUpload", projected)
+
+    def test_restart_with_saved_resumable_session_retries_same_transport_instead_of_unknown_state(self):
+        settings = Settings(
+            youtube_publication_upload_concurrency=1,
+            youtube_publication_executions={
+                "snapshot-resume": {
+                    "snapshotId": "snapshot-resume",
+                    "overallStatus": "UPLOADING",
+                    "youtubeVideoId": None,
+                    "activeLease": {"workerId": "lost-worker"},
+                    "resumableUpload": {
+                        "sessionUri": "https://upload.youtube.test/session-1",
+                        "bytesSent": 8 * 1024 * 1024,
+                        "totalBytes": 24 * 1024 * 1024,
+                        "status": "ACTIVE",
+                    },
+                    "steps": {
+                        "VIDEO_UPLOAD": {
+                            "status": "RUNNING",
+                            "attempts": 1,
+                            "progress": {"state": "transferring"},
+                        },
+                    },
+                },
+            },
+        )
+
+        result = reconcile_publication_executions(settings)
+
+        execution = settings.youtube_publication_executions["snapshot-resume"]
+        self.assertEqual(result["interrupted"], 1)
+        self.assertEqual(execution["overallStatus"], "RETRYING")
+        self.assertEqual(execution["steps"]["VIDEO_UPLOAD"]["status"], "RETRYING")
+        self.assertEqual(
+            execution["steps"]["VIDEO_UPLOAD"]["progress"]["bytesSent"],
+            8 * 1024 * 1024,
+        )
+        self.assertIsNone(execution["activeLease"])
+        self.assertEqual(next_upload_candidates(settings), ["snapshot-resume"])
+
+    def test_studio_identity_category_is_visible_user_action_not_oauth_auth_required(self):
+        settings = Settings(
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "overallStatus": "FORMATTING",
+                    "steps": {"CARDS": {"status": "RUNNING"}},
+                },
+            },
+        )
+
+        fail_publication_stage(
+            settings,
+            "snapshot-1",
+            "CARDS",
+            "STUDIO_IDENTITY_REQUIRED",
+            "Нужно подтвердить личность в Studio",
+        )
+
+        step = settings.youtube_publication_executions["snapshot-1"]["steps"]["CARDS"]
+        self.assertEqual(step["status"], "USER_ACTION_REQUIRED")
+        self.assertEqual(step["error"]["category"], "STUDIO_IDENTITY_REQUIRED")
+        self.assertNotEqual(step["error"]["category"], "AUTH_REQUIRED")
+
+
 class PublicationV2BridgeTests(unittest.TestCase):
     def test_v2_upload_records_invalid_oauth_on_auth_stage_before_transport(self):
         """Malformed credentials must fail AUTH_CHECK before the MP4 transport becomes RUNNING."""
@@ -2403,6 +2524,231 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(set_thumbnail.call_args.args[1], "yt-1")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["THUMBNAIL"]["status"], "SUCCESS")
+
+
+    def test_reupload_bridge_forces_private_unscheduled_insert_and_keeps_old_new_audit(self):
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "replacement.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {
+                            "title": "Выпуск",
+                            "description": "Описание",
+                            "tags": ["тег"],
+                            "hashtags": ["#news"],
+                        },
+                        "privacy": "public",
+                        "publishMode": "schedule",
+                        "requestedPublishAt": "2026-10-01T12:00:00+00:00",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "youtubeVideoId": "yt-old",
+                        "youtubeVideoUrl": "https://youtu.be/yt-old",
+                        "overallStatus": "DONE",
+                        "activeLease": None,
+                        "steps": {
+                            "AUTH_CHECK": {"status": "SUCCESS"},
+                            "VIDEO_UPLOAD": {"status": "SUCCESS"},
+                            "TITLE": {"status": "SUCCESS"},
+                            "DESCRIPTION": {"status": "SUCCESS"},
+                            "TAGS": {"status": "SUCCESS"},
+                            "SCHEDULE": {"status": "SUCCESS"},
+                        },
+                        "timeline": [],
+                    },
+                },
+            )
+            queue_publication_reupload(
+                settings,
+                "snapshot-1",
+                "Контролируемый повтор",
+                metadata_confirmed=True,
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(
+                     bridge,
+                     "validate_publication_snapshot",
+                     return_value={"ok": True, "uploadAlreadyExists": False, "reasons": []},
+                 ), \
+                 patch.object(
+                     bridge,
+                     "fetch_current_channel",
+                     return_value=({"channelId": "UC-test"}, {"token": "safe"}),
+                 ), \
+                 patch.object(
+                     bridge,
+                     "upload_private_video",
+                     return_value=(
+                         {
+                             "videoId": "yt-new",
+                             "videoUrl": "https://youtu.be/yt-new",
+                             "privacyStatus": "private",
+                         },
+                         {"token": "refreshed"},
+                     ),
+                 ) as upload:
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        self.assertEqual(result["operationResult"]["count"], 1)
+        body = upload.call_args.kwargs["body"]
+        self.assertEqual(body["status"]["privacyStatus"], "private")
+        self.assertNotIn("publishAt", body["status"])
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertEqual(execution["youtubeVideoId"], "yt-new")
+        self.assertEqual(execution["reupload"]["oldVideoId"], "yt-old")
+        self.assertEqual(execution["reupload"]["newVideoId"], "yt-new")
+        self.assertEqual(execution["reupload"]["status"], "UPLOADED")
+        self.assertFalse(execution["reupload"]["scheduleApplied"])
+
+    def test_v2_resume_bridge_passes_saved_session_to_same_upload_without_fresh_insert_boundary(self):
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            resume = {
+                "sessionUri": "https://upload.youtube.test/session-1",
+                "bytesSent": 1024,
+                "totalBytes": 4096,
+                "status": "ACTIVE",
+            }
+            settings = Settings(
+                youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+                youtube_publication_snapshots={
+                    "snapshot-1": {
+                        "id": "snapshot-1",
+                        "channelId": "channel-a",
+                        "videoPath": str(video),
+                        "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                        "privacy": "private",
+                        "publishMode": "publish_now",
+                    },
+                },
+                youtube_publication_executions={
+                    "snapshot-1": {
+                        "snapshotId": "snapshot-1",
+                        "overallStatus": "RETRYING",
+                        "youtubeVideoId": None,
+                        "activeLease": None,
+                        "resumableUpload": dict(resume),
+                        "steps": {"VIDEO_UPLOAD": {"status": "RETRYING", "attempts": 1}},
+                    },
+                },
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(
+                     bridge,
+                     "validate_publication_snapshot",
+                     return_value={"ok": True, "uploadAlreadyExists": False, "reasons": []},
+                 ), \
+                 patch.object(
+                     bridge,
+                     "fetch_current_channel",
+                     return_value=({"channelId": "UC-test"}, {"token": "safe"}),
+                 ), \
+                 patch.object(
+                     bridge,
+                     "upload_private_video",
+                     return_value=(
+                         {"videoId": "yt-resumed", "videoUrl": "https://youtu.be/yt-resumed", "privacyStatus": "private"},
+                         {"token": "refreshed"},
+                     ),
+                 ) as upload:
+                bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        self.assertEqual(upload.call_args.kwargs["resume_state"]["sessionUri"], resume["sessionUri"])
+        self.assertEqual(
+            settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"],
+            "yt-resumed",
+        )
+
+    def test_status_only_youtube_refresh_never_creates_engagement_task(self):
+        settings = Settings(
+            youtube_oauth_tokens={"channel-a": '{"token":"safe"}'},
+            youtube_publication_snapshots={
+                "snapshot-1": {
+                    "id": "snapshot-1",
+                    "channelId": "channel-a",
+                    "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                    "publishMode": "publish_now",
+                },
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "overallStatus": "PROCESSING",
+                    "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}},
+                },
+            },
+        )
+        response = {
+            "snippet": {"title": "Выпуск", "description": "Описание", "tags": []},
+            "processingDetails": {"processingStatus": "succeeded"},
+            "status": {"privacyStatus": "private"},
+        }
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(
+                 bridge,
+                 "fetch_youtube_video_state",
+                 return_value=(response, {"token": "refreshed"}),
+             ), \
+             patch.object(bridge, "_queue_publication_v2_engagement_task") as queue_engagement:
+            result = bridge.reconcile_publication_v2_youtube({
+                "snapshotIds": ["snapshot-1"],
+                "statusOnly": True,
+            })
+
+        self.assertEqual(result["operationResult"]["kind"], "publication-v2-status-refresh")
+        queue_engagement.assert_not_called()
+
+    def test_identity_verification_action_opens_profile_without_retrying_upload(self):
+        settings = Settings(
+            youtube_publication_snapshots={
+                "snapshot-1": {"id": "snapshot-1", "channelId": "channel-a"},
+            },
+            youtube_publication_executions={
+                "snapshot-1": {
+                    "snapshotId": "snapshot-1",
+                    "youtubeVideoId": "yt-1",
+                    "currentStage": "CARDS",
+                    "steps": {
+                        "CARDS": {
+                            "status": "USER_ACTION_REQUIRED",
+                            "error": {
+                                "category": "STUDIO_IDENTITY_REQUIRED",
+                                "message": "Нужно 2FA",
+                            },
+                        },
+                    },
+                    "timeline": [],
+                },
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "_youtube_channel_profile_dir", return_value=Path("C:/profiles/channel-a")), \
+             patch.object(bridge, "open_studio_identity_verification") as open_studio, \
+             patch.object(bridge, "upload_publication_v2_snapshots") as upload:
+            result = bridge.open_publication_v2_identity_verification({"snapshotId": "snapshot-1"})
+
+        self.assertEqual(result["operationResult"]["kind"], "publication-v2-identity-verification")
+        open_studio.assert_called_once_with(Path("C:/profiles/channel-a"), "yt-1")
+        upload.assert_not_called()
 
 
 if __name__ == "__main__":
