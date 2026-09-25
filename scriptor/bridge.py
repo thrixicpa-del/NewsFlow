@@ -3199,7 +3199,7 @@ def _fit_formula_part(value: object, limit: int) -> str:
     compact = " ".join(words).strip("—-:;!?. ")
     if compact and len(compact) <= limit:
         return compact
-    return text[:limit].rstrip(" —-:;!?.,") 
+    return text[:limit].rstrip(" —-:;!?.,")
 
 
 def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
