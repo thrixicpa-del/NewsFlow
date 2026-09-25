@@ -33,10 +33,16 @@ def _is_test_runner_process() -> bool:
     """Detect an actual test runner without treating imported test modules as test mode."""
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
+
+    original = [str(value).casefold().strip() for value in getattr(sys, "orig_argv", [])]
+    for index, value in enumerate(original[:-1]):
+        if value == "-m" and original[index + 1] in {"unittest", "pytest"}:
+            return True
+
     argv0 = str(sys.argv[0] if sys.argv else "").replace("\\", "/").casefold().strip()
     basename = Path(argv0).name
     return (
-        argv0 in {"python -m unittest", "py -m unittest"}
+        argv0.endswith(" -m unittest")
         or argv0.endswith("/unittest/__main__.py")
         or argv0.endswith("/pytest/__main__.py")
         or basename in {"pytest", "pytest.exe", "py.test", "py.test.exe"}
