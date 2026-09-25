@@ -67,6 +67,12 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "resolve-publication-v2-uncertain-upload": CommandRegistration(
         "resolve_publication_v2_uncertain_upload", "scriptor.publication_v2 + scriptor.youtube_api", _NO_LEGACY,
     ),
+    "open-publication-v2-identity-verification": CommandRegistration(
+        "open_publication_v2_identity_verification", "scriptor.youtube_studio", _NO_LEGACY,
+    ),
+    "queue-publication-v2-reupload": CommandRegistration(
+        "queue_publication_v2_reuploads", "scriptor.publication_v2 + scriptor.youtube_api", _NO_LEGACY,
+    ),
 }
 
 
