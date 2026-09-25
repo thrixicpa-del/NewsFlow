@@ -1,6 +1,6 @@
 import unittest
 
-from scriptor.youtube_studio import (_click_exact_visible_button, _open_video_editor, planned_studio_actions, studio_details_url, studio_editor_url,
+from scriptor.youtube_studio import (StudioAutomationError, _click_exact_visible_button, _open_video_editor, planned_studio_actions, studio_details_url, studio_editor_url,
                                      studio_shell_loaded, studio_control_labels, end_screen_requires_editor_entry,
                                      studio_transition_label)
 
@@ -154,3 +154,52 @@ class YouTubeStudioActionsTests(unittest.TestCase):
             opened = False
         self.assertTrue(opened)
         self.assertEqual(page.menuitem_request, ("menuitem", "Редактор", True))
+
+    def test_editor_navigation_reports_studio_access_denied_before_clicking(self):
+        class DisabledMenuItem:
+            def is_visible(self, timeout):
+                return True
+
+            def click(self, timeout):
+                return None
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Сведения о видео Редактор У вас нет доступа к этому разделу"
+
+        class Locator:
+            def __init__(self, body):
+                self.body = body
+
+            @property
+            def first(self):
+                return self.body
+
+            def is_visible(self, timeout):
+                return self.body.is_visible(timeout)
+
+            def click(self, timeout):
+                return self.body.click(timeout)
+
+            def inner_text(self, timeout):
+                return self.body.inner_text(timeout)
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def locator(self, _selector):
+                return Locator(Body())
+
+            def get_by_role(self, *_args, **_kwargs):
+                return Locator(DisabledMenuItem())
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        with self.assertRaises(StudioAutomationError) as raised:
+            _open_video_editor(Page(), "video-a")
+        self.assertIn("нет доступа", str(raised.exception).casefold())

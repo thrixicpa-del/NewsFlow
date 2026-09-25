@@ -295,6 +295,12 @@ def _open_video_editor(page, video_id: str) -> None:
 
     page.goto(studio_details_url(video_id), wait_until="domcontentloaded", timeout=120_000)
     _wait_for_studio_shell(page)
+    visible_text = " ".join(page.locator("body").inner_text(timeout=3_000).casefold().split())
+    if "нет доступа к этому разделу" in visible_text:
+        raise StudioAutomationError(
+            "У текущего аккаунта YouTube Studio нет доступа к разделу «Редактор». "
+            "Проверьте роль владельца или редактора канала."
+        )
     # Current Studio repeats the word "Редактор" in nested non-interactive
     # drawer containers before the actual navigation anchor.  Select only the
     # interactive menu item; a text locator can click a harmless LI/DIV.
