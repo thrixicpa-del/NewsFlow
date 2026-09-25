@@ -3167,12 +3167,9 @@ def _formula_seo_anchors(topic: str, entities: list[str], object_name: str) -> l
 def _formula_parts_need_contextual_fallback(parts: tuple[str, str, str], topic: str) -> bool:
     """Reject a mood-only formula that drops the direction's subject or object."""
     entities, object_name = _formula_topic_context(topic)
-    left, _right = _formula_direction_parts(topic)
     combined_words = _formula_words(" ".join(parts))
     action_words = _formula_words(parts[1])
     combined_stems = _formula_keyword_stems(" ".join(parts))
-    action_stems = _formula_keyword_stems(parts[1])
-
     concrete_action_subject = any(_formula_entity_present(action_words, entity) for entity in entities)
     if action_words & _ABSTRACT_FORMULA_SUBJECTS and not concrete_action_subject:
         return True
@@ -3182,9 +3179,10 @@ def _formula_parts_need_contextual_fallback(parts: tuple[str, str, str], topic: 
         if not concrete_action_subject:
             return True
     else:
-        left_stems = _formula_keyword_stems(left)
-        if left_stems and not (left_stems & action_stems):
-            return True
+        # A topic label such as "Продовольственный кризис" is not a concrete
+        # actor. Without an explicit named side the local fallback must not
+        # invent who acted; keep the deficit visible for research/clarification.
+        return True
 
     object_stems = _formula_keyword_stems(object_name)
     return bool(object_stems and not (object_stems & combined_stems))
@@ -3205,62 +3203,71 @@ def _fit_formula_part(value: object, limit: int) -> str:
 
 
 def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
-    """Create a safe direction-specific fallback instead of reusable generic mood phrases."""
+    """Materialise only claims that are already explicit in the direction.
+
+    A local repair is allowed to restate an explicit negotiation deadlock with
+    named sides. Other directions may need provider evidence before a concrete
+    subject-action-consequence title is safe, so returning empty parts is
+    preferable to inventing an action or outcome.
+    """
     entities, object_name = _formula_topic_context(topic)
-    left, right = _formula_direction_parts(topic)
-    subject = " и ".join(entities) if entities else left
-    object_label = object_name or right or topic
+    _left, right = _formula_direction_parts(topic)
+    lowered_right = right.casefold()
+    if not (
+        len(entities) == 2
+        and object_name == "переговоры"
+        and "тупик" in lowered_right
+    ):
+        return "", "", ""
 
-    if len(entities) == 2 and object_name == "переговоры":
-        hooks = (
-            "Договориться не смогли",
-            "Переговоры снова в тупике",
-            "Сближения позиций нет",
-            "Условия снова расходятся",
-        )
-        actions = (
-            f"{subject} не уступают",
-            f"{subject} держат позиции",
-            f"{subject} расходятся",
-            f"{subject} не сближаются",
-        )
-        consequences = (
-            "переговоры снова в тупике",
-            "компромисс под вопросом",
-            "сделка пока не складывается",
-            "сближения по переговорам нет",
-        )
-        return tuple(
-            _fit_formula_part(value, limit)
-            for value, limit in zip(
-                (
-                    hooks[variant % len(hooks)],
-                    actions[variant % len(actions)],
-                    consequences[variant % len(consequences)],
-                ),
-                _IDEA_FORMULA_PART_LIMITS,
-            )
-        )
-
-    subject = subject or "Субъект требует уточнения"
     hooks = (
-        f"{object_label} требует разбора",
-        f"Фокус на теме {object_label}",
-        f"{object_label} требует проверки",
-        f"{object_label} в центре внимания",
+        "Договориться не смогли",
+        "Переговоры снова в тупике",
+        "Выход из тупика не найден",
+        "Компромисс пока не найден",
+        "Тупик переговоров сохраняется",
+        "Переговоры остаются в тупике",
+        "Прорыва в переговорах пока нет",
+        "Сделка пока не складывается",
+        "Сближения позиций пока нет",
+        "Переговоры без прорыва",
     )
-    action_suffixes = (" в фокусе", " в центре темы", " в центре разбора", "")
-    action = f"{subject}{action_suffixes[variant % len(action_suffixes)]}"
+    actions = (
+        f"{entities[0]} и {entities[1]} не уступают",
+        f"{entities[0]} и {entities[1]} держат позиции",
+        f"{entities[0]} и {entities[1]} не сближаются",
+        "Москва и Киев держат позиции"
+        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} держат позиции",
+        "Москва и Киев не сближаются"
+        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не сближаются",
+        f"{entities[0]} и {entities[1]} расходятся",
+        "Москва и Киев не уступают"
+        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не уступают",
+        "Москва и Киев без компромисса"
+        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} без компромисса",
+        f"{entities[0]} и {entities[1]} стоят на своём",
+        "Москва и Киев стоят на своём"
+        if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} стоят на своём",
+    )
     consequences = (
-        "последствия требуют проверки",
-        "риски нужно отделить от фактов",
-        "итог пока требует проверки",
-        "следствия пока неясны",
+        "переговоры снова в тупике",
+        "компромисс под вопросом",
+        "выход из тупика не найден",
+        "сделка пока не складывается",
+        "тупик сохраняется",
+        "переговоры без прорыва",
+        "компромисс пока не найден",
+        "сближения позиций пока нет",
+        "договорённости пока нет",
+        "выход из тупика под вопросом",
     )
-    return (
-        _fit_formula_part(hooks[variant % len(hooks)], _IDEA_FORMULA_PART_LIMITS[0]),
-        _fit_formula_part(action, _IDEA_FORMULA_PART_LIMITS[1]),
-        _fit_formula_part(consequences[variant % len(consequences)], _IDEA_FORMULA_PART_LIMITS[2]),
+    index = variant % len(hooks)
+    return tuple(
+        _fit_formula_part(value, limit)
+        for value, limit in zip(
+            (hooks[index], actions[index], consequences[index]),
+            _IDEA_FORMULA_PART_LIMITS,
+        )
     )
 
 
