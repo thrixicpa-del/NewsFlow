@@ -1817,7 +1817,7 @@ def queue_publication_reupload(
 
     current_reupload = dict(execution.get("reupload", {}) or {})
     if str(current_reupload.get("status", "")).upper() in {
-        "QUEUED", "RUNNING", "UPLOADED", "PROCESSING",
+        "QUEUED", "RUNNING", "RETRYABLE", "UPLOADED", "PROCESSING",
     }:
         raise ValueError("Этот ролик уже находится в активном перезаливе")
 
@@ -2120,9 +2120,9 @@ def begin_publication_stage(settings: Any, snapshot_id: str, worker_id: str, sta
     })
     steps[normalized] = step
     reupload = dict(execution.get("reupload", {}) or {})
-    if normalized == "VIDEO_UPLOAD" and str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING"}:
+    if normalized == "VIDEO_UPLOAD" and str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING", "RETRYABLE"}:
         reupload.update({
-            "status": "FAILED",
+            "status": "RETRYABLE" if classification == "RETRYABLE" else "FAILED",
             "failedAt": now,
             "lastCheckedAt": now,
             "error": {"category": classification, "message": str(message)},
@@ -2228,8 +2228,18 @@ def fail_publication_stage(settings: Any, snapshot_id: str, stage: str, category
     step = dict(steps.get(normalized, {}) or _step())
     classification = str(category).strip().upper() or "PERMANENT_FAILED"
     now = _now()
-    step.update({"status": "FAILED" if classification not in {"AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"} else classification,
-                 "finishedAt": now, "error": {"category": classification, "message": str(message)}, "progress": None})
+    if classification == "STUDIO_IDENTITY_REQUIRED":
+        step_status = "USER_ACTION_REQUIRED"
+    elif classification in {"AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"}:
+        step_status = classification
+    else:
+        step_status = "FAILED"
+    step.update({
+        "status": step_status,
+        "finishedAt": now,
+        "error": {"category": classification, "message": str(message)},
+        "progress": None,
+    })
     steps[normalized] = step
     execution["steps"] = steps
     execution["currentStage"] = normalized
