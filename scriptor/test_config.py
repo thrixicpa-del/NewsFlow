@@ -23,6 +23,7 @@ class TestStorageIsolationTests(unittest.TestCase):
     def test_direct_unittest_runtime_refuses_production_storage_without_explicit_test_root(self):
         """A direct unittest runner must fail before it can write canonical NewsFlow data."""
         with patch.dict(os.environ, {}, clear=False), \
+             patch.object(sys, "orig_argv", ["python", "-m", "unittest", "scriptor.test_config"]), \
              patch.object(sys, "argv", ["python -m unittest", "scriptor.test_config"]):
             os.environ.pop("NEWSFLOW_TEST_MODE", None)
             os.environ.pop("NEWSFLOW_TEST_ROOT", None)
@@ -43,7 +44,10 @@ class TestStorageIsolationTests(unittest.TestCase):
             with patch.dict(os.environ, {
                 "LOCALAPPDATA": str(production_parent),
                 "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(production_parent),
-            }, clear=False), patch.object(sys, "argv", ["NewsFlowCore.exe"]):
+            }, clear=False), \
+                 patch.object(sys, "orig_argv", ["NewsFlowCore.exe"]), \
+                 patch.object(sys, "argv", ["NewsFlowCore.exe"]), \
+                 patch.dict(sys.modules, {"pytest": object()}):
                 os.environ.pop("NEWSFLOW_TEST_MODE", None)
                 os.environ.pop("NEWSFLOW_TEST_ROOT", None)
                 self.assertIn("unittest", sys.modules)
@@ -51,6 +55,7 @@ class TestStorageIsolationTests(unittest.TestCase):
 
     def test_pytest_runner_requires_explicit_test_root_without_test_mode(self):
         with patch.dict(os.environ, {}, clear=False), \
+             patch.object(sys, "orig_argv", ["python", "-m", "pytest", "scriptor/test_config.py"]), \
              patch.object(sys, "argv", [r"C:\Python\Lib\site-packages\pytest\__main__.py"]):
             os.environ.pop("NEWSFLOW_TEST_MODE", None)
             os.environ.pop("NEWSFLOW_TEST_ROOT", None)
