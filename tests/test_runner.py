@@ -249,7 +249,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].length_status, "READY")
         self.assertLessEqual(jobs[0].actual_chars, 10000)
 
-    async def test_exhausted_length_repairs_keep_the_best_script_without_an_error(self):
+    async def test_exhausted_length_repairs_keep_the_best_script_paused_without_an_error(self):
         class AlwaysShortClient:
             fresh_calls = 0
 
@@ -265,7 +265,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         jobs = await ParallelRunner(client, 1).run([request])
 
         self.assertEqual(client.fresh_calls, 2)
-        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].result, "мало")
         self.assertEqual(jobs[0].length_status, "SHORT")
         self.assertEqual(jobs[0].length_repair_attempts, 2)
         self.assertEqual(jobs[0].error, "")
