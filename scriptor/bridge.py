@@ -3344,7 +3344,6 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
         parts = (hook, fallback_parts[1], fallback_parts[2])
     elif _formula_parts_need_contextual_fallback(parts, topic):
         parts = fallback_parts
-        used_contextual_fallback = True
 
     parts = tuple(
         _fit_formula_part(
