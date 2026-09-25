@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
+import subprocess
 from typing import Mapping
 
 from .claude import chrome_path
@@ -24,6 +25,10 @@ class StudioAutomationError(RuntimeError):
     """A visible Studio action was not confirmed and may be retried later."""
 
 
+class StudioIdentityVerificationRequired(StudioAutomationError):
+    """A human must complete Studio's account-protection step."""
+
+
 def studio_editor_url(video_id: str) -> str:
     """Build the Studio editor URL for one YouTube video identifier only."""
 
@@ -31,6 +36,19 @@ def studio_editor_url(video_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", value):
         raise StudioAutomationError("Некорректный идентификатор ролика для редактора Studio.")
     return f"https://studio.youtube.com/video/{value}/editor"
+
+
+def open_studio_identity_verification(profile_dir: Path, video_id: str) -> subprocess.Popen:
+    """Open ordinary Chrome for human 2FA without triggering a retry."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return subprocess.Popen([
+        str(chrome_path()),
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        studio_editor_url(video_id),
+    ])
 
 
 def studio_monetization_url(video_id: str) -> str:
@@ -68,9 +86,33 @@ def studio_control_labels(kind: str) -> str:
     return labels[kind]
 
 
-def _open_editor_section(page, kind: str) -> None:
-    """Click the visible plus control on a current Studio editor row."""
+def _enter_new_editor_if_needed(page) -> None:
+    """Dismiss Studio's shared welcome screen before any editor action."""
+    clicked_transition = False
+    for _attempt in range(40):
+        current_text = page.locator("body").inner_text(timeout=1_000)
+        if identity_verification_required(current_text):
+            raise StudioIdentityVerificationRequired(
+                "YouTube Studio просит подтвердить личность. Завершите 2FA вручную и повторите действие."
+            )
+        if new_editor_sections_visible(current_text):
+            return
+        if end_screen_requires_editor_entry(current_text) and not clicked_transition:
+            if not _click_exact_visible_button(page, studio_transition_label()):
+                raise StudioAutomationError("Не найдена кнопка перехода в новый видеоредактор Studio.")
+            clicked_transition = True
+        page.wait_for_timeout(250)
+    raise StudioAutomationError("Studio не загрузил разделы нового видеоредактора.")
 
+
+def _open_editor_section(page, kind: str) -> None:
+    """Click the visible add/edit control on a current Studio editor row."""
+    current_text = page.locator("body").inner_text(timeout=3_000)
+    if identity_verification_required(current_text):
+        raise StudioIdentityVerificationRequired(
+            "YouTube Studio просит подтвердить личность. Завершите 2FA вручную и повторите действие."
+        )
+    _enter_new_editor_if_needed(page)
     label = studio_control_labels(kind)
     opened = page.locator("body").evaluate("""(needle) => {
       const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
@@ -103,6 +145,28 @@ def end_screen_requires_editor_entry(visible_text: str) -> bool:
 
 def studio_transition_label() -> str:
     return "Перейти к редактору"
+
+
+def new_editor_sections_visible(visible_text: str) -> bool:
+    normalized = " ".join(str(visible_text or "").casefold().split())
+    return "конечные заставки" in normalized and "подсказки" in normalized
+
+
+def identity_verification_required(visible_text: str) -> bool:
+    normalized = " ".join(str(visible_text or "").casefold().split())
+    return any(marker in normalized for marker in (
+        "подтвердите личность",
+        "подтверждение личности",
+        "verify your identity",
+    ))
+
+
+def _editor_access_denied(visible_text: str) -> bool:
+    normalized = " ".join(str(visible_text or "").casefold().split())
+    return (
+        "нет доступа к этому разделу" in normalized
+        or "don't have access to this section" in normalized
+    )
 
 
 def _click_exact_visible_button(page, label: str) -> bool:
@@ -192,6 +256,95 @@ def _first(page, selectors: list[str]):
         except Exception:
             continue
     raise StudioAutomationError("Не удалось найти нужный элемент в YouTube Studio. Обновите Studio и повторите шаг.")
+
+
+def _choose_card_video_type(page) -> None:
+    for _attempt in range(40):
+        for label in ("Добавить подсказку со ссылкой на ролик", "Add video card"):
+            try:
+                control = page.get_by_label(label, exact=True)
+                if control.is_visible(timeout=1_000):
+                    control.click(timeout=10_000)
+                    return
+            except Exception:
+                pass
+        for name in ("Видео", "Video"):
+            try:
+                option = page.get_by_role("option", name=name, exact=True)
+                if option.is_visible(timeout=1_000):
+                    option.click(timeout=10_000)
+                    return
+            except Exception:
+                pass
+        page.wait_for_timeout(250)
+    raise StudioAutomationError("Studio не показал вариант «Видео» для подсказки.")
+
+
+def _choose_own_video_by_title(page, title: str) -> None:
+    value = " ".join(str(title or "").split())
+    if not value:
+        raise StudioAutomationError("В плане отсутствует название опубликованного ролика.")
+    pattern = re.compile(re.escape(value), re.IGNORECASE)
+    for _attempt in range(40):
+        try:
+            option = page.get_by_role("option", name=pattern).first
+            if option.is_visible(timeout=1_000):
+                option.click(timeout=10_000)
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+    raise StudioAutomationError(f"Studio не нашёл опубликованный ролик «{value}» в списке своих видео.")
+
+
+def _save_editor_changes(page) -> None:
+    """Click an enabled Save and wait until Studio consumes the change."""
+    saw_save = False
+    for _attempt in range(40):
+        if identity_verification_required(page.locator("body").inner_text(timeout=1_000)):
+            raise StudioIdentityVerificationRequired(
+                "YouTube Studio просит подтвердить личность перед сохранением."
+            )
+        for label in ("Сохранить", "Save"):
+            try:
+                control = page.get_by_label(label, exact=True)
+                if not control.is_visible(timeout=700):
+                    continue
+                saw_save = True
+                if not control.is_enabled(timeout=700):
+                    continue
+                control.click(timeout=10_000)
+                for _wait in range(40):
+                    try:
+                        if not control.is_visible(timeout=300) or not control.is_enabled(timeout=300):
+                            return
+                    except Exception:
+                        return
+                    page.wait_for_timeout(250)
+                raise StudioAutomationError("Studio не подтвердил завершение сохранения.")
+            except StudioIdentityVerificationRequired:
+                raise
+            except StudioAutomationError:
+                raise
+            except Exception:
+                continue
+        page.wait_for_timeout(250)
+    if saw_save:
+        raise StudioAutomationError("Studio не принял изменение: кнопка «Сохранить» осталась неактивной.")
+    raise StudioAutomationError("Studio не показал кнопку «Сохранить» после изменения.")
+
+
+def _verify_cards_saved(page, cards: list[Mapping[str, object]]) -> None:
+    """Reopen Cards and prove that every target title survived the save."""
+    if not cards:
+        return
+    _open_editor_section(page, "cards")
+    for _attempt in range(40):
+        visible = " ".join(page.locator("body").inner_text(timeout=1_000).split())
+        if all(str(dict(card).get("videoTitle", "")).strip() in visible for card in cards):
+            return
+        page.wait_for_timeout(250)
+    raise StudioAutomationError("Повторная проверка не нашла все сохранённые подсказки.")
 
 
 def _click_text(page, labels: list[str]) -> None:
@@ -418,38 +571,43 @@ def _apply_ads(page, action: Mapping[str, object]) -> dict:
 
 
 def _apply_cards(page, action: Mapping[str, object]) -> None:
+    cards = [dict(card) for card in list(action.get("cards") or [])][:5]
     _open_editor_section(page, "cards")
-    for card in list(action.get("cards") or []):
-        _click_text(page, [r"добавить.*карточк", r"add.*card"])
-        _click_text(page, [r"видео", r"video"])
-        video_id = str(dict(card).get("videoId", "")).strip()
-        if not video_id:
-            raise StudioAutomationError("В плане карточки отсутствует идентификатор видео.")
-        search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
-        search.fill(video_id)
-        _click_text(page, [re.escape(video_id), r"выбрать", r"select"])
-        timestamp = _first(page, ["input[aria-label*='время' i]", "input[aria-label*='time' i]"])
-        timestamp.fill(str(int(float(dict(card).get("atSeconds", 0) or 0))))
-    _click_text(page, [r"сохранить", r"save"])
+    for item in cards:
+        title = " ".join(str(item.get("videoTitle", "")).split())
+        if not title:
+            raise StudioAutomationError("В плане подсказки отсутствует название опубликованного ролика.")
+        _choose_card_video_type(page)
+        search = _first(page, [
+            "input[placeholder='Найти свои видео']",
+            "input[placeholder='Search your videos']",
+            "input[type='search']",
+            "input[aria-label*='поиск' i]",
+            "input[aria-label*='search' i]",
+        ])
+        search.fill(title)
+        _choose_own_video_by_title(page, title)
+        timestamp = _first(page, [
+            "input[aria-label*='Время начала показа' i]",
+            "input[aria-label*='время' i]",
+            "input[aria-label*='time' i]",
+        ])
+        timestamp.click()
+        try:
+            timestamp.press("Control+A")
+        except Exception:
+            pass
+        timestamp.fill(str(max(0, int(float(item.get("atSeconds", 0) or 0)))))
+        timestamp.press("Tab")
+        page.wait_for_timeout(350)
+    _save_editor_changes(page)
+    _verify_cards_saved(page, cards)
 
 
 def _apply_end_screen(page, action: Mapping[str, object]) -> None:
-    if end_screen_requires_editor_entry(page.locator("body").inner_text(timeout=3_000)):
-        if not _click_exact_visible_button(page, studio_transition_label()):
-            raise StudioAutomationError("Не найдена большая кнопка перехода в новый видеоредактор Studio.")
-        for _attempt in range(40):
-            current_text = page.locator("body").inner_text(timeout=1_000)
-            if not end_screen_requires_editor_entry(current_text):
-                break
-            page.wait_for_timeout(250)
-        else:
-            raise StudioAutomationError("Studio не открыл новый редактор после нажатия «Перейти к редактору».")
     _open_editor_section(page, "end-screen")
-    # The Studio editor owns the exact positioning controls.  Insert elements
-    # one by one so a changed template can never silently replace a video's
-    # existing end screen wholesale.
-    for item in list(action.get("items") or []):
-        kind = str(dict(item).get("kind", ""))
+    for item in [dict(value) for value in list(action.get("items") or [])][:4]:
+        kind = str(item.get("kind", ""))
         if kind == "best-for-viewer":
             _click_text(page, [r"добавить.*элемент", r"add.*element"])
             _click_text(page, [r"лучшее.*зрител", r"best.*viewer"])
@@ -457,29 +615,67 @@ def _apply_end_screen(page, action: Mapping[str, object]) -> None:
             _click_text(page, [r"добавить.*элемент", r"add.*element"])
             _click_text(page, [r"подпис", r"subscribe"])
         elif kind == "video":
+            title = " ".join(str(item.get("videoTitle", "")).split())
+            if not title:
+                raise StudioAutomationError("В плане конечной заставки отсутствует название опубликованного ролика.")
             _click_text(page, [r"добавить.*элемент", r"add.*element"])
             _click_text(page, [r"видео", r"video"])
-            search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
-            search.fill(str(dict(item).get("videoId", "")))
-            _click_text(page, [r"выбрать", r"select"])
+            search = _first(page, [
+                "input[placeholder='Найти свои видео']",
+                "input[placeholder='Search your videos']",
+                "input[type='search']",
+                "input[aria-label*='поиск' i]",
+            ])
+            search.fill(title)
+            _choose_own_video_by_title(page, title)
         elif kind == "playlist":
             _click_text(page, [r"добавить.*элемент", r"add.*element"])
             _click_text(page, [r"плейлист", r"playlist"])
-            search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
-            search.fill(str(dict(item).get("playlistId", "")))
+            search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]"])
+            search.fill(str(item.get("playlistId", "")))
             _click_text(page, [r"выбрать", r"select"])
-    _click_text(page, [r"сохранить", r"save"])
+    _save_editor_changes(page)
 
 
 def _open_video_editor(page, video_id: str) -> None:
-    """Follow Studio's supported Details → Editor path for one video."""
-
+    """Open the exact visible actionable Editor navigation item."""
     page.goto(studio_details_url(video_id), wait_until="domcontentloaded", timeout=120_000)
     _wait_for_studio_shell(page)
-    _click_text(page, [r"^редактор$"])
-    for _attempt in range(40):
-        if "/editor" in page.url:
+    visible_text = page.locator("body").inner_text(timeout=3_000)
+    if identity_verification_required(visible_text):
+        raise StudioIdentityVerificationRequired(
+            "YouTube Studio просит подтвердить личность. Завершите 2FA вручную и повторите действие."
+        )
+    if _editor_access_denied(visible_text):
+        raise StudioAutomationError("У текущего аккаунта YouTube Studio нет доступа к разделу «Редактор».")
+    clicked = bool(page.locator("body").evaluate("""() => {
+      const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
+      const candidates = Array.from(document.querySelectorAll(
+        'a[role="menuitem"], [role="menuitem"][href], a[href*="/editor"]'
+      ));
+      const target = candidates.find((node) =>
+        visible(node) && (
+          normalize(node.innerText) === 'редактор'
+          || String(node.getAttribute('href') || '').includes('/editor')
+        )
+      );
+      if (!target) return false;
+      target.click();
+      return true;
+    }"""))
+    if not clicked:
+        raise StudioAutomationError("В Studio недоступен видимый пункт меню «Редактор».")
+    for _attempt in range(60):
+        if "/editor" in str(page.url):
             return
+        current_text = page.locator("body").inner_text(timeout=1_000)
+        if identity_verification_required(current_text):
+            raise StudioIdentityVerificationRequired(
+                "YouTube Studio просит подтвердить личность. Завершите 2FA вручную и повторите действие."
+            )
+        if _editor_access_denied(current_text):
+            raise StudioAutomationError("YouTube Studio запретил доступ к разделу «Редактор».")
         page.wait_for_timeout(250)
     raise StudioAutomationError("Studio не открыл вкладку «Редактор» со страницы сведений ролика.")
 
@@ -488,13 +684,7 @@ def execute_studio_task(
     task: Mapping[str, object], *, profile_dir: Path, youtube_channel_id: str,
     action_kinds: set[str] | None = None,
 ) -> list[str]:
-    """Run planned actions in one visible, persistent Chrome profile.
-
-    The caller updates status only after this function returns each completed
-    action.  Closing the context preserves the Chrome profile's cookies and
-    history; it never deletes or substitutes a user profile.
-    """
-
+    """Run planned actions in the channel's visible persistent Chrome profile."""
     if not youtube_channel_id:
         raise StudioAutomationError("У канала нет подтверждённого YouTube ID.")
     actions = planned_studio_actions(task, action_kinds=action_kinds)
@@ -508,15 +698,23 @@ def execute_studio_task(
     completed: list[str] = []
     playwright = sync_playwright().start()
     page = None
+    context = None
+    verification_error: StudioIdentityVerificationRequired | None = None
     try:
         context = playwright.chromium.launch_persistent_context(
             str(profile_dir), executable_path=str(chrome_path()), headless=False,
-            args=["--no-first-run", "--no-default-browser-check",
-                  "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows"],
+            args=[
+                "--no-first-run", "--no-default-browser-check",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+            ],
             viewport={"width": 1280, "height": 900},
         )
         page = context.new_page()
-        page.goto(f"https://studio.youtube.com/channel/{youtube_channel_id}", wait_until="domcontentloaded", timeout=120_000)
+        page.goto(
+            f"https://studio.youtube.com/channel/{youtube_channel_id}",
+            wait_until="domcontentloaded", timeout=120_000,
+        )
         _wait_for_studio_shell(page)
         for action in actions:
             if action["kind"] == "ads":
@@ -534,11 +732,16 @@ def execute_studio_task(
                 _open_video_editor(page, str(task.get("videoId", "")))
                 _apply_end_screen(page, action)
             completed.append(str(action["kind"]))
-        context.close()
+    except StudioIdentityVerificationRequired as exc:
+        message = str(exc)
+        if page is not None:
+            try:
+                visible = " ".join(page.locator("body").inner_text(timeout=2_000).split())[:700]
+                message = f"{message} URL: {page.url}. Экран: {visible}"
+            except Exception:
+                pass
+        verification_error = StudioIdentityVerificationRequired(message)
     except StudioAutomationError as exc:
-        # Keep a compact, local diagnostic for the retry queue. It tells us
-        # whether Studio redirected to login, opened a blocking dialog, or
-        # renamed a control without storing page source or credentials.
         if page is not None:
             try:
                 visible = " ".join(page.locator("body").inner_text(timeout=2_000).split())[:700]
@@ -551,5 +754,18 @@ def execute_studio_task(
     except Exception as exc:
         raise StudioAutomationError(f"Studio не подтвердил действие: {exc}") from exc
     finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
         playwright.stop()
+    if verification_error is not None:
+        try:
+            open_studio_identity_verification(profile_dir, str(task.get("videoId", "")))
+        except Exception as exc:
+            raise StudioAutomationError(
+                f"{verification_error} Не удалось оставить Studio открытым: {exc}"
+            ) from exc
+        raise verification_error
     return completed
