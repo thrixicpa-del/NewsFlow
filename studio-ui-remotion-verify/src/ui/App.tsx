@@ -10944,7 +10944,7 @@ export function Outputs({
         <div className="panel-title">
           <div>
             <b>Результаты для передачи</b>
-            <small>Одна нумерованная выгрузка TXT, выбранные обложки и готовые MP4 без изменения Publication-пакетов.</small>
+            <small>Три согласованных TXT, выбранные обложки и готовые MP4 без изменения Publication-пакетов.</small>
           </div>
         </div>
         <div className="toolbar">

@@ -14423,9 +14423,9 @@ def export_results_batch(payload: dict) -> dict:
     folder = _results_export_folder(root)
     covers_folder = folder / "Обложки"
     mp4_folder = folder / "MP4"
-    headings: list[str] = ["ЗАГОЛОВКИ", ""]
-    descriptions: list[str] = ["SEO ОПИСАНИЯ", ""]
-    tags_section: list[str] = ["ТЕГИ", ""]
+    headings: list[str] = []
+    descriptions: list[str] = []
+    tags_section: list[str] = []
     missing_mp4: list[int] = []
     missing_cover: list[int] = []
     missing_description: list[int] = []
@@ -14440,13 +14440,13 @@ def export_results_batch(payload: dict) -> dict:
         cover = covers_by_id.get(production_item_id, {}) if production_item_id else legacy_covers.get(title.casefold(), {})
         seo_ready = str(seo.get("status", "")) == "Готово"
         tags_ready = str(seo.get("tags_status", "")) == "Готово"
-        seo_title = (str(seo.get("title", "") or "").strip() if seo_ready else "") or title
         description = str(seo.get("description", "") or "").strip() if seo_ready else ""
+        hashtags = _seo_hashtags(seo) if seo_ready else []
         tags = seo.get("tags", []) if tags_ready and isinstance(seo.get("tags", []), list) else []
         tag_text = ", ".join(str(value).strip() for value in tags if str(value).strip())
-        headings.append(f"{ordinal:03d}. {seo_title}")
-        descriptions.append(f"{ordinal:03d}. {description}")
-        tags_section.append(f"{ordinal:03d}. {tag_text}")
+        headings.append(f"{ordinal:03d}. {title}")
+        descriptions.append("\n".join(filter(None, [f"{ordinal:03d}. {description}".rstrip(), " ".join(hashtags)])))
+        tags_section.append(f"{ordinal:03d}. {tag_text}".rstrip())
         if not description:
             missing_description.append(ordinal)
         if not tag_text:
@@ -14472,9 +14472,9 @@ def export_results_batch(payload: dict) -> dict:
                 missing_mp4.append(ordinal)
         else:
             missing_mp4.append(ordinal)
-    (folder / "Результаты.txt").write_text(
-        "\n".join([*headings, "", *descriptions, "", *tags_section, ""]), encoding="utf-8",
-    )
+    (folder / "01-заголовки.txt").write_text("\n".join(headings) + "\n", encoding="utf-8")
+    (folder / "02-SEO-и-хештеги.txt").write_text("\n".join(descriptions) + "\n", encoding="utf-8")
+    (folder / "03-теги.txt").write_text("\n".join(tags_section) + "\n", encoding="utf-8")
     settings.results_last_export_folder = str(folder)
     save_settings(settings)
     summary = {
