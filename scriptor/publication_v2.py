@@ -1183,12 +1183,19 @@ def _apply_adaptive_bulk_schedule_range(
             if not _is_quarter_hour(start) or not _is_quarter_hour(end):
                 raise ValueError("Начало и конец массового диапазона должны быть кратны 15 минутам.")
 
+            minimum_interval_minutes = max(
+                180,
+                max(15, int(rule.get("intervalMinutes", 180) or 180)),
+            )
+
             def can_use(
                 candidate: datetime,
                 production_item_id: str,
                 rule_for_channel: dict = rule,
                 channel_zone: ZoneInfo = zone,
                 channel_key: str = channel_id,
+                *,
+                enforce_interval: bool = True,
             ) -> bool:
                 allowed = rule_for_channel.get("allowedWeekdays")
                 weekdays = {int(value) for value in allowed} if isinstance(allowed, list) and allowed else set(range(7))
@@ -1209,6 +1216,11 @@ def _apply_adaptive_bulk_schedule_range(
                 except ValueError:
                     return False
                 existing = channel_slots.get(channel_key, [])
+                if enforce_interval and any(
+                    abs(candidate - point) < timedelta(minutes=minimum_interval_minutes)
+                    for point, _value in existing
+                ):
+                    return False
                 daily_cap = max(0, int(rule_for_channel.get("dailyCap", 0) or 0))
                 if daily_cap and sum(point.date() == candidate.date() for point, _value in existing) >= daily_cap:
                     return False
@@ -1241,8 +1253,32 @@ def _apply_adaptive_bulk_schedule_range(
                 row = result[position]
                 slot = slots_by_id[str(row["productionItemId"])]
                 if slot is None:
-                    row["scheduleWarning"] = "В выбранном диапазоне нет свободного 15-минутного слота, совместимого с правилами канала."
-                    row["scheduleSuggestion"] = "Расширьте диапазон, включите другое окно или измените квоту/правила канала."
+                    candidate = start
+                    rule_compatible_without_interval = False
+                    while candidate <= end:
+                        if (
+                            candidate.astimezone(timezone.utc) not in occupied
+                            and can_use(candidate, str(row["productionItemId"]), enforce_interval=False)
+                        ):
+                            rule_compatible_without_interval = True
+                            break
+                        candidate += timedelta(minutes=15)
+                    if rule_compatible_without_interval:
+                        row["scheduleWarning"] = (
+                            f"Не удаётся выдержать минимальный интервал {minimum_interval_minutes} минут "
+                            "между роликами этого канала."
+                        )
+                        row["scheduleSuggestion"] = (
+                            "Расширьте временное окно, уменьшите квоту канала или перенесите часть роликов "
+                            "на другой канал."
+                        )
+                    else:
+                        row["scheduleWarning"] = (
+                            "В выбранном окне нет свободного времени, совместимого с правилами канала."
+                        )
+                        row["scheduleSuggestion"] = (
+                            "Проверьте окно публикации, blackout, дневную квоту и ограничения канала."
+                        )
                     row.pop("publishAt", None)
                     continue
                 row.pop("scheduleWarning", None)
