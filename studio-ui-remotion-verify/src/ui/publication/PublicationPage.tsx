@@ -73,7 +73,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     endTime: "10:00",
     timezone: "Europe/Minsk",
     channelIds: model.channels.filter((channel) => channel.enabled).map((channel) => channel.channelId),
-    maxPerChannel: 1,
+    maxPerChannel: 0,
     timeWindows: [
       { id: "morning", label: "Первая половина дня · 03:00–12:00", startTime: "03:00", endTime: "12:00", quota: 0, enabled: true },
       { id: "day", label: "Днём · 12:00–17:00", startTime: "12:00", endTime: "17:00", quota: 0, enabled: false },
@@ -429,7 +429,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         <label>Дата диапазона<input aria-label="Дата диапазона" type="date" value={bulkSchedule.date} onChange={(event) => setBulkSchedule((current) => ({ ...current, date: event.target.value }))}/></label>
         <label>Начало диапазона<input aria-label="Начало диапазона" type="time" step="900" value={bulkSchedule.startTime} onChange={(event) => setBulkSchedule((current) => ({ ...current, startTime: event.target.value }))}/></label>
         <label>Конец диапазона<input aria-label="Конец диапазона" type="time" step="900" value={bulkSchedule.endTime} onChange={(event) => setBulkSchedule((current) => ({ ...current, endTime: event.target.value }))}/></label>
-        <label>Максимум роликов на канал<input aria-label="Максимум роликов на канал" type="number" min="1" value={bulkSchedule.maxPerChannel} onChange={(event) => setBulkSchedule((current) => ({ ...current, maxPerChannel: Math.max(1, Number(event.target.value) || 1) }))}/></label>
+        <label>Доп. максимум на канал<input aria-label="Максимум роликов на канал" type="number" min="0" value={bulkSchedule.maxPerChannel || ""} placeholder="по квоте канала" onChange={(event) => setBulkSchedule((current) => ({ ...current, maxPerChannel: Math.max(0, Number(event.target.value) || 0) }))}/></label>
         <fieldset className="nf-time-window-priorities"><legend>Приоритет времени</legend><small>Включите нужные окна. «Авто» распределит оставшиеся ролики между активными окнами; числом задаётся точная квота.</small>{bulkSchedule.timeWindows.map((window) => <div key={window.id} className="nf-time-window-priority"><label><input aria-label={`Включить ${window.label}`} type="checkbox" checked={window.enabled} onChange={(event) => updateTimeWindow(window.id, { enabled: event.target.checked })}/>{window.label}</label><label>Роликов <input aria-label={`Роликов ${window.label}`} type="range" min="0" max="20" value={window.quota} onChange={(event) => updateTimeWindow(window.id, { quota: Number(event.target.value) || 0 })}/><output>{window.quota || "Авто"}</output></label></div>)}</fieldset>
         <div className="nf-bulk-channel-list" aria-label="Каналы диапазона">
           {rules.filter((channel) => channel.enabled).map((channel) => <label key={channel.channelId}>
