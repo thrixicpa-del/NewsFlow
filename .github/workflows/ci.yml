@@ -24,6 +24,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: studio-ui-remotion-verify
       - run: pwsh -NoProfile -File scripts/release-lint.ps1
+      - run: python -m ruff check --select E9,F63,F7,F82 scriptor/bridge.py scriptor/command_contract.py scriptor/publication_v2.py scriptor/youtube_api.py scriptor/youtube_engagement.py scriptor/youtube_studio.py tests/test_publication_v2.py tests/test_youtube_engagement.py tests/test_youtube_publisher.py tests/test_youtube_studio.py
+      - run: git diff --check origin/main...HEAD
       - run: pwsh -NoProfile -File scripts/audit-python-dependencies.ps1
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
@@ -31,6 +33,11 @@ jobs:
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py scriptor.test_command_contract
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: pnpm exec vitest run src/ui/publication/publication-flow.test.tsx src/contracts/newsflowCommands.test.ts
+        working-directory: studio-ui-remotion-verify
       - run: pnpm typecheck
         working-directory: studio-ui-remotion-verify
       - run: pnpm test:ui
