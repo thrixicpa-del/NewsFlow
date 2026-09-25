@@ -15316,13 +15316,17 @@ def preview_publication_v2_distribution(payload: dict) -> dict:
         if not selected_channels:
             raise ValueError("Выберите хотя бы один канал для массового диапазона.")
         try:
-            max_per_channel = max(1, int(bulk_schedule.get("maxPerChannel", 1)))
+            max_per_channel = max(0, int(bulk_schedule.get("maxPerChannel", 0) or 0))
         except (TypeError, ValueError) as error:
-            raise ValueError("Укажите положительный лимит роликов на канал.") from error
+            raise ValueError("Дополнительный лимит роликов на канал должен быть неотрицательным числом.") from error
         rules = [
             {
                 **rule,
-                "quota": min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel),
+                "quota": (
+                    min(max(0, int(rule.get("quota", 0) or 0)), max_per_channel)
+                    if max_per_channel
+                    else max(0, int(rule.get("quota", 0) or 0))
+                ),
             }
             for rule in rules
             if str(rule.get("channelId", "")).strip() in selected_channels
