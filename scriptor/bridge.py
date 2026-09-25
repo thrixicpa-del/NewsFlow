@@ -2864,6 +2864,7 @@ _IDEA_TITLE_TARGET_MAX_CHARS = 95
 _IDEA_TITLE_MEMORY_LIMIT = 500
 _IDEA_TITLE_RECENT_WINDOW = 100
 _IDEA_TITLE_FORMULA_SEPARATOR = " — "
+_IDEA_FORMULA_PART_LIMITS = (32, 33, 29)
 _GENERIC_IDEA_TITLE_WORDS = {
     "глобальный", "глобальная", "глобальные", "политический", "политическая", "политические",
     "кризис", "кризиса", "кризисе", "экономический", "экономическая", "экономические",
@@ -3008,30 +3009,68 @@ def _metadata_for_idea_title(title: str, topic: str, candidate: dict | None = No
 
 
 def _formula_part(value: object) -> str:
-    return _clean_idea_title(value).strip("—-:;!. ")
+    text = _clean_idea_title(value).strip("—-:;!?. ")
+    if _title_is_all_caps(text):
+        text = text.lower().capitalize()
+    return text
 
 
-def _formula_candidate(candidate: dict) -> dict | None:
+def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
+    """Return concise complete phrases when a provider part does not fit."""
+    del topic
+    hooks = (
+        "Ставки растут", "Новый разлом", "Решающий поворот", "Напряжение усиливается",
+        "Риск выходит наружу", "Баланс меняется", "Конфликт обостряется", "Вопрос становится жёстче",
+        "Стороны повышают цену", "Точка давления найдена",
+    )
+    actions = (
+        "Стороны меняют курс", "Стороны усиливают давление", "Участники идут на риск",
+        "Стороны ужесточают условия", "Участники меняют расчёт", "Стороны меняют баланс",
+        "Участники проверяют границы", "Стороны повышают ставки", "Участники меняют тактику",
+        "Стороны спорят за влияние",
+    )
+    consequences = (
+        "Баланс сил под угрозой", "Условия для сторон жёстче", "Интересы сторон под риском",
+        "Цена ошибки растёт", "Исход для сторон неясен", "Контроль слабеет",
+        "Влияние на объект меняется", "Компромисс усложняется", "Последствия нарастают",
+        "Ставка для объекта выше",
+    )
+    return (
+        hooks[variant % len(hooks)],
+        actions[variant % len(actions)],
+        consequences[variant % len(consequences)],
+    )
+
+
+def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
+                       force_local_parts: bool = False) -> dict:
     """Return one canonical Hook — Action — Consequence idea title.
 
-    The visible title is a production contract, not a best-effort suggestion:
-    every accepted candidate must carry a provocative hook, a subject action,
-    and a consequence for the affected object. A model may provide those
-    fields directly or an already assembled three-part title, but a free-form
-    question never enters the Ideas result list.
+    The visible title is a production contract.  A provider response is never
+    sent back for a forced rewrite or discarded solely for formatting: Python
+    materialises missing parts and compacts every accepted title locally.
     """
     explicit_parts = (
         _formula_part(candidate.get("provocative_headline", candidate.get("provocativeHeadline", ""))),
         _formula_part(candidate.get("subject_action", candidate.get("subjectAction", ""))),
         _formula_part(candidate.get("object_consequence", candidate.get("objectConsequence", ""))),
     )
+    raw_title = _formula_part(candidate.get("title", ""))
     if all(explicit_parts):
         parts = explicit_parts
     else:
-        parts = tuple(_formula_part(part) for part in _clean_idea_title(candidate.get("title", "")).split(
+        parts = tuple(_formula_part(part) for part in raw_title.split(
             _IDEA_TITLE_FORMULA_SEPARATOR))
-    if len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
-        return None
+    fallback_parts = _local_formula_parts(topic, variant)
+    if force_local_parts:
+        parts = fallback_parts
+    elif len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
+        hook = raw_title.strip("?") if raw_title and not _has_unresolved_headline_template(raw_title) else fallback_parts[0]
+        parts = (hook, fallback_parts[1], fallback_parts[2])
+    parts = tuple(
+        part if len(part) <= limit and "…" not in part else fallback
+        for part, limit, fallback in zip(parts, _IDEA_FORMULA_PART_LIMITS, fallback_parts)
+    )
     title = _IDEA_TITLE_FORMULA_SEPARATOR.join(parts)
     return {
         **candidate,
@@ -3057,9 +3096,7 @@ def _parse_idea_candidates(text: str, *, formula_only: bool = False) -> list[dic
         for value in decoded:
             if isinstance(value, dict):
                 if formula_only:
-                    formula = _formula_candidate(value)
-                    if formula:
-                        candidates.append(formula)
+                    candidates.append(value)
                 else:
                     title = _clean_idea_title(value.get("title", ""))
                     if title:
@@ -3078,18 +3115,33 @@ def select_idea_title_candidates(topic: str, candidates: list[object], memory: l
     """Select diverse valid candidates with deterministic anti-duplicate checks."""
     selected: list[dict] = []
     comparison_memory = list(memory)
-    for raw in candidates:
+    for variant, raw in enumerate(candidates):
         candidate = raw if isinstance(raw, dict) else {"title": raw}
         if formula_only:
-            candidate = _formula_candidate(candidate)
-            if not candidate:
-                continue
+            candidate = _formula_candidate(candidate, topic=topic, variant=variant)
         validation = valid_idea_title(candidate.get("title", ""))
         if not validation["valid"]:
             continue
         duplicate, score, _reason = _duplicate_details(validation["title"], comparison_memory)
         if duplicate:
-            continue
+            if not formula_only:
+                continue
+            for collision_variant in range(variant, variant + 10):
+                replacement = _formula_candidate(
+                    candidate, topic=topic, variant=collision_variant, force_local_parts=True,
+                )
+                replacement_validation = valid_idea_title(replacement["title"])
+                replacement_duplicate, replacement_score, _reason = _duplicate_details(
+                    replacement_validation["title"], comparison_memory,
+                )
+                if replacement_validation["valid"] and not replacement_duplicate:
+                    candidate = replacement
+                    validation = replacement_validation
+                    score = replacement_score
+                    duplicate = False
+                    break
+            if duplicate:
+                continue
         metadata = _metadata_for_idea_title(validation["title"], topic, candidate, score)
         selected.append(metadata)
         comparison_memory.append(metadata)
@@ -3121,33 +3173,12 @@ def _local_idea_drafts(topic: str, count: int) -> list[str]:
 
 def _local_idea_title_drafts(topic: str, count: int) -> list[dict]:
     """Create safe offline candidates in the same visible three-part formula."""
-    topic_label = _clean_idea_title(topic)
-    if len(topic_label) > 24:
-        topic_label = f"{topic_label[:23].rstrip()}…"
-    hooks = (
-        "Ставки растут", "Новый разлом", "Решающий поворот", "Напряжение усиливается",
-        "Риск выходит наружу", "Баланс меняется", "Конфликт растёт", "Спор обостряется",
-        "Стороны повышают цену", "Точка давления найдена",
-    )
-    actions = (
-        "«{topic}» меняет позиции", "«{topic}» усиливает давление",
-        "«{topic}» идёт на риск", "«{topic}» ужесточает условия",
-        "«{topic}» меняет расчёт", "«{topic}» меняет баланс сил",
-        "«{topic}» проверяет уступки", "«{topic}» повышает ставки",
-        "«{topic}» меняет тактику", "«{topic}» спорит за влияние",
-    )
-    consequences = (
-        "Баланс сил под угрозой", "Условия для сторон жёстче",
-        "Интересы сторон под риском", "Цена ошибки растёт",
-        "Исход для сторон неясен", "Контроль над ситуацией слабеет",
-        "Риски для объекта выше", "Компромисс сложнее",
-        "Последствия для сторон нарастают", "Ставка для объекта выше",
-    )
     return [{
-        "provocative_headline": hooks[index % len(hooks)],
-        "subject_action": actions[index % len(actions)].format(topic=topic_label),
-        "object_consequence": consequences[index % len(consequences)],
-    } for index in range(max(count, len(hooks)))]
+        "provocative_headline": parts[0],
+        "subject_action": parts[1],
+        "object_consequence": parts[2],
+    } for index in range(max(count, 10))
+      for parts in [_local_formula_parts(topic, index)]]
 
 
 def _has_unresolved_headline_template(value: str) -> bool:
@@ -3205,7 +3236,8 @@ def _title_generation_prompt(topic: str, requirements: str, candidate_count: int
         "ОБЯЗАТЕЛЬНАЯ ФОРМУЛА КАЖДОГО ЗАГОЛОВКА: [ПРОВОКАЦИОННЫЙ ЗАГОЛОВОК] — "
         "[ДЕЙСТВИЕ СУБЪЕКТА] — [ПОСЛЕДСТВИЕ ДЛЯ ОБЪЕКТА]. Это ровно три непустые части, "
         "разделённые длинным тире; не используй вопросительную форму, двоеточие вместо частей или "
-        "свободный заголовок.\n"
+        "свободный заголовок. Первая часть — не более 32 символов, вторая — не более 33 символов, "
+        "третья — не более 29 символов; каждая часть должна быть законченной фразой без многоточия.\n"
         if formula_only else
         "Трёхчастная формула не выбрана оператором: используй её только если она действительно делает заголовок лучше.\n"
     )

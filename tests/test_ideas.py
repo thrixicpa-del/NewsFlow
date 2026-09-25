@@ -167,8 +167,8 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertTrue(any("Правило второй темы" in prompt for prompt in prompts))
         self.assertFalse(any("Общее правило, которое не должно заменить личные" in prompt for prompt in prompts))
 
-    def test_generation_rejects_free_form_titles_and_falls_back_to_the_three_part_formula(self):
-        """A provider question must never bypass the operator's title formula."""
+    def test_generation_materialises_free_form_titles_into_the_three_part_formula(self):
+        """A provider question is locally formatted instead of rejected or regenerated."""
         settings = Settings(
             openai_api_keys=[OpenAIKey(label="Тест", secret="test-key", active=True)],
             idea_plan=[{
@@ -179,8 +179,11 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             }],
         )
 
+        prompts = []
+
         class FakePool:
-            async def generate(self, _prompt):
+            async def generate(self, prompt):
+                prompts.append(prompt)
                 return "Почему переговоры могут зайти в тупик: у сторон остался спорный вопрос\n" \
                        "Что меняют новые условия для участников переговоров"
 
@@ -196,8 +199,54 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             parts = idea.split(" — ")
             self.assertEqual(len(parts), 3, idea)
             self.assertTrue(all(part.strip() for part in parts), idea)
-            self.assertIn("Международные переговоры", idea)
             self.assertNotIn("?", idea)
+        self.assertIn("не более 32 символов", prompts[0])
+        self.assertIn("не более 33 символов", prompts[0])
+        self.assertIn("не более 29 символов", prompts[0])
+
+    def test_formula_selection_compacts_ten_provider_titles_without_dropping_them(self):
+        """An overlong provider title must be locally fitted, not rejected or regenerated."""
+        hooks = [
+            "Ставки России растут", "Новый разлом Европы", "Решающий поворот Вашингтона",
+            "Напряжение вокруг Ормуза", "Риск для Киева усиливается", "Баланс сил меняется",
+            "Конфликт на границе", "Ультиматум для НАТО", "Санкции бьют сильнее",
+            "Точка давления найдена",
+        ]
+        candidates = [{
+            "provocative_headline": hook,
+            "subject_action": "Участники международного конфликта меняют переговорную позицию под новым давлением",
+            "object_consequence": "Последствия для граждан, рынков и региональной безопасности продолжают нарастать",
+        } for hook in hooks]
+
+        selected = bridge.select_idea_title_candidates(
+            "Международные переговоры", candidates, [], 10, formula_only=True,
+        )
+
+        self.assertEqual(len(selected), 10)
+        for item in selected:
+            title = item["title"]
+            self.assertLessEqual(len(title), 100, title)
+            self.assertEqual(len(title.split(" — ")), 3, title)
+            self.assertTrue(all(part.strip() for part in title.split(" — ")), title)
+            self.assertNotIn("…", title, title)
+
+    def test_formula_selection_repairs_normalization_collisions_without_losing_metadata(self):
+        """Repeated provider titles must become distinct local formula cards without another request."""
+        candidates = [{
+            "title": "Ставки растут — Стороны меняют курс — Цена ошибки растёт",
+            "angle": f"angle-{index}",
+            "framing_type": "ANALYSIS",
+            "information_payload": {"event": index},
+        } for index in range(10)]
+
+        selected = bridge.select_idea_title_candidates(
+            "Международные переговоры", candidates, [], 10, formula_only=True,
+        )
+
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(len({item["title"] for item in selected}), 10)
+        self.assertEqual([item["angle"] for item in selected], [f"angle-{index}" for index in range(10)])
+        self.assertEqual([item["information_payload"] for item in selected], [{"event": index} for index in range(10)])
 
     def test_generation_without_formula_keeps_free_form_provider_titles(self):
         settings = Settings(
@@ -238,15 +287,20 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertTrue(all(len(item["title"]) <= 100 for item in selected))
         self.assertTrue(all(len(item["title"].split(" — ")) == 3 for item in selected))
 
-    def test_formula_mode_rejects_question_parts_and_uses_non_question_uncertainty_guidance(self):
-        self.assertIsNone(bridge._formula_candidate({
+    def test_formula_mode_materialises_question_parts_without_a_provider_rewrite(self):
+        from_title = bridge._formula_candidate({
             "title": "Кто уступит? — Стороны меняют позиции — Цена компромисса растёт",
-        }))
-        self.assertIsNone(bridge._formula_candidate({
+        })
+        from_fields = bridge._formula_candidate({
             "provocative_headline": "Кто уступит?",
             "subject_action": "Стороны меняют позиции",
             "object_consequence": "Цена компромисса растёт",
-        }))
+        })
+        for candidate in (from_title, from_fields):
+            self.assertIsNotNone(candidate)
+            self.assertNotIn("?", candidate["title"])
+            self.assertEqual(len(candidate["title"].split(" — ")), 3)
+            self.assertLessEqual(len(candidate["title"]), 100)
 
         prompt = bridge._title_generation_prompt(
             "Международные переговоры", "", 3, [], [], formula_only=True,

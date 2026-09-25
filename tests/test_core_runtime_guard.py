@@ -21,6 +21,7 @@ REQUIRED_SOURCES = (
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
+    "scriptor/openai_client.py",
     "scriptor/timeline.py",
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
@@ -119,15 +120,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r16")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r17")
         self.assertEqual(
             lock["coreExeSha256"],
-            "f534b47bbdf80d20fb806bb381a6f9bdf0322b724879c201fe732d232284fa5e",
+            "ef505e0693745a7904ccfb503d733eba41288a9cb2dee55679ab7f6bb1b14bb9",
         )
-        self.assertEqual(lock["coreExeSize"], 34206733)
+        self.assertEqual(lock["coreExeSize"], 34240724)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "4ceef4cee2b5b765d65dc136cce77f9614c40514",
+            "d0fd69f3b93e8a47fbaa4421bb664be0ce76b370",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),
@@ -177,6 +178,20 @@ class CoreRuntimeGuardTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(relative, result.stderr)
                 self.assertIn("Пересоберите core-bin", result.stderr)
+
+    def test_guard_rejects_changed_openai_client_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "openai_client.py").write_text(
+                "# changed OpenAI runtime transport\n",
+                encoding="utf-8",
+            )
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scriptor/openai_client.py", result.stderr)
+            self.assertIn("Пересоберите core-bin", result.stderr)
 
     def test_guard_rejects_changed_footage_index_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
