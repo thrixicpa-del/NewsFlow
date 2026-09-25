@@ -59,7 +59,10 @@ class IdeasCisRelevanceRegressionTests(unittest.TestCase):
         self.assertEqual(len(prompts), len(directions))
         self.assertEqual({next(value for value in directions if f"Направление: {value}." in prompt)
                           for prompt in prompts}, set(directions))
-        self.assertEqual(set(settings.idea_suggested_topics), set(titles.values()))
+        # Generated headlines are production candidates in Results.  The
+        # reusable direction-proposal list must remain untouched.
+        self.assertEqual(set(settings.idea_results), set(titles.values()))
+        self.assertEqual(settings.idea_suggested_topics, [])
         self.assertEqual({settings.idea_title_metadata[title]["topic"] for title in titles.values()}, set(directions))
 
     def test_evidence_backed_custom_topic_survives_provider_to_production_and_scenario_handoff(self):
