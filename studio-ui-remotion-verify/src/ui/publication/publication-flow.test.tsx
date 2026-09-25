@@ -521,6 +521,38 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByRole("button", { name: "Подтвердить назначения" })).toBeDisabled();
   });
 
+  it("shows uploaded separately before YouTube processing status is known", () => {
+    const data = {
+      ...base,
+      publication: {
+        ...base.publication,
+        v2: {
+          ...(base.publication as any).v2,
+          queue: (base.publication as any).v2.queue.map((row: any) =>
+            row.snapshotId === "snapshot-uploaded"
+              ? {
+                  ...row,
+                  currentStage: "YOUTUBE_PROCESSING",
+                  youtubeVideoId: "yt-known",
+                  youtubeVideoUrl: "https://youtu.be/yt-known",
+                  steps: {
+                    ...row.steps,
+                    VIDEO_UPLOAD: { status: "SUCCESS", progress: { state: "complete" } },
+                    YOUTUBE_PROCESSING: { status: "PENDING" },
+                  },
+                }
+              : row,
+          ),
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+
+    render(<PublicationPage data={data} command={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+
+    expect(screen.getByText("Загружен")).toBeInTheDocument();
+  });
+
   it("refreshes YouTube statuses without starting engagement automation", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<PublicationPage data={base} command={command} />);
