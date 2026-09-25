@@ -3287,10 +3287,7 @@ def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
         f"Главная линия {object_label}",
     )
     actions = (
-        (
-            f"{subject} в фокусе"
-            if entities else f"{subject} в фокусе"
-        ),
+        f"{subject} в фокусе",
         (
             f"{subject} в центре"
             if entities else f"В фокусе {subject}"
