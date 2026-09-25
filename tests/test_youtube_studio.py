@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from scriptor.youtube_studio import (StudioAutomationError, _click_exact_visible_button, _open_video_editor, planned_studio_actions, studio_details_url, studio_editor_url,
                                      studio_shell_loaded, studio_control_labels, end_screen_requires_editor_entry,
@@ -78,7 +80,7 @@ class YouTubeStudioActionsTests(unittest.TestCase):
                 self.page = page
 
             def inner_text(self, timeout):
-                return "Редактор" if self.page.in_new_editor else "Перейти к редактору"
+                return "Конечные заставки Подсказки" if self.page.in_new_editor else "Перейти к редактору"
 
             def evaluate(self, _script, _label):
                 return self.page.in_new_editor
@@ -129,6 +131,58 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         except Exception as exc:
             self.fail(f"The visible new-editor sections must win over retained welcome text: {exc}")
 
+    def test_cards_wait_for_the_late_studio_welcome_handoff(self):
+        """The Editor URL can render before either the welcome or its sections."""
+        from scriptor.youtube_studio import _open_editor_section
+
+        class TransitionButton:
+            def __init__(self, page):
+                self.page = page
+
+            def is_visible(self, timeout):
+                return True
+
+            def click(self, timeout, force=False):
+                self.page.step = 2
+
+        class Body:
+            def __init__(self, page):
+                self.page = page
+
+            def inner_text(self, timeout):
+                return [
+                    "Видеоредактор",
+                    "Перейти к редактору",
+                    "Конечные заставки Подсказки",
+                ][self.page.step]
+
+            def evaluate(self, _script, _label):
+                return self.page.step == 2
+
+        class Page:
+            def __init__(self):
+                self.step = 0
+                self.button = TransitionButton(self)
+
+            def locator(self, _selector):
+                return Body(self)
+
+            def get_by_label(self, _label, exact):
+                if not exact:
+                    raise AssertionError("The handoff requires the exact Studio label")
+                return self.button
+
+            def wait_for_timeout(self, _milliseconds):
+                if self.step == 0:
+                    self.step = 1
+
+        page = Page()
+        try:
+            _open_editor_section(page, "cards")
+        except Exception as exc:
+            self.fail(f"Cards must wait for the delayed Studio handoff: {exc}")
+        self.assertEqual(page.step, 2)
+
     def test_editor_section_stops_for_identity_verification(self):
         """Automation must not click controls behind Studio's identity gate."""
         from scriptor.youtube_studio import _open_editor_section
@@ -152,6 +206,19 @@ class YouTubeStudioActionsTests(unittest.TestCase):
             self.fail(f"Identity verification must be reported before touching editor controls: {exc}")
         else:
             self.fail("Identity verification must stop the Studio action")
+
+    def test_identity_verification_opens_the_same_profile_at_the_editor(self):
+        """A human verification must remain visible in the channel's Studio profile."""
+        from scriptor.youtube_studio import open_studio_identity_verification
+
+        profile = Path(r"D:\\disposable\\youtube-profile")
+        with patch("scriptor.youtube_studio.subprocess.Popen") as popen:
+            open_studio_identity_verification(profile, "4aNnkPSxX_o")
+
+        command = popen.call_args.args[0]
+        self.assertIn(f"--user-data-dir={profile}", command)
+        self.assertIn("--new-window", command)
+        self.assertEqual(command[-1], "https://studio.youtube.com/video/4aNnkPSxX_o/editor")
 
     def test_legacy_transition_uses_accessible_button_label(self):
         class Button:

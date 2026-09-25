@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
+import subprocess
 from typing import Mapping
 
 from .claude import chrome_path
@@ -24,6 +25,10 @@ class StudioAutomationError(RuntimeError):
     """A visible Studio action was not confirmed and may be retried later."""
 
 
+class StudioIdentityVerificationRequired(StudioAutomationError):
+    """A human must complete Studio's account-protection step."""
+
+
 def studio_editor_url(video_id: str) -> str:
     """Build the Studio editor URL for one YouTube video identifier only."""
 
@@ -31,6 +36,17 @@ def studio_editor_url(video_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]{6,64}", value):
         raise StudioAutomationError("Некорректный идентификатор ролика для редактора Studio.")
     return f"https://studio.youtube.com/video/{value}/editor"
+
+
+def open_studio_identity_verification(profile_dir: Path, video_id: str) -> subprocess.Popen:
+    """Leave the channel's Studio editor visible for an operator to verify identity."""
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return subprocess.Popen([
+        str(chrome_path()), f"--user-data-dir={profile_dir}",
+        "--no-first-run", "--no-default-browser-check", "--new-window",
+        studio_editor_url(video_id),
+    ])
 
 
 def studio_details_url(video_id: str) -> str:
@@ -64,7 +80,7 @@ def _open_editor_section(page, kind: str) -> None:
     """Click the visible plus control on a current Studio editor row."""
 
     if identity_verification_required(page.locator("body").inner_text(timeout=3_000)):
-        raise StudioAutomationError(
+        raise StudioIdentityVerificationRequired(
             "YouTube Studio просит подтвердите личность. Завершите проверку вручную в профиле канала и повторите действие."
         )
     _enter_new_editor_if_needed(page)
@@ -95,17 +111,21 @@ def _open_editor_section(page, kind: str) -> None:
 def _enter_new_editor_if_needed(page) -> None:
     """Dismiss Studio's shared Editor welcome screen before any section action."""
 
-    visible_text = page.locator("body").inner_text(timeout=3_000)
-    if new_editor_sections_visible(visible_text) or not end_screen_requires_editor_entry(visible_text):
-        return
-    if not _click_exact_visible_button(page, studio_transition_label()):
-        raise StudioAutomationError("Не найдена большая кнопка перехода в новый видеоредактор Studio.")
+    clicked_transition = False
     for _attempt in range(40):
         current_text = page.locator("body").inner_text(timeout=1_000)
-        if new_editor_sections_visible(current_text) or not end_screen_requires_editor_entry(current_text):
+        if identity_verification_required(current_text):
+            raise StudioIdentityVerificationRequired(
+                "YouTube Studio просит подтвердите личность. Завершите проверку вручную в профиле канала и повторите действие."
+            )
+        if new_editor_sections_visible(current_text):
             return
+        if end_screen_requires_editor_entry(current_text) and not clicked_transition:
+            if not _click_exact_visible_button(page, studio_transition_label()):
+                raise StudioAutomationError("Не найдена большая кнопка перехода в новый видеоредактор Studio.")
+            clicked_transition = True
         page.wait_for_timeout(250)
-    raise StudioAutomationError("Studio не открыл новый редактор после нажатия «Перейти к редактору».")
+    raise StudioAutomationError("Studio не загрузил разделы нового видеоредактора.")
 
 
 def end_screen_requires_editor_entry(visible_text: str) -> bool:
@@ -373,6 +393,7 @@ def execute_studio_task(
     completed: list[str] = []
     playwright = sync_playwright().start()
     page = None
+    verification_error: StudioIdentityVerificationRequired | None = None
     try:
         context = playwright.chromium.launch_persistent_context(
             str(profile_dir), executable_path=str(chrome_path()), headless=False,
@@ -394,6 +415,15 @@ def execute_studio_task(
                 _apply_end_screen(page, action)
             completed.append(str(action["kind"]))
         context.close()
+    except StudioIdentityVerificationRequired as exc:
+        message = str(exc)
+        if page is not None:
+            try:
+                visible = " ".join(page.locator("body").inner_text(timeout=2_000).split())[:700]
+                message = f"{message} URL: {page.url}. Экран: {visible}"
+            except Exception:
+                pass
+        verification_error = StudioIdentityVerificationRequired(message)
     except StudioAutomationError as exc:
         # Keep a compact, local diagnostic for the retry queue. It tells us
         # whether Studio redirected to login, opened a blocking dialog, or
@@ -411,4 +441,12 @@ def execute_studio_task(
         raise StudioAutomationError(f"Studio не подтвердил действие: {exc}") from exc
     finally:
         playwright.stop()
+    if verification_error is not None:
+        try:
+            open_studio_identity_verification(profile_dir, str(task.get("videoId", "")))
+        except Exception as exc:
+            raise StudioAutomationError(
+                f"{verification_error} Не удалось оставить окно Studio открытым: {exc}"
+            ) from exc
+        raise verification_error
     return completed
