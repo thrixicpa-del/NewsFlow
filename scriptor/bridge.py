@@ -3122,8 +3122,8 @@ def _local_idea_drafts(topic: str, count: int) -> list[str]:
 def _local_idea_title_drafts(topic: str, count: int) -> list[dict]:
     """Create safe offline candidates in the same visible three-part formula."""
     topic_label = _clean_idea_title(topic)
-    if len(topic_label) > 31:
-        topic_label = f"{topic_label[:28].rstrip()}…"
+    if len(topic_label) > 24:
+        topic_label = f"{topic_label[:23].rstrip()}…"
     hooks = (
         "Ставки растут", "Новый разлом", "Решающий поворот", "Напряжение усиливается",
         "Риск выходит наружу", "Баланс меняется", "Конфликт растёт", "Спор обостряется",
