@@ -17526,6 +17526,10 @@ def main() -> None:
             result = retry_publication_v2_stage(payload if isinstance(payload, dict) else {})
         elif command == "resolve-publication-v2-uncertain-upload":
             result = resolve_publication_v2_uncertain_upload(payload if isinstance(payload, dict) else {})
+        elif command == "open-publication-v2-identity-verification":
+            result = open_publication_v2_identity_verification(payload if isinstance(payload, dict) else {})
+        elif command == "queue-publication-v2-reupload":
+            result = queue_publication_v2_reuploads(payload if isinstance(payload, dict) else {})
         elif command == "set-publication-v2-paused":
             result = set_publication_v2_paused(payload if isinstance(payload, dict) else {})
         elif command == "cancel-publication-v2-execution":
