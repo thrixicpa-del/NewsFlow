@@ -274,6 +274,17 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertIn("не добавляй неподтверждённые факты", prompt)
         self.assertIn("framing_type", prompt)
 
+    def test_title_prompt_requires_exact_python_character_count_before_final_json(self):
+        for formula_only in (False, True):
+            prompt = bridge._title_generation_prompt(
+                "Международные переговоры", "Пользовательский промпт", 3, [], [],
+                formula_only=formula_only,
+            )
+            self.assertIn("Пользовательский промпт", prompt)
+            self.assertIn("Python len(title.strip())", prompt)
+            self.assertIn("len(title.strip()) <= 100", prompt)
+            self.assertIn("не примет заголовок длиннее 100 символов", prompt)
+
     def test_candidate_selection_skips_recent_opening_and_keeps_metadata(self):
         selected = bridge.select_idea_title_candidates(
             "Международные переговоры",
