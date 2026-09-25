@@ -58,6 +58,70 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(first.prompt, "Напиши: Имя")
         self.assertTrue(second.prompt.endswith("Название сценария: Имя"))
 
+    def test_single_character_target_in_prompt_becomes_approximate_runtime_contract(self):
+        request = build_requests(
+            ["Имя"],
+            "Напиши сценарий на тему {title}. Нужно около 10 000 символов, считать Python.",
+            [],
+        )[0]
+
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
+        self.assertIn("9000–11000", request.prompt)
+
+    def test_structured_length_contract_is_prioritized_without_truncating_the_user_template(self):
+        template = (
+            "FULL_USER_PROMPT_BEGIN\\n"
+            "Сохрани все мои правила. Старое текстовое число: 5 000 символов.\\n"
+            "Уникальный хвост шаблона: FULL_USER_PROMPT_END {title}"
+        )
+        request = build_requests(
+            ["Проверочная тема"],
+            template,
+            [],
+            default_target_chars=10000,
+            default_allowed_min=9000,
+            default_allowed_max=11000,
+        )[0]
+
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
+        self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", request.prompt)
+        self.assertIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", request.prompt)
+        self.assertIn("ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину", request.prompt)
+        self.assertIn("len(text.strip())", request.prompt)
+        self.assertIn("а не слова, токены или приблизительный объем", request.prompt)
+        self.assertIn("приоритет над любыми конфликтующими числами", request.prompt)
+        self.assertIn("FULL_USER_PROMPT_BEGIN", request.prompt)
+        self.assertIn("FULL_USER_PROMPT_END Проверочная тема", request.prompt)
+        self.assertIn("Старое текстовое число: 5 000 символов.", request.prompt)
+        self.assertLess(
+            request.prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
+            request.prompt.index("FULL_USER_PROMPT_BEGIN"),
+        )
+
+    def test_global_structured_length_contract_applies_to_every_scenario(self):
+        requests = build_requests(
+            ["Первый", "Второй"],
+            "Напиши: {title}",
+            [],
+            default_target_chars=10000,
+        )
+
+        self.assertTrue(all(
+            (item.target_chars, item.allowed_min, item.allowed_max) == (10000, 9000, 11000)
+            for item in requests
+        ))
+
+    def test_range_length_contract_overrides_the_global_preset_contract(self):
+        requests = build_requests(
+            ["Первый", "Второй"],
+            "Напиши: {title}",
+            [PromptRange(2, 2, "", target_chars=6000)],
+            default_target_chars=10000,
+        )
+
+        self.assertEqual((requests[0].target_chars, requests[0].allowed_min, requests[0].allowed_max), (10000, 9000, 11000))
+        self.assertEqual((requests[1].target_chars, requests[1].allowed_min, requests[1].allowed_max), (6000, 5400, 6600))
+
 
 class ExportTests(unittest.TestCase):
     def test_safe_filename_removes_windows_forbidden_characters(self):

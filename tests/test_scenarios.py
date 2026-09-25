@@ -114,6 +114,80 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(saved_batches[-1][0].state, RunState.DONE)
         self.assertEqual(saved_batches[-1][0].result, "Готовый сценарий по проверочной теме.")
 
+    def test_both_provider_modes_receive_full_template_and_priority_length_contract(self):
+        template = (
+            "FULL_USER_PROMPT_BEGIN :: Напиши сценарий для {title}.\\n"
+            + ("Сохрани эту пользовательскую вводную без потери контекста. " * 120)
+            + "\\nFULL_USER_PROMPT_END"
+        )
+
+        class FakePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                return "а" * 10000
+
+        for provider in ("openai", "agent"):
+            with self.subTest(provider=provider):
+                settings = Settings(
+                    scenario_provider=provider,
+                    template=template,
+                    prompt_ranges=[],
+                    scenario_target_chars=10000,
+                    scenario_allowed_min=9000,
+                    scenario_allowed_max=11000,
+                )
+                pool = FakePool()
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=(["Проверочная тема"], [])), \
+                     patch.object(bridge, "save_session"), \
+                     patch.object(bridge, "save_settings"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=pool):
+                    bridge.generate_scenarios({"provider": provider})
+
+                self.assertEqual(len(pool.prompts), 1)
+                prompt = pool.prompts[0]
+                self.assertIn("FULL_USER_PROMPT_BEGIN :: Напиши сценарий для Проверочная тема.", prompt)
+                self.assertIn("FULL_USER_PROMPT_END", prompt)
+                self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", prompt)
+                self.assertIn("Целевой объем: 10000 символов", prompt)
+                self.assertIn("Допустимый итоговый диапазон: 9000–11000 символов", prompt)
+                self.assertIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", prompt)
+                self.assertIn("ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину", prompt)
+                self.assertIn("len(text.strip())", prompt)
+                self.assertIn("а не слова, токены или приблизительный объем", prompt)
+                self.assertLess(
+                    prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
+                    prompt.index("FULL_USER_PROMPT_BEGIN"),
+                )
+
+    def test_add_scenarios_persists_identity_before_any_read_only_snapshot(self):
+        """A typed title gets one durable ID on the explicit Add action."""
+        title = "Ручной заголовок до генерации"
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {
+                    "NEWSFLOW_TEST_MODE": "1",
+                    "NEWSFLOW_TEST_ROOT": directory,
+                    "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(directory) / "production"),
+                    "LOCALAPPDATA": directory,
+                }), \
+                patch("scriptor.config._newsflow_auth_library_candidates", return_value=[]), \
+                patch("scriptor.config.storyflow_documents_root", return_value=Path(directory) / "media"):
+            bridge.add_scenarios({"titles": title})
+            settings = load_settings()
+            titles, _jobs = load_session()
+
+        self.assertEqual(titles, [title])
+        self.assertEqual(len(settings.idea_production_items), 1)
+        production_item_id = str(settings.idea_production_items[0]["id"])
+        self.assertTrue(production_item_id)
+        self.assertEqual(settings.idea_scenario_context[title]["id"], production_item_id)
+
     def test_manual_scenario_persists_current_production_identity_for_covers(self):
         """A manually completed script must enter Covers through a durable current ID."""
         title = "Ручной сценарий для обложки"
@@ -164,6 +238,69 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(settings.idea_scenario_context[title]["id"], production_item_id)
         self.assertEqual(jobs[0].request.production_item_id, production_item_id)
         self.assertEqual(result["covers"][0]["production_item_id"], production_item_id)
+
+    def test_template_length_contract_is_persisted_and_used_by_generation(self):
+        template = "Напиши сценарий по теме {title}."
+        settings = Settings(scenario_provider="openai", template=template, prompt_ranges=[])
+        saved_batches = []
+
+        class FakePool:
+            concurrency = 1
+
+            async def generate(self, _prompt):
+                return "а" * 10000
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_template({
+                "template": template,
+                "ranges": [],
+                "targetChars": 10000,
+                "allowedMin": 9000,
+                "allowedMax": 11000,
+            })
+
+        self.assertEqual(
+            (settings.scenario_target_chars, settings.scenario_allowed_min, settings.scenario_allowed_max),
+            (10000, 9000, 11000),
+        )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=(["Тема"], [])), \
+             patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved_batches.append(jobs)), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=FakePool()):
+            bridge.generate_scenarios({"provider": "openai"})
+
+        request = saved_batches[-1][0].request
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
+        self.assertEqual(saved_batches[-1][0].length_status, "READY")
+
+    def test_template_preset_keeps_its_own_dynamic_length_contract(self):
+        settings = Settings()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_template_preset({
+                "name": "10k",
+                "template": "Шаблон {title}",
+                "ranges": [],
+                "targetChars": 10000,
+                "allowedMin": 9000,
+                "allowedMax": 11000,
+            })
+
+        preset = settings.scenario_templates[0]
+        self.assertEqual(
+            (preset["target_chars"], preset["allowed_min"], preset["allowed_max"]),
+            (10000, 9000, 11000),
+        )
+        self.assertEqual(
+            (settings.scenario_target_chars, settings.scenario_allowed_min, settings.scenario_allowed_max),
+            (10000, 9000, 11000),
+        )
 
     def test_range_target_is_included_in_the_python_owned_scenario_contract(self):
         from scriptor.core import PromptRange, build_requests

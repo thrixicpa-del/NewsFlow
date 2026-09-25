@@ -71,3 +71,44 @@
 @media (max-width: 880px) {
   .nf-template-library { grid-template-columns: 1fr 1fr; }
 }
+
+
+.nf-template-workspace .template-global-length {
+  display: grid;
+  gap: 12px;
+  margin: 16px 24px 4px;
+  padding: 14px 16px;
+  border: 1px solid #274b6a;
+  border-radius: 10px;
+  background: rgba(8, 25, 43, .66);
+}
+
+.nf-template-workspace .template-global-length > div:first-child b,
+.nf-template-workspace .template-global-length > div:first-child small {
+  display: block;
+}
+
+.nf-template-workspace .template-global-length > div:first-child small,
+.nf-template-workspace .template-global-length > small {
+  margin-top: 4px;
+  color: #7892aa;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.nf-template-workspace .template-global-length .range-length-inputs label {
+  width: min(180px, 30vw);
+  color: #91a8bd;
+  font-size: 10px;
+}
+
+.nf-template-workspace .template-global-length .range-length-inputs input {
+  width: 100%;
+  min-width: 120px;
+  height: 34px;
+  border: 1px solid #2b4c6b;
+  border-radius: 8px;
+  background: #081522;
+  color: #d4e4f2;
+  padding: 0 10px;
+}

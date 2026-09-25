@@ -150,18 +150,18 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             bridge.generate_ideas({"requirements": "Общее правило, которое не должно заменить личные"})
 
         self.assertEqual([item["count"] for item in settings.idea_plan], [2, 4])
-        self.assertEqual(len(settings.idea_suggested_topics), 6)
+        self.assertEqual(settings.idea_suggested_topics, [])
+        self.assertEqual(len(settings.idea_results), 6)
         self.assertEqual(
             sum(settings.idea_title_metadata[title]["topic"] == "Первая тема"
-                for title in settings.idea_suggested_topics),
+                for title in settings.idea_results),
             2,
         )
         self.assertEqual(
             sum(settings.idea_title_metadata[title]["topic"] == "Вторая тема"
-                for title in settings.idea_suggested_topics),
+                for title in settings.idea_results),
             4,
         )
-        self.assertEqual(settings.idea_results, [])
         self.assertEqual(settings.idea_production_items, [])
         self.assertTrue(any("Правило первой темы" in prompt for prompt in prompts))
         self.assertTrue(any("Правило второй темы" in prompt for prompt in prompts))
@@ -189,9 +189,10 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
              patch.object(bridge, "HybridTextPool", return_value=FakePool()):
             bridge.generate_ideas({})
 
-        self.assertEqual(len(settings.idea_suggested_topics), 2)
-        self.assertTrue(all("[" not in idea and "]" not in idea for idea in settings.idea_suggested_topics))
-        self.assertTrue(all(idea.count("!") == 0 for idea in settings.idea_suggested_topics))
+        self.assertEqual(settings.idea_suggested_topics, [])
+        self.assertEqual(len(settings.idea_results), 2)
+        self.assertTrue(all("[" not in idea and "]" not in idea for idea in settings.idea_results))
+        self.assertTrue(all(idea.count("!") == 0 for idea in settings.idea_results))
 
     def test_title_validation_rejects_long_caps_and_unfinished_templates(self):
         self.assertTrue(bridge.valid_idea_title(
@@ -247,7 +248,7 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertEqual(selected[0]["information_payload"]["core"], "условия переговоров и цена соглашения")
         self.assertEqual(selected[0]["script_requirements"], ["разделить факт и editorial трактовку"])
 
-    def test_generation_without_evidence_keeps_requested_headlines_as_research_suggestions(self):
+    def test_generation_without_evidence_keeps_requested_headlines_in_results_for_research(self):
         settings = Settings(idea_plan=[{
             "topic": "Международные переговоры",
             "count": 2,
@@ -258,20 +259,20 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
              patch.object(bridge, "snapshot", return_value={}):
             bridge.generate_ideas({})
 
-        self.assertEqual(settings.idea_results, [])
-        self.assertEqual(len(settings.idea_suggested_topics), 2)
+        self.assertEqual(len(settings.idea_results), 2)
+        self.assertEqual(settings.idea_suggested_topics, [])
         self.assertEqual(settings.idea_plan, [{
             "topic": "Международные переговоры", "count": 2, "provider": "agent",
         }])
         self.assertTrue(all(
             settings.idea_title_metadata[title]["review_status"] == "NEEDS_RESEARCH"
-            for title in settings.idea_suggested_topics
+            for title in settings.idea_results
         ))
         self.assertEqual(settings.idea_portfolio_summary["generated"], 2)
         self.assertEqual(settings.idea_portfolio_summary["needs_research"], 2)
         self.assertEqual(settings.idea_portfolio_summary["rejected"], 0)
 
-    def test_selected_direction_generates_suggestions_without_adding_it_to_release_plan(self):
+    def test_selected_direction_generates_results_without_adding_it_to_release_plan(self):
         settings = Settings(idea_plan=[])
 
         class FakePool:
@@ -290,8 +291,62 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             })
 
         self.assertEqual(settings.idea_plan, [])
-        self.assertEqual(len(settings.idea_suggested_topics), 2)
-        self.assertEqual(settings.idea_results, [])
+        self.assertEqual(settings.idea_suggested_topics, [])
+        self.assertEqual(len(settings.idea_results), 2)
+
+    def test_generation_migrates_only_metadata_marked_old_headlines_out_of_proposals(self):
+        generated = "Старый сгенерированный заголовок"
+        direction = "Обычное предложенное направление"
+        settings = Settings(
+            idea_plan=[{"topic": "Новая тема", "count": 1, "provider": "agent"}],
+            idea_suggested_topics=[generated, direction],
+            idea_title_metadata={
+                generated: {
+                    "title": generated,
+                    "topic": "Старое направление",
+                    "review_status": "NEEDS_RESEARCH",
+                },
+            },
+        )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "_generate_for_vectors", return_value=([], {}, {}, [], {
+                 "providerRequested": False,
+                 "providerResponseReceived": False,
+                 "providerRequestDirections": 0,
+                 "providerResponseDirections": 0,
+             })):
+            bridge.generate_ideas({})
+
+        self.assertIn(generated, settings.idea_results)
+        self.assertEqual(settings.idea_result_sources[generated], "Старое направление")
+        self.assertEqual(settings.idea_suggested_topics, [direction])
+        self.assertEqual(settings.idea_title_metadata[generated]["review_status"], "NEEDS_RESEARCH")
+
+    def test_removing_last_plan_row_persists_after_reload(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            environment = {
+                "NEWSFLOW_TEST_MODE": "1",
+                "NEWSFLOW_TEST_ROOT": str(root),
+                "LOCALAPPDATA": str(root),
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(root / "production"),
+            }
+            with patch.dict(os.environ, environment, clear=False), \
+                 patch("scriptor.config._newsflow_auth_library_candidates", return_value=[]), \
+                 patch("scriptor.config.storyflow_documents_root", return_value=root / "media"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                config.save_settings(Settings(idea_plan=[{
+                    "topic": "Единственное направление",
+                    "count": 3,
+                    "provider": "agent",
+                }]))
+                bridge.update_idea_plan({"index": 0, "remove": True})
+                restarted = config.load_settings()
+
+        self.assertEqual(restarted.idea_plan, [])
 
     def test_agent_suggestions_stay_in_proposals_and_preserve_the_existing_release_plan(self):
         settings = Settings(

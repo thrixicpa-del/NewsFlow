@@ -79,6 +79,19 @@ def scenario_length_status(request: ScenarioRequest, text: str) -> tuple[str, in
     return "READY", actual_chars
 
 
+def scenario_length_requirement(request: ScenarioRequest) -> str:
+    """Human-readable bounds for progress/errors without inventing a missing side."""
+    if request.allowed_min and request.allowed_max:
+        return f"{request.allowed_min}–{request.allowed_max} знаков"
+    if request.allowed_min:
+        return f"не менее {request.allowed_min} знаков"
+    if request.allowed_max:
+        return f"не более {request.allowed_max} знаков"
+    return "без ограничения длины"
+
+
+
+
 class ParallelRunner:
     def __init__(self, client, max_concurrency: int = 8, on_change: Callable[[Job], None] | None = None):
         self.client = client
@@ -106,55 +119,21 @@ class ParallelRunner:
         if self.on_change:
             self.on_change(job)
 
-    async def _repair_length_if_needed(self, job: Job) -> bool:
-        """Make at most two fresh, explicit repairs for an opted-in length range.
-
-        A length repair is never a silent success: an exhausted repair budget
-        leaves the job in ERROR with a visible FAILED length status.  The normal
-        unbounded scenario path does not perform any extra provider calls.
-        """
+    async def _validate_length(self, job: Job) -> bool:
+        """Validate one provider response; never regenerate solely to change its length."""
         status, actual_chars = scenario_length_status(job.request, job.result)
         job.length_status = status
         job.actual_chars = actual_chars
-        if status not in {"SHORT", "LONG"}:
-            return True
-
-        generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-        for attempt in range(1, 3):
-            job.length_repair_attempts = attempt
+        job.length_repair_attempts = 0
+        if status in {"SHORT", "LONG"}:
+            job.state = RunState.ERROR
             job.error = (
-                f"Длина {actual_chars} знаков вне диапазона "
-                f"{job.request.allowed_min}–{job.request.allowed_max}; корректировка {attempt}/2"
+                f"Длина {actual_chars} знаков вне требования "
+                f"{scenario_length_requirement(job.request)}. "
+                "Автоматическое переписывание по длине отключено."
             )
-            self._notify(job)
-            repair_prompt = (
-                "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
-                f"Верни только готовый сценарий длиной строго от {job.request.allowed_min} "
-                f"до {job.request.allowed_max} знаков (цель: {job.request.target_chars} знаков). "
-                "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
-                f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
-            )
-            job.result = await generate_fresh(repair_prompt)
-            if looks_like_action_required(job.result):
-                job.length_status = "FAILED"
-                job.actual_chars = len(str(job.result or "").strip())
-                job.state = RunState.PAUSED
-                job.error = "Текстовый агент не вернул сценарий при корректировке длины"
-                return False
-            status, actual_chars = scenario_length_status(job.request, job.result)
-            job.length_status = status
-            job.actual_chars = actual_chars
-            if status == "READY":
-                return True
-
-        job.length_status = "FAILED"
-        job.state = RunState.ERROR
-        job.error = (
-            f"После {job.length_repair_attempts} корректировок длина сценария "
-            f"осталась {job.actual_chars} знаков; требуется {job.request.allowed_min}–"
-            f"{job.request.allowed_max}"
-        )
-        return False
+            return False
+        return True
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:
@@ -196,11 +175,11 @@ class ParallelRunner:
                         job.state = RunState.PAUSED
                         job.error = "Текстовый агент и доступные ключи ChatGPT API не вернули готовый сценарий"
                     else:
-                        if await self._repair_length_if_needed(job):
+                        if await self._validate_length(job):
                             job.state = RunState.DONE
                             job.error = ""
                 else:
-                    if await self._repair_length_if_needed(job):
+                    if await self._validate_length(job):
                         job.state = RunState.DONE
                         job.error = ""
             except Exception as exc:

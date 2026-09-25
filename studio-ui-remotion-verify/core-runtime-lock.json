@@ -1,15 +1,17 @@
 {
   "format": 1,
   "appVersion": "2.1.152",
-  "coreRevision": "core-bin-2.1.152-observability-r15",
-  "coreExeSha256": "4a549c58cb61c40d489b580a388b0c80795344c2d86b477f934bfd584123ac5d",
-  "coreExeSize": 34226546,
-  "builtFromGitSha": "1d8650efa92e72fabc0933609315d853a8ad2a93",
+  "coreRevision": "core-bin-2.1.152-observability-r16",
+  "coreExeSha256": "f534b47bbdf80d20fb806bb381a6f9bdf0322b724879c201fe732d232284fa5e",
+  "coreExeSize": 34206733,
+  "builtFromGitSha": "4ceef4cee2b5b765d65dc136cce77f9614c40514",
   "sourceGitBlobs": {
-    "scriptor/bridge.py": "fb11bfb2f2d52c48b08985fbd618d5f0b5346de3",
+    "scriptor/bridge.py": "9e0f72b3e598d33be8d1c3c66ff0c2cf64f2dda5",
     "scriptor/ai_index.py": "c9da2a83ea5724eaa28ee8401b1eb303e597cd1f",
+    "scriptor/config.py": "f479087eeaa1b9106250e827da8056d79d620b11",
     "scriptor/timeline.py": "d2eec941cda44972256fb7f1020b930dec95c0e9",
-    "scriptor/core.py": "cae9d10f0863df38169cfa6134b6a1a435568a43",
+    "scriptor/core.py": "5ec0df29d16027b632bd663ea7671e3f3924c64a",
+    "scriptor/runner.py": "786adf947fa68cdfcb7db6c0cbb72480b37559a0",
     "scriptor/thumbnail_prompt_v2.py": "36afbb3f135857b8cb2f68774620f90f07ca5865",
     "scriptor/observability.py": "cd4524d258b41f3b659395d3772561a24632e3bd",
     "bridge_main.py": "abb479996f873ca96d8f9efc6805608cb4a4dd7b"

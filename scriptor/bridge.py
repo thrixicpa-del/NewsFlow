@@ -272,8 +272,14 @@ def _restore_cover_face_config(settings: Settings, value: dict[str, object]) -> 
 
 
 def _active_cover_production_ids(settings: Settings) -> set[str]:
-    """Return only identities owned by the current durable scenario session."""
-    titles, _jobs = load_session()
+    """Return only identities owned by the current durable scenario session.
+
+    The session job is the strongest current identity once scenario work has
+    started. Title-indexed settings are only a fallback for rows that have not
+    yet received a Job.
+    """
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
     ids_by_title = {
         str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
         for item in getattr(settings, "idea_production_items", [])
@@ -284,10 +290,14 @@ def _active_cover_production_ids(settings: Settings) -> set[str]:
         for title, item in getattr(settings, "idea_scenario_context", {}).items()
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     })
-    return {
-        identity for title in titles
-        if (identity := ids_by_title.get(str(title).casefold(), ""))
-    }
+    identities: set[str] = set()
+    for index, title in enumerate(titles):
+        job = jobs_by_index.get(index)
+        job_identity = str(job.request.production_item_id if job else "").strip()
+        identity = job_identity or ids_by_title.get(str(title).casefold(), "")
+        if identity:
+            identities.add(identity)
+    return identities
 
 
 def _select_current_cover_generation_rows(
@@ -1848,10 +1858,19 @@ def snapshot() -> dict:
         "templateSettings": {
             "template": settings.template,
             "ranges": settings.prompt_ranges,
+            "targetChars": settings.scenario_target_chars,
+            "allowedMin": settings.scenario_allowed_min,
+            "allowedMax": settings.scenario_allowed_max,
             "scenarioProvider": settings.scenario_provider,
             "presets": [
-                {"name": str(item.get("name", "Шаблон")), "template": str(item.get("template", "")),
-                 "ranges": item.get("ranges", [])}
+                {
+                    "name": str(item.get("name", "Шаблон")),
+                    "template": str(item.get("template", "")),
+                    "ranges": item.get("ranges", []),
+                    "targetChars": max(0, int(item.get("target_chars", 0) or 0)),
+                    "allowedMin": max(0, int(item.get("allowed_min", 0) or 0)),
+                    "allowedMax": max(0, int(item.get("allowed_max", 0) or 0)),
+                }
                 for item in settings.scenario_templates
                 if item.get("topic") == "__newsflow_desktop__"
             ],
@@ -2703,6 +2722,8 @@ def update_idea_plan(payload: dict) -> dict:
         raise ValueError("Направление в плане не найдено")
     if payload.get("remove"):
         del settings.idea_plan[index]
+        if not settings.idea_plan:
+            allow_empty_release_state(settings, "idea_plan")
     elif "count" in payload:
         settings.idea_plan[index]["count"] = max(1, min(500, int(payload["count"])))
     save_settings(settings)
@@ -3234,8 +3255,48 @@ def _generate_for_vectors(settings, plan: list[dict], requirements: str) -> tupl
     }
 
 
+def _migrate_generated_headlines_from_suggestions(settings: Settings) -> int:
+    """Move old generated video titles out of reusable direction proposals.
+
+    Older builds stored generated headlines in idea_suggested_topics.  Only
+    entries carrying generated-title review metadata are migrated; ordinary
+    direction proposals stay untouched.
+    """
+    metadata = getattr(settings, "idea_title_metadata", {}) or {}
+    suggestions = list(getattr(settings, "idea_suggested_topics", []) or [])
+    results = list(getattr(settings, "idea_results", []) or [])
+    sources = dict(getattr(settings, "idea_result_sources", {}) or {})
+    known_results = {str(value).strip().casefold() for value in results if str(value).strip()}
+    remaining: list[str] = []
+    migrated = 0
+
+    for raw in suggestions:
+        title = str(raw).strip()
+        detail = metadata.get(title, {}) if isinstance(metadata, dict) else {}
+        review_status = str(detail.get("review_status", "")).strip().upper() if isinstance(detail, dict) else ""
+        if title and review_status in {"READY", "NEEDS_RESEARCH"}:
+            if title.casefold() not in known_results:
+                results.append(title)
+                known_results.add(title.casefold())
+            source = str(detail.get("topic", "")).strip()
+            if source and not str(sources.get(title, "")).strip():
+                sources[title] = source
+            migrated += 1
+            continue
+        remaining.append(raw)
+
+    if migrated:
+        settings.idea_results = results
+        settings.idea_result_sources = sources
+        settings.idea_suggested_topics = remaining
+        if suggestions and not remaining:
+            allow_empty_release_state(settings, "idea_suggested_topics")
+    return migrated
+
+
 def generate_ideas(payload: dict) -> dict:
     settings = load_settings()
+    migrated_headlines = _migrate_generated_headlines_from_suggestions(settings)
     plan = list(settings.idea_plan)
     # "Generate" is the one primary action in the desktop UI.  Selected topic
     # cards are accepted here as well, so users do not have to remember a
@@ -3274,36 +3335,41 @@ def generate_ideas(payload: dict) -> dict:
         if changed:
             save_settings(settings)
     if not plan:
+        if migrated_headlines:
+            save_settings(settings)
         raise ValueError("Добавьте направления в план выпуска")
     generated, generated_sources, generated_metadata, local_fallback_topics, provider_trace = _generate_for_vectors(
         settings, plan, requirements)
-    # Generation is an editorial ideation step, not a production acceptance
-    # gate.  Evidence changes the review status only; it may never hide a
-    # generated headline or silently write it into the release plan.
-    known_suggestions = {str(item).casefold() for item in settings.idea_suggested_topics}
-    suggestions = []
+    # Generated video headlines belong in Results.  Reusable direction
+    # proposals stay exclusively in idea_suggested_topics.
+    known_results = {str(item).casefold() for item in settings.idea_results}
+    new_results = []
     needs_research = 0
     ready = 0
     for title in generated:
-        if title.casefold() in known_suggestions:
+        if title.casefold() in known_results:
             continue
         topic = generated_sources.get(title, "")
         status = "READY" if _events_for_idea_direction(settings.idea_events, topic) else "NEEDS_RESEARCH"
         detail = {**generated_metadata.get(title, {}), "review_status": status}
         generated_metadata[title] = detail
-        suggestions.append(title)
-        known_suggestions.add(title.casefold())
+        new_results.append(title)
+        known_results.add(title.casefold())
         if status == "NEEDS_RESEARCH":
             needs_research += 1
         else:
             ready += 1
-    settings.idea_suggested_topics = [*settings.idea_suggested_topics, *suggestions]
+    settings.idea_results = [*settings.idea_results, *new_results]
+    settings.idea_result_sources = {
+        **getattr(settings, "idea_result_sources", {}),
+        **{title: generated_sources.get(title, "") for title in new_results},
+    }
     settings.idea_title_metadata = {**getattr(settings, "idea_title_metadata", {}), **generated_metadata}
     settings.idea_rejected_items = []
     settings.idea_portfolio_summary = {
         "requested": sum(max(1, int(item.get("count", 1))) for item in plan),
         "generated": len(generated),
-        "suggested": len(suggestions),
+        "suggested": len(new_results),
         "accepted": ready,
         "needs_research": needs_research,
         "rejected": 0,
@@ -3319,7 +3385,7 @@ def generate_ideas(payload: dict) -> dict:
                f"Готово: {summary['accepted']}. На research: {summary['needs_research']}. "
                f"Отклонено: 0. Источник: {provider_label}.")
     return {**snapshot(), "operationResult": {
-        "kind": "ideas", "count": len(suggestions), "message": message,
+        "kind": "ideas", "count": len(new_results), "message": message,
         "generation": {
             "requested": summary["requested"], "generated": summary["generated"],
             "suggested": summary["suggested"], "accepted": summary["accepted"],
@@ -4972,7 +5038,12 @@ def add_scenarios(payload: dict) -> dict:
         raise ValueError("Добавьте хотя бы один заголовок сценария")
     titles, jobs = load_session()
     known = {title.casefold() for title in titles}
-    titles.extend(title for title in incoming if title.casefold() not in known)
+    added = [title for title in incoming if title.casefold() not in known]
+    titles.extend(added)
+    if added:
+        settings = load_settings()
+        ensure_idea_production_items(settings, active_titles=added)
+        save_settings(settings)
     save_session(titles, jobs)
     return snapshot()
 
@@ -5015,6 +5086,16 @@ def production_item_prompt(item: dict) -> str:
 def generate_scenarios(payload: dict) -> dict:
     settings = load_settings()
     titles, existing_jobs = load_session()
+    existing_jobs_by_index = {job.request.index: job for job in existing_jobs}
+    missing_identity_titles = [
+        title for index, title in enumerate(titles)
+        if not str(existing_jobs_by_index.get(index).request.production_item_id
+                   if existing_jobs_by_index.get(index) else "").strip()
+    ]
+    if missing_identity_titles and ensure_idea_production_items(
+        settings, active_titles=missing_identity_titles,
+    ):
+        save_settings(settings)
     provider = str(payload.get("provider", settings.scenario_provider)).strip()
     if provider not in {"agent", "openai"}:
         raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
@@ -5032,11 +5113,23 @@ def generate_scenarios(payload: dict) -> dict:
         for item in settings.idea_production_items
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     }
+    for index, title in enumerate(titles):
+        job = existing_jobs_by_index.get(index)
+        job_identity = str(job.request.production_item_id if job else "").strip()
+        if job_identity:
+            production_id_by_title[str(title).casefold()] = job_identity
     all_requests = [ScenarioRequest(
         request.index, request.title, request.prompt,
         production_id_by_title.get(request.title.casefold(), ""),
         request.target_chars, request.allowed_min, request.allowed_max,
-    ) for request in build_requests(titles, settings.template, ranges)]
+    ) for request in build_requests(
+        titles,
+        settings.template,
+        ranges,
+        settings.scenario_target_chars,
+        settings.scenario_allowed_min,
+        settings.scenario_allowed_max,
+    )]
     completed = {
         job.request.index for job in existing_jobs
         if job.state == RunState.DONE and str(job.result or "").strip()
@@ -5064,7 +5157,9 @@ def generate_scenarios(payload: dict) -> dict:
         selected = [ScenarioRequest(request.index, request.title,
                                     "Ты редактор новостных сценариев NewsFlow. Напиши цельный, понятный текст "
                                     "по заданию; отделяй проверяемые факты от оценок, не выдумывай даты, цитаты "
-                                    "и цифры. Верни только готовый сценарий.\n\n" + request.prompt,
+                                    "и цифры. Если ниже есть «ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW», соблюдай "
+                                    "его как обязательный контракт длины, выше конфликтующих чисел в шаблоне. "
+                                    "Верни только готовый сценарий.\n\n" + request.prompt,
                                     request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max)
                     for request in selected]
     api_keys = [item for item in settings.openai_api_keys if item.active and item.secret.strip()]
@@ -5381,13 +5476,16 @@ def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bo
 
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
-    """Keep a single automatic cover entry for every scenario topic."""
+    """Keep a single automatic cover entry for every current scenario identity."""
     script = job.result if job and job.state == RunState.DONE else ""
     production_item = dict(getattr(settings, "idea_scenario_context", {}).get(title, {}) or {})
-    production_item_id = str(production_item.get("id", "")).strip()
+    job_identity = str(job.request.production_item_id if job else "").strip()
+    production_item_id = job_identity or str(production_item.get("id", "")).strip()
     existing = next((item for item in settings.cover_queue
                      if (production_item_id and str(item.get("production_item_id", "")).strip() == production_item_id)
-                     or (not production_item_id and str(item.get("title", "")).casefold() == title.casefold())), None)
+                     or (not str(item.get("production_item_id", "")).strip()
+                         and int(item.get("scenario_index", index + 1) or index + 1) == index + 1
+                         and str(item.get("title", "")).casefold() == title.casefold())), None)
     context_keys = (
         "direction", "topic", "angle", "event_ids", "event_context", "supporting_context",
         "primary_entities", "primary_entity", "entities", "geography", "conflict",
@@ -5413,21 +5511,44 @@ def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Jo
 def _sync_current_scenario_covers(settings: Settings) -> bool:
     """Project exactly one cover row for each current scenario identity."""
     titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
+    missing_identity_titles = [
+        title for index, title in enumerate(titles)
+        if not str(jobs_by_index.get(index).request.production_item_id
+                   if jobs_by_index.get(index) else "").strip()
+    ]
+    changed = (
+        ensure_idea_production_items(settings, active_titles=missing_identity_titles)
+        if missing_identity_titles else False
+    )
+
+    for index, title in enumerate(titles):
+        job = jobs_by_index.get(index)
+        context = dict(getattr(settings, "idea_scenario_context", {}).get(str(title), {}) or {})
+        identity = str(job.request.production_item_id if job else "").strip() or str(context.get("id", "")).strip()
+        if not identity:
+            continue
+        for item in settings.cover_queue:
+            if not isinstance(item, dict) or str(item.get("production_item_id", "")).strip():
+                continue
+            try:
+                scenario_index = int(item.get("scenario_index", index + 1) or index + 1)
+            except (TypeError, ValueError):
+                continue
+            if scenario_index == index + 1 and str(item.get("title", "")).casefold() == str(title).casefold():
+                item["production_item_id"] = identity
+                changed = True
+                break
+
     active_ids = _active_cover_production_ids(settings)
-    # Direct cover-reference/compositor actions can deliberately operate on a
-    # manually supplied in-memory row before a production session exists.
-    # There is no current session identity to reconcile in that case, so do
-    # not erase the operator's row.  Hydration itself still refuses to restore
-    # an old persistent gallery when the current session is empty.
     if not active_ids:
-        return False
+        return changed
     before = list(settings.cover_queue)
     settings.cover_queue = [
         item for item in settings.cover_queue
         if isinstance(item, dict) and str(item.get("production_item_id", "")).strip() in active_ids
     ]
-    jobs_by_index = {job.request.index: job for job in jobs}
-    changed = settings.cover_queue != before
+    changed = settings.cover_queue != before or changed
     for index, title in enumerate(titles):
         changed = _sync_scenario_to_covers(settings, index, str(title), jobs_by_index.get(index)) or changed
     _assign_cover_production_ids(settings)
@@ -15725,12 +15846,31 @@ def generate_media(payload: dict) -> dict:
     return {**snapshot(), "operationResult": {"kind": "media", "count": len(paths), "folder": str(output)}}
 
 
+def _scenario_length_payload(payload: dict, *, current_target: int = 0,
+                             current_minimum: int = 0, current_maximum: int = 0) -> tuple[int, int, int]:
+    target = max(0, int(payload.get("targetChars", current_target) or 0))
+    minimum = max(0, int(payload.get("allowedMin", current_minimum) or 0))
+    maximum = max(0, int(payload.get("allowedMax", current_maximum) or 0))
+    if minimum and maximum and minimum > maximum:
+        raise ValueError("Минимальная длина сценария больше максимальной")
+    return target, minimum, maximum
+
+
 def save_template(payload: dict) -> dict:
     settings = load_settings()
     template = str(payload.get("template", "")).strip()
     if not template:
         raise ValueError("Введите общий шаблон сценария")
+    target, minimum, maximum = _scenario_length_payload(
+        payload,
+        current_target=settings.scenario_target_chars,
+        current_minimum=settings.scenario_allowed_min,
+        current_maximum=settings.scenario_allowed_max,
+    )
     settings.template = template
+    settings.scenario_target_chars = target
+    settings.scenario_allowed_min = minimum
+    settings.scenario_allowed_max = maximum
     ranges = payload.get("ranges")
     if isinstance(ranges, list):
         settings.prompt_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
@@ -15748,19 +15888,31 @@ def save_template_preset(payload: dict) -> dict:
         raise ValueError("Укажите название пресета")
     if not template:
         raise ValueError("Заполните общий промпт перед сохранением пресета")
+    target, minimum, maximum = _scenario_length_payload(payload)
     ranges = payload.get("ranges", [])
     safe_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
                     "prompt": str(item.get("prompt", "")), "target_chars": max(0, int(item.get("target_chars", 0) or 0)),
                     "allowed_min": max(0, int(item.get("allowed_min", 0) or 0)), "allowed_max": max(0, int(item.get("allowed_max", 0) or 0))} for item in ranges if isinstance(item, dict)] if isinstance(ranges, list) else []
     existing = next((item for item in settings.scenario_templates
                      if item.get("topic") == "__newsflow_desktop__" and str(item.get("name", "")).casefold() == name.casefold()), None)
-    value = {"name": name, "topic": "__newsflow_desktop__", "template": template, "ranges": safe_ranges}
+    value = {
+        "name": name,
+        "topic": "__newsflow_desktop__",
+        "template": template,
+        "ranges": safe_ranges,
+        "target_chars": target,
+        "allowed_min": minimum,
+        "allowed_max": maximum,
+    }
     if existing is None:
         settings.scenario_templates.append(value)
     else:
         existing.update(value)
     settings.template = template
     settings.prompt_ranges = safe_ranges
+    settings.scenario_target_chars = target
+    settings.scenario_allowed_min = minimum
+    settings.scenario_allowed_max = maximum
     save_settings(settings)
     return {**snapshot(), "operationResult": {"kind": "template-preset", "count": 1,
                                                 "message": f"Пресет «{name}» сохранён."}}
