@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 import threading
 import time
 import uuid
@@ -36,8 +35,7 @@ def _test_storage_root() -> Path | None:
     root makes an accidental ``python -m unittest`` fail before it can create
     or rewrite `%LOCALAPPDATA%/NewsFlow` or the default media folders.
     """
-    under_test = (os.environ.get(_TEST_MODE_ENV) == "1"
-                  or "unittest" in sys.modules or "pytest" in sys.modules)
+    under_test = os.environ.get(_TEST_MODE_ENV) == "1"
     if not under_test:
         return None
     value = str(os.environ.get(_TEST_ROOT_ENV, "")).strip()

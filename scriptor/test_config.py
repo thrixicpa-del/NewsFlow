@@ -20,13 +20,30 @@ from .session import load_session, save_session
 
 
 class TestStorageIsolationTests(unittest.TestCase):
-    def test_test_runtime_refuses_production_storage_without_explicit_test_root(self):
+    def test_explicit_test_runtime_refuses_production_storage_without_explicit_test_root(self):
         """A test process must fail before it can create/write canonical NewsFlow data."""
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("NEWSFLOW_TEST_MODE", None)
+            os.environ["NEWSFLOW_TEST_MODE"] = "1"
             os.environ.pop("NEWSFLOW_TEST_ROOT", None)
             with self.assertRaisesRegex(RuntimeError, "NEWSFLOW_TEST_ROOT"):
                 app_data_root()
+
+    def test_production_runtime_ignores_unittest_module_without_explicit_test_mode(self):
+        """Optional provider imports must not turn a normal desktop run into a test."""
+        with tempfile.TemporaryDirectory() as directory:
+            production_parent = Path(directory) / "production-local-appdata"
+            with patch.dict(os.environ, {
+                "LOCALAPPDATA": str(production_parent),
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(production_parent),
+            }, clear=False):
+                os.environ.pop("NEWSFLOW_TEST_MODE", None)
+                os.environ.pop("NEWSFLOW_TEST_ROOT", None)
+                self.assertIn("unittest", sys.modules)
+                try:
+                    result = app_data_root()
+                except RuntimeError as error:
+                    self.fail(f"regular runtime was misclassified as a test: {error}")
+                self.assertEqual(result, production_parent / "NewsFlow")
 
     def test_explicit_test_root_rejects_declared_production_localappdata(self):
         """A test must fail, not redirect silently, when pointed at production."""
