@@ -1216,13 +1216,20 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 portrait.write_bytes(b"test")
                 portraits.append(portrait)
             settings = Settings(cover_face_library_folder=str(folder), cover_face_library_enabled=True)
-            with patch("scriptor.bridge.random.choice", side_effect=lambda values: values[-1]):
+            with patch(
+                "scriptor.bridge.random.choice",
+                side_effect=lambda values: max(values, key=lambda path: path.name),
+            ):
                 path, _label, source = _match_cover_face_reference({"title": "Путин сделал заявление"}, settings)
             self.assertEqual(Path(path), portraits[-1])
             self.assertEqual(source, "auto")
             # Auto matches are allowed to change on the next render, while a
-            # reference explicitly marked manual is not randomized.
-            with patch("scriptor.bridge.random.choice", side_effect=lambda values: values[0]):
+            # reference explicitly marked manual is not randomized. Directory
+            # iteration order is intentionally not part of this contract.
+            with patch(
+                "scriptor.bridge.random.choice",
+                side_effect=lambda values: min(values, key=lambda path: path.name),
+            ):
                 changed, _label, source = _match_cover_face_reference({
                     "title": "Путин сделал заявление", "face_reference_path": str(portraits[-1]),
                     "face_reference_source": "auto",
