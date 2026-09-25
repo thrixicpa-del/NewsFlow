@@ -17,6 +17,132 @@ class IdeaParsingTests(unittest.TestCase):
         self.assertFalse(validation["valid"])
         self.assertIn("generic_topic", validation["reasons"])
 
+    def test_formula_candidate_replaces_abstract_title_with_concrete_script_vector(self):
+        candidate = bridge._formula_candidate({
+            "title": (
+                "Переговоры вязнут в паузе — Стороны не сдвигают позиции — "
+                "шанс на прорыв тает"
+            ),
+        }, topic="Россия-Украина — тупик переговоров")
+
+        self.assertEqual(
+            candidate["title"],
+            "Договориться не смогли — Россия и Украина не уступают — переговоры снова в тупике",
+        )
+        self.assertLessEqual(len(candidate["title"]), 100)
+        self.assertEqual(len(candidate["title"].split(" — ")), 3)
+        self.assertEqual(candidate["subjects"], ["Россия", "Украина"])
+        self.assertEqual(candidate["main_consequence"], "переговоры снова в тупике")
+        self.assertEqual(candidate["information_payload"]["core"], "Россия и Украина не уступают")
+        self.assertEqual(candidate["information_payload"]["object"], "переговоры")
+        self.assertEqual(
+            candidate["information_payload"]["seo_anchors"],
+            ["Россия", "Украина", "переговоры"],
+        )
+
+    def test_formula_context_accepts_no_space_en_dash_between_named_sides(self):
+        candidate = bridge._formula_candidate({
+            "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
+        }, topic="Россия–Украина — тупик переговоров")
+
+        self.assertIn("Россия", candidate["title"])
+        self.assertIn("Украина", candidate["title"])
+        self.assertIn("переговоры", candidate["title"].casefold())
+        self.assertLessEqual(len(candidate["title"]), 100)
+
+    def test_abstract_non_deadlock_candidate_is_replaced_without_dropping_output(self):
+        candidate = bridge._formula_candidate({
+            "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
+        }, topic="ЕС-Россия — новые санкции")
+
+        self.assertTrue(candidate["title"])
+        self.assertIn("ЕС", candidate["title"])
+        self.assertIn("Россия", candidate["title"])
+        self.assertIn("санкц", candidate["title"].casefold())
+        self.assertNotIn("Стороны меняют курс", candidate["title"])
+        self.assertLessEqual(len(candidate["title"]), 100)
+
+    def test_concrete_non_deadlock_provider_title_is_preserved_without_rewrite(self):
+        title = "Санкции снова в центре — ЕС и Россия меняют условия — санкционный спор продолжается"
+        candidate = bridge._formula_candidate({"title": title}, topic="ЕС-Россия — новые санкции")
+
+        self.assertEqual(candidate["title"], title)
+        self.assertLessEqual(len(candidate["title"]), 100)
+        self.assertEqual(candidate["subjects"], ["ЕС", "Россия"])
+        self.assertEqual(candidate["information_payload"]["object"], "санкции")
+
+    def test_negotiation_keyword_without_explicit_deadlock_preserves_output_without_inventing_deadlock(self):
+        candidate = bridge._formula_candidate({
+            "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
+        }, topic="Трамп-Зеленский — давление и переговоры")
+
+        self.assertTrue(candidate["title"])
+        self.assertIn("Трамп", candidate["title"])
+        self.assertIn("Зеленский", candidate["title"])
+        self.assertIn("переговор", candidate["title"].casefold())
+        self.assertNotIn("тупик", candidate["title"].casefold())
+        self.assertNotIn("сделк", candidate["title"].casefold())
+        self.assertLessEqual(len(candidate["title"]), 100)
+
+    def test_formula_object_detection_does_not_read_deportations_as_port(self):
+        subjects, object_name = bridge._formula_topic_context("Россия — депортации и диаспоры")
+
+        self.assertEqual(subjects, ["Россия"])
+        self.assertEqual(object_name, "депортации и диаспоры")
+
+    def test_formula_provider_payload_is_preserved_while_required_vector_stays_available(self):
+        title = "Давление растёт — Москва и Киев держат позиции — переговоры снова в тупике"
+        candidate = bridge._formula_candidate({
+            "title": title,
+            "information_payload": {"source_note": "provider-kept"},
+            "script_requirements": ["Сверить исходную выборку"],
+        }, topic="Россия-Украина — тупик переговоров")
+
+        self.assertEqual(candidate["title"], title)
+        self.assertEqual(candidate["information_payload"], {"source_note": "provider-kept"})
+        self.assertEqual(candidate["subjects"], ["Россия", "Украина"])
+        self.assertEqual(candidate["main_consequence"], "переговоры снова в тупике")
+        self.assertIn("Назвать субъектов: Россия, Украина", candidate["script_requirements"])
+        self.assertIn("Объяснить объект: переговоры", candidate["script_requirements"])
+        self.assertIn("Проверить последствие: переговоры снова в тупике", candidate["script_requirements"])
+
+    def test_local_formula_never_reuses_generic_filler_across_default_directions(self):
+        generic = {
+            "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
+        }
+
+        for topic in NEWS_TOPICS:
+            with self.subTest(topic=topic):
+                candidate = bridge._formula_candidate(generic, topic=topic)
+                title = candidate["title"]
+                self.assertNotIn("Стороны меняют курс", title)
+                if title:
+                    self.assertLessEqual(len(title), 100)
+                    parts = tuple(title.split(" — "))
+                    self.assertEqual(len(parts), 3)
+                    self.assertFalse(bridge._formula_parts_need_contextual_fallback(parts, topic))
+
+    def test_underspecified_direction_keeps_output_anchored_to_the_direction(self):
+        candidate = bridge._formula_candidate({
+            "title": "Ставки растут — Участники меняют курс — Последствия нарастают",
+        }, topic="Продовольственный кризис — помидорная война")
+
+        self.assertTrue(candidate["title"])
+        self.assertIn("Продовольственный кризис", candidate["title"])
+        self.assertIn("помидор", candidate["title"].casefold())
+        self.assertNotIn("Участники меняют курс", candidate["title"])
+        self.assertLessEqual(len(candidate["title"]), 100)
+
+    def test_formula_prompt_requires_named_subject_object_and_natural_seo_anchors(self):
+        prompt = bridge._title_generation_prompt(
+            "Трамп-Зеленский — давление и переговоры", "", 10, [], formula_only=True,
+        )
+
+        self.assertIn("конкретный субъект", prompt)
+        self.assertIn("объект действия", prompt)
+        self.assertIn("SEO-якор", prompt)
+        self.assertIn("естественном русском", prompt)
+
     def test_newsflow_has_seventeen_default_news_directions(self):
         self.assertEqual(len(NEWS_TOPICS), 17)
         self.assertEqual(Settings().idea_topics, NEWS_TOPICS)
@@ -53,6 +179,50 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         context = getattr(settings, "idea_scenario_context", {}).get(title)
         self.assertIsNotNone(context)
         self.assertEqual(context["script_requirements"], item["script_requirements"])
+
+    def test_generated_formula_metadata_survives_real_ideas_to_scenario_handoff(self):
+        title = "Договориться не смогли — Россия и Украина не уступают — переговоры снова в тупике"
+        settings = Settings(
+            idea_results=[title],
+            idea_result_sources={title: "Россия-Украина — тупик переговоров"},
+            idea_title_metadata={
+                title: {
+                    "topic": "Россия-Украина — тупик переговоров",
+                    "angle": "тупик переговоров",
+                    "subjects": ["Россия", "Украина"],
+                    "main_consequence": "переговоры снова в тупике",
+                    "information_payload": {
+                        "core": "Россия и Украина не уступают",
+                        "object": "переговоры",
+                        "consequence": "переговоры снова в тупике",
+                    },
+                    "script_requirements": [
+                        "Назвать субъектов: Россия, Украина",
+                        "Объяснить объект: переговоры",
+                        "Проверить последствие: переговоры снова в тупике",
+                    ],
+                },
+            },
+        )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "load_session", return_value=([], [])), \
+             patch.object(bridge, "save_session"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.add_ideas_to_scenarios({"ideas": [title]})
+
+        context = settings.idea_scenario_context[title]
+        self.assertEqual(context["core_event"], "Россия и Украина не уступают")
+        self.assertEqual(context["conflict"], "переговоры")
+        self.assertEqual(context["main_consequence"], "переговоры снова в тупике")
+        self.assertEqual(context["primary_entities"], ["Россия", "Украина"])
+        self.assertIn("Объяснить объект: переговоры", context["script_requirements"])
+
+        prompt = bridge.production_item_prompt(context)
+        self.assertIn("Россия и Украина не уступают", prompt)
+        self.assertIn("Объяснить объект: переговоры", prompt)
+        self.assertIn("Проверить последствие: переговоры снова в тупике", prompt)
 
     def test_scenario_prompt_includes_production_contract(self):
         prompt = getattr(bridge, "production_item_prompt", lambda _item: "")({
