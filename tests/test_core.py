@@ -85,7 +85,10 @@ class PromptTests(unittest.TestCase):
 
         self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
         self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", request.prompt)
+        self.assertIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", request.prompt)
+        self.assertIn("ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину", request.prompt)
         self.assertIn("len(text.strip())", request.prompt)
+        self.assertIn("а не слова, токены или приблизительный объем", request.prompt)
         self.assertIn("приоритет над любыми конфликтующими числами", request.prompt)
         self.assertIn("FULL_USER_PROMPT_BEGIN", request.prompt)
         self.assertIn("FULL_USER_PROMPT_END Проверочная тема", request.prompt)
