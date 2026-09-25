@@ -894,7 +894,8 @@ def _cover_face_catalog(settings: Settings) -> list[dict]:
             for key, paths in sorted(groups.items()) if paths]
 
 
-def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False) -> tuple[str, str, str]:
+def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False,
+                                prepared_only: bool = False) -> tuple[str, str, str]:
     """Find a portrait only where the identity is explicitly present in the topic."""
     if item.get("face_reference_disabled"):
         return "", "", ""
@@ -908,12 +909,20 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    title_tokens = _cover_face_tokens(str(item.get("title", "")))
+    # A long script can mention unrelated countries, people or markets.  Face
+    # selection must follow the title/topic which the operator actually chose,
+    # never an incidental word from the body text.
+    title_tokens = _cover_face_tokens(" ".join((
+        str(item.get("title", "")), str(item.get("topic", "")),
+    )))
     topic_tokens = set(title_tokens)
-    topic_tokens |= _cover_face_tokens(" ".join(str(item.get("script", "")).split())[:1200])
     best_score = 0
     candidates: list[Path] = []
+    prepared_folder = _cover_prepared_face_folder(settings, folder)
     for source in files:
+        prepared_candidate = _cover_processed_face_path(source, folder, prepared_folder)
+        if prepared_only and not prepared_candidate.is_file():
+            continue
         try:
             relative = source.relative_to(folder)
         except ValueError:
@@ -940,15 +949,21 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
     # choose one to avoid four thumbnails using the identical Putin/Trump/etc.
     # photo; the rendered layout itself remains remembered per selected photo.
     source = random.choice(candidates)
-    prepared = _cover_processed_face_path(source, folder, _cover_prepared_face_folder(settings, folder))
-    chosen = prepared if settings.cover_face_remove_background and prepared.is_file() else source
+    prepared = _cover_processed_face_path(source, folder, prepared_folder)
+    if prepared_only:
+        _compress_prepared_face_for_fastgen(prepared)
+        chosen = prepared
+    else:
+        chosen = prepared if settings.cover_face_remove_background and prepared.is_file() else source
     label = source.parent.name if source.parent != folder else source.stem
     return str(chosen), label, "auto"
 
 
 def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
                                face_mode: str = "auto", position: int = 0,
-                               max_references: int = 10) -> tuple[list[str], str]:
+                               max_references: int = 10,
+                               preserve_face_selection: bool = False,
+                               prepared_auto_face: bool = False) -> tuple[list[str], str]:
     """Keep references within the operation limit and reserve a selected face slot."""
     manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
     if face_mode == "without" or item.get("face_reference_disabled"):
@@ -961,7 +976,7 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
         face_source = "manual"
     else:
         face_path, face_label, face_source = _match_cover_face_reference(
-            item, settings, force=face_mode == "with"
+            item, settings, force=face_mode == "with", prepared_only=prepared_auto_face,
         )
     # Scene/style references can arrive from four places: a manually uploaded
     # image, an existing gallery cover, a FastGen pack and an AI-reference
@@ -983,7 +998,7 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
     references = [str(_prepare_cover_visual_reference(Path(reference))) for reference in scene_references]
     if face_path:
         item.update(face_reference_path=face_path, face_reference_label=face_label, face_reference_source=face_source)
-    else:
+    elif not preserve_face_selection:
         item.pop("face_reference_path", None)
         item.pop("face_reference_label", None)
         item.pop("face_reference_source", None)
@@ -6175,7 +6190,7 @@ def save_cover_settings(payload: dict) -> dict:
     if str(payload.get("textMode", settings.cover_text_mode)) in {"overlay", "fastgen"}:
         settings.cover_text_mode = str(payload.get("textMode"))
     build_mode = str(payload.get("buildMode", settings.cover_build_mode))
-    if build_mode in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
+    if build_mode in {"fastgen-full", "fastgen-full-my-face"}:
         settings.cover_build_mode = build_mode
     if "headlineTemplate" in payload:
         settings.cover_headline_template = str(payload["headlineTemplate"]).strip() or settings.cover_headline_template
@@ -7208,6 +7223,21 @@ _COVER_WORD_PAIRING = {
 }
 _COVER_WORD_GENERIC_STEMS = {"важн", "главн", "новост", "сегодн", "ситуац", "событ", "проблем", "изменен", "вопрос", "сценар", "последств", "шок", "срочно"}
 _COVER_WORD_FOREIGN_ENTITIES = {"трамп", "путин", "зеленск", "макрон", "али", "эрдоган", "нетан", "китай", "росси", "украин", "европ", "нато", "сша", "иран", "израил"}
+_COVER_WORD_GENERIC_ENTITY_TOKENS = {
+    "стороны", "сторона", "участники", "участник", "чиновники", "чиновник",
+    "власти", "люди", "рынок", "переговоры", "кризис", "ситуация",
+}
+_COVER_WORD_STRENGTHENING_RULES = (
+    (
+        ("бросил вызов", "бросила вызов", "бросает вызов", "бросают вызов"),
+        ("бросил вызов", "бросила вызов", "бросает вызов", "бросают вызов"),
+    ),
+    (("ультимат",), ("ультимат",)),
+    (
+        ("пригроз", "угрожает", "угрожают", "угрожал", "угрожала"),
+        ("пригроз", "угрожает", "угрожают", "угрожал", "угрожала"),
+    ),
+)
 _COVER_WORD_RISK_TERMS = ("может", "могут", "риск", "вероят", "возмож", "угроз")
 _COVER_WORD_ASSERTIVE_TERMS = ("взлетел", "рухнул", "обвалил", "закрыл", "остановил", "сорвал")
 _COVER_WORD_SEMANTIC_GROUPS = {
@@ -7315,6 +7345,73 @@ def _cover_word_foreign_entities(value: str, item: dict) -> set[str]:
             if entity[:4] in phrase_tokens and entity[:4] not in source_tokens}
 
 
+def _cover_word_named_source_entities(item: dict) -> set[str]:
+    """Return concrete topic anchors without learning names from a long script.
+
+    Prefer structured ProductionItem entities. For direction strings such as
+    Armenia-Azerbaijan followed by a direction separator, the named left side
+    is also an explicit anchor. The legacy known-entity vocabulary remains a
+    compatibility fallback for title/topic rows without structured fields.
+    """
+    anchors: set[str] = set()
+
+    def add_words(value: object, *, trust_structure: bool = False) -> None:
+        text = _cover_context_values(value)
+        for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text):
+            lowered = word.casefold()
+            if lowered in _COVER_WORD_GENERIC_ENTITY_TOKENS:
+                continue
+            if trust_structure or word.isupper() or word[:1].isupper():
+                anchors.add(lowered[:4])
+
+    for field in ("primary_entities", "primary_entity", "entities", "geography"):
+        if item.get(field):
+            add_words(item.get(field), trust_structure=True)
+
+    for field in ("direction", "topic"):
+        value = _cover_context_values(item.get(field))
+        if not value:
+            continue
+        left = re.split(r"\s+[—–]\s+|\s+-\s+", value, maxsplit=1)[0]
+        parts = [part.strip() for part in re.split(r"(?<!\s)[-–/](?!\s)", left) if part.strip()]
+        if not parts:
+            parts = [left]
+        for part in parts:
+            words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", part)
+            if words and all(word.isupper() or word[:1].isupper() for word in words):
+                add_words(part)
+
+    topic_fields = (
+        "title", "topic", "direction", "angle", "event_context",
+        "primary_entities", "primary_entity", "entities", "geography",
+        "conflict", "framing",
+    )
+    topic_text = " ".join(
+        _cover_context_values(item.get(field)) for field in topic_fields if item.get(field)
+    )
+    source_tokens = {
+        word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", topic_text.casefold())
+    }
+    anchors.update(
+        entity[:4]
+        for entity in _COVER_WORD_FOREIGN_ENTITIES
+        if entity[:4] in source_tokens
+    )
+    return anchors
+
+
+def _cover_word_strengthens_source(value: str, item: dict) -> bool:
+    """Detect materially stronger cover claims than the source carries."""
+    phrase = " ".join(str(value or "").casefold().split())
+    source = " ".join(_cover_word_source_text(item).casefold().split())
+    for output_markers, source_markers in _COVER_WORD_STRENGTHENING_RULES:
+        if any(marker in phrase for marker in output_markers) and not any(
+            marker in source for marker in source_markers
+        ):
+            return True
+    return False
+
+
 def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "",
                          structure: dict | None = None, recent: list[dict] | None = None) -> dict[str, object]:
     """Return explicit validation/reason codes; never silently truncate into READY."""
@@ -7324,7 +7421,7 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         result.update(reason_code="INVALID_JSON", reason_detail="Ожидалось одно значение из JSON-ответа")
         return result
     words = raw.split()
-    min_words, max_words, max_chars = (1, 3, 70) if kind == "headline" else (3, 10, 110)
+    min_words, max_words, max_chars = (1, 5, 100) if kind == "headline" else (3, 10, 110)
     if len(raw) > max_chars:
         result.update(reason_code="TOO_LONG", reason_detail=f"Лимит: {max_chars} символов")
         return result
@@ -7339,6 +7436,17 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         return result
     stems = _cover_meaningful_word_stems(raw)
     topic_stems = _cover_topic_terms(str(item.get("title", "")), _cover_word_source_text(item))
+    if kind == "headline":
+        named_source_entities = _cover_word_named_source_entities(item)
+        phrase_tokens = {
+            word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", raw.casefold())
+        }
+        if named_source_entities and not (named_source_entities & phrase_tokens):
+            result.update(
+                reason_code="MISSING_NAMED_ANCHOR",
+                reason_detail="Headline должен назвать конкретную сущность из темы, а не только действие или абстракцию",
+            )
+            return result
     # Existing topic terms keep five letters whereas duplicate detection uses
     # four-letter stems. Compare their shared stem instead of rejecting a
     # grounded inflection such as «экспорт» / «экспорта».
@@ -7353,6 +7461,12 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         result.update(reason_code="GENERIC_ONLY", reason_detail="Фраза состоит только из общего кликбейта")
         return result
     source = _cover_word_source_text(item).casefold()
+    if kind == "headline" and _cover_word_strengthens_source(raw, item):
+        result.update(
+            reason_code="CLAIM_STRENGTH_ERROR",
+            reason_detail="Headline усиливает исходный факт более жёстким действием, которого нет в теме или контексте",
+        )
+        return result
     if (any(token in raw.casefold() for token in _COVER_WORD_ASSERTIVE_TERMS)
             and any(token in source for token in _COVER_WORD_RISK_TERMS)
             and "?" not in raw
@@ -7393,11 +7507,12 @@ def _clean_cover_headline(value: str, *, emergency_limit: bool = True) -> str:
         except (ValueError, TypeError, IndexError):
             pass
     text = re.sub(r"^[\s\"'«»]+|[\s\"'«»]+$", "", text)
-    # The cover headline is a deliberately compact 1–3 word display field.
+    # The cover headline stays compact but may include a necessary preposition
+    # and object, e.g. «Трамп давит на Киев», without becoming a fragment.
     # Keep its hard rendering limit here as a final guard even if a provider
     # ignored the prompt constraint.
     words = text.split()
-    return " ".join(words[:3] if emergency_limit else words)
+    return " ".join(words[:5] if emergency_limit else words)
 
 
 def _clean_cover_subheadline(value: str) -> str:
@@ -7544,7 +7659,7 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
     role = structure[f"{prefix}_structure"]
     slots = structure[f"{prefix}_semantic_slots"]
     schema = '{"headline":"..."}' if kind == "headline" else '{"subheadline":"..."}'
-    target = "1–3 слова, максимум 3 слова и 70 символов" if kind == "headline" else "3–7 слов, максимум 10 слов и 110 символов"
+    target = "1–5 слов, максимум 5 слов и 100 символов" if kind == "headline" else "3–7 слов, максимум 10 слов и 110 символов"
     task = (
         "Ты создаёшь только одну строку для новостной YouTube-обложки. "
         "Примеры пользовательского стиля не являются фактами и не могут переносить чужие имена, страны или события. "
@@ -7555,6 +7670,12 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
     if kind == "headline":
         task += (
             "Внутренне сравни минимум пять разных подходов и верни один лучший. "
+            "Headline обязан быть самодостаточным: без полного названия ролика зритель сразу должен понимать, "
+            "кто или что находится в центре конфликта. Если в теме назван человек, страна, город или организация, "
+            "включи хотя бы одну такую конкретную сущность в headline. Запрещены голые действия и абстрактные "
+            "пары без субъекта — например «Не уступает» и «Новые условия». "
+            "Не усиливай исходное действие: если тема говорит «не уступает», не заменяй это на «бросил вызов», "
+            "ультиматум, угрозу или другое более жёсткое утверждение, которого в источнике нет. "
             "При равной фактической точности выбери наиболее кликабельный hook: конкретный конфликт, сильное действие, "
             "угрозу, ставку или неожиданный поворот. Не выбирай скучную нейтральную формулировку, если её можно "
             "точнее и сильнее выразить без изменения фактов. Не используй пустой общий кликбейт. "
@@ -7611,7 +7732,7 @@ def _cover_text_prompt(kind: str, template: str, title: str, context: str, headl
                        use_structure: bool = True, avoid_repeats: bool = True) -> str:
     """Build a topic-locked prompt for either cover text line."""
     style = template.replace("{title}", title).replace("{excerpt}", context)
-    response_schema = '{"headline":"1–3 слова"}' if kind == "headline" else '{"subheadline":"2–7 слов"}'
+    response_schema = '{"headline":"1–5 слов"}' if kind == "headline" else '{"subheadline":"2–7 слов"}'
     base = (
         "Ты создаёшь только текст одной новостной YouTube-обложки.\n"
         "НИЖЕ ПОЛЬЗОВАТЕЛЬСКИЕ ПРАВИЛА СТИЛЯ. Примеры в них — не факты, не готовые фразы и не имена, "
@@ -8522,11 +8643,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         _run_parallel_cover_workers(sorted(requested), run_topic)
         return snapshot()
     refine_with_face = bool(payload.get("refineWithFace"))
-    # FastGen accepts the scene/text instruction, while NewsFlow composites
-    # the local cut-out portrait afterwards. This keeps the person sharp and
-    # avoids sending a portrait as an unreliable remote reference for the
-    # text-only rerender path.
-    local_face_only = bool(payload.get("localFaceOnly"))
+    # Both supported routes are final FastGen renders.  The optional portrait
+    # route transports one prepared reference but never performs local face
+    # compositing after the provider response.
+    local_face_only = False
     face_mode = str(payload.get("faceMode", "auto")).casefold()
     # A one-off FastGen text render must not overwrite the user's usual
     # local-overlay preference for future covers.
@@ -8536,8 +8656,9 @@ def _generate_covers_unlocked(payload: dict) -> dict:
     if face_mode not in {"auto", "with", "without"}:
         face_mode = "auto"
     build_mode = str(payload.get("buildMode", settings.cover_build_mode)).casefold()
-    if build_mode not in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
-        build_mode = settings.cover_build_mode
+    if build_mode not in {"fastgen-full", "fastgen-full-my-face"}:
+        build_mode = "fastgen-full-my-face"
+    use_my_face = build_mode == "fastgen-full-my-face"
     operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
     operation_reference_limit = _cover_operation_reference_limit(settings, operation)
     operation_accepts_references = _cover_operation_accepts_references(settings, operation)
@@ -8601,25 +8722,16 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         try:
             references, face_label = _cover_references_for_item(
                 item, settings, refine=refine_with_face,
-                face_mode="without" if local_face_only else face_mode, position=index,
+                face_mode=face_mode if use_my_face else "without", position=index,
                 max_references=operation_reference_limit if operation_reference_limit is not None else 10,
+                preserve_face_selection=not use_my_face,
+                prepared_auto_face=use_my_face,
             )
-            if local_face_only and face_mode != "without":
-                face_path, face_label, face_source = _match_cover_face_reference(
-                    item, settings, force=face_mode == "with"
-                )
-                if face_path:
-                    item.update(face_reference_path=face_path, face_reference_label=face_label,
-                                face_reference_source=face_source)
-                else:
-                    item.pop("face_reference_path", None)
-                    item.pop("face_reference_label", None)
-                    item.pop("face_reference_source", None)
             # A full-FastGen face cover is accepted only when the provider can
             # receive the selected portrait. Falling back to a name-only prompt
             # would silently produce a different person and cannot count as the
             # requested scene + face + text workflow.
-            if build_mode == "fastgen-full" and face_label and operation_reference_limit is None:
+            if use_my_face and face_label and operation_reference_limit is None:
                 detail = (
                     "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
                     "обновите список моделей или выберите reference-capable operation."
@@ -8628,10 +8740,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item["error"] = detail
                 _save_cover_state(settings)
                 continue
-            if build_mode == "fastgen-full" and face_label and not operation_accepts_references:
+            if use_my_face and face_label and not operation_accepts_references:
                 detail = (
                     f"Операция FastGen {operation} не поддерживает image/reference input; "
-                    "выберите reference-capable operation для режима «Всё через FastGen»."
+                    "выберите reference-capable operation для режима «FastGen всё + мои лица»."
                 )
                 _cover_step(item, "Операция FastGen без references", 100, detail)
                 item["error"] = detail
@@ -8655,7 +8767,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         identity_notes: list[str] = []
         reference_notes: list[str] = []
         composition_notes: list[str] = []
-        face_requirement = _cover_face_visual_requirement(face_mode, face_label)
+        face_requirement = _cover_face_visual_requirement(face_mode if use_my_face else "auto", face_label)
         if face_requirement:
             identity_notes.append(face_requirement)
         if references:
@@ -8681,9 +8793,16 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             reference_notes.append(
                 "Use the first supplied image as the existing composition reference while redrawing a clean topic-relevant scene."
             )
+        # Preserve a manual selection on the row for a later my-faces retry,
+        # but do not let its identity leak into the FastGen-only prompt.
+        prompt_item = item
+        if not use_my_face:
+            prompt_item = dict(item)
+            for key in ("face_reference_path", "face_reference_label", "face_reference_source"):
+                prompt_item.pop(key, None)
         final_prompt_options = [
             build_final_provider_prompt(
-                visual_prompt, item,
+                visual_prompt, prompt_item,
                 identity_notes=" ".join(note for note in identity_notes if note),
                 reference_notes=" ".join(note for note in reference_notes if note),
                 composition_notes=" ".join(note for note in composition_notes if note),
@@ -9200,7 +9319,8 @@ def regenerate_cover_with_face(payload: dict) -> dict:
     })
     return regenerate_covers({
         "indices": [index], "productionItemIds": [production_item_id],
-        "faceMode": "with", "textMode": "fastgen", "localFaceOnly": True,
+        "buildMode": "fastgen-full-my-face", "faceMode": "auto",
+        "textMode": "fastgen", "localFaceOnly": False,
     })
 
 
@@ -9267,7 +9387,8 @@ def refine_cover_faces(payload: dict) -> dict:
     return generate_covers({
         "indices": [index for index, _item in selected],
         "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
-        "refineWithFace": True, "localFaceOnly": True,
+        "refineWithFace": True, "buildMode": "fastgen-full-my-face",
+        "faceMode": "auto", "textMode": "fastgen", "localFaceOnly": False,
     })
 
 

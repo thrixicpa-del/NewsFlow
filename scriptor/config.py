@@ -42,9 +42,7 @@ def _is_test_runner_process() -> bool:
     argv0 = str(sys.argv[0] if sys.argv else "").replace("\\", "/").casefold().strip()
     basename = Path(argv0).name
     return (
-        argv0.endswith(" -m unittest")
-        or argv0.endswith("/unittest/__main__.py")
-        or argv0.endswith("/pytest/__main__.py")
+        argv0.endswith((" -m unittest", "/unittest/__main__.py", "/pytest/__main__.py"))
         or basename in {"pytest", "pytest.exe", "py.test", "py.test.exe"}
     )
 
@@ -673,12 +671,13 @@ class Settings:
     cover_prompt_variant_count: int = 2
     cover_headline_provider: str = "agent"
     cover_text_mode: str = "overlay"
-    # The rendering route is explicit: the third route keeps FastGen's
-    # typography but guarantees a locally matched face.
-    cover_build_mode: str = "fastgen-text-local-face"
+    # Both supported routes are fully rendered by FastGen.  The second route
+    # may send one selected portrait as a remote reference; it never composites
+    # a local face onto the returned image.
+    cover_build_mode: str = "fastgen-full"
     cover_headline_template: str = (
         "Придумай короткую фразу для текста на YouTube-обложке по теме «{title}». "
-        "1–3 слова, конкретно, интригующе, без ложных фактов и без повторения полного заголовка."
+        "1–5 слов, конкретно, интригующе, без ложных фактов и без повторения полного заголовка."
     )
     cover_subheadline_template: str = (
         "Придумай короткий подзаголовок для YouTube-обложки по теме «{title}». "
@@ -1267,10 +1266,11 @@ def load_settings() -> Settings:
             cover_prompt_variant_count=max(1, min(10, int(data.get("cover_prompt_variant_count", 2) or 2))),
             cover_headline_provider=data.get("cover_headline_provider", "agent") if data.get("cover_headline_provider", "agent") in {"agent", "openai"} else "agent",
             cover_text_mode=data.get("cover_text_mode", "overlay") if data.get("cover_text_mode", "overlay") in {"overlay", "fastgen"} else "overlay",
-            cover_build_mode=(str(data.get("cover_build_mode", "fastgen-text-local-face"))
-                              if str(data.get("cover_build_mode", "fastgen-text-local-face"))
-                              in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}
-                              else "fastgen-text-local-face"),
+            # Retired local-composite routes retain the closest intent after
+            # migration: FastGen receives the already selected portrait.
+            cover_build_mode=("fastgen-full"
+                              if str(data.get("cover_build_mode", "fastgen-full")) == "fastgen-full"
+                              else "fastgen-full-my-face"),
             cover_headline_template=data.get("cover_headline_template") or Settings().cover_headline_template,
             cover_subheadline_template=data.get("cover_subheadline_template") or Settings().cover_subheadline_template,
             cover_headline_presets=data.get("cover_headline_presets", []),

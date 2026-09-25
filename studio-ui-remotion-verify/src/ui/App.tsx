@@ -181,12 +181,12 @@ export const fallback: NewsFlowSnapshot = {
     promptVariantCount: 2,
     headlineProvider: "agent",
     headlineTemplate:
-      "Придумай короткую фразу для текста на YouTube-обложке по теме «{title}». 1–3 слова, конкретно, интригующе, без ложных фактов.",
+      "Придумай короткую фразу для текста на YouTube-обложке по теме «{title}». 1–5 слов, конкретно, интригующе, без ложных фактов.",
     subheadlineTemplate:
       "Придумай короткий подзаголовок для YouTube-обложке по теме «{title}». 3–7 слов, не повторяй основной заголовок и не выдумывай факты.",
     headlinePresets: [],
     textMode: "overlay",
-    buildMode: "fastgen-text-local-face",
+    buildMode: "fastgen-full",
     ranges: [],
     presets: [],
     referenceMode: "all",
@@ -3903,12 +3903,12 @@ export function Covers({
   const [textMode, setTextMode] = useState<"overlay" | "fastgen">(
     data.coverSettings.textMode,
   );
-  const [coverBuildMode, setCoverBuildMode] = useState<
-    | "fastgen-full"
-    | "newsflow-full"
-    | "fastgen-text-local-face"
-    | "fastgen-text-auto-face"
-  >(data.coverSettings.buildMode || "fastgen-text-local-face");
+  type CoverBuildMode = "fastgen-full" | "fastgen-full-my-face";
+  const normaliseCoverBuildMode = (value: unknown): CoverBuildMode =>
+    value === "fastgen-full" ? "fastgen-full" : "fastgen-full-my-face";
+  const [coverBuildMode, setCoverBuildMode] = useState<CoverBuildMode>(
+    normaliseCoverBuildMode(data.coverSettings.buildMode),
+  );
   const [coverGenerationStarting, setCoverGenerationStarting] = useState(false);
   const coverGenerationStartRef = useRef(false);
   useEffect(() => {
@@ -3941,9 +3941,7 @@ export function Covers({
     setUseTextStructure(data.coverSettings.useTextStructure);
     setAvoidTextRepeats(data.coverSettings.avoidTextRepeats);
     setTextMode(data.coverSettings.textMode);
-    setCoverBuildMode(
-      data.coverSettings.buildMode || "fastgen-text-local-face",
-    );
+    setCoverBuildMode(normaliseCoverBuildMode(data.coverSettings.buildMode));
   // `data.coverSettings` above is a deliberately normalised object created
   // for every render. Depending on it here makes a missing optional field
   // (for example `selectedKeyLabels`) allocate a new fallback array forever
@@ -4346,23 +4344,16 @@ export function Covers({
     if (text) void command("import-cover-topics", { text });
   };
   const generate = async (
-    mode:
-      | "fastgen-full"
-      | "newsflow-full"
-      | "fastgen-text-local-face"
-      | "fastgen-text-auto-face" = coverBuildMode,
+    mode: CoverBuildMode = coverBuildMode,
   ) => {
     if (coverGenerationStartRef.current) return;
     coverGenerationStartRef.current = true;
     setCoverGenerationStarting(true);
-    // Keep the existing modes unchanged. The additional automatic mode lets
-    // FastGen draw exact text while NewsFlow adds a local portrait only when
-    // the topic matcher finds a relevant person; otherwise no face is used.
-    const automaticTextWithFace = mode === "fastgen-text-auto-face";
-    const fastgenText = mode !== "newsflow-full";
-    const localFaceOnly = mode !== "fastgen-full";
-    const faceMode =
-      mode === "fastgen-full" || automaticTextWithFace ? "auto" : "with";
+    // Both routes finish in FastGen.  The my-faces route may pass a single
+    // prepared portrait reference; no route performs a local face composite.
+    const fastgenText = true;
+    const localFaceOnly = false;
+    const faceMode = "auto";
     // The selected route is persisted before the request. This guarantees
     // that retry/restart buttons do not silently switch typography engines.
     try {
@@ -4827,44 +4818,20 @@ export function Covers({
                 </Button>
                 <Button
                   kind={
-                    coverBuildMode === "newsflow-full" ? "primary" : "secondary"
-                  }
-                  onClick={() => selectCoverBuildMode("newsflow-full")}
-                >
-                  <Pencil size={15} />
-                  FastGen + NewsFlow всё
-                </Button>
-                <Button
-                  kind={
-                    coverBuildMode === "fastgen-text-local-face"
+                    coverBuildMode === "fastgen-full-my-face"
                       ? "success"
                       : "secondary"
                   }
-                  onClick={() => selectCoverBuildMode("fastgen-text-local-face")}
+                  onClick={() => selectCoverBuildMode("fastgen-full-my-face")}
                 >
                   <Image size={15} />
-                  FastGen текст + лицо NewsFlow
-                </Button>
-                <Button
-                  kind={
-                    coverBuildMode === "fastgen-text-auto-face"
-                      ? "success"
-                      : "secondary"
-                  }
-                  onClick={() => selectCoverBuildMode("fastgen-text-auto-face")}
-                >
-                  <Sparkles size={15} />
-                  FastGen текст + лицо NewsFlow (автоматически)
+                  FastGen всё + мои лица
                 </Button>
               </div>
               <small>
                 {coverBuildMode === "fastgen-full"
-                  ? "FastGen сам рисует сцену, текст и релевантное лицо по теме."
-                  : coverBuildMode === "newsflow-full"
-                    ? "FastGen рисует только сцену; NewsFlow накладывает лицо и точный текст."
-                    : coverBuildMode === "fastgen-text-local-face"
-                      ? "FastGen рисует сцену и текст; NewsFlow всегда накладывает выбранное лицо."
-                      : "Автоматически: FastGen рисует сцену и текст, а NewsFlow добавляет лицо только при подтверждённом совпадении с темой; иначе оставляет сцену без лица."}
+                  ? "FastGen сам рисует сцену, лица и текст; пользовательский PNG не загружается."
+                  : "NewsFlow подбирает только подтверждённо релевантный PNG и отправляет один референс в FastGen. FastGen сам рисует финальную сцену, лицо и текст."}
               </small>
               <div className="cover-workflow-faces">
                 <Button onClick={() => void chooseFaceLibrary()}>
@@ -4965,7 +4932,7 @@ export function Covers({
               <b>Запустите FastGen</b>
               <small>
                 {promptsReady
-                  ? `Промпты готовы. Режим: ${coverBuildMode === "fastgen-full" ? "всё через FastGen" : coverBuildMode === "newsflow-full" ? "FastGen + NewsFlow всё" : coverBuildMode === "fastgen-text-local-face" ? "FastGen текст + лицо NewsFlow" : "FastGen текст + лицо NewsFlow (автоматически)"}.`
+                  ? `Промпты готовы. Режим: ${coverBuildMode === "fastgen-full" ? "всё через FastGen" : "FastGen всё + мои лица"}.`
                   : "Сначала создайте промпты на шаге 01."}
               </small>
             </div>
@@ -5053,36 +5020,6 @@ export function Covers({
             </Button>
           </article>
         </div>
-      </section>
-      <section className="panel cover-auto-face-mode">
-        <b>
-          Дополнительный режим: FastGen текст + лицо NewsFlow (автоматически)
-        </b>
-        <small>
-          FastGen создаёт сцену и точный текст. NewsFlow анализирует тему и
-          добавляет релевантное лицо только при подтверждённом совпадении; если
-          лицо неуместно или не найдено, обложка остаётся без лица.
-        </small>
-        <Button
-          kind={
-            coverBuildMode === "fastgen-text-auto-face"
-              ? "success"
-              : "secondary"
-          }
-          onClick={() => selectCoverBuildMode("fastgen-text-auto-face")}
-        >
-          <Sparkles size={15} />
-          {coverBuildMode === "fastgen-text-auto-face"
-            ? "Выбран автоматический режим"
-            : "Выбрать автоматический режим"}
-        </Button>
-      </section>
-      <section className="panel cover-auto-mode-note">
-        <b>Режим «Всё через FastGen»</b>
-        <small>
-          FastGen сам решает: использовать релевантное лицо или оставить сцену
-          без лица; сам рисует текст, плашку и рамку.
-        </small>
       </section>
       <section className="panel cover-settings-launcher">
         <div>
@@ -5200,24 +5137,6 @@ export function Covers({
             >
               <Image size={16} />
               Подготовить PNG
-            </Button>
-            <Button
-              kind={coverBuildMode === "fastgen-full" ? "success" : "secondary"}
-              onClick={() => selectCoverBuildMode("fastgen-full")}
-            >
-              <Sparkles size={16} />
-              Всё через FastGen
-            </Button>
-            <Button
-              kind={
-                coverBuildMode === "fastgen-text-local-face"
-                  ? "success"
-                  : "secondary"
-              }
-              onClick={() => selectCoverBuildMode("fastgen-text-local-face")}
-            >
-              <Image size={16} />
-              FastGen текст + лицо NewsFlow
             </Button>
           </div>
           <div className="cover-face-quick-status">
@@ -7244,9 +7163,14 @@ export function CoverGallery({
       return;
     }
     await command("select-cover-face-person", { index, person });
-    await command("compose-cover-faces", { indices: [index] });
-    if (data.coverSettings.buildMode === "newsflow-full")
-      await command("render-cover-text", { indices: [index] });
+    await command("regenerate-covers", {
+      ...coverSelectionPayload([index]),
+      buildMode: "fastgen-full-my-face",
+      faceMode: "auto",
+      textMode: "fastgen",
+      localFaceOnly: false,
+      operation: data.coverSettings.operation,
+    });
   };
   const rerenderWithFace = async (index: number) => {
     const person = faceByTopic[index];

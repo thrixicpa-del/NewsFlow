@@ -45,7 +45,28 @@ describe("Covers Light view", () => {
 
     await waitFor(() => expect(command).toHaveBeenCalledWith("generate-covers", expect.objectContaining({
       indices: [], resumeGeneration: true, operation: data.coverSettings.operation,
-      buildMode: "fastgen-text-local-face", faceMode: "with", textMode: "fastgen", localFaceOnly: true,
+      buildMode: "fastgen-full", faceMode: "auto", textMode: "fastgen", localFaceOnly: false,
+    })));
+  });
+
+  it("exposes exactly the two all-FastGen routes and sends the my-faces route", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{ title: "Порт Одессы", image_prompt: "Морской терминал", paths: [] }],
+    };
+    render(<Covers data={data} command={command} />);
+
+    expect(screen.getByRole("button", { name: "Всё через FastGen" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "FastGen всё + мои лица" })).toBeTruthy();
+    expect(screen.queryByText("FastGen + NewsFlow всё")).toBeNull();
+    expect(screen.queryByText("FastGen текст + лицо NewsFlow")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "FastGen всё + мои лица" }));
+    fireEvent.click(screen.getByText("Создать обложки").closest("button")!);
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("generate-covers", expect.objectContaining({
+      buildMode: "fastgen-full-my-face", faceMode: "auto", textMode: "fastgen", localFaceOnly: false,
     })));
   });
 

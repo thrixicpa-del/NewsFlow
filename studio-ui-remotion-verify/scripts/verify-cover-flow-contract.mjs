@@ -4,11 +4,12 @@ import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const app = readFileSync(resolve(root, 'src/ui/App.tsx'), 'utf8');
 const required = [
-  "const faceMode = mode === 'fastgen-full' || automaticTextWithFace ? 'auto' : 'with';",
-  'const automaticTextWithFace = mode === \'fastgen-text-auto-face\';',
-  'FastGen текст + лицо NewsFlow (автоматически)',
-  'faceMode, textMode: fastgenText ? \'fastgen\' : \'overlay\', localFaceOnly',
-  'Режим «Всё через FastGen»',
+  'const fastgenText = true;',
+  'const localFaceOnly = false;',
+  'const faceMode = "auto";',
+  'FastGen всё + мои лица',
+  'FastGen сам рисует сцену, лица и текст; пользовательский PNG не загружается.',
+  'buildMode: "fastgen-full-my-face",',
   'setUseCustomPrompt(true)',
   'value={template}',
   'Поле пустое: дополнительные правила не передаются.',
@@ -27,11 +28,10 @@ const required = [
   'Диапазоны для ИИ',
   'select-cover-visual-reference',
   'Загрузить референс для выбранной темы',
-  "const fastgenText = mode !== 'newsflow-full';",
   'currentProfile: true',
   'value="__none__"',
   'visual_reference_to_fastgen',
-  'buildMode: mode, faceMode, textMode: fastgenText ? \'fastgen\' : \'overlay\', localFaceOnly',
+  'buildMode: mode,',
   'Также отправить общий набор ИИ-референсов в FastGen',
   'sendToFastgen: event.target.checked',
   'mass-cover-selection-summary',
@@ -41,12 +41,23 @@ const required = [
   'Повторить с новыми',
   'Модель для массовой генерации',
   'Открыть папку обложек',
-  "indices: [index], currentProfile: true, operation",
+  'currentProfile: true,\n      operation,',
   'newsflow_preview',
 ];
 const missing = required.filter(fragment => !app.includes(fragment));
-if (missing.length) {
-  console.error(`Cover-flow contract failed:\n${missing.map(item => `- ${item}`).join('\n')}`);
+const retiredRoutes = [
+  'fastgen-text-auto-face',
+  'fastgen-text-local-face',
+  'newsflow-full',
+  'FastGen + NewsFlow всё',
+  'FastGen текст + лицо NewsFlow',
+];
+const retired = retiredRoutes.filter(fragment => app.includes(fragment));
+if (missing.length || retired.length) {
+  console.error([
+    missing.length ? `Cover-flow contract missing:\n${missing.map(item => `- ${item}`).join('\n')}` : '',
+    retired.length ? `Retired cover routes are still visible:\n${retired.map(item => `- ${item}`).join('\n')}` : '',
+  ].filter(Boolean).join('\n'));
   process.exit(1);
 }
 console.log(`Cover-flow contract passed: ${required.length} cover interactions found.`);

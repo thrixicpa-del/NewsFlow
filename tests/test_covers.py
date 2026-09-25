@@ -27,9 +27,12 @@ from scriptor.bridge import (
     _cover_text_prompt,
     _cover_text_structure,
     _cover_topic_visual_plan,
+    _cover_word_provider_prompt,
+    _cover_word_structure_pair,
     _match_cover_face_reference,
     _migrate_legacy_cover_photo_prompts,
     _normalize_cover_photo_prompt,
+    _validate_cover_word,
     compose_cover_faces,
     generate_cover_headlines,
     generate_cover_prompts,
@@ -47,7 +50,7 @@ from scriptor.bridge import (
     select_cover_visual_reference,
     set_cover_visual_reference_target,
 )
-from scriptor.config import FastGenKey, OpenAIKey, Settings
+from scriptor.config import FastGenKey, OpenAIKey, Settings, load_settings
 from scriptor.cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
 from scriptor.covers import (
     FastGenClient,
@@ -285,7 +288,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertEqual(len(payloads), 1)
         self.assertIn("CLICKABILITY = HIGH.", payloads[0])
         self.assertIn("ACTION = HIGH.", payloads[0])
-        self.assertIn("thin vivid red graphical edge accents", payloads[0])
+        self.assertIn("bold vivid red curved-corner frame", payloads[0])
         self.assertNotIn("breaking-news", payloads[0].casefold())
 
     def test_prompt_has_single_style_block(self):
@@ -454,6 +457,27 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("Do not add punctuation", headline)
         self.assertIn("Do not add punctuation", subheadline)
 
+    def test_final_prompt_prioritises_title_scene_and_requires_a_high_contrast_red_yellow_treatment(self):
+        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+        prompt = build_final_provider_prompt(
+            "Energy traders react to changing oil prices on live market boards.",
+            {
+                "title": "Порт Одессы под ударом — инфраструктура и отгрузка под угрозой",
+                "script": "Длинный сценарий вскользь упоминает нефтяной рынок и цены на энергию.",
+                "cover_headline": "ПОРТ ПОД УДАРОМ",
+            },
+        )
+
+        body = prompt.casefold()
+        self.assertIn("port operations", body)
+        self.assertIn("container", body)
+        self.assertNotIn("energy-market trading floor", body)
+        self.assertIn("red curved-corner frame", body)
+        self.assertIn("all four outer edges", body)
+        self.assertIn("yellow lettering on a red panel", body)
+        self.assertIn("red lettering on a yellow panel", body)
+
     def test_semantic_scene_planner_resolves_concrete_values_for_supported_news_topics(self):
         """V2 receives scene facts, never planner instructions or generic placeholders."""
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
@@ -547,7 +571,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             [{"status": "READY", "error": ""}] * 5,
         )
         self.assertTrue(all(row["subheadline_status"] == "READY" for row in settings.cover_queue))
-        self.assertTrue(all(len(row["cover_headline"].split()) <= 3 for row in settings.cover_queue))
+        self.assertTrue(all(len(row["cover_headline"].split()) <= 5 for row in settings.cover_queue))
         self.assertTrue(all(3 <= len(row["cover_subheadline"].split()) <= 7 for row in settings.cover_queue))
         self.assertTrue(all(not _cover_lines_repeat_meaningful_words(row["cover_headline"], row["cover_subheadline"])
                             for row in settings.cover_queue))
@@ -561,7 +585,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         async def generate(prompt, **_kwargs):
             calls.append(prompt)
-            return json.dumps({"headline": "ПОРТ ЗАКРЫТ" if len(calls) > 1 else "ПОРТ ЗАКРЫТ ПРЯМО СЕЙЧАС"}, ensure_ascii=False)
+            return json.dumps({
+                "headline": "ПОРТ ЗАКРЫТ" if len(calls) > 1 else "ПОРТ ЗАКРЫТ ПРЯМО СЕЙЧАС ВЕСЬ ДЕНЬ"
+            }, ensure_ascii=False)
 
         value, validation, attempts = asyncio.run(bridge._generate_cover_word_v2(
             SimpleNamespace(generate=generate), "headline", item, "", bridge._cover_word_structure_pair(item),
@@ -619,7 +645,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             self.assertIn("CLICKABILITY = HIGH.", payload)
             self.assertIn("PHOTOREALISM = MAXIMUM.", payload)
             self.assertIn("SELECTED COMPOSITION:\n", payload)
-            self.assertIn("Use thin vivid red graphical edge accents", payload)
+            self.assertIn("bold vivid red curved-corner frame", payload)
             self.assertIn(f"HEADLINE:\n<exact-text>{headline}</exact-text>", payload)
             self.assertIn(f"SUBHEADLINE:\n<exact-text>{subheadline}</exact-text>", payload)
             self.assertNotIn("breaking-news", payload.casefold())
@@ -850,8 +876,11 @@ class FastGenClientTests(unittest.TestCase):
 
 
 class CoverHeadlineGuardTests(unittest.TestCase):
-    def test_headline_is_limited_to_three_words(self):
-        self.assertEqual(_clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС"), "ОРМУЗ ПОД УГРОЗОЙ")
+    def test_headline_is_limited_to_five_words(self):
+        self.assertEqual(
+            _clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС НОЧЬЮ"),
+            "ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС",
+        )
 
     def test_rejects_an_unrelated_example_from_user_prompt(self):
         title = "Тегеран усиливает давление на Ормузский пролив"
@@ -875,6 +904,101 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertFalse(_cover_lines_repeat_meaningful_words(
             "ОРМУЗ В ОГНЕ", "Тегеран давит сильнее"
         ))
+
+    def test_rejects_weak_headlines_that_drop_named_people_from_the_topic(self):
+        item = {
+            "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        for weak in ("Новые условия", "Не уступает"):
+            validation = _validate_cover_word("headline", weak, item)
+            self.assertFalse(validation["valid"], weak)
+            self.assertEqual(validation["reason_code"], "MISSING_NAMED_ANCHOR")
+
+    def test_accepts_a_standalone_headline_with_a_named_topic_anchor(self):
+        item = {
+            "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        validation = _validate_cover_word("headline", "Зеленский держит курс", item)
+        self.assertTrue(validation["valid"], validation)
+
+    def test_accepts_a_natural_headline_with_subject_action_and_object(self):
+        item = {
+            "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        validation = _validate_cover_word("headline", "Трамп давит на Киев", item)
+        self.assertTrue(validation["valid"], validation)
+
+    def test_does_not_require_an_incidental_script_person_as_the_headline_anchor(self):
+        item = {
+            "title": "Поставки газа на рынок",
+            "script": "Трамп обсудил поставки газа с чиновниками.",
+        }
+        validation = _validate_cover_word("headline", "Поставки под угрозой", item)
+        self.assertTrue(validation["valid"], validation)
+
+    def test_provider_prompt_for_named_topics_forbids_bare_actions_and_abstract_hooks(self):
+        item = {
+            "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item),
+        )
+        self.assertIn("самодостаточным", prompt)
+        self.assertIn("Не уступает", prompt)
+        self.assertIn("Не усиливай исходное действие", prompt)
+
+    def test_named_anchor_guard_covers_new_direction_entities_not_in_legacy_vocabulary(self):
+        item = {
+            "title": "Мирный процесс снова в центре внимания",
+            "direction": "Армения-Азербайджан — мирный процесс и Карабах",
+            "topic": "Армения-Азербайджан — мирный процесс и Карабах",
+        }
+
+        abstract = _validate_cover_word("headline", "Мирный процесс буксует", item)
+        concrete = _validate_cover_word("headline", "Армения обсуждает мирный процесс", item)
+
+        self.assertFalse(abstract["valid"], abstract)
+        self.assertEqual(abstract["reason_code"], "MISSING_NAMED_ANCHOR")
+        self.assertTrue(concrete["valid"], concrete)
+
+    def test_named_anchor_guard_uses_structured_entities_even_when_they_are_lowercase(self):
+        item = {
+            "title": "Мирный процесс меняет повестку",
+            "primary_entities": ["армении", "азербайджана"],
+        }
+
+        abstract = _validate_cover_word("headline", "Мирный процесс меняется", item)
+        concrete = _validate_cover_word("headline", "Армения меняет подход", item)
+
+        self.assertFalse(abstract["valid"], abstract)
+        self.assertEqual(abstract["reason_code"], "MISSING_NAMED_ANCHOR")
+        self.assertTrue(concrete["valid"], concrete)
+
+    def test_headline_guard_rejects_stronger_challenge_or_ultimatum_than_the_source(self):
+        item = {
+            "title": "Зеленский не уступает Трампу",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+
+        for value in ("Зеленский бросил вызов", "Трамп выдвинул ультиматум"):
+            with self.subTest(value=value):
+                validation = _validate_cover_word("headline", value, item)
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "CLAIM_STRENGTH_ERROR")
+
+    def test_headline_guard_allows_strong_wording_when_the_source_contains_it(self):
+        item = {
+            "title": "Трамп выдвинул ультиматум Зеленскому",
+            "topic": "Трамп-Зеленский — ультиматум на переговорах",
+        }
+
+        validation = _validate_cover_word("headline", "Трамп выдвинул ультиматум", item)
+
+        self.assertTrue(validation["valid"], validation)
 
     def test_topic_gets_one_clear_pair_structure(self):
         headline, subheadline = _cover_text_structure("Тегеран усиливает давление на Ормузский пролив")
@@ -916,6 +1040,130 @@ class CoverFaceLibraryTests(unittest.TestCase):
             self.assertEqual(label, "Алиев")
             self.assertEqual(source, "auto")
             self.assertEqual(_match_cover_face_reference({"title": "Тегеран усиливает давление на Ормуз"}, settings), ("", "", ""))
+
+    def test_prepared_only_auto_match_returns_prepared_png_even_when_background_flag_is_off(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            prepared_root = root / "Готовые PNG"
+            source = sources / "Зеленский" / "portrait.jpg"
+            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source.parent.mkdir(parents=True)
+            prepared.parent.mkdir(parents=True)
+            source.write_bytes(b"source-jpg")
+            prepared.write_bytes(b"prepared-png")
+            settings = Settings(
+                cover_face_library_folder=str(sources),
+                cover_face_prepared_folder=str(prepared_root),
+                cover_face_library_enabled=True,
+                cover_face_remove_background=False,
+            )
+
+            path, label, source_kind = _match_cover_face_reference(
+                {"title": "Зеленский обсуждает переговоры"},
+                settings,
+                prepared_only=True,
+            )
+
+        self.assertEqual(Path(path), prepared)
+        self.assertEqual(label, "Зеленский")
+        self.assertEqual(source_kind, "auto")
+        self.assertEqual(Path(path).suffix.casefold(), ".png")
+
+    def test_prepared_only_auto_match_does_not_fall_back_to_raw_source_portrait(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            source = sources / "Зеленский" / "portrait.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"source-jpg")
+            settings = Settings(
+                cover_face_library_folder=str(sources),
+                cover_face_prepared_folder=str(root / "Готовые PNG"),
+                cover_face_library_enabled=True,
+            )
+
+            result = _match_cover_face_reference(
+                {"title": "Зеленский обсуждает переговоры"},
+                settings,
+                prepared_only=True,
+            )
+
+        self.assertEqual(result, ("", "", ""))
+
+    def test_my_faces_route_uses_prepared_auto_png_and_fastgen_only_route_sends_no_user_face(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            prepared_root = root / "Готовые PNG"
+            source = sources / "Зеленский" / "portrait.jpg"
+            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source.parent.mkdir(parents=True)
+            prepared.parent.mkdir(parents=True)
+            source.write_bytes(b"source-jpg")
+            prepared.write_bytes(b"prepared-png")
+
+            def make_settings():
+                settings = Settings(
+                    cover_output_folder=directory,
+                    cover_variant_count=1,
+                    cover_operation="reference_image_edit",
+                    cover_face_library_folder=str(sources),
+                    cover_face_prepared_folder=str(prepared_root),
+                    cover_face_library_enabled=True,
+                    cover_face_remove_background=False,
+                )
+                settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+                settings.fastgen_capabilities_cache = {"image": [{
+                    "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+                }]}
+                settings.cover_queue = [{
+                    "title": "Зеленский обсуждает переговоры",
+                    "topic": "Трамп-Зеленский — давление и переговоры",
+                    "production_item_id": "production:0",
+                    "image_prompt": "Topic-accurate editorial news scene",
+                    "cover_headline": "ЗЕЛЕНСКИЙ НА ПЕРЕГОВОРАХ",
+                    "cover_subheadline": "ДАВЛЕНИЕ НА КИЕВ РАСТЁТ",
+                    "paths": [],
+                }]
+                return settings
+
+            for build_mode, expected in (
+                ("fastgen-full-my-face", (str(prepared),)),
+                ("fastgen-full", ()),
+            ):
+                settings = make_settings()
+                calls = []
+
+                def render(_prompt, _output, _stem, _operation, _ratio, *,
+                           _calls=calls, _build_mode=build_mode, **kwargs):
+                    _calls.append(tuple(str(path) for path in kwargs.get("references") or []))
+                    return [root / f"{_build_mode}.png"]
+
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                     patch.object(bridge, "_save_cover_state"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                    bridge.generate_covers({
+                        "indices": [0],
+                        "productionItemIds": ["production:0"],
+                        "_parallel_cover_worker": True,
+                        "buildMode": build_mode,
+                        "faceMode": "auto",
+                        "textMode": "fastgen",
+                        "localFaceOnly": False,
+                        "operation": "reference_image_edit",
+                    })
+
+                self.assertEqual(calls, [expected])
+                if build_mode == "fastgen-full-my-face":
+                    self.assertEqual(settings.cover_queue[0]["face_reference_path"], str(prepared))
+                    self.assertEqual(settings.cover_queue[0]["face_reference_source"], "auto")
+                else:
+                    self.assertNotIn("face_reference_label", settings.cover_queue[0])
 
     def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
         with TemporaryDirectory() as directory:
@@ -968,13 +1216,20 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 portrait.write_bytes(b"test")
                 portraits.append(portrait)
             settings = Settings(cover_face_library_folder=str(folder), cover_face_library_enabled=True)
-            with patch("scriptor.bridge.random.choice", side_effect=lambda values: values[-1]):
+            with patch(
+                "scriptor.bridge.random.choice",
+                side_effect=lambda values: max(values, key=lambda path: path.name),
+            ):
                 path, _label, source = _match_cover_face_reference({"title": "Путин сделал заявление"}, settings)
             self.assertEqual(Path(path), portraits[-1])
             self.assertEqual(source, "auto")
             # Auto matches are allowed to change on the next render, while a
-            # reference explicitly marked manual is not randomized.
-            with patch("scriptor.bridge.random.choice", side_effect=lambda values: values[0]):
+            # reference explicitly marked manual is not randomized. Directory
+            # iteration order is intentionally not part of this contract.
+            with patch(
+                "scriptor.bridge.random.choice",
+                side_effect=lambda values: min(values, key=lambda path: path.name),
+            ):
                 changed, _label, source = _match_cover_face_reference({
                     "title": "Путин сделал заявление", "face_reference_path": str(portraits[-1]),
                     "face_reference_source": "auto",
@@ -1194,6 +1449,18 @@ class CoverVisualInstructionTests(unittest.TestCase):
 
 
 class CoverLocalCompositorTests(unittest.TestCase):
+    def test_legacy_local_face_route_migrates_to_the_remote_my_faces_route(self):
+        with TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            settings_path.write_text(json.dumps({
+                "schema_version": 4,
+                "cover_build_mode": "fastgen-text-local-face",
+            }), encoding="utf-8")
+            with patch("scriptor.config.config_path", return_value=settings_path):
+                settings = load_settings()
+
+        self.assertEqual(settings.cover_build_mode, "fastgen-full-my-face")
+
     def test_render_stores_profile_that_describes_the_created_cover(self):
         """The retry button needs a record of the actual route, not today's UI default."""
         with TemporaryDirectory() as directory:
@@ -1207,23 +1474,23 @@ class CoverLocalCompositorTests(unittest.TestCase):
                  patch("scriptor.bridge.snapshot", return_value={}), \
                  patch("scriptor.bridge.FastGenPool.generate_media", return_value=[output]):
                 generate_covers({
-                    "indices": [0], "buildMode": "fastgen-text-auto-face",
-                    "faceMode": "auto", "textMode": "fastgen", "localFaceOnly": True,
+                    "indices": [0], "buildMode": "fastgen-full-my-face",
+                    "faceMode": "auto", "textMode": "fastgen", "localFaceOnly": False,
                 })
         self.assertEqual(settings.cover_queue[0]["render_profile"], {
-            "build_mode": "fastgen-text-auto-face", "face_mode": "auto",
-            "text_mode": "fastgen", "local_face_only": True,
+            "build_mode": "fastgen-full-my-face", "face_mode": "auto",
+            "text_mode": "fastgen", "local_face_only": False,
             "operation": "flower_image_generate",
         })
 
     def test_repeat_current_uses_saved_render_profile_instead_of_new_defaults(self):
-        """A retry must not turn an automatic text+face cover into a different route."""
+        """A retry must preserve the my-faces FastGen route."""
         settings = Settings()
         settings.cover_queue = [{
             "title": "Ормуз", "image_prompt": "scene",
             "render_profile": {
-                "build_mode": "fastgen-text-auto-face", "face_mode": "auto",
-                "text_mode": "fastgen", "local_face_only": True,
+                "build_mode": "fastgen-full-my-face", "face_mode": "auto",
+                "text_mode": "fastgen", "local_face_only": False,
                 "operation": "flower_image_generate",
             },
         }]
@@ -1236,8 +1503,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
             regenerate_covers({"indices": [0], "currentProfile": True})
         payload = render.call_args.args[0]
         self.assertEqual({key: value for key, value in payload.items() if key != "productionItemIds"}, {
-            "indices": [0], "buildMode": "fastgen-text-auto-face", "faceMode": "auto",
-            "textMode": "fastgen", "localFaceOnly": True,
+            "indices": [0], "buildMode": "fastgen-full-my-face", "faceMode": "auto",
+            "textMode": "fastgen", "localFaceOnly": False,
             "operation": "flower_image_generate",
         })
         self.assertEqual(len(payload["productionItemIds"]), 1)
@@ -1406,13 +1673,13 @@ class CoverLocalCompositorTests(unittest.TestCase):
             save_cover_settings({"promptVariantCount": 10})
             self.assertEqual(settings.cover_prompt_variant_count, 10)
 
-    def test_cover_build_mode_accepts_additional_automatic_text_face_route(self):
+    def test_cover_build_mode_accepts_the_only_my_faces_route(self):
         settings = Settings()
         with patch("scriptor.bridge.load_settings", return_value=settings), \
              patch("scriptor.bridge.save_settings"), \
              patch("scriptor.bridge.snapshot", return_value={}):
-            save_cover_settings({"buildMode": "fastgen-text-auto-face"})
-        self.assertEqual(settings.cover_build_mode, "fastgen-text-auto-face")
+            save_cover_settings({"buildMode": "fastgen-full-my-face"})
+        self.assertEqual(settings.cover_build_mode, "fastgen-full-my-face")
 
     def test_ai_reference_settings_are_saved_separately_from_fastgen_references(self):
         settings = Settings()
@@ -2625,7 +2892,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "indices": [0, 1],
                     "productionItemIds": ["production:0", "production:1"],
                     "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
+                    "buildMode": "fastgen-full-my-face",
                     "faceMode": "with",
                     "textMode": "fastgen",
                     "localFaceOnly": False,
@@ -2642,6 +2909,82 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
             self.assertEqual(settings.cover_queue[index]["status"], "Готово")
         compose.assert_not_called()
         overlay.assert_not_called()
+
+    def test_two_fastgen_routes_keep_trump_zelensky_cover_words_and_only_my_faces_uploads_portrait(self):
+        """The visible routes differ only by one explicit remote face reference."""
+        from scriptor import bridge
+
+        rows = (
+            {
+                "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
+                "cover_headline": "ТРАМП ДАВИТ",
+                "cover_subheadline": "НОВЫЕ УСЛОВИЯ КИЕВУ",
+                "build_mode": "fastgen-full",
+                "face_label": "Дональд Трамп",
+                "expect_reference": False,
+            },
+            {
+                "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
+                "cover_headline": "ЗЕЛЕНСКИЙ НЕ СДАЁТСЯ",
+                "cover_subheadline": "ПОМОЩЬ США ПОД ВОПРОСОМ",
+                "build_mode": "fastgen-full-my-face",
+                "face_label": "Владимир Зеленский",
+                "expect_reference": True,
+            },
+        )
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            face = root / "zelensky-prepared.png"
+            face.write_bytes(b"prepared-face")
+            for row in rows:
+                settings = Settings(
+                    cover_output_folder=temporary,
+                    cover_variant_count=1,
+                    cover_operation="reference_image_edit",
+                )
+                settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+                settings.fastgen_capabilities_cache = {"image": [{
+                    "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+                }]}
+                settings.cover_queue = [self._row(
+                    0,
+                    title=row["title"],
+                    image_prompt="Topic-accurate editorial news scene",
+                    cover_headline=row["cover_headline"],
+                    cover_subheadline=row["cover_subheadline"],
+                    face_reference_path=str(face),
+                    face_reference_label=row["face_label"],
+                    face_reference_source="manual",
+                )]
+                calls = []
+
+                def render(prompt, _output, _stem, _operation, _ratio, *, _calls=calls,
+                           _root=root, _mode=row["build_mode"], **kwargs):
+                    _calls.append((prompt, tuple(str(path) for path in kwargs.get("references") or [])))
+                    return [_root / f"{_mode}.png"]
+
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                     patch.object(bridge, "_save_cover_state"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge.FastGenPool, "generate_media", side_effect=render), \
+                     patch.object(bridge, "compose_cover_faces") as compose:
+                    bridge.generate_covers({
+                        "indices": [0], "productionItemIds": ["production:0"],
+                        "_parallel_cover_worker": True, "buildMode": row["build_mode"],
+                        "faceMode": "auto", "textMode": "fastgen", "localFaceOnly": False,
+                        "operation": "reference_image_edit",
+                    })
+
+                self.assertEqual(len(calls), 1)
+                self.assertIn(f"<exact-text>{row['cover_headline']}</exact-text>", calls[0][0])
+                self.assertIn(f"<exact-text>{row['cover_subheadline']}</exact-text>", calls[0][0])
+                self.assertEqual(calls[0][1], (str(face),) if row["expect_reference"] else ())
+                if row["expect_reference"]:
+                    self.assertIn(row["face_label"], calls[0][0])
+                else:
+                    self.assertNotIn(row["face_label"], calls[0][0])
+                compose.assert_not_called()
 
     def test_fastgen_full_with_selected_face_rejects_operation_without_reference_input(self):
         from scriptor import bridge
@@ -2677,7 +3020,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "indices": [0],
                     "productionItemIds": ["production:0"],
                     "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
+                    "buildMode": "fastgen-full-my-face",
                     "faceMode": "with",
                     "textMode": "fastgen",
                     "localFaceOnly": False,
@@ -2720,7 +3063,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "indices": [0],
                     "productionItemIds": ["production:0"],
                     "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
+                    "buildMode": "fastgen-full-my-face",
                     "faceMode": "with",
                     "textMode": "fastgen",
                     "localFaceOnly": False,
@@ -2781,7 +3124,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "indices": [0],
                     "productionItemIds": ["production:0"],
                     "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
+                    "buildMode": "fastgen-full-my-face",
                     "faceMode": "with",
                     "textMode": "fastgen",
                     "localFaceOnly": False,
@@ -2841,7 +3184,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "indices": [0],
                     "productionItemIds": ["production:0"],
                     "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
+                    "buildMode": "fastgen-full-my-face",
                     "faceMode": "with",
                     "textMode": "fastgen",
                     "localFaceOnly": False,
@@ -2884,8 +3227,8 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                 face_reference_label="Selected Person",
                 face_reference_source="manual",
                 render_profile={
-                    "build_mode": "fastgen-full",
-                    "face_mode": "with",
+                    "build_mode": "fastgen-full-my-face",
+                    "face_mode": "auto",
                     "text_mode": "fastgen",
                     "local_face_only": False,
                     "operation": "reference_image_edit",
@@ -2960,8 +3303,8 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "indices": [0],
                     "productionItemIds": ["production:0"],
                     "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
-                    "faceMode": "with",
+                    "buildMode": "fastgen-full-my-face",
+                    "faceMode": "auto",
                     "textMode": "fastgen",
                     "localFaceOnly": False,
                     "operation": "reference_image_edit",

@@ -68,14 +68,6 @@ def _topic_scene_defaults(title: str, source: str) -> dict[str, str]:
             "environment": "EU or NATO consultation room and press zone",
             "emotion": "Visible diplomatic pressure during a decision meeting",
         }
-    if any(term in source for term in ("нефт", "oil", "рынок", "market", "инфляц", "inflation", "цен", "price", "поставк")):
-        return {
-            "main_subject": "Oil price movement and the supply decision behind it",
-            "visible_action": "Energy traders react to changing oil prices on live market boards",
-            "visual_evidence": "Oil price charts, trading screens, supply-route map and tanker or barrel details",
-            "environment": "Energy-market trading floor with oil logistics context",
-            "emotion": "Immediate market alarm as prices and supply expectations move",
-        }
     if (any(term in source for term in ("порт", "port", "контейнер", "container", "мост", "bridge", "трубопровод", "pipeline", "газ", "gas", "завод", "plant", "электростанц", "power station"))
             and not any(term in source for term in ("мэр", "mayor", "президент", "president", "заяв", "said", "объяв", "announce"))):
         subject = "Port operations and container traffic" if any(term in source for term in ("порт", "port", "контейнер", "container")) else "The infrastructure site named in the topic"
@@ -87,6 +79,14 @@ def _topic_scene_defaults(title: str, source: str) -> dict[str, str]:
             "visual_evidence": evidence,
             "environment": environment,
             "emotion": "Operational urgency around a disrupted essential service",
+        }
+    if any(term in source for term in ("нефт", "oil", "рынок", "market", "инфляц", "inflation", "цен", "price", "поставк")):
+        return {
+            "main_subject": "Oil price movement and the supply decision behind it",
+            "visible_action": "Energy traders react to changing oil prices on live market boards",
+            "visual_evidence": "Oil price charts, trading screens, supply-route map and tanker or barrel details",
+            "environment": "Energy-market trading floor with oil logistics context",
+            "emotion": "Immediate market alarm as prices and supply expectations move",
         }
     if any(term in source for term in ("мэр", "mayor", "президент", "president", "заяв", "said", "объяв", "announce", "переговор", "negotiat", "правительств", "government")):
         person = "mayor" if any(term in source for term in ("мэр", "mayor")) else "president" if any(term in source for term in ("президент", "president")) else "official"
@@ -209,8 +209,11 @@ def build_final_provider_prompt(
             if brief["subheadline"] else "None supplied."
         )
         typography = (
-            "Ultra-heavy condensed Cyrillic, large at phone size, with a thick black outer stroke and hard dark shadow. "
-            "Place text left/lower-centre; keep the lettering panel within its bounds and leave most of the photograph visible."
+            "Act as the thumbnail art director: choose the strongest readable composition for this exact photograph, "
+            "never thin, horror-style, low-contrast or decorative lettering. Use ultra-heavy condensed Cyrillic, "
+            "large at phone size, with a thick black outer stroke and hard dark shadow. Prefer yellow lettering on a red panel; "
+            "when it creates stronger separation from the scene, use red lettering on a yellow panel instead. "
+            "The panel must sit behind every headline word, keep the lettering within its bounds, and leave most of the photograph visible."
         )
     else:
         headline = "None supplied; do not generate words."
@@ -230,7 +233,7 @@ def build_final_provider_prompt(
         ("HEADLINE", headline),
         ("SUBHEADLINE", subheadline),
         ("TYPOGRAPHY", typography),
-        ("RED EDGE ACCENTS", "Use thin vivid red graphical edge accents with no words, flush against the absolute LEFT and RIGHT outer edges: zero inset and zero empty margin."),
+        ("RED EDGE ACCENTS", "Use one bold vivid red curved-corner frame with no words around all four outer edges of the image: continuous perimeter treatment, flush to the boundary, zero inset and zero empty margin. It must read as a deliberate red arc/frame, never as two thin side stripes."),
         ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
     )
     return "\n\n".join(f"{name}:\n{content}" for name, content in blocks)
