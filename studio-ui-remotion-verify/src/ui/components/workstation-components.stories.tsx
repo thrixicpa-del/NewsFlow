@@ -26,9 +26,25 @@ export const TaskCenterAndInspector: Story = {
     const [entry, setEntry] = useState<TaskCenterEntry | null>(null);
     const [width, setWidth] = useState(360);
     const [density, setDensity] = useState<"comfortable" | "compact">("comfortable");
+    const [inspectorVisible, setInspectorVisible] = useState(true);
     return <main className="nf-app-shell" style={{ gridTemplateColumns: "minmax(0, 1fr) 380px", minHeight: "100vh", padding: 24 }}>
-      <TaskCenter data={queueSnapshot} onSelect={setEntry} />
-      <ContextInspector entry={entry} width={width} density={density} onDensityChange={setDensity} onWidthChange={setWidth} onClose={() => setEntry(null)} />
+      <TaskCenter data={queueSnapshot} onSelect={(nextEntry) => {
+        setEntry(nextEntry);
+        setInspectorVisible(true);
+      }} />
+      {inspectorVisible ? (
+        <ContextInspector
+          entry={entry}
+          width={width}
+          density={density}
+          onDensityChange={setDensity}
+          onWidthChange={setWidth}
+          onClose={() => setEntry(null)}
+          onHide={() => setInspectorVisible(false)}
+        />
+      ) : (
+        <button type="button" onClick={() => setInspectorVisible(true)}>Развернуть инспектор</button>
+      )}
     </main>;
   },
 };
