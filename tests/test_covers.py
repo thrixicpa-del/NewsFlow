@@ -27,9 +27,12 @@ from scriptor.bridge import (
     _cover_text_prompt,
     _cover_text_structure,
     _cover_topic_visual_plan,
+    _cover_word_provider_prompt,
+    _cover_word_structure_pair,
     _match_cover_face_reference,
     _migrate_legacy_cover_photo_prompts,
     _normalize_cover_photo_prompt,
+    _validate_cover_word,
     compose_cover_faces,
     generate_cover_headlines,
     generate_cover_prompts,
@@ -568,7 +571,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             [{"status": "READY", "error": ""}] * 5,
         )
         self.assertTrue(all(row["subheadline_status"] == "READY" for row in settings.cover_queue))
-        self.assertTrue(all(len(row["cover_headline"].split()) <= 3 for row in settings.cover_queue))
+        self.assertTrue(all(len(row["cover_headline"].split()) <= 5 for row in settings.cover_queue))
         self.assertTrue(all(3 <= len(row["cover_subheadline"].split()) <= 7 for row in settings.cover_queue))
         self.assertTrue(all(not _cover_lines_repeat_meaningful_words(row["cover_headline"], row["cover_subheadline"])
                             for row in settings.cover_queue))
@@ -582,7 +585,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         async def generate(prompt, **_kwargs):
             calls.append(prompt)
-            return json.dumps({"headline": "ПОРТ ЗАКРЫТ" if len(calls) > 1 else "ПОРТ ЗАКРЫТ ПРЯМО СЕЙЧАС"}, ensure_ascii=False)
+            return json.dumps({
+                "headline": "ПОРТ ЗАКРЫТ" if len(calls) > 1 else "ПОРТ ЗАКРЫТ ПРЯМО СЕЙЧАС ВЕСЬ ДЕНЬ"
+            }, ensure_ascii=False)
 
         value, validation, attempts = asyncio.run(bridge._generate_cover_word_v2(
             SimpleNamespace(generate=generate), "headline", item, "", bridge._cover_word_structure_pair(item),
@@ -871,8 +876,11 @@ class FastGenClientTests(unittest.TestCase):
 
 
 class CoverHeadlineGuardTests(unittest.TestCase):
-    def test_headline_is_limited_to_three_words(self):
-        self.assertEqual(_clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС"), "ОРМУЗ ПОД УГРОЗОЙ")
+    def test_headline_is_limited_to_five_words(self):
+        self.assertEqual(
+            _clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС НОЧЬЮ"),
+            "ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС",
+        )
 
     def test_rejects_an_unrelated_example_from_user_prompt(self):
         title = "Тегеран усиливает давление на Ормузский пролив"
@@ -896,6 +904,52 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertFalse(_cover_lines_repeat_meaningful_words(
             "ОРМУЗ В ОГНЕ", "Тегеран давит сильнее"
         ))
+
+    def test_rejects_weak_headlines_that_drop_named_people_from_the_topic(self):
+        item = {
+            "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        for weak in ("Новые условия", "Не уступает"):
+            validation = _validate_cover_word("headline", weak, item)
+            self.assertFalse(validation["valid"], weak)
+            self.assertEqual(validation["reason_code"], "MISSING_NAMED_ANCHOR")
+
+    def test_accepts_a_standalone_headline_with_a_named_topic_anchor(self):
+        item = {
+            "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        validation = _validate_cover_word("headline", "Зеленский держит курс", item)
+        self.assertTrue(validation["valid"], validation)
+
+    def test_accepts_a_natural_headline_with_subject_action_and_object(self):
+        item = {
+            "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        validation = _validate_cover_word("headline", "Трамп давит на Киев", item)
+        self.assertTrue(validation["valid"], validation)
+
+    def test_does_not_require_an_incidental_script_person_as_the_headline_anchor(self):
+        item = {
+            "title": "Поставки газа на рынок",
+            "script": "Трамп обсудил поставки газа с чиновниками.",
+        }
+        validation = _validate_cover_word("headline", "Поставки под угрозой", item)
+        self.assertTrue(validation["valid"], validation)
+
+    def test_provider_prompt_for_named_topics_forbids_bare_actions_and_abstract_hooks(self):
+        item = {
+            "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item),
+        )
+        self.assertIn("самодостаточным", prompt)
+        self.assertIn("Не уступает", prompt)
+        self.assertIn("Не усиливай исходное действие", prompt)
 
     def test_topic_gets_one_clear_pair_structure(self):
         headline, subheadline = _cover_text_structure("Тегеран усиливает давление на Ормузский пролив")

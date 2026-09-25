@@ -6945,6 +6945,25 @@ def _cover_word_foreign_entities(value: str, item: dict) -> set[str]:
             if entity[:4] in phrase_tokens and entity[:4] not in source_tokens}
 
 
+def _cover_word_named_source_entities(item: dict) -> set[str]:
+    """Named topic anchors, excluding incidental people from a long script."""
+    topic_fields = (
+        "title", "topic", "angle", "event_context", "primary_entities",
+        "primary_entity", "entities", "geography", "conflict", "framing",
+    )
+    topic_text = " ".join(
+        _cover_context_values(item.get(field)) for field in topic_fields if item.get(field)
+    )
+    source_tokens = {
+        word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", topic_text.casefold())
+    }
+    return {
+        entity[:4]
+        for entity in _COVER_WORD_FOREIGN_ENTITIES
+        if entity[:4] in source_tokens
+    }
+
+
 def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "",
                          structure: dict | None = None, recent: list[dict] | None = None) -> dict[str, object]:
     """Return explicit validation/reason codes; never silently truncate into READY."""
@@ -6954,7 +6973,7 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         result.update(reason_code="INVALID_JSON", reason_detail="Ожидалось одно значение из JSON-ответа")
         return result
     words = raw.split()
-    min_words, max_words, max_chars = (1, 3, 70) if kind == "headline" else (3, 10, 110)
+    min_words, max_words, max_chars = (1, 5, 100) if kind == "headline" else (3, 10, 110)
     if len(raw) > max_chars:
         result.update(reason_code="TOO_LONG", reason_detail=f"Лимит: {max_chars} символов")
         return result
@@ -6969,6 +6988,17 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         return result
     stems = _cover_meaningful_word_stems(raw)
     topic_stems = _cover_topic_terms(str(item.get("title", "")), _cover_word_source_text(item))
+    if kind == "headline":
+        named_source_entities = _cover_word_named_source_entities(item)
+        phrase_tokens = {
+            word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", raw.casefold())
+        }
+        if named_source_entities and not (named_source_entities & phrase_tokens):
+            result.update(
+                reason_code="MISSING_NAMED_ANCHOR",
+                reason_detail="Headline должен назвать конкретную сущность из темы, а не только действие или абстракцию",
+            )
+            return result
     # Existing topic terms keep five letters whereas duplicate detection uses
     # four-letter stems. Compare their shared stem instead of rejecting a
     # grounded inflection such as «экспорт» / «экспорта».
@@ -7023,11 +7053,12 @@ def _clean_cover_headline(value: str, *, emergency_limit: bool = True) -> str:
         except (ValueError, TypeError, IndexError):
             pass
     text = re.sub(r"^[\s\"'«»]+|[\s\"'«»]+$", "", text)
-    # The cover headline is a deliberately compact 1–3 word display field.
+    # The cover headline stays compact but may include a necessary preposition
+    # and object, e.g. «Трамп давит на Киев», without becoming a fragment.
     # Keep its hard rendering limit here as a final guard even if a provider
     # ignored the prompt constraint.
     words = text.split()
-    return " ".join(words[:3] if emergency_limit else words)
+    return " ".join(words[:5] if emergency_limit else words)
 
 
 def _clean_cover_subheadline(value: str) -> str:
@@ -7174,7 +7205,7 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
     role = structure[f"{prefix}_structure"]
     slots = structure[f"{prefix}_semantic_slots"]
     schema = '{"headline":"..."}' if kind == "headline" else '{"subheadline":"..."}'
-    target = "1–3 слова, максимум 3 слова и 70 символов" if kind == "headline" else "3–7 слов, максимум 10 слов и 110 символов"
+    target = "1–5 слов, максимум 5 слов и 100 символов" if kind == "headline" else "3–7 слов, максимум 10 слов и 110 символов"
     task = (
         "Ты создаёшь только одну строку для новостной YouTube-обложки. "
         "Примеры пользовательского стиля не являются фактами и не могут переносить чужие имена, страны или события. "
@@ -7185,6 +7216,12 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
     if kind == "headline":
         task += (
             "Внутренне сравни минимум пять разных подходов и верни один лучший. "
+            "Headline обязан быть самодостаточным: без полного названия ролика зритель сразу должен понимать, "
+            "кто или что находится в центре конфликта. Если в теме назван человек, страна, город или организация, "
+            "включи хотя бы одну такую конкретную сущность в headline. Запрещены голые действия и абстрактные "
+            "пары без субъекта — например «Не уступает» и «Новые условия». "
+            "Не усиливай исходное действие: если тема говорит «не уступает», не заменяй это на «бросил вызов», "
+            "ультиматум, угрозу или другое более жёсткое утверждение, которого в источнике нет. "
             "При равной фактической точности выбери наиболее кликабельный hook: конкретный конфликт, сильное действие, "
             "угрозу, ставку или неожиданный поворот. Не выбирай скучную нейтральную формулировку, если её можно "
             "точнее и сильнее выразить без изменения фактов. Не используй пустой общий кликбейт. "
@@ -7241,7 +7278,7 @@ def _cover_text_prompt(kind: str, template: str, title: str, context: str, headl
                        use_structure: bool = True, avoid_repeats: bool = True) -> str:
     """Build a topic-locked prompt for either cover text line."""
     style = template.replace("{title}", title).replace("{excerpt}", context)
-    response_schema = '{"headline":"1–3 слова"}' if kind == "headline" else '{"subheadline":"2–7 слов"}'
+    response_schema = '{"headline":"1–5 слов"}' if kind == "headline" else '{"subheadline":"2–7 слов"}'
     base = (
         "Ты создаёшь только текст одной новостной YouTube-обложки.\n"
         "НИЖЕ ПОЛЬЗОВАТЕЛЬСКИЕ ПРАВИЛА СТИЛЯ. Примеры в них — не факты, не готовые фразы и не имена, "

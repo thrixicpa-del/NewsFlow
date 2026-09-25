@@ -181,7 +181,7 @@ export const fallback: NewsFlowSnapshot = {
     promptVariantCount: 2,
     headlineProvider: "agent",
     headlineTemplate:
-      "Придумай короткую фразу для текста на YouTube-обложке по теме «{title}». 1–3 слова, конкретно, интригующе, без ложных фактов.",
+      "Придумай короткую фразу для текста на YouTube-обложке по теме «{title}». 1–5 слов, конкретно, интригующе, без ложных фактов.",
     subheadlineTemplate:
       "Придумай короткий подзаголовок для YouTube-обложке по теме «{title}». 3–7 слов, не повторяй основной заголовок и не выдумывай факты.",
     headlinePresets: [],

@@ -99,7 +99,7 @@ class CoverLibraryTests(unittest.TestCase):
             async def generate(self, _prompt, before_request=None):
                 if before_request:
                     await before_request()
-                return "ТАРИФЫ ДАВЯТ"
+                return "ТРАМП ДАВИТ"
 
         settings = Settings(openai_api_keys=["test"], idea_scenario_context={
             "Трамп повысил тарифы на импорт": {"id": "headline-after-sub"},
@@ -117,7 +117,7 @@ class CoverLibraryTests(unittest.TestCase):
              patch.object(bridge, "HybridTextPool", FakeWordPool):
             bridge.generate_cover_headlines({"indices": [0], "productionItemIds": ["headline-after-sub"], "provider": "agent"})
 
-        self.assertEqual(settings.cover_queue[0]["cover_headline"], "ТАРИФЫ ДАВЯТ")
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "ТРАМП ДАВИТ")
         self.assertEqual(settings.cover_queue[0]["headline_status"], "READY")
 
     def test_word_engine_v2_does_not_overwrite_manual_subheadline_in_normal_batch(self):
@@ -222,7 +222,7 @@ class CoverLibraryTests(unittest.TestCase):
                 self.calls += 1
                 return "ВАЖНЫЕ НОВОСТИ"
 
-        item = {"title": "Поставки газа в Европу", "script": "Поставки газа сократились.", "production_item_id": "repair-2"}
+        item = {"title": "Поставки газа на рынок", "script": "Поставки газа сократились.", "production_item_id": "repair-2"}
         pool = GenericPool()
 
         with self.assertRaisesRegex(ValueError, "NOT_GROUNDED"):
@@ -266,17 +266,17 @@ class CoverLibraryTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "DUPLICATE_MEANING")
 
     def test_word_engine_v2_rejects_truncation_instead_of_marking_it_ready(self):
-        """A four-word headline must request repair, not silently lose its final meaning."""
+        """A six-word headline must request repair, not silently lose its final meaning."""
         item = {"title": "Европа осталась без газа", "script": "Поставки газа в Европу сократились."}
 
         result = bridge._validate_cover_word(
-            "headline", "Европа осталась без газа", item,
+            "headline", "Европа осталась совсем без газа зимой", item,
             structure={"semantic_slots": ["location", "consequence"]},
         )
 
         self.assertFalse(result["valid"])
         self.assertEqual(result["reason_code"], "TOO_MANY_WORDS")
-        self.assertEqual(result["value"], "Европа осталась без газа")
+        self.assertEqual(result["value"], "Европа осталась совсем без газа зимой")
 
     def test_word_engine_v2_preserves_manual_words_during_ordinary_batch_generation(self):
         """Manual wording must be excluded unless the caller explicitly forces replacement."""
@@ -291,8 +291,8 @@ class CoverLibraryTests(unittest.TestCase):
     def test_word_engine_v2_reads_pattern_cooldown_from_persisted_headlines(self):
         """Restarted queues lack transient signatures, so cooldown must derive them from saved words."""
         item = {
-            "title": "Трамп повысил тарифы на импорт",
-            "script": "Трамп ввёл новые тарифы на импорт.",
+            "title": "Тарифы повысили на импорт",
+            "script": "Новые тарифы подняли стоимость импорта.",
         }
         recent = [{"cover_headline": "ТАРИФЫ ДАВЯТ"} for _ in range(3)]
 
