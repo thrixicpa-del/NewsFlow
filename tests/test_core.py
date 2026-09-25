@@ -90,6 +90,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("len(text.strip())", request.prompt)
         self.assertIn("а не слова, токены или приблизительный объем", request.prompt)
         self.assertIn("приоритет над любыми конфликтующими числами", request.prompt)
+        self.assertIn("смысловым блокам", request.prompt)
+        self.assertIn("не пересказывать уже раскрытые тезисы", request.prompt)
         self.assertIn("FULL_USER_PROMPT_BEGIN", request.prompt)
         self.assertIn("FULL_USER_PROMPT_END Проверочная тема", request.prompt)
         self.assertIn("Старое текстовое число: 5 000 символов.", request.prompt)
@@ -110,6 +112,28 @@ class PromptTests(unittest.TestCase):
             (item.target_chars, item.allowed_min, item.allowed_max) == (10000, 9000, 11000)
             for item in requests
         ))
+
+    def test_target_without_an_explicit_minimum_uses_a_strict_ten_percent_band(self):
+        request = build_requests(
+            ["Тема"],
+            "Напиши: {title}",
+            [],
+            default_target_chars=2000,
+            default_allowed_max=120000,
+        )[0]
+
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (2000, 1800, 2200))
+
+    def test_target_with_explicit_maximum_preserves_that_user_bound(self):
+        request = build_requests(
+            ["Тема"],
+            "Напиши: {title}",
+            [],
+            default_target_chars=10000,
+            default_allowed_max=12000,
+        )[0]
+
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 12000))
 
     def test_range_length_contract_overrides_the_global_preset_contract(self):
         requests = build_requests(

@@ -2556,10 +2556,11 @@ export function Scenarios({
         .length,
       waiting: data.scenarios.filter((item) => item.state === "Ожидает").length,
       errors: data.scenarios.filter((item) => item.state === "Ошибка").length,
+      needsAction: data.scenarios.filter((item) => item.state === "Нужно действие").length,
     }),
     [data.scenarios],
   );
-  const unfinishedScenarioCount = counts.waiting + counts.errors;
+  const unfinishedScenarioCount = counts.waiting + counts.errors + counts.needsAction;
   const scenarioColumns = useMemo<ColumnDef<NewsFlowSnapshot["scenarios"][number]>[]>(
     () => [
       {

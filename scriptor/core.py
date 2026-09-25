@@ -42,12 +42,17 @@ def _normalise_character_contract(target_chars: int = 0, allowed_min: int = 0,
     target = max(0, int(target_chars or 0))
     minimum = max(0, int(allowed_min or 0))
     maximum = max(0, int(allowed_max or 0))
+    has_explicit_minimum = bool(minimum)
+    legacy_storage_ceiling = bool(target and not minimum and maximum == 120000)
     if minimum and maximum and minimum > maximum:
         raise ValueError("Минимальная длина больше максимальной")
     if target:
         if not minimum:
             minimum = max(1, int(round(target * .9)))
-        if not maximum:
+        # Historical builds could persist 120000 as a technical storage ceiling
+        # next to a concrete target. Treat only that legacy sentinel as "target
+        # only"; preserve every other explicitly configured maximum.
+        if not maximum or legacy_storage_ceiling:
             maximum = max(minimum, int(round(target * 1.1)))
     elif minimum and maximum:
         target = (minimum + maximum) // 2
@@ -157,6 +162,8 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange],
                 f"- Допустимый итоговый диапазон: {bounds} символов.\n"
                 "- Планируй детализацию и количество абзацев сразу под этот объем; не выдавай заведомо "
                 "короткий черновик с обещанием расширить его позже.\n"
+                "- До написания молча распредели материал по последовательным разным смысловым блокам; "
+                "каждый следующий блок должен развивать новый аспект темы, а не пересказывать уже раскрытые тезисы.\n"
                 "- ОБЯЗАТЕЛЬНО сам контролируй количество символов по мере написания сценария.\n"
                 "- ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину готового сценария по правилу Python "
                 "len(text.strip()) и убедись, что результат находится в указанном допустимом диапазоне.\n"

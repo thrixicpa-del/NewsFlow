@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import math
+import re
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -90,6 +93,106 @@ def scenario_length_requirement(request: ScenarioRequest) -> str:
     return "без ограничения длины"
 
 
+def scenario_output_token_budget(request: ScenarioRequest) -> int | None:
+    """Reserve enough Responses output for the requested character contract.
+
+    ``max_output_tokens`` also includes model reasoning tokens, so this uses a
+    conservative 1.25 characters-per-token estimate plus one 1,024-token
+    reserve and rounds up to a whole 1,024-token block.  The upper cap keeps a
+    malformed preset from issuing an unexpectedly expensive request.
+    """
+    expected_chars = max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
+    if not expected_chars:
+        return None
+    requested = math.ceil(expected_chars / 1.25) + 1024
+    return min(32768, max(2048, math.ceil(requested / 1024) * 1024))
+
+
+def scenario_length_repair_instruction(request: ScenarioRequest) -> str:
+    """Provider instruction that preserves one-sided contracts correctly."""
+    target = f" Цель: {request.target_chars} знаков." if request.target_chars else ""
+    if request.allowed_min and request.allowed_max:
+        return (
+            f"Верни только готовый сценарий длиной строго от {request.allowed_min} "
+            f"до {request.allowed_max} знаков.{target}"
+        )
+    if request.allowed_min:
+        return f"Верни только готовый сценарий длиной не менее {request.allowed_min} знаков.{target}"
+    if request.allowed_max:
+        return f"Верни только готовый сценарий длиной не более {request.allowed_max} знаков.{target}"
+    return "Верни только полный готовый сценарий."
+
+
+def scenario_length_continuation_instruction(request: ScenarioRequest, actual_chars: int) -> str:
+    """Tell the provider to extend one short result instead of restarting it."""
+    needed_total = max(request.target_chars, request.allowed_min)
+    remaining = max(1, needed_total - actual_chars)
+    maximum = max(0, request.allowed_max - actual_chars) if request.allowed_max else 0
+    upper_bound = f" Не добавляй более {maximum} знаков." if maximum else ""
+    return (
+        "Это продолжение уже написанного сценария, а не новая версия. ПРОДОЛЖИ текст строго с места, "
+        "на котором он заканчивается: не повторяй начало, не пересказывай готовые абзацы и не добавляй "
+        "заголовки или комментарии. Молча выдели уже раскрытые тезисы и напиши только следующий "
+        "нераскрытый смысловой блок: новый факт, контекст, позицию участника, последствие, риск, "
+        "хронологический этап или вывод — без повторения прежних общих формулировок. "
+        f"Уже сохранено {actual_chars} знаков; добавь примерно {remaining} знаков, чтобы общий текст "
+        f"соответствовал требованию {scenario_length_requirement(request)}.{upper_bound} "
+        "Перед отправкой сам проверь длину добавленного продолжения и помни: NewsFlow склеит оба фрагмента "
+        "и проверит итог через len(text.strip()). Верни только следующий фрагмент сценария."
+    )
+
+
+def continuation_repeats_draft(draft: str, continuation: str) -> bool:
+    """Reject an attempted restart before it can be appended to one scenario."""
+    draft_words = re.findall(r"[^\W\d_]+", str(draft or "").casefold(), flags=re.UNICODE)
+    continuation_words = re.findall(r"[^\W\d_]+", str(continuation or "").casefold(), flags=re.UNICODE)
+    if len(draft_words) < 5 or len(continuation_words) < 5:
+        return False
+    draft_ngrams = {tuple(draft_words[index:index + 5]) for index in range(len(draft_words) - 4)}
+    continuation_ngrams = [tuple(continuation_words[index:index + 5])
+                           for index in range(len(continuation_words) - 4)]
+    repeated = sum(ngram in draft_ngrams for ngram in continuation_ngrams)
+    return repeated >= max(3, math.ceil(len(continuation_ngrams) * .10))
+
+
+def trim_text_to_sentence_boundary(text: str, allowed_max: int) -> str:
+    """Keep text inside a maximum without asking the provider to rewrite it."""
+    text = str(text or "").strip()
+    if not allowed_max or len(text) <= allowed_max:
+        return text
+    prefix = text[:allowed_max]
+    endpoint = max(prefix.rfind(mark) for mark in ".!?…")
+    if endpoint >= 0:
+        return prefix[:endpoint + 1].strip()
+    return prefix.rstrip()
+
+
+def trim_continuation_to_fit(draft: str, continuation: str, allowed_max: int) -> str:
+    """Keep a unique continuation within the contract without restarting it.
+
+    The model can legitimately produce more text than remains in the selected
+    range.  Do not ask it to rewrite the complete scenario in that case: keep
+    only complete sentences that fit after the already accepted draft.
+    """
+    if not allowed_max:
+        return str(continuation or "").strip()
+    available = allowed_max - len(str(draft or "").rstrip()) - 2
+    if available <= 0:
+        return ""
+    return trim_text_to_sentence_boundary(continuation, available)
+
+
+def scenario_length_repair_limit(request: ScenarioRequest, actual_chars: int) -> int:
+    """Allow enough continuations when a provider voluntarily stops early."""
+    missing = max(0, max(request.target_chars, request.allowed_min) - actual_chars)
+    expected = max(request.target_chars, request.allowed_min)
+    minimum_attempts = 3 if expected >= 5000 else 2
+    # Real long-form responses may add only a sentence or two per request even
+    # with a large output budget.  Keep this bounded, but do not strand a 10k+
+    # scenario below its selected range after merely two such continuations.
+    return min(6, max(minimum_attempts, math.ceil(missing / 2000)))
+
+
 
 
 class ParallelRunner:
@@ -119,21 +222,84 @@ class ParallelRunner:
         if self.on_change:
             self.on_change(job)
 
-    async def _validate_length(self, job: Job) -> bool:
-        """Validate one provider response; never regenerate solely to change its length."""
+    @staticmethod
+    def _accepts_keyword(method, keyword: str) -> bool:
+        """Keep lightweight legacy adapters usable without hiding provider errors."""
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(parameter.name == keyword or parameter.kind is parameter.VAR_KEYWORD
+                   for parameter in parameters)
+
+    async def _generate_for_request(self, method, prompt: str, request: ScenarioRequest) -> str:
+        budget = scenario_output_token_budget(request)
+        if budget and self._accepts_keyword(method, "max_output_tokens"):
+            return await method(prompt, max_output_tokens=budget)
+        return await method(prompt)
+
+    async def _repair_length_if_needed(self, job: Job) -> bool:
+        """Finish a single scenario without full-text rewrites or length errors."""
         status, actual_chars = scenario_length_status(job.request, job.result)
         job.length_status = status
         job.actual_chars = actual_chars
-        job.length_repair_attempts = 0
-        if status in {"SHORT", "LONG"}:
-            job.state = RunState.ERROR
-            job.error = (
-                f"Длина {actual_chars} знаков вне требования "
-                f"{scenario_length_requirement(job.request)}. "
-                "Автоматическое переписывание по длине отключено."
+        if status not in {"SHORT", "LONG"}:
+            job.length_repair_attempts = 0
+            return True
+
+        if status == "LONG":
+            job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
+            status, actual_chars = scenario_length_status(job.request, job.result)
+            job.length_status = status
+            job.actual_chars = actual_chars
+            if status != "SHORT":
+                job.length_repair_attempts = 0
+                return True
+
+        generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+        repair_limit = scenario_length_repair_limit(job.request, actual_chars)
+        for attempt in range(1, repair_limit + 1):
+            job.length_repair_attempts = attempt
+            repair_prompt = (
+                f"{scenario_length_continuation_instruction(job.request, actual_chars)}\n\n"
+                f"УЖЕ НАПИСАННЫЙ ТЕКСТ:\n{job.result.strip()}"
             )
-            return False
-        return True
+            repaired_text = await self._generate_for_request(generate_fresh, repair_prompt, job.request)
+            if looks_like_action_required(repaired_text):
+                job.length_status = "FAILED"
+                job.actual_chars = len(str(repaired_text or "").strip())
+                job.state = RunState.PAUSED
+                job.error = "Текстовый агент не вернул сценарий при корректировке длины"
+                return False
+            if status == "SHORT":
+                if continuation_repeats_draft(job.result, repaired_text):
+                    continue
+                accepted_continuation = trim_continuation_to_fit(
+                    job.result,
+                    repaired_text,
+                    job.request.allowed_max,
+                )
+                if not accepted_continuation:
+                    continue
+                candidate = f"{job.result.rstrip()}\n\n{accepted_continuation}"
+                candidate_status, _candidate_chars = scenario_length_status(job.request, candidate)
+                if candidate_status == "LONG":
+                    continue
+                job.result = candidate
+            else:
+                job.result = repaired_text
+            status, actual_chars = scenario_length_status(job.request, job.result)
+            job.length_status = status
+            job.actual_chars = actual_chars
+            if status == "READY":
+                return True
+
+        # Preserve the best usable text without misclassifying an out-of-range
+        # result as production-ready. The operator can retry it later from the
+        # existing batch action; this is a paused task, not an error.
+        job.state = RunState.PAUSED
+        job.error = ""
+        return False
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:
@@ -141,7 +307,7 @@ class ParallelRunner:
             job.error = ""
             self._notify(job)
             try:
-                job.result = await self.client.generate(job.request.prompt)
+                job.result = await self._generate_for_request(self.client.generate, job.request.prompt, job.request)
                 refused = looks_like_action_required(job.result)
                 for attempt in range(1, 3):
                     if not refused:
@@ -156,7 +322,7 @@ class ParallelRunner:
                         f"ЗАДАЧА:\n{job.request.prompt}"
                     )
                     generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-                    job.result = await generate_fresh(retry_prompt)
+                    job.result = await self._generate_for_request(generate_fresh, retry_prompt, job.request)
                     refused = looks_like_action_required(job.result)
                 if refused:
                     generate_openai = getattr(self.client, "generate_openai", None)
@@ -169,17 +335,17 @@ class ParallelRunner:
                             "безопасный вариант. Верни только готовый сценарий без комментариев.\n\n"
                             f"ЗАДАЧА:\n{job.request.prompt}"
                         )
-                        job.result = await generate_openai(openai_prompt)
+                        job.result = await self._generate_for_request(generate_openai, openai_prompt, job.request)
                         refused = looks_like_action_required(job.result)
                     if refused:
                         job.state = RunState.PAUSED
                         job.error = "Текстовый агент и доступные ключи ChatGPT API не вернули готовый сценарий"
                     else:
-                        if await self._validate_length(job):
+                        if await self._repair_length_if_needed(job):
                             job.state = RunState.DONE
                             job.error = ""
                 else:
-                    if await self._validate_length(job):
+                    if await self._repair_length_if_needed(job):
                         job.state = RunState.DONE
                         job.error = ""
             except Exception as exc:

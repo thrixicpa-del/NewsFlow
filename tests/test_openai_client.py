@@ -1,12 +1,10 @@
 import asyncio
-import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from scriptor.config import OpenAIKey
-from scriptor.openai_client import OpenAIAPIError, OpenAITextClient
-from scriptor.openai_client import HybridTextPool
+from scriptor.openai_client import HybridTextPool, OpenAIAPIError, OpenAITextClient
 
 
 class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
@@ -97,6 +95,14 @@ class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[2]["input"], prompt)
         self.assertTrue(args[2]["input"].startswith("FULL_USER_PROMPT_BEGIN"))
         self.assertTrue(args[2]["input"].endswith("FULL_USER_PROMPT_END"))
+
+    async def test_responses_api_receives_the_requested_output_budget_for_a_long_scenario(self):
+        client = OpenAITextClient("sk-test")
+        with patch.object(client, "_request", return_value={"output_text": "готово"}) as request:
+            result = await client.generate("Напиши сценарий", max_output_tokens=9216)
+
+        self.assertEqual(result, "готово")
+        self.assertEqual(request.call_args.args[2]["max_output_tokens"], 9216)
 
     def test_text_request_times_out_after_two_minutes_instead_of_blocking_the_batch(self):
         response = MagicMock()

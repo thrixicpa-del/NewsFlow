@@ -84,6 +84,34 @@ describe("Scenarios and scripts Light views", () => {
     expect(command).toHaveBeenCalledWith("generate-scenarios", { provider: "agent" });
   });
 
+  it("offers a batch retry for a length-paused scenario without calling it ready", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [
+        {
+          index: 0,
+          title: "Нужна корректировка длины",
+          state: "Нужно действие",
+          result: "Короткий текст",
+          error: "",
+          lengthStatus: "SHORT" as const,
+          actualChars: 6110,
+          allowedMin: 9000,
+          allowedMax: 120000,
+          lengthRepairAttempts: 2,
+        },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Написать все сценарии: 1" }));
+
+    expect(command).toHaveBeenCalledWith("generate-scenarios", { provider: "agent" });
+    expect(screen.getByText(/Длина SHORT: 6110 знаков/)).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Все сценарии готовы" })).toBeNull();
+  });
+
   it("submits selected generation once and disables both generation buttons while pending", () => {
     const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
     const data = {
