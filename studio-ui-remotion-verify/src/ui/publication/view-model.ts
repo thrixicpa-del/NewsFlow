@@ -173,12 +173,14 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
   const channelRows: ChannelRow[] = channels.map(({ channel, id }) => {
     const savedRule = record(rules[id]);
     const detectedMonetization = Boolean((channel as any).monetaryAccess ?? (channel as any).monetary_access);
+    const hasSavedPriority = Object.prototype.hasOwnProperty.call(savedRule, "channelPriority");
     return {
     ...defaultRule(id, {
       ...savedRule,
       // Fresh channel metadata is the default for a newly discovered channel.
-      // A saved boolean remains the operator's explicit override.
+      // Saved values, including explicit false/0, remain operator overrides.
       monetized: typeof savedRule.monetized === "boolean" ? savedRule.monetized : detectedMonetization,
+      channelPriority: hasSavedPriority ? savedRule.channelPriority : (detectedMonetization ? 10 : 0),
     }),
     name: channel.name || channel.channel || id,
     oauthConnected: Boolean(channel.oauthConnected),
