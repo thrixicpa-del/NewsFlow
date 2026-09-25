@@ -61,6 +61,31 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         self.assertEqual(studio_control_labels("cards"), "Подсказки")
         self.assertEqual(studio_control_labels("end-screen"), "Конечные заставки")
 
+    def test_cards_use_the_visible_public_title_and_save_only_after_a_real_editor_change(self):
+        """Studio's picker cannot safely target a video by its internal ID."""
+        from scriptor.youtube_studio import _apply_cards
+
+        class Field:
+            def __init__(self): self.value = ""; self.events = []
+            def fill(self, value): self.value = value
+            def click(self): self.events.append("click")
+            def press(self, value): self.events.append(value)
+
+        search, clock = Field(), Field()
+        with patch("scriptor.youtube_studio._open_editor_section"), \
+             patch("scriptor.youtube_studio._choose_card_video_type") as choose_type, \
+             patch("scriptor.youtube_studio._choose_own_video_by_title") as choose_title, \
+             patch("scriptor.youtube_studio._first", side_effect=[search, clock]), \
+             patch("scriptor.youtube_studio._save_editor_changes") as save:
+            _apply_cards(object(), {"cards": [{"videoId": "opaque-id", "videoTitle": "Опубликованный ролик", "atSeconds": 210}]})
+
+        choose_type.assert_called_once()
+        choose_title.assert_called_once_with(unittest.mock.ANY, "Опубликованный ролик")
+        self.assertEqual(search.value, "Опубликованный ролик")
+        self.assertEqual(clock.value, "210")
+        self.assertIn("Tab", clock.events)
+        save.assert_called_once()
+
     def test_cards_enter_the_new_editor_before_looking_for_the_section(self):
         """The welcome handoff blocks Cards just like it blocks end screens."""
         from scriptor.youtube_studio import _open_editor_section

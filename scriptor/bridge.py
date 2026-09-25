@@ -66,8 +66,9 @@ from .publication_v2 import (apply_bulk_schedule_range, build_distribution_previ
                               complete_publication_stage, fail_publication_stage, migrate_legacy_publication_data, publication_queue_projection,
                               persist_publication_receipt, reconcile_publication_executions, reconcile_publication_items,
                               reconcile_youtube_video_state, release_execution, retry_publication_stage,
+                              queue_publication_reupload,
                               validate_publication_snapshot)
-from .youtube_studio import StudioAutomationError, execute_studio_task
+from .youtube_studio import StudioAutomationError, execute_studio_task, open_studio_identity_verification
 from .seo_prefixes import normalize_prefix_ranges, prepend_description_prefix
 from .cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
 from .thumbnail_prompt_v2 import (append_universal_thumbnail_core_v2,
@@ -1146,6 +1147,7 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
     catalog = [
         {
             "videoId": item.get("videoId", ""), "channelId": item.get("channelId", ""),
+            "title": item.get("seoTitle") or item.get("title", ""),
             "privacyStatus": item.get("youtubePrivacyStatus", ""),
             "publishedAt": item.get("publishAt", ""), "score": item.get("engagementScore", 0),
         }
@@ -11917,6 +11919,57 @@ def retry_publication_v2_stage(payload: dict) -> dict:
     return snapshot()
 
 
+def open_publication_v2_identity_verification(payload: dict) -> dict:
+    """Open the affected channel's persistent Studio profile for human 2FA.
+
+    This is a hand-off only: it never retries an upload or touches OAuth
+    tokens. The operator explicitly chooses a later retry after verification.
+    """
+    snapshot_id = str(payload.get("snapshotId", "")).strip()
+    if not snapshot_id:
+        raise ValueError("Выберите snapshot, требующий проверки личности.")
+    settings = load_settings()
+    snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+    execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+    if not snapshot_record or not execution:
+        raise ValueError("Publication snapshot не найден.")
+    channel_id = str(snapshot_record.get("channelId", "")).strip()
+    channel = next((dict(item) for item in settings.analytics_channels
+                    if str(item.get("profile_id", "")).strip() == channel_id), None)
+    if channel is None:
+        raise ValueError("Для snapshot не найден профиль YouTube-канала.")
+    profile_dir = _youtube_channel_profile_dir(channel_id)
+    video_id = str(execution.get("youtubeVideoId") or "").strip()
+    if video_id:
+        open_studio_identity_verification(profile_dir, video_id)
+    else:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        channel_url = f"https://studio.youtube.com/channel/{str(channel.get('channel_id', '')).strip()}"
+        subprocess.Popen([str(chrome_path()), f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check", "--new-window", channel_url])
+    execution.setdefault("timeline", []).append({
+        "at": datetime.now().astimezone().isoformat(), "stage": "VIDEO_UPLOAD", "status": "USER_ACTION_REQUIRED",
+        "detail": "Открыт профиль канала для ручного подтверждения личности; retry выполняется отдельно.",
+    })
+    settings.youtube_publication_executions[snapshot_id] = execution
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-identity-verification", "count": 1,
+            "message": "Открыт Chrome-профиль канала для ручной проверки. После неё нажмите «Попробовать ещё раз»."}}
+
+
+def queue_publication_v2_reuploads(payload: dict) -> dict:
+    """Queue selected replacement uploads; old YouTube videos stay untouched."""
+    requested = list(dict.fromkeys(str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()))
+    if not requested:
+        raise ValueError("Выберите хотя бы один ролик для перезалива.")
+    reason = str(payload.get("reason", "") or "Обработка YouTube завершена, но оператор запросил повторную отправку.")
+    settings = load_settings()
+    for snapshot_id in requested:
+        queue_publication_reupload(settings, snapshot_id, reason)
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {"kind": "publication-v2-reupload-queued", "count": len(requested),
+            "message": f"В очередь на перезалив добавлено: {len(requested)}. Старые ролики не удалялись."}}
+
+
 def set_publication_v2_paused(payload: dict) -> dict:
     settings = load_settings()
     settings.youtube_publication_queue_paused = bool(payload.get("paused", False))
@@ -11995,6 +12048,24 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
             snapshot_record = dict(snapshots[snapshot_id])
             metadata = dict(snapshot_record.get("metadata", {}) or {})
             channel_id = str(snapshot_record.get("channelId", "")).strip()
+
+        def record_upload_progress(progress: dict[str, int]) -> None:
+            """Persist actual transfer bytes without ever fabricating completion."""
+
+            with lock:
+                execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+                active = dict(execution.get("activeLease", {}) or {})
+                if str(active.get("workerId", "")) != worker_id:
+                    return
+                steps = dict(execution.get("steps", {}) or {})
+                upload = dict(steps.get("VIDEO_UPLOAD", {}) or {})
+                if str(upload.get("status", "")).upper() != "RUNNING":
+                    return
+                upload["progress"] = {"state": "transferring", **dict(progress)}
+                steps["VIDEO_UPLOAD"] = upload
+                execution["steps"] = steps
+                settings.youtube_publication_executions[snapshot_id] = execution
+                save_settings(settings)
         try:
             credentials = json.loads(settings.youtube_oauth_tokens[channel_id])
             body = build_private_video_insert_body(
@@ -12003,8 +12074,10 @@ def upload_publication_v2_snapshots(payload: dict) -> dict:
                 publish_at=str(snapshot_record.get("requestedPublishAt", "") or ""),
                 privacy=str(snapshot_record.get("privacy", "private")),
             )
-            result, refreshed = upload_private_video(credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
-                                                       thumbnail_path="")
+            result, refreshed = upload_private_video(
+                credentials, video_path=str(snapshot_record.get("videoPath", "")), body=body,
+                thumbnail_path="", on_progress=record_upload_progress,
+            )
             with lock:
                 complete_upload_attempt(settings, snapshot_id, worker_id, result)
                 settings.youtube_oauth_tokens[channel_id] = json.dumps(refreshed, ensure_ascii=False)
@@ -12938,6 +13011,10 @@ def main() -> None:
             result = confirm_publication_v2_distribution(payload if isinstance(payload, dict) else {})
         elif command == "retry-publication-v2-stage":
             result = retry_publication_v2_stage(payload if isinstance(payload, dict) else {})
+        elif command == "open-publication-v2-identity-verification":
+            result = open_publication_v2_identity_verification(payload if isinstance(payload, dict) else {})
+        elif command == "queue-publication-v2-reuploads":
+            result = queue_publication_v2_reuploads(payload if isinstance(payload, dict) else {})
         elif command == "set-publication-v2-paused":
             result = set_publication_v2_paused(payload if isinstance(payload, dict) else {})
         elif command == "cancel-publication-v2-execution":

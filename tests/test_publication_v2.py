@@ -28,6 +28,7 @@ from scriptor.publication_v2 import (
     reconcile_publication_executions,
     retry_publication_stage,
     reconcile_publication_items,
+    queue_publication_reupload,
     release_execution,
     validate_publication_schedule,
     validate_publication_snapshot,
@@ -500,6 +501,46 @@ class PublicationV2ExecutionTests(unittest.TestCase):
 
 
 class PublicationV2BridgeTests(unittest.TestCase):
+    def test_identity_handoff_opens_only_the_matching_channel_profile_and_never_retries(self):
+        """2FA is a visible human hand-off; it cannot send another upload itself."""
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "channel_id": "UC-test"}],
+            youtube_publication_snapshots={"snapshot-1": {"id": "snapshot-1", "channelId": "channel-a"}},
+            youtube_publication_executions={"snapshot-1": {"snapshotId": "snapshot-1", "youtubeVideoId": None, "timeline": []}},
+        )
+        with TemporaryDirectory() as directory, \
+             patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings") as save, \
+             patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+             patch.object(bridge, "_youtube_channel_profile_dir", return_value=Path(directory) / "channel-a"), \
+             patch.object(bridge.subprocess, "Popen") as launch:
+            result = bridge.open_publication_v2_identity_verification({"snapshotId": "snapshot-1"})
+
+        self.assertEqual(result["operationResult"]["kind"], "publication-v2-identity-verification")
+        self.assertIn("--user-data-dir=", " ".join(launch.call_args.args[0]))
+        self.assertIn("https://studio.youtube.com/channel/UC-test", launch.call_args.args[0])
+        self.assertEqual(save.call_count, 1)
+        self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["timeline"][-1]["status"], "USER_ACTION_REQUIRED")
+
+    def test_reupload_queue_preserves_the_old_video_and_refuses_a_second_active_attempt(self):
+        """A manual re-upload is explicit, auditable, and never deletes the known video."""
+        settings = Settings(youtube_publication_executions={
+            "snapshot-1": {
+                "snapshotId": "snapshot-1", "youtubeVideoId": "yt-old",
+                "youtubeVideoUrl": "https://youtu.be/yt-old", "overallStatus": "PROCESSING",
+                "activeLease": None, "steps": {"VIDEO_UPLOAD": {"status": "SUCCESS"}},
+            },
+        })
+
+        queue_publication_reupload(settings, "snapshot-1", "Обработка YouTube завершена, но требуется повторная отправка")
+
+        execution = settings.youtube_publication_executions["snapshot-1"]
+        self.assertIsNone(execution["youtubeVideoId"])
+        self.assertEqual(execution["reupload"]["status"], "QUEUED")
+        self.assertEqual(execution["reupload"]["oldVideoId"], "yt-old")
+        with self.assertRaisesRegex(ValueError, "уже находится в очереди"):
+            queue_publication_reupload(settings, "snapshot-1", "Повтор")
+
     def test_v2_upload_persists_running_state_then_keeps_returned_youtube_id_before_downstream_work(self):
         """Bridge upload uses a frozen snapshot and cannot lose the YouTube ID to a later thumbnail failure."""
         with TemporaryDirectory() as directory:
@@ -524,6 +565,35 @@ class PublicationV2BridgeTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["youtubeVideoId"], "yt-new")
         self.assertEqual(settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["status"], "SUCCESS")
         self.assertEqual(upload.call_args.kwargs["thumbnail_path"], "")
+
+    def test_v2_upload_persists_actual_resumable_progress_before_youtube_returns_an_id(self):
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "episode.mp4"
+            video.write_bytes(b"mp4")
+            settings = Settings(youtube_oauth_tokens={"channel-a": '{"token":"safe"}'}, youtube_publication_snapshots={
+                "snapshot-1": {"id": "snapshot-1", "channelId": "channel-a", "videoPath": str(video),
+                               "metadata": {"title": "Выпуск", "description": "Описание", "tags": []},
+                               "privacy": "private", "publishMode": "publish_now"},
+            }, youtube_publication_executions={
+                "snapshot-1": {"snapshotId": "snapshot-1", "overallStatus": "READY", "youtubeVideoId": None,
+                               "activeLease": None, "steps": {"VIDEO_UPLOAD": {"status": "PENDING", "attempts": 0}}},
+            })
+
+            def upload_with_progress(*_args, **kwargs):
+                kwargs["on_progress"]({"bytesSent": 50, "totalBytes": 100, "percent": 50})
+                self.assertEqual(
+                    settings.youtube_publication_executions["snapshot-1"]["steps"]["VIDEO_UPLOAD"]["progress"],
+                    {"state": "transferring", "bytesSent": 50, "totalBytes": 100, "percent": 50},
+                )
+                return {"videoId": "yt-new", "videoUrl": "https://youtu.be/yt-new"}, {"token": "refreshed"}
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={"publication": {}}), \
+                 patch.object(bridge, "upload_private_video", side_effect=upload_with_progress):
+                result = bridge.upload_publication_v2_snapshots({"snapshotIds": ["snapshot-1"]})
+
+        self.assertEqual(result["operationResult"]["count"], 1)
 
     def test_v2_upload_queue_drains_requested_batch_without_exceeding_configured_transport_workers(self):
         """Finished transports free their slot so the next requested snapshot starts in the same queue run."""

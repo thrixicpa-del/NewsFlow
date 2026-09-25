@@ -566,6 +566,51 @@ def retry_publication_stage(settings: Any, snapshot_id: str, stage: str) -> None
     settings.youtube_publication_executions = executions
 
 
+def queue_publication_reupload(settings: Any, snapshot_id: str, reason: str) -> None:
+    """Queue one explicit replacement upload without deleting the known video.
+
+    The historical YouTube identity remains in ``reupload.oldVideoId`` for
+    audit. Resetting the local transport stage only makes a new *private*
+    attempt eligible for the ordinary durable lease.
+    """
+    executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
+    execution = dict(executions.get(snapshot_id, {}) or {})
+    if not execution:
+        raise ValueError("Publication execution не найден")
+    if execution.get("activeLease"):
+        raise ValueError("Нельзя перезалить ролик: текущая попытка ещё выполняется")
+    existing = dict(execution.get("reupload", {}) or {})
+    if str(existing.get("status", "")).upper() in {"QUEUED", "RUNNING"}:
+        raise ValueError("Этот ролик уже находится в очереди на перезалив")
+    old_video_id = str(execution.get("youtubeVideoId") or "").strip()
+    if not old_video_id:
+        raise ValueError("Перезалив доступен только после подтверждённого YouTube ID")
+    clean_reason = " ".join(str(reason or "").split())
+    if not clean_reason:
+        raise ValueError("Укажите причину перезалива")
+    now = _now()
+    steps = dict(execution.get("steps", {}) or {})
+    steps["VIDEO_UPLOAD"] = {
+        **_step("PENDING"), "attempts": 0,
+        "detail": "Оператор подтвердил новый private upload; прежний ролик сохранён.",
+    }
+    old_video_url = str(execution.get("youtubeVideoUrl") or "")
+    execution.update({
+        "youtubeVideoId": None, "youtubeVideoUrl": None, "steps": steps,
+        "currentStage": "VIDEO_UPLOAD", "overallStatus": "REUPLOAD_QUEUED",
+        "reupload": {
+            "status": "QUEUED", "oldVideoId": old_video_id,
+            "oldVideoUrl": old_video_url, "reason": clean_reason, "requestedAt": now,
+        },
+    })
+    execution.setdefault("timeline", []).append({
+        "at": now, "stage": "VIDEO_UPLOAD", "status": "REUPLOAD_QUEUED",
+        "detail": "Перезалив поставлен оператором; старый YouTube ID сохранён.",
+    })
+    executions[snapshot_id] = execution
+    settings.youtube_publication_executions = executions
+
+
 def release_execution(settings: Any, snapshot_id: str, worker_id: str) -> bool:
     """Release only the worker's own lease; another worker cannot unlock it."""
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
@@ -638,6 +683,11 @@ def begin_upload_attempt(settings: Any, snapshot_id: str, worker_id: str) -> Non
     upload.update({"status": "RUNNING", "startedAt": now, "finishedAt": None, "error": None,
                    "attempts": int(upload.get("attempts", 0) or 0) + 1, "progress": {"state": "starting"}})
     steps["VIDEO_UPLOAD"] = upload
+    reupload = dict(execution.get("reupload", {}) or {})
+    if str(reupload.get("status", "")).upper() == "QUEUED":
+        reupload["status"] = "RUNNING"
+        reupload["startedAt"] = now
+        execution["reupload"] = reupload
     execution.update({"steps": steps, "currentStage": "VIDEO_UPLOAD", "overallStatus": "UPLOADING",
                       "startedAt": execution.get("startedAt") or now, "uploadStartedAt": now})
     execution.setdefault("timeline", []).append({"at": now, "stage": "VIDEO_UPLOAD", "status": "RUNNING", "detail": "Передача MP4 начата"})
@@ -662,6 +712,12 @@ def complete_upload_attempt(settings: Any, snapshot_id: str, worker_id: str, pro
     upload = dict(steps.get("VIDEO_UPLOAD", {}) or _step())
     upload.update({"status": "SUCCESS", "finishedAt": now, "providerResult": dict(provider_result), "progress": {"state": "complete"}})
     steps["VIDEO_UPLOAD"] = upload
+    reupload = dict(execution.get("reupload", {}) or {})
+    if str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING"}:
+        reupload.update({"status": "UPLOADED", "newVideoId": video_id,
+                         "newVideoUrl": str(provider_result.get("videoUrl", "")).strip() or None,
+                         "completedAt": now})
+        execution["reupload"] = reupload
     execution.update({"steps": steps, "youtubeVideoId": video_id, "youtubeVideoUrl": str(provider_result.get("videoUrl", "")).strip() or None,
                       "currentStage": "YOUTUBE_PROCESSING", "overallStatus": "PROCESSING", "uploadCompletedAt": now})
     execution.setdefault("timeline", []).append({"at": now, "stage": "VIDEO_UPLOAD", "status": "SUCCESS", "detail": f"YouTube ID: {video_id}"})
@@ -773,6 +829,10 @@ def fail_publication_stage(settings: Any, snapshot_id: str, stage: str, category
     step.update({"status": "FAILED" if classification not in {"AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"} else classification,
                  "finishedAt": now, "error": {"category": classification, "message": str(message)}, "progress": None})
     steps[normalized] = step
+    reupload = dict(execution.get("reupload", {}) or {})
+    if normalized == "VIDEO_UPLOAD" and str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING"}:
+        reupload.update({"status": "FAILED", "failedAt": now, "error": {"category": classification, "message": str(message)}})
+        execution["reupload"] = reupload
     execution["steps"] = steps
     execution["currentStage"] = normalized
     execution["overallStatus"] = "PARTIAL" if str(execution.get("youtubeVideoId") or "").strip() else step["status"]
@@ -909,6 +969,7 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
             "completion": {"completed": completed, "total": total}, "steps": steps,
             "timeline": list(execution.get("timeline", []) or [])[-100:],
             "active": bool(execution.get("activeLease")),
+            "reupload": dict(execution.get("reupload", {}) or {}),
         })
     return {"items": items, "queue": rows, "counters": {"total": len(rows), **status_counts},
             "paused": bool(getattr(settings, "youtube_publication_queue_paused", False)),

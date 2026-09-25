@@ -194,6 +194,11 @@ def _wait_for_studio_shell(page, *, timeout_seconds: int = 25) -> None:
                 return
         except Exception:
             pass
+        if _attempt and _attempt % 4 == 0:
+            try:
+                page.mouse.wheel(0, 360)
+            except Exception:
+                pass
         page.wait_for_timeout(250)
     raise StudioAutomationError("YouTube Studio открыл пустую страницу и не загрузил интерфейс. Проверьте вход в профиль канала.")
 
@@ -229,6 +234,67 @@ def _first(page, selectors: list[str]):
         except Exception:
             continue
     raise StudioAutomationError("Не удалось найти нужный элемент в YouTube Studio. Обновите Studio и повторите шаг.")
+
+
+def _choose_card_video_type(page) -> None:
+    """Open Studio's video-card picker using its actionable control."""
+    for _attempt in range(40):
+        for label in ("Добавить подсказку со ссылкой на ролик", "Add video card"):
+            try:
+                control = page.get_by_label(label, exact=True)
+                if control.is_visible(timeout=1_000):
+                    control.click(timeout=10_000)
+                    return
+            except Exception:
+                continue
+        for name in ("Видео", "Video"):
+            try:
+                option = page.get_by_role("option", name=name, exact=True)
+                if option.is_visible(timeout=1_000):
+                    option.click(timeout=10_000)
+                    return
+            except Exception:
+                continue
+        page.wait_for_timeout(250)
+    raise StudioAutomationError("Studio не показал вариант «Видео» для подсказки.")
+
+
+def _choose_own_video_by_title(page, title: str) -> None:
+    """Select a public own-video result by its visible title, never its opaque ID."""
+    value = str(title or "").strip()
+    if not value:
+        raise StudioAutomationError("В плане карточки отсутствует название опубликованного ролика.")
+    pattern = re.compile(re.escape(value), re.IGNORECASE)
+    for _attempt in range(40):
+        try:
+            option = page.get_by_role("option", name=pattern).first
+            if option.is_visible(timeout=1_000):
+                option.click(timeout=10_000)
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(250)
+    raise StudioAutomationError(f"Studio не нашёл опубликованный ролик «{value}» в списке «Найти свои видео».")
+
+
+def _save_editor_changes(page) -> None:
+    """Save only through an enabled visible Studio control."""
+    saw_save = False
+    for _attempt in range(20):
+        for label in ("Сохранить", "Save"):
+            try:
+                control = page.get_by_label(label, exact=True)
+                if control.is_visible(timeout=1_000):
+                    saw_save = True
+                    if control.is_enabled(timeout=1_000):
+                        control.click(timeout=10_000)
+                        return
+            except Exception:
+                continue
+        page.wait_for_timeout(250)
+    if saw_save:
+        raise StudioAutomationError("Studio не принял изменение: кнопка «Сохранить» неактивна. Задание не помечено выполненным.")
+    _click_text(page, [r"сохранить", r"save"])
 
 
 def _click_text(page, labels: list[str]) -> None:
@@ -298,17 +364,17 @@ def _publish_scheduled_post(page, action: Mapping[str, object]) -> None:
 def _apply_cards(page, action: Mapping[str, object]) -> None:
     _open_editor_section(page, "cards")
     for card in list(action.get("cards") or []):
-        _click_text(page, [r"добавить.*карточк", r"add.*card"])
-        _click_text(page, [r"видео", r"video"])
-        video_id = str(dict(card).get("videoId", "")).strip()
-        if not video_id:
-            raise StudioAutomationError("В плане карточки отсутствует идентификатор видео.")
-        search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
-        search.fill(video_id)
-        _click_text(page, [re.escape(video_id), r"выбрать", r"select"])
-        timestamp = _first(page, ["input[aria-label*='время' i]", "input[aria-label*='time' i]"])
-        timestamp.fill(str(int(float(dict(card).get("atSeconds", 0) or 0))))
-    _click_text(page, [r"сохранить", r"save"])
+        _choose_card_video_type(page)
+        item = dict(card)
+        title = str(item.get("videoTitle", "")).strip()
+        search = _first(page, ["input[placeholder='Найти свои видео']", "input[placeholder='Search your videos']", "input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
+        search.fill(title)
+        _choose_own_video_by_title(page, title)
+        timestamp = _first(page, ["input[aria-label*='Время начала показа' i]", "input[aria-label*='время' i]", "input[aria-label*='time' i]"])
+        timestamp.click()
+        timestamp.fill(str(max(0, int(float(item.get("atSeconds", 0) or 0)))))
+        timestamp.press("Tab")
+    _save_editor_changes(page)
 
 
 def _apply_end_screen(page, action: Mapping[str, object]) -> None:
@@ -328,15 +394,19 @@ def _apply_end_screen(page, action: Mapping[str, object]) -> None:
             _click_text(page, [r"добавить.*элемент", r"add.*element"])
             _click_text(page, [r"видео", r"video"])
             search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
-            search.fill(str(dict(item).get("videoId", "")))
-            _click_text(page, [r"выбрать", r"select"])
+            title = str(dict(item).get("videoTitle", "")).strip()
+            if title:
+                search.fill(title)
+                _choose_own_video_by_title(page, title)
+            else:
+                raise StudioAutomationError("В плане конечной заставки отсутствует название опубликованного ролика.")
         elif kind == "playlist":
             _click_text(page, [r"добавить.*элемент", r"add.*element"])
             _click_text(page, [r"плейлист", r"playlist"])
             search = _first(page, ["input[type='search']", "input[aria-label*='поиск' i]", "input[aria-label*='search' i]"])
             search.fill(str(dict(item).get("playlistId", "")))
             _click_text(page, [r"выбрать", r"select"])
-    _click_text(page, [r"сохранить", r"save"])
+    _save_editor_changes(page)
 
 
 def _open_video_editor(page, video_id: str) -> None:

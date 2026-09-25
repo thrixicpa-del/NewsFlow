@@ -3,12 +3,65 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 YOUTUBE_TAG_CHARACTER_LIMIT = 500
+
+
+def _is_transient_upload_error(error: BaseException) -> bool:
+    """Return whether a resumable request may safely retry its same session."""
+
+    if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+        return True
+    response = getattr(error, "resp", None)
+    status = getattr(response, "status", None)
+    if status is None:
+        status = getattr(error, "status_code", None)
+    try:
+        return int(status) in {500, 502, 503, 504}
+    except (TypeError, ValueError):
+        return False
+
+
+def consume_resumable_upload(
+    request: Any,
+    *,
+    on_progress: Callable[[dict[str, int]], None] | None = None,
+    max_retries: int = 5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Drive one Google resumable request without hiding transport failures.
+
+    ``next_chunk`` keeps the same upload session on transient failures. We
+    retry only those failures with a finite backoff; authentication, metadata
+    and unknown failures propagate to the durable queue instead of being
+    misreported as a completed video.
+    """
+
+    retries = 0
+    while True:
+        try:
+            status, response = request.next_chunk()
+        except Exception as exc:
+            if not _is_transient_upload_error(exc) or retries >= max_retries:
+                raise
+            sleep(float(2 ** retries))
+            retries += 1
+            continue
+        retries = 0
+        if status is not None and on_progress is not None:
+            sent = max(0, int(getattr(status, "resumable_progress", 0) or 0))
+            total = max(0, int(getattr(status, "total_size", 0) or 0))
+            percent = min(100, int((sent * 100) / total)) if total else 0
+            on_progress({"bytesSent": sent, "totalBytes": total, "percent": percent})
+        if response is not None:
+            if not isinstance(response, dict):
+                raise RuntimeError("YouTube вернул некорректный ответ завершения загрузки")
+            return response
 
 
 def parse_google_account_email(payload: dict[str, Any]) -> str:
@@ -265,6 +318,7 @@ def upload_private_video(
     video_path: str,
     body: dict[str, Any],
     thumbnail_path: str = "",
+    on_progress: Callable[[dict[str, int]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Upload one NewsFlow package using an explicitly authorised channel.
 
@@ -287,11 +341,12 @@ def upload_private_video(
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
     youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
-    response = youtube.videos().insert(
+    request = youtube.videos().insert(
         part="snippet,status",
         body=body,
         media_body=MediaFileUpload(str(source), mimetype="video/mp4", resumable=True),
-    ).execute()
+    )
+    response = consume_resumable_upload(request, on_progress=on_progress)
     video_id = str(response.get("id", "")).strip() if isinstance(response, dict) else ""
     if not video_id:
         raise RuntimeError("YouTube не вернул ID после загрузки ролика")

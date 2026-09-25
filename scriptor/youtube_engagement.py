@@ -31,6 +31,7 @@ def _eligible_catalog(job: Mapping[str, object], catalog: Sequence[Mapping[str, 
         if str(item.get("channelId", "")).strip() == channel_id
         and str(item.get("privacyStatus", "")).strip() == "public"
         and str(item.get("videoId", "")).strip()
+        and str(item.get("title", "")).strip()
         and str(item.get("videoId", "")).strip() != current_video_id
     ]
     return sorted(
@@ -49,8 +50,8 @@ def build_engagement_plan(
     duration = _duration(job)
     targets = _eligible_catalog(job, catalog)
     cards = [
-        {"videoId": str(item["videoId"]), "atSeconds": round(duration * ratio)}
-        for ratio, item in zip((0.35, 0.65), targets[:2])
+        {"videoId": str(item["videoId"]), "videoTitle": str(item["title"]).strip(), "atSeconds": round(duration * ratio)}
+        for ratio, item in zip((0.17, 0.33, 0.50, 0.67, 0.83), targets[:5])
         if round(duration * ratio) < duration - 20
     ]
     if duration < 25:
@@ -66,14 +67,19 @@ def build_engagement_plan(
             ),
             "",
         )
+        end_items = [
+            *([{"kind": "video", "videoId": str(targets[0]["videoId"]), "videoTitle": str(targets[0]["title"]).strip()}] if targets else []),
+        ]
+        if playlist:
+            end_items.extend([{"kind": "best-for-viewer"}, {"kind": "playlist", "playlistId": playlist}, {"kind": "subscribe"}])
+        else:
+            end_items.extend([
+                *([{"kind": "video", "videoId": str(targets[1]["videoId"]), "videoTitle": str(targets[1]["title"]).strip()}] if len(targets) > 1 else []),
+                {"kind": "best-for-viewer"}, {"kind": "subscribe"},
+            ])
         end_screen = {
             "startSeconds": round(duration - 20),
-            "items": [
-                *([{"kind": "video", "videoId": str(targets[0]["videoId"])}] if targets else []),
-                {"kind": "best-for-viewer"},
-                *([{"kind": "playlist", "playlistId": playlist}] if playlist else []),
-                {"kind": "subscribe"},
-            ],
+            "items": end_items[:4],
         }
     return {"cards": cards, "endScreen": end_screen}
 

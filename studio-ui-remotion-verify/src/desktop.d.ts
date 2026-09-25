@@ -75,7 +75,7 @@ interface NewsFlowSnapshot {
     };
     v2?: {
       items: Record<string, { productionItemId?: string; metadata?: { title?: string; description?: string; tags?: string[]; duration?: number; index?: number }; readiness?: { state?: string; reasons?: string[] }; artifacts?: { video?: { path?: string; exists?: boolean; duration?: number } } }>;
-      queue: Array<{ snapshotId: string; productionItemId: string; title: string; channelId: string; publishAt?: string; privacy: 'private' | 'unlisted' | 'public'; publishMode: string; youtubeVideoId?: string; youtubeVideoUrl?: string; currentStage: string; status: string; active: boolean; completion: { completed: number; total: number }; steps: Record<string, { status?: string; error?: unknown; detail?: string; startedAt?: string; finishedAt?: string; durationSeconds?: number }>; timeline?: Array<{ at?: string; stage?: string; status?: string; detail?: string }> }>;
+      queue: Array<{ snapshotId: string; productionItemId: string; title: string; channelId: string; publishAt?: string; privacy: 'private' | 'unlisted' | 'public'; publishMode: string; youtubeVideoId?: string; youtubeVideoUrl?: string; currentStage: string; status: string; active: boolean; completion: { completed: number; total: number }; steps: Record<string, { status?: string; error?: unknown; detail?: string; startedAt?: string; finishedAt?: string; durationSeconds?: number }>; timeline?: Array<{ at?: string; stage?: string; status?: string; detail?: string }>; reupload?: { status?: string; oldVideoId?: string; oldVideoUrl?: string; newVideoId?: string; newVideoUrl?: string; reason?: string; requestedAt?: string; completedAt?: string } }>;
       counters: Record<string, number>;
       paused: boolean;
       uploadConcurrency: number;

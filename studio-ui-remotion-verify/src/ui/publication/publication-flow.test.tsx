@@ -13,6 +13,7 @@ const base = {
     queue: [
       { snapshotId: "snapshot-ready", productionItemId: "item-ready", title: "Готовый ролик", channelId: "channel-a", currentStage: "WAITING", status: "WAITING", active: false, completion: { completed: 0, total: 8 }, steps: {} },
       { snapshotId: "snapshot-uploaded", productionItemId: "item-uploaded", title: "Уже загруженный ролик", channelId: "channel-a", currentStage: "THUMBNAIL", status: "PARTIAL", active: false, youtubeVideoId: "yt-123", completion: { completed: 4, total: 8 }, steps: { VIDEO_UPLOAD: { status: "SUCCESS" }, THUMBNAIL: { status: "FAILED" } } },
+      { snapshotId: "snapshot-auth", productionItemId: "item-auth", title: "Требует проверки", channelId: "channel-a", currentStage: "VIDEO_UPLOAD", status: "AUTH_REQUIRED", active: false, completion: { completed: 0, total: 8 }, steps: { VIDEO_UPLOAD: { status: "AUTH_REQUIRED", error: { category: "AUTH_REQUIRED", message: "Подтвердите личность" } } } },
     ], counters: {}, paused: false, uploadConcurrency: 6, channelRules: {}, assignments: {},
   } },
 } as unknown as NewsFlowSnapshot;
@@ -51,6 +52,30 @@ describe("PublicationPage interactions", () => {
     expect(command).toHaveBeenCalledWith("upload-publication-v2-snapshots", { snapshotIds: ["snapshot-ready"] });
     releaseUpload?.();
     await waitFor(() => expect(screen.getByRole("button", { name: "Запустить очередь" })).toBeEnabled());
+  });
+
+  it("keeps both manual identity verification and retry available for an interrupted upload", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Раскрыть ход публикации" })[2]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Пройти 2FA" }));
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать ещё раз" }));
+
+    expect(command).toHaveBeenCalledWith("open-publication-v2-identity-verification", { snapshotId: "snapshot-auth" });
+    expect(command).toHaveBeenCalledWith("retry-publication-v2-stage", { snapshotId: "snapshot-auth", stage: "VIDEO_UPLOAD" });
+  });
+
+  it("requires explicit confirmation before queuing a selected re-upload", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Выбрать для перезалива Уже загруженный ролик" }));
+    fireEvent.click(screen.getByRole("button", { name: "Перезалить выбранные" }));
+    expect(screen.getByText("Старые ролики не будут удалены или опубликованы автоматически.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Подтвердить перезалив" }));
+    expect(command).toHaveBeenCalledWith("queue-publication-v2-reuploads", { snapshotIds: ["snapshot-uploaded"] });
   });
 
   it("opens non-uploading distribution preview and preserves its manual lock affordance", async () => {

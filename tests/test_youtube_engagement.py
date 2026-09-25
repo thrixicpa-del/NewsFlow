@@ -32,6 +32,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 },
                 {
                     "videoId": "relevant-video",
+                    "title": "Актуальный опубликованный ролик",
                     "channelId": "channel-a",
                     "privacyStatus": "public",
                     "publishedAt": "2026-08-31T10:00:00+00:00",
@@ -39,6 +40,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 },
                 {
                     "videoId": "latest-video",
+                    "title": "Последний опубликованный ролик",
                     "channelId": "channel-a",
                     "privacyStatus": "public",
                     "publishedAt": "2026-08-30T10:00:00+00:00",
@@ -46,6 +48,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 },
                 {
                     "videoId": "private-video",
+                    "title": "Приватный ролик",
                     "channelId": "channel-a",
                     "privacyStatus": "private",
                     "publishedAt": "2026-08-29T10:00:00+00:00",
@@ -58,11 +61,26 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
         self.assertEqual(
             plan["cards"],
             [
-                {"videoId": "relevant-video", "atSeconds": 210},
-                {"videoId": "latest-video", "atSeconds": 390},
+                {"videoId": "relevant-video", "videoTitle": "Актуальный опубликованный ролик", "atSeconds": 102},
+                {"videoId": "latest-video", "videoTitle": "Последний опубликованный ролик", "atSeconds": 198},
             ],
         )
         self.assertEqual(plan["endScreen"]["startSeconds"], 580)
+
+    def test_public_video_without_a_display_title_is_not_planned_for_studio(self):
+        plan = build_engagement_plan(
+            {"id": "new-job", "channelId": "channel-a", "videoId": "current-video", "durationSeconds": 600},
+            [{"videoId": "public-without-title", "channelId": "channel-a", "privacyStatus": "public", "score": 1.0}],
+            [],
+        )
+        self.assertEqual(plan["cards"], [])
+
+    def test_plan_uses_at_most_five_unique_cards_and_four_unique_end_screen_elements(self):
+        catalog = [{"videoId": f"video-{index}", "title": f"Опубликованный ролик {index}", "channelId": "channel-a", "privacyStatus": "public", "score": 10 - index} for index in range(6)]
+        plan = build_engagement_plan({"channelId": "channel-a", "videoId": "current", "durationSeconds": 600}, catalog, [{"channelId": "channel-a", "playlistId": "playlist-1", "public": True}])
+        self.assertEqual(len(plan["cards"]), 5)
+        self.assertEqual(len({item["videoId"] for item in plan["cards"]}), 5)
+        self.assertEqual(len(plan["endScreen"]["items"]), 4)
 
     def test_completed_post_cannot_return_to_pending(self):
         state = new_engagement_state("job-a", "channel-a")

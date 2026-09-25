@@ -54,6 +54,12 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
         "preview_publication_v2_distribution", "scriptor.publication_v2", _NO_LEGACY,
     ),
     "migrate-publication-v2": CommandRegistration("migrate_publication_v2", "scriptor.publication_v2", _NO_LEGACY),
+    "open-publication-v2-identity-verification": CommandRegistration(
+        "open_publication_v2_identity_verification", "scriptor.bridge visible Studio handoff", _NO_LEGACY,
+    ),
+    "queue-publication-v2-reuploads": CommandRegistration(
+        "queue_publication_v2_reuploads", "scriptor.publication_v2", _NO_LEGACY,
+    ),
 }
 
 
