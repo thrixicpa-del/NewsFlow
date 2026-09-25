@@ -114,6 +114,55 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(saved_batches[-1][0].state, RunState.DONE)
         self.assertEqual(saved_batches[-1][0].result, "Готовый сценарий по проверочной теме.")
 
+    def test_both_provider_modes_receive_full_template_and_priority_length_contract(self):
+        template = (
+            "FULL_USER_PROMPT_BEGIN :: Напиши сценарий для {title}.\\n"
+            + ("Сохрани эту пользовательскую вводную без потери контекста. " * 120)
+            + "\\nFULL_USER_PROMPT_END"
+        )
+
+        class FakePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                return "а" * 10000
+
+        for provider in ("openai", "agent"):
+            with self.subTest(provider=provider):
+                settings = Settings(
+                    scenario_provider=provider,
+                    template=template,
+                    prompt_ranges=[],
+                    scenario_target_chars=10000,
+                    scenario_allowed_min=9000,
+                    scenario_allowed_max=11000,
+                )
+                pool = FakePool()
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=(["Проверочная тема"], [])), \
+                     patch.object(bridge, "save_session"), \
+                     patch.object(bridge, "save_settings"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=pool):
+                    bridge.generate_scenarios({"provider": provider})
+
+                self.assertEqual(len(pool.prompts), 1)
+                prompt = pool.prompts[0]
+                self.assertIn("FULL_USER_PROMPT_BEGIN :: Напиши сценарий для Проверочная тема.", prompt)
+                self.assertIn("FULL_USER_PROMPT_END", prompt)
+                self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", prompt)
+                self.assertIn("Целевой объем: 10000 символов", prompt)
+                self.assertIn("Допустимый итоговый диапазон: 9000–11000 символов", prompt)
+                self.assertIn("len(text.strip())", prompt)
+                self.assertLess(
+                    prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
+                    prompt.index("FULL_USER_PROMPT_BEGIN"),
+                )
+
     def test_manual_scenario_persists_current_production_identity_for_covers(self):
         """A manually completed script must enter Covers through a durable current ID."""
         title = "Ручной сценарий для обложки"
