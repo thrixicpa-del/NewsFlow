@@ -257,7 +257,7 @@ describe("PublicationPage interactions", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
     fireEvent.click(screen.getByLabelText("Выбрать публикацию Готовый ролик"));
 
-    expect(screen.getByRole("button", { name: "Проверить YouTube" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Обновить статусы YouTube" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Продолжить выбранные" })).toBeDisabled();
   });
 
@@ -520,4 +520,125 @@ describe("PublicationPage interactions", () => {
     expect(screen.getAllByText(/Перенесите ролик внутрь окна публикации канала/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Подтвердить назначения" })).toBeDisabled();
   });
+
+  it("refreshes YouTube statuses without starting engagement automation", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByLabelText("Выбрать публикацию Уже загруженный ролик"));
+    fireEvent.click(screen.getByRole("button", { name: "Обновить статусы YouTube" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "reconcile-publication-v2-youtube",
+      { snapshotIds: ["snapshot-uploaded"], statusOnly: true },
+    ));
+    expect(command).not.toHaveBeenCalledWith("run-publication-v2-studio", expect.anything());
+  });
+
+  it("shows Studio 2FA separately from retry and neither action starts an upload", async () => {
+    const data = {
+      ...base,
+      publication: {
+        ...base.publication,
+        v2: {
+          ...(base.publication as any).v2,
+          queue: (base.publication as any).v2.queue.map((row: any) =>
+            row.snapshotId === "snapshot-uploaded"
+              ? {
+                  ...row,
+                  currentStage: "CARDS",
+                  status: "PARTIAL",
+                  steps: {
+                    ...row.steps,
+                    CARDS: {
+                      status: "USER_ACTION_REQUIRED",
+                      error: {
+                        category: "STUDIO_IDENTITY_REQUIRED",
+                        message: "Нужно подтвердить личность",
+                      },
+                    },
+                  },
+                }
+              : row,
+          ),
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(<PublicationPage data={data} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByRole("button", { name: /Раскрыть ход публикации Уже загруженный ролик/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Пройти 2FA" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "open-publication-v2-identity-verification",
+      { snapshotId: "snapshot-uploaded" },
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: /Попробовать ещё раз.*Подсказки/ }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "retry-publication-v2-stage",
+      { snapshotId: "snapshot-uploaded", stage: "CARDS" },
+    ));
+    expect(command).not.toHaveBeenCalledWith("upload-publication-v2-snapshots", expect.anything());
+  });
+
+  it("queues a confirmed private reupload without starting it automatically", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<PublicationPage data={base} command={command} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+    fireEvent.click(screen.getByLabelText("Выбрать публикацию Уже загруженный ролик"));
+
+    fireEvent.change(screen.getByLabelText("Причина перезалива"), {
+      target: { value: "Повтор после проверки обработки" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Перезалить выбранные (1)" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "queue-publication-v2-reupload",
+      {
+        snapshotIds: ["snapshot-uploaded"],
+        reason: "Повтор после проверки обработки",
+        metadataConfirmed: true,
+      },
+    ));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(command).not.toHaveBeenCalledWith("upload-publication-v2-snapshots", expect.anything());
+    confirm.mockRestore();
+  });
+
+  it("keeps the reupload badge visible while replacement processing is active", () => {
+    const data = {
+      ...base,
+      publication: {
+        ...base.publication,
+        v2: {
+          ...(base.publication as any).v2,
+          queue: (base.publication as any).v2.queue.map((row: any) =>
+            row.snapshotId === "snapshot-uploaded"
+              ? {
+                  ...row,
+                  reupload: {
+                    status: "PROCESSING",
+                    oldVideoId: "yt-old",
+                    newVideoId: "yt-new",
+                    reason: "Повтор",
+                    lastCheckedAt: "2026-09-26T00:00:00+03:00",
+                    originalPublishAt: "2026-09-27T12:00:00+03:00",
+                    scheduleApplied: false,
+                  },
+                }
+              : row,
+          ),
+        },
+      },
+    } as unknown as NewsFlowSnapshot;
+
+    render(<PublicationPage data={data} command={vi.fn().mockResolvedValue(undefined)} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Очередь" }));
+
+    expect(screen.getByText("Перезалив")).toBeInTheDocument();
+  });
+
 });
