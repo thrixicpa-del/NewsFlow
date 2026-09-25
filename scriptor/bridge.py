@@ -108,6 +108,7 @@ from .publication_v2 import (
     normalize_channel_publication_rule,
     persist_publication_receipt,
     publication_queue_projection,
+    queue_publication_reupload,
     reconcile_publication_executions,
     reconcile_publication_items,
     reconcile_youtube_video_state,
@@ -172,6 +173,7 @@ from .voicer import (
 )
 from .youtube_allocation import allocate_ready_jobs, build_allocation_summary
 from .youtube_api import (
+    ResumableUploadSessionExpired,
     build_private_video_insert_body,
     fetch_current_channel,
     fetch_google_account_email,
@@ -206,7 +208,12 @@ from .youtube_publisher import (
     publication_job_record,
     suggest_youtube_title,
 )
-from .youtube_studio import StudioAutomationError, execute_studio_task
+from .youtube_studio import (
+    StudioAutomationError,
+    StudioIdentityVerificationRequired,
+    execute_studio_task,
+    open_studio_identity_verification,
+)
 
 # Fail closed on programming defects while preserving the bridge's established
 # recovery behavior for filesystem, provider, parsing, and subprocess failures.
@@ -15894,6 +15901,78 @@ def retry_publication_v2_stage(payload: dict) -> dict:
     retry_publication_stage(settings, str(payload.get("snapshotId", "")), str(payload.get("stage", "")))
     save_settings(settings)
     return snapshot()
+
+
+def open_publication_v2_identity_verification(payload: dict) -> dict:
+    """Open Studio for human 2FA only; never retry or upload from this action."""
+    snapshot_id = str(payload.get("snapshotId", "")).strip()
+    if not snapshot_id:
+        raise ValueError("Выберите publication snapshot для 2FA.")
+    settings = load_settings()
+    snapshot_record = dict((settings.youtube_publication_snapshots or {}).get(snapshot_id, {}) or {})
+    execution = dict((settings.youtube_publication_executions or {}).get(snapshot_id, {}) or {})
+    if not snapshot_record or not execution:
+        raise ValueError("Publication snapshot не найден.")
+    steps = dict(execution.get("steps", {}) or {})
+    identity_required = any(
+        str(dict(step or {}).get("error", {}).get("category", "")).upper() == "STUDIO_IDENTITY_REQUIRED"
+        for step in steps.values()
+        if isinstance(step, dict)
+    )
+    if not identity_required:
+        raise ValueError("Для этой строки нет активного запроса Studio 2FA.")
+    video_id = str(execution.get("youtubeVideoId") or "").strip()
+    if not video_id:
+        raise ValueError("Studio 2FA доступна только после подтверждённого YouTube video ID.")
+    channel_id = str(snapshot_record.get("channelId", "")).strip()
+    open_studio_identity_verification(_youtube_channel_profile_dir(channel_id), video_id)
+    now = datetime.now().astimezone().isoformat()
+    execution.setdefault("timeline", []).append({
+        "at": now,
+        "stage": str(execution.get("currentStage") or "STUDIO"),
+        "status": "USER_ACTION_REQUIRED",
+        "detail": "Открыт обычный Chrome профиля канала для ручного 2FA. Автоповтор не запускался.",
+    })
+    settings.youtube_publication_executions[snapshot_id] = execution
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-identity-verification",
+        "count": 1,
+        "message": "Studio открыт в профиле канала. Завершите 2FA и нажмите «Попробовать ещё раз».",
+    }}
+
+
+def queue_publication_v2_reuploads(payload: dict) -> dict:
+    """Queue explicit selected private replacement uploads; no old video is touched."""
+    requested = list(dict.fromkeys(
+        str(value).strip() for value in payload.get("snapshotIds", []) if str(value).strip()
+    ))
+    if not requested:
+        raise ValueError("Выберите хотя бы один ролик для перезалива.")
+    reason = " ".join(str(payload.get("reason", "")).split())
+    if not reason:
+        raise ValueError("Укажите причину перезалива.")
+    if payload.get("metadataConfirmed") is not True:
+        raise ValueError("Подтвердите актуальность metadata перед перезаливом.")
+    settings = load_settings()
+    queued = 0
+    for snapshot_id in requested:
+        queue_publication_reupload(
+            settings,
+            snapshot_id,
+            reason,
+            metadata_confirmed=True,
+        )
+        queued += 1
+    save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "publication-v2-reupload",
+        "count": queued,
+        "message": (
+            f"В private re-upload очередь поставлено: {queued}. "
+            "Старые YouTube ролики не удаляются и не публикуются автоматически."
+        ),
+    }}
 
 
 def resolve_publication_v2_uncertain_upload(payload: dict) -> dict:
