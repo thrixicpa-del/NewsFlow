@@ -769,8 +769,8 @@ class PublicationV2PresetTests(unittest.TestCase):
         self.assertEqual(restored.youtube_publication_plan_versions, settings.youtube_publication_plan_versions)
 
 class PublicationV2SchedulerTests(unittest.TestCase):
-    def test_adaptive_bulk_range_spreads_each_channel_and_avoids_cross_channel_collisions(self):
-        """A dense operator-selected window stays usable without synchronising channels."""
+    def test_adaptive_bulk_range_enforces_three_hour_minimum_per_channel(self):
+        """Three auto-planned videos on one channel must be at least 180 minutes apart."""
         assignments = [
             {
                 "productionItemId": f"{channel}-{number}",
@@ -780,15 +780,12 @@ class PublicationV2SchedulerTests(unittest.TestCase):
                 "reason": "balanced",
             }
             for channel in ("channel-a", "channel-b")
-            for number in range(1, 6)
+            for number in range(1, 4)
         ]
         rules = {
             channel: {
                 "channelId": channel,
                 "timezone": "Europe/Minsk",
-                # Three hours is the normal preference, but ten clips across
-                # two channels must still fit naturally inside one selected
-                # nine-hour window.
                 "intervalMinutes": 180,
             }
             for channel in ("channel-a", "channel-b")
@@ -808,9 +805,8 @@ class PublicationV2SchedulerTests(unittest.TestCase):
 
         self.assertTrue(all(not row.get("scheduleWarning") for row in scheduled))
         slots = [datetime.fromisoformat(str(row["publishAt"])) for row in scheduled]
-        self.assertEqual(len(slots), 10)
-        self.assertEqual(len(set(slots)), 10)
-        self.assertTrue(all(slot.hour >= 3 and (slot.hour < 12 or slot.minute == 0) for slot in slots))
+        self.assertEqual(len(slots), 6)
+        self.assertEqual(len(set(slots)), 6)
         self.assertTrue(all(slot.minute in {0, 15, 30, 45} for slot in slots))
         for channel in ("channel-a", "channel-b"):
             channel_slots = sorted(
@@ -819,8 +815,38 @@ class PublicationV2SchedulerTests(unittest.TestCase):
                 if row["channelId"] == channel
             )
             gaps = [int((after - before).total_seconds() // 60) for before, after in pairwise(channel_slots)]
-            self.assertTrue(all(gap >= 15 for gap in gaps))
-            self.assertLessEqual(max(gaps) - min(gaps), 60)
+            self.assertTrue(all(gap >= 180 for gap in gaps), gaps)
+
+    def test_adaptive_bulk_range_reports_interval_conflict_in_too_small_window(self):
+        assignments = [
+            {
+                "productionItemId": f"item-{number}",
+                "channelId": "channel-a",
+                "source": "auto",
+                "locked": False,
+                "reason": "balanced",
+            }
+            for number in range(1, 4)
+        ]
+
+        scheduled = apply_bulk_schedule_range(
+            assignments,
+            {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "08:00",
+                "timezone": "Europe/Minsk",
+                "spacingStrategy": "adaptive_jittered",
+            },
+            {"channel-a": {"channelId": "channel-a", "timezone": "Europe/Minsk", "intervalMinutes": 180}},
+        )
+
+        ready = [row for row in scheduled if row.get("publishAt")]
+        blocked = [row for row in scheduled if row.get("scheduleWarning")]
+        self.assertEqual(len(ready), 2)
+        self.assertEqual(len(blocked), 1)
+        self.assertIn("минимальный интервал 180 минут", blocked[0]["scheduleWarning"])
+        self.assertNotIn("publishAt", blocked[0])
 
     def test_adaptive_bulk_range_honors_operator_window_quotas(self):
         """Window priorities cap their own slots without changing channel assignment."""
@@ -877,7 +903,7 @@ class PublicationV2SchedulerTests(unittest.TestCase):
                 "channelId": "channel-a",
                 "timezone": "Europe/Minsk",
                 "publishWindowStart": "06:00",
-                "publishWindowEnd": "11:00",
+                "publishWindowEnd": "12:00",
                 "maxVideosPerHour": 1,
                 "topicCooldownMinutes": 90,
                 "dailyCap": 3,
