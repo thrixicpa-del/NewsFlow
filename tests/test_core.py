@@ -68,6 +68,33 @@ class PromptTests(unittest.TestCase):
         self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
         self.assertIn("9000–11000", request.prompt)
 
+    def test_structured_length_contract_is_prioritized_without_truncating_the_user_template(self):
+        template = (
+            "FULL_USER_PROMPT_BEGIN\\n"
+            "Сохрани все мои правила. Старое текстовое число: 5 000 символов.\\n"
+            "Уникальный хвост шаблона: FULL_USER_PROMPT_END {title}"
+        )
+        request = build_requests(
+            ["Проверочная тема"],
+            template,
+            [],
+            default_target_chars=10000,
+            default_allowed_min=9000,
+            default_allowed_max=11000,
+        )[0]
+
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (10000, 9000, 11000))
+        self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", request.prompt)
+        self.assertIn("len(text.strip())", request.prompt)
+        self.assertIn("приоритет над любыми конфликтующими числами", request.prompt)
+        self.assertIn("FULL_USER_PROMPT_BEGIN", request.prompt)
+        self.assertIn("FULL_USER_PROMPT_END Проверочная тема", request.prompt)
+        self.assertIn("Старое текстовое число: 5 000 символов.", request.prompt)
+        self.assertLess(
+            request.prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
+            request.prompt.index("FULL_USER_PROMPT_BEGIN"),
+        )
+
     def test_global_structured_length_contract_applies_to_every_scenario(self):
         requests = build_requests(
             ["Первый", "Второй"],
