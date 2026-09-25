@@ -50,17 +50,31 @@ class IdeaParsingTests(unittest.TestCase):
         self.assertIn("переговоры", candidate["title"].casefold())
         self.assertLessEqual(len(candidate["title"]), 100)
 
-    def test_formula_fallback_is_direction_specific_for_non_negotiation_topics(self):
+    def test_abstract_non_deadlock_candidate_is_rejected_instead_of_inventing_action(self):
         candidate = bridge._formula_candidate({
             "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
         }, topic="ЕС-Россия — новые санкции")
 
-        self.assertTrue(candidate["title"])
-        self.assertIn("ЕС", candidate["title"])
-        self.assertIn("Россия", candidate["title"])
-        self.assertIn("санкц", candidate["title"].casefold())
-        self.assertNotIn("Стороны меняют курс", candidate["title"])
+        self.assertEqual(candidate["title"], "")
+        self.assertEqual(candidate["provocative_headline"], "")
+        self.assertEqual(candidate["subject_action"], "")
+        self.assertEqual(candidate["object_consequence"], "")
+
+    def test_concrete_non_deadlock_provider_title_is_preserved_without_rewrite(self):
+        title = "Санкции снова в центре — ЕС и Россия меняют условия — санкционный спор продолжается"
+        candidate = bridge._formula_candidate({"title": title}, topic="ЕС-Россия — новые санкции")
+
+        self.assertEqual(candidate["title"], title)
         self.assertLessEqual(len(candidate["title"]), 100)
+        self.assertEqual(candidate["subjects"], ["ЕС", "Россия"])
+        self.assertEqual(candidate["information_payload"]["object"], "санкции")
+
+    def test_negotiation_keyword_without_explicit_deadlock_does_not_invent_a_deadlock(self):
+        candidate = bridge._formula_candidate({
+            "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
+        }, topic="Трамп-Зеленский — давление и переговоры")
+
+        self.assertEqual(candidate["title"], "")
 
     def test_formula_object_detection_does_not_read_deportations_as_port(self):
         subjects, object_name = bridge._formula_topic_context("Россия — депортации и диаспоры")
@@ -84,7 +98,7 @@ class IdeaParsingTests(unittest.TestCase):
         self.assertIn("Назвать субъектов: Россия, Украина", candidate["script_requirements"])
         self.assertIn("Объяснить объект: переговоры", candidate["script_requirements"])
 
-    def test_every_default_direction_local_formula_is_contextual_and_within_hard_limit(self):
+    def test_local_formula_never_reuses_generic_filler_across_default_directions(self):
         generic = {
             "title": "Ставки растут — Стороны меняют курс — Баланс сил под угрозой",
         }
@@ -93,12 +107,19 @@ class IdeaParsingTests(unittest.TestCase):
             with self.subTest(topic=topic):
                 candidate = bridge._formula_candidate(generic, topic=topic)
                 title = candidate["title"]
-                self.assertTrue(title)
-                self.assertLessEqual(len(title), 100)
-                parts = tuple(title.split(" — "))
-                self.assertEqual(len(parts), 3)
-                self.assertFalse(bridge._formula_parts_need_contextual_fallback(parts, topic))
                 self.assertNotIn("Стороны меняют курс", title)
+                if title:
+                    self.assertLessEqual(len(title), 100)
+                    parts = tuple(title.split(" — "))
+                    self.assertEqual(len(parts), 3)
+                    self.assertFalse(bridge._formula_parts_need_contextual_fallback(parts, topic))
+
+    def test_underspecified_direction_does_not_invent_a_named_actor(self):
+        candidate = bridge._formula_candidate({
+            "title": "Ставки растут — Участники меняют курс — Последствия нарастают",
+        }, topic="Продовольственный кризис — помидорная война")
+
+        self.assertEqual(candidate["title"], "")
 
     def test_formula_prompt_requires_named_subject_object_and_natural_seo_anchors(self):
         prompt = bridge._title_generation_prompt(
