@@ -20,6 +20,7 @@ from scriptor.publication_v2 import (
     complete_upload_attempt,
     confirm_publication_snapshots,
     fail_publication_stage,
+    ensure_refreshed_channel_publication_rule,
     migrate_legacy_publication_data,
     next_upload_candidates,
     normalize_channel_publication_rule,
@@ -797,6 +798,50 @@ class PublicationV2PresetTests(unittest.TestCase):
                 restored = config.load_settings()
 
         self.assertEqual(restored.youtube_publication_plan_versions, settings.youtube_publication_plan_versions)
+
+class PublicationV2ChannelRefreshTests(unittest.TestCase):
+    def test_new_monetized_channel_gets_safe_priority_default_without_overwriting_existing_rules(self):
+        settings = Settings()
+
+        created = ensure_refreshed_channel_publication_rule(
+            settings, "channel-money", monetized=True,
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(
+            {
+                key: settings.youtube_channel_publication_rules["channel-money"][key]
+                for key in ("enabled", "quota", "monetized", "channelPriority")
+            },
+            {"enabled": True, "quota": 1, "monetized": True, "channelPriority": 10},
+        )
+
+        settings.youtube_channel_publication_rules["channel-money"].update({
+            "enabled": False,
+            "quota": 7,
+            "channelPriority": 0,
+        })
+        created_again = ensure_refreshed_channel_publication_rule(
+            settings, "channel-money", monetized=True,
+        )
+
+        self.assertFalse(created_again)
+        self.assertEqual(
+            {
+                key: settings.youtube_channel_publication_rules["channel-money"][key]
+                for key in ("enabled", "quota", "channelPriority")
+            },
+            {"enabled": False, "quota": 7, "channelPriority": 0},
+        )
+
+    def test_non_monetized_refresh_does_not_auto_add_a_priority_rule(self):
+        settings = Settings()
+
+        self.assertFalse(ensure_refreshed_channel_publication_rule(
+            settings, "channel-regular", monetized=False,
+        ))
+        self.assertEqual(settings.youtube_channel_publication_rules, {})
+
 
 class PublicationV2SchedulerTests(unittest.TestCase):
     def test_adaptive_bulk_range_enforces_three_hour_minimum_per_channel(self):
