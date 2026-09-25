@@ -167,7 +167,8 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertTrue(any("Правило второй темы" in prompt for prompt in prompts))
         self.assertFalse(any("Общее правило, которое не должно заменить личные" in prompt for prompt in prompts))
 
-    def test_generation_does_not_require_legacy_three_part_formula(self):
+    def test_generation_rejects_free_form_titles_and_falls_back_to_the_three_part_formula(self):
+        """A provider question must never bypass the operator's title formula."""
         settings = Settings(
             openai_api_keys=[OpenAIKey(label="Тест", secret="test-key", active=True)],
             idea_plan=[{
@@ -187,12 +188,16 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
              patch.object(bridge, "save_settings"), \
              patch.object(bridge, "snapshot", return_value={}), \
              patch.object(bridge, "HybridTextPool", return_value=FakePool()):
-            bridge.generate_ideas({})
+            bridge.generate_ideas({"titleFormulaOnly": True})
 
         self.assertEqual(settings.idea_suggested_topics, [])
         self.assertEqual(len(settings.idea_results), 2)
-        self.assertTrue(all("[" not in idea and "]" not in idea for idea in settings.idea_results))
-        self.assertTrue(all(idea.count("!") == 0 for idea in settings.idea_results))
+        for idea in settings.idea_results:
+            parts = idea.split(" — ")
+            self.assertEqual(len(parts), 3, idea)
+            self.assertTrue(all(part.strip() for part in parts), idea)
+            self.assertIn("Международные переговоры", idea)
+            self.assertNotIn("?", idea)
 
     def test_title_validation_rejects_long_caps_and_unfinished_templates(self):
         self.assertTrue(bridge.valid_idea_title(

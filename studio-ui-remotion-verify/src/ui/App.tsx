@@ -1271,6 +1271,7 @@ export function Ideas({
   const [youtubeGenerateTogether, setYoutubeGenerateTogether] = useState(false);
   const [youtubeSelected, setYoutubeSelected] = useState<string[]>([]);
   const [youtubeIncludeMine, setYoutubeIncludeMine] = useState(true);
+  const [titleFormulaOnly, setTitleFormulaOnly] = useState(false);
   const [youtubeError, setYoutubeError] = useState("");
   const [generationOpen, setGenerationOpen] = useState(false);
   const deleteSelectedTopicsLock = useRef(false);
@@ -1412,7 +1413,9 @@ export function Ideas({
     const result = await command("add-topic", { topic });
     if (result) {
       setCustomTopic("");
-      setSelected([topic]);
+      setSelected((current) =>
+        current.includes(topic) ? current : [...current, topic],
+      );
     }
   };
   const suggestDirections = async () => {
@@ -1578,6 +1581,7 @@ export function Ideas({
         count: Number(vectors),
         provider,
         requirements,
+        titleFormulaOnly,
       });
       if (!result) {
         setGenerationError(
@@ -1837,6 +1841,11 @@ export function Ideas({
           <Sparkles size={17} />
           {generatingIdeas ? "Генерация идей…" : "Сгенерировать идеи"}
         </Button>
+        <Checkbox
+          label="Только трёхчастная формула"
+          checked={titleFormulaOnly}
+          onCheckedChange={setTitleFormulaOnly}
+        />
         <Button onClick={() => setGenerationOpen(true)}>
           <Settings2 size={17} />
           Настроить генерацию

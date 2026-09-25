@@ -26,7 +26,7 @@ export type GenericCommandPayload = Record<string, unknown>;
 
 export interface CriticalCommandPayloads {
   "save-settings": GenericCommandPayload;
-  "generate-ideas": { topics?: string[]; count?: number; requirements?: string; provider?: "agent" | "openai" };
+  "generate-ideas": { topics?: string[]; count?: number; requirements?: string; provider?: "agent" | "openai"; titleFormulaOnly?: boolean };
   "generate-scenarios": { indices?: number[]; provider?: "agent" | "openai"; force?: boolean; restart?: boolean };
   "generate-voice-queue": { force?: boolean };
   "generate-voice-range": { rangeId?: string; force?: boolean };
