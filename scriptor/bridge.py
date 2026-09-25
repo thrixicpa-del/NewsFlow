@@ -16526,6 +16526,17 @@ def run_publication_v2_studio(payload: dict) -> dict:
             if stage_state in terminal:
                 skipped += 1
                 continue
+            reupload_state = dict(execution.get("reupload", {}) or {})
+            if kind == "post" and reupload_state and not bool(reupload_state.get("scheduleApplied")):
+                fail_publication_stage(
+                    settings,
+                    snapshot_id,
+                    "POST",
+                    "USER_ACTION_REQUIRED",
+                    "Community post не запущен: исходное расписание replacement upload сохранено только для проверки и не применено автоматически.",
+                )
+                skipped += 1
+                continue
             if kind in {"ads", "post", "cards", "end-screen"} and str(dict(execution_steps.get("YOUTUBE_PROCESSING", {}) or {}).get("status", "")).upper() != "SUCCESS":
                 skipped += 1
                 continue
