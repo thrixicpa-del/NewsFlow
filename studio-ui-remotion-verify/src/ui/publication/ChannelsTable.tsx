@@ -7,7 +7,7 @@ import type { ChannelRow } from "./types";
 
 export function ChannelsTable({ rows, onEdit }: { rows: ChannelRow[]; onEdit(row: ChannelRow): void }) {
   const columns: ColumnDef<ChannelRow>[] = [
-    { id: "number", header: "№", cell: ({ row }) => <span className="nf-number">Канал {row.index + 1}</span> },
+    { id: "number", header: "№", cell: ({ row }) => <span className="nf-number">Канал {row.original.number}</span> },
     { accessorKey: "name", header: "Канал", cell: ({ row }) => <div><b>{row.original.name}</b><small>{row.original.subscribers} подписчиков</small></div> },
     { id: "oauth", header: "OAuth", cell: ({ row }) => <Badge tone={row.original.oauthConnected ? "success" : "warning"}>{row.original.oauthConnected ? "Подключён" : "Нужен вход"}</Badge> },
     { id: "monetized", header: "Монетизация", cell: ({ row }) => <Badge tone={row.original.monetized ? "success" : "neutral"}>{row.original.monetized ? "Вкл" : "Нет"}</Badge> },
