@@ -1821,6 +1821,66 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
                 self.assertEqual(result["operationResult"]["kind"], result_kind)
                 self.assertEqual(result["operationResult"]["count"], 0)
 
+    def test_blank_current_cover_id_reaches_all_generation_entry_points_selected_and_all(self):
+        """Prompt/headline/subheadline actions must not reject the visible current RC row."""
+        from scriptor import bridge
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        title = "Ручная текущая тема"
+        job = Job(
+            ScenarioRequest(0, title, "", "production:current"),
+            RunState.DONE,
+            "Текущий сценарий",
+        )
+        cases = (
+            (bridge.generate_cover_headlines, {
+                "cover_headline": "ПОРТ ЗАКРЫТ",
+                "headline_status": "READY",
+                "headline_source": "AI",
+            }, "cover-headlines"),
+            (bridge.generate_cover_subheadlines, {
+                "cover_headline": "ПОРТ ЗАКРЫТ",
+                "headline_status": "READY",
+                "cover_subheadline": "Контейнеры ждут решения",
+                "subheadline_status": "READY",
+                "subheadline_source": "AI",
+            }, "cover-subheadlines"),
+            (bridge.generate_cover_prompts, {
+                "image_prompt": "Existing visual brief",
+                "image_prompt_options": ["Existing visual brief"],
+            }, "cover-prompts"),
+        )
+        scopes = (
+            {"indices": [0], "productionItemIds": ["production:current"], "provider": "agent"},
+            {"provider": "agent"},
+        )
+
+        for action, ready_fields, result_kind in cases:
+            for payload in scopes:
+                with self.subTest(action=action.__name__, selected=bool(payload.get("indices"))):
+                    settings = Settings()
+                    settings.cover_queue = [{
+                        "title": title,
+                        "scenario_index": 1,
+                        "script": "Текущий сценарий",
+                        "production_item_id": "",
+                        **ready_fields,
+                    }]
+
+                    def hydrate(current_settings):
+                        return bridge._sync_current_scenario_covers(current_settings)
+
+                    with patch("scriptor.bridge.load_settings", return_value=settings), \
+                         patch("scriptor.bridge.load_session", return_value=([title], [job])), \
+                         patch("scriptor.bridge._hydrate_cover_library", side_effect=hydrate), \
+                         patch("scriptor.bridge.snapshot", return_value={"covers": []}):
+                        result = action(payload)
+
+                    self.assertEqual(settings.cover_queue[0]["production_item_id"], "production:current")
+                    self.assertEqual(result["operationResult"]["kind"], result_kind)
+                    self.assertEqual(result["operationResult"]["count"], 0)
+
     def test_current_session_job_adopts_blank_cover_id_for_selected_and_all_scope(self):
         """Old RC rows without an ID become the current row, not an unselectable ghost."""
         from scriptor import bridge
