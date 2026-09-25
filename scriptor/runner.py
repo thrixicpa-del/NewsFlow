@@ -294,11 +294,12 @@ class ParallelRunner:
             if status == "READY":
                 return True
 
-        # A usable script is preferable to turning a completed creative task
-        # into an error merely because the model stopped early.  Its actual
-        # length remains in the snapshot for an informative UI label.
+        # Preserve the best usable text without misclassifying an out-of-range
+        # result as production-ready. The operator can retry it later from the
+        # existing batch action; this is a paused task, not an error.
+        job.state = RunState.PAUSED
         job.error = ""
-        return True
+        return False
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:
