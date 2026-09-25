@@ -240,6 +240,36 @@ class PublicationV2DistributionTests(unittest.TestCase):
         self.assertEqual(settings.youtube_publication_assignments, {})
 
 
+    def test_bridge_bulk_range_without_extra_cap_preserves_channel_quota(self):
+        settings = Settings(
+            analytics_channels=[{"profile_id": "channel-a", "name": "A"}],
+            youtube_oauth_tokens={"channel-a": "{\"token\": \"a\"}"},
+            youtube_publication_items={
+                f"pi-{index}": {
+                    "productionItemId": f"pi-{index}",
+                    "readiness": {"state": "VIDEO_READY"},
+                }
+                for index in range(3)
+            },
+            youtube_channel_publication_rules={
+                "channel-a": {"channelId": "channel-a", "enabled": True, "quota": 3},
+            },
+        )
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "reconcile_publication_items"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            result = bridge.preview_publication_v2_distribution({"bulkSchedule": {
+                "date": "2026-11-15",
+                "startTime": "03:00",
+                "endTime": "12:00",
+                "timezone": "Europe/Minsk",
+                "channelIds": ["channel-a"],
+                "maxPerChannel": 0,
+            }})
+
+        rows = result["publicationPreview"]["assignments"]
+        self.assertEqual([row["channelId"] for row in rows], ["channel-a", "channel-a", "channel-a"])
+
     def test_bridge_auto_preview_excludes_orphan_channel_rule_when_real_channels_are_known(self):
         """A stale rule for a removed/unconnected channel must never receive new auto assignments."""
         settings = Settings(
