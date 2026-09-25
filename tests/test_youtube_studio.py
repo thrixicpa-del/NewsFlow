@@ -1,9 +1,23 @@
 import unittest
+from unittest.mock import patch
 
-from scriptor.youtube_studio import (_click_exact_visible_button, planned_studio_actions, studio_details_url, studio_editor_url,
-                                     studio_monetization_url,
-                                     studio_shell_loaded, studio_control_labels, end_screen_requires_editor_entry,
-                                     studio_transition_label)
+from scriptor.youtube_studio import (
+    StudioAutomationError,
+    StudioIdentityVerificationRequired,
+    _click_exact_visible_button,
+    _open_video_editor,
+    _save_editor_changes,
+    _verify_cards_saved,
+    end_screen_requires_editor_entry,
+    identity_verification_required,
+    planned_studio_actions,
+    studio_control_labels,
+    studio_details_url,
+    studio_editor_url,
+    studio_monetization_url,
+    studio_shell_loaded,
+    studio_transition_label,
+)
 
 
 class YouTubeStudioActionsTests(unittest.TestCase):
@@ -112,3 +126,155 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         self.assertTrue(_click_exact_visible_button(page, "Перейти к редактору"))
         self.assertEqual(page.label, "Перейти к редактору")
         self.assertTrue(page.button.clicked)
+
+    def test_editor_navigation_clicks_exact_current_video_editor_route(self):
+        class Body:
+            def __init__(self, page):
+                self.page = page
+                self.evaluate_args = []
+
+            def inner_text(self, timeout):
+                return "Сведения о видео Редактор Подсказки Конечные заставки"
+
+            def evaluate(self, _script, video_id):
+                self.evaluate_args.append(video_id)
+                self.page.url = f"https://studio.youtube.com/video/{video_id}/editor"
+                return True
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.body = Body(self)
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def locator(self, _selector):
+                return self.body
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        page = Page()
+        _open_video_editor(page, "video-a")
+
+        self.assertEqual(page.body.evaluate_args, ["video-a"])
+        self.assertEqual(page.url, "https://studio.youtube.com/video/video-a/editor")
+
+    def test_editor_navigation_reports_access_denied_before_any_click(self):
+        class Body:
+            def __init__(self):
+                self.evaluated = False
+
+            def inner_text(self, timeout):
+                return "Редактор У вас нет доступа к этому разделу"
+
+            def evaluate(self, *_args):
+                self.evaluated = True
+                return True
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.body = Body()
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def locator(self, _selector):
+                return self.body
+
+        page = Page()
+        with self.assertRaises(StudioAutomationError) as raised:
+            _open_video_editor(page, "video-a")
+
+        self.assertIn("нет доступа", str(raised.exception).casefold())
+        self.assertFalse(page.body.evaluated)
+
+    def test_editor_navigation_surfaces_identity_verification_as_distinct_error(self):
+        class Body:
+            def inner_text(self, timeout):
+                return "Редактор Подтвердите личность"
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def locator(self, _selector):
+                return Body()
+
+        self.assertTrue(identity_verification_required("Подтвердите личность"))
+        with self.assertRaises(StudioIdentityVerificationRequired):
+            _open_video_editor(Page(), "video-a")
+
+    def test_save_waits_until_studio_consumes_enabled_button(self):
+        class Button:
+            def __init__(self):
+                self.clicked = False
+
+            @property
+            def first(self):
+                return self
+
+            def is_visible(self, timeout):
+                return True
+
+            def is_enabled(self, timeout):
+                return not self.clicked
+
+            def click(self, timeout):
+                self.clicked = True
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Редактор Подсказки Конечные заставки"
+
+        class Page:
+            def __init__(self):
+                self.button = Button()
+                self.role_request = None
+
+            def locator(self, _selector):
+                return Body()
+
+            def get_by_role(self, role, name):
+                self.role_request = (role, name)
+                return self.button
+
+            def get_by_label(self, label, exact):
+                raise LookupError((label, exact))
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        page = Page()
+        _save_editor_changes(page)
+
+        self.assertTrue(page.button.clicked)
+        self.assertEqual(page.role_request[0], "button")
+
+    def test_card_save_verification_reopens_cards_and_requires_every_visible_title(self):
+        class Body:
+            def inner_text(self, timeout):
+                return "Ролик один Ролик два"
+
+        class Page:
+            def locator(self, _selector):
+                return Body()
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        cards = [
+            {"videoTitle": "Ролик один"},
+            {"videoTitle": "Ролик два"},
+        ]
+        with patch("scriptor.youtube_studio._open_editor_section") as open_section:
+            _verify_cards_saved(Page(), cards)
+
+        self.assertEqual(open_section.call_count, 1)
+        self.assertEqual(open_section.call_args.args[1], "cards")
+
