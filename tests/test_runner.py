@@ -81,6 +81,44 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].actual_chars, 10000)
         self.assertEqual(jobs[0].length_repair_attempts, 1)
 
+    async def test_one_sided_minimum_length_repair_uses_a_truthful_instruction(self):
+        class MinimumClient:
+            prompts = []
+
+            async def generate(self, prompt, on_progress=None):
+                return "мало"
+
+            async def generate_fresh(self, prompt, on_progress=None):
+                self.prompts.append(prompt)
+                return "а" * 9000
+
+        client = MinimumClient()
+        request = ScenarioRequest(0, "S", "P", target_chars=9000, allowed_min=9000)
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertIn("не менее 9000 знаков", client.prompts[0])
+        self.assertNotIn("9000 до 0", client.prompts[0])
+
+    async def test_one_sided_maximum_length_repair_uses_a_truthful_instruction(self):
+        class MaximumClient:
+            prompts = []
+
+            async def generate(self, prompt, on_progress=None):
+                return "а" * 12000
+
+            async def generate_fresh(self, prompt, on_progress=None):
+                self.prompts.append(prompt)
+                return "а" * 10000
+
+        client = MaximumClient()
+        request = ScenarioRequest(0, "S", "P", target_chars=10000, allowed_max=10000)
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertIn("не более 10000 знаков", client.prompts[0])
+        self.assertNotIn("0 до 10000", client.prompts[0])
+
     async def test_short_script_is_repaired_within_the_configured_bounds(self):
         class LengthClient:
             fresh_calls = 0
