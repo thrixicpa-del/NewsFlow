@@ -1137,9 +1137,10 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 settings = make_settings()
                 calls = []
 
-                def render(_prompt, _output, _stem, _operation, _ratio, **kwargs):
-                    calls.append(tuple(str(path) for path in kwargs.get("references") or []))
-                    return [root / f"{build_mode}.png"]
+                def render(_prompt, _output, _stem, _operation, _ratio, *,
+                           _calls=calls, _build_mode=build_mode, **kwargs):
+                    _calls.append(tuple(str(path) for path in kwargs.get("references") or []))
+                    return [root / f"{_build_mode}.png"]
 
                 with patch.object(bridge, "load_settings", return_value=settings), \
                      patch.object(bridge, "_hydrate_cover_library", return_value=False), \
