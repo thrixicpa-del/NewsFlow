@@ -3275,40 +3275,40 @@ def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
     # Its claims are about the selected direction itself, so it can preserve
     # output count without pretending an unverified event already happened.
     hooks = (
-        f"Фокус на теме {object_label}",
-        f"{object_label} выходит в фокус",
-        f"{object_label} требует внимания",
-        f"Главный вопрос {object_label}",
-        f"{object_label} в центре разбора",
-        f"В центре темы {object_label}",
-        f"{object_label} становится ключевым",
-        f"Разбор темы {object_label}",
-        f"{object_label} задаёт повестку",
-        f"Почему важен {object_label}",
+        f"Фокус смещается к {object_label}",
+        f"{object_label} выходит на первый план",
+        f"Главный вопрос теперь {object_label}",
+        f"Разбор начинается с {object_label}",
+        f"Редакционный фокус на {object_label}",
+        f"Ключевая тема {object_label}",
+        f"В центре внимания {object_label}",
+        f"Новая рамка темы {object_label}",
+        f"Контекст строится вокруг {object_label}",
+        f"Главная линия {object_label}",
     )
     actions = (
-        f"{subject} в центре темы",
-        f"{subject} задаёт контекст",
-        f"{subject} остаётся в фокусе",
-        f"{subject} ключевая сторона",
-        f"{subject} в центре разбора",
-        f"{subject} определяет контекст",
-        f"{subject} задаёт рамку темы",
-        f"{subject} остаётся ключевым",
-        f"{subject} формирует контекст",
-        f"{subject} в центре повестки",
+        f"Контекст задаёт {subject}",
+        f"В фокусе остаётся {subject}",
+        f"Ключевая сторона {subject}",
+        f"Рамку определяет {subject}",
+        f"Контекст формирует {subject}",
+        f"В центре разбора {subject}",
+        f"Повестку задаёт {subject}",
+        f"Ключевым остаётся {subject}",
+        f"Тему определяет {subject}",
+        f"В центре повестки {subject}",
     )
     consequences = (
-        f"{object_label} требует разбора",
-        f"{object_label} остаётся вопросом",
+        f"Разбора требует {object_label}",
+        "выводы по теме требуют проверки",
+        "последствия отделяем от фактов",
+        "контекст темы остаётся ключевым",
+        "риски требуют отдельной проверки",
+        f"главный вопрос — {object_label}",
+        "факты и оценки нужно разделить",
+        "итог зависит от контекста темы",
         "последствия требуют проверки",
-        f"фокус остаётся на {object_label}",
-        "риски нужно отделить от фактов",
-        f"{object_label} остаётся в центре",
-        "выводы требуют проверки",
-        f"важен контекст {object_label}",
-        "последствия пока неясны",
-        f"ключевой вопрос {object_label}",
+        "главный вопрос остаётся открытым",
     )
     index = variant % len(hooks)
     values = hooks[index], actions[index], consequences[index]
@@ -3337,13 +3337,11 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
         parts = tuple(_formula_part(part) for part in raw_title.split(
             _IDEA_TITLE_FORMULA_SEPARATOR))
     fallback_parts = _local_formula_parts(topic, variant)
-    used_contextual_fallback = force_local_parts
     if force_local_parts:
         parts = fallback_parts
     elif len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
         hook = raw_title.strip("?") if raw_title and not _has_unresolved_headline_template(raw_title) else fallback_parts[0]
         parts = (hook, fallback_parts[1], fallback_parts[2])
-        used_contextual_fallback = True
     elif _formula_parts_need_contextual_fallback(parts, topic):
         parts = fallback_parts
         used_contextual_fallback = True
@@ -3380,18 +3378,17 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
     payload = dict(information_payload) if isinstance(information_payload, dict) else {}
     seo_anchors = _formula_seo_anchors(topic, subjects, object_name)
     canonical_payload = {
-        "core": parts[1] if all(parts) else "",
+        "core": parts[1],
         "object": object_name,
-        "consequence": parts[2] if all(parts) else "",
+        "consequence": parts[2],
         "seo_anchors": seo_anchors,
     }
-    for key, value in canonical_payload.items():
-        if not value:
-            continue
-        if used_contextual_fallback:
-            payload[key] = value
-        else:
-            payload.setdefault(key, value)
+    if not payload:
+        payload = {
+            key: value
+            for key, value in canonical_payload.items()
+            if value
+        }
 
     script_requirements = candidate.get("script_requirements")
     requirements = (
