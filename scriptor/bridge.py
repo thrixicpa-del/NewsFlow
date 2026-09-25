@@ -103,6 +103,7 @@ from .publication_v2 import (
     confirm_publication_snapshots,
     fail_publication_stage,
     frozen_artifact_matches,
+    ensure_refreshed_channel_publication_rule,
     mark_publication_stage_not_required,
     migrate_legacy_publication_data,
     normalize_channel_publication_rule,
@@ -5178,6 +5179,11 @@ def refresh_analytics(payload: dict) -> dict:
             else:
                 channel["analytics_note"] = ""
             settings.youtube_oauth_tokens[profile_id] = json.dumps(refreshed_token, ensure_ascii=False)
+            ensure_refreshed_channel_publication_rule(
+                settings,
+                profile_id,
+                monetized=bool(channel.get("monetary_access", False)),
+            )
             refreshed += 1
         except _BRIDGE_OPERATION_ERRORS as exc:
             channel["status"] = f"Ошибка аналитики: {str(exc)[:180]}"
