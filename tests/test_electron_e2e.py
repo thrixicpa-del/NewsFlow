@@ -141,12 +141,14 @@ class ElectronE2ESmokeTests(unittest.TestCase):
                 });
                 return {
                     operation: state.operationResult,
+                    results: state.ideaResults,
                     suggestions: state.ideaSuggestedTopics,
                 };
             }""")
             self.assertEqual("ideas", generated["operation"]["kind"])
             self.assertGreaterEqual(generated["operation"]["generation"]["generated"], 1)
-            self.assertTrue(generated["suggestions"], generated)
+            self.assertTrue(generated["results"], generated)
+            self.assertEqual([], generated["suggestions"], generated)
             browser.close()
 
     def test_screen_text_maintenance_round_trip_does_not_require_footage_roots(self):
