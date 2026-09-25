@@ -139,7 +139,10 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 "durationSeconds": 900,
             },
             catalog,
-            ["playlist-a", "playlist-b"],
+            [
+                {"channelId": "channel-a", "playlistId": "playlist-a", "public": True},
+                {"channelId": "channel-a", "playlistId": "playlist-b", "public": True},
+            ],
         )
 
         self.assertEqual(len(plan["cards"]), 5)
