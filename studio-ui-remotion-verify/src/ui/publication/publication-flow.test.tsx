@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { PublicationPage } from "./PublicationPage";
 
@@ -58,8 +58,8 @@ describe("PublicationPage interactions", () => {
     expect(screen.getByText("Канал 1")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
-    await screen.findByLabelText("Канал для Готовый ролик");
-    expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
+    const assignmentSelect = await screen.findByLabelText("Канал для Готовый ролик");
+    expect(within(assignmentSelect).getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
   });
 
   it("navigates assignments both channel-to-video and video-to-channel with stable numbers", async () => {
@@ -95,10 +95,10 @@ describe("PublicationPage interactions", () => {
 
     const channelFilter = await screen.findByLabelText("Фильтр назначений по каналу");
     const videoFilter = screen.getByLabelText("Фильтр назначений по ролику");
-    expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Канал 2 — Второй канал" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Ролик 1 — Готовый ролик" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Ролик 2 — Уже загруженный ролик" })).toBeInTheDocument();
+    expect(within(channelFilter).getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
+    expect(within(channelFilter).getByRole("option", { name: "Канал 2 — Второй канал" })).toBeInTheDocument();
+    expect(within(videoFilter).getByRole("option", { name: "Ролик 1 — Готовый ролик" })).toBeInTheDocument();
+    expect(within(videoFilter).getByRole("option", { name: "Ролик 2 — Уже загруженный ролик" })).toBeInTheDocument();
 
     fireEvent.change(channelFilter, { target: { value: "channel-b" } });
     expect(screen.getByLabelText("Канал для Уже загруженный ролик")).toHaveValue("channel-b");
@@ -321,8 +321,8 @@ describe("PublicationPage interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Распределить" }));
 
-    await screen.findByLabelText("Канал для Готовый ролик");
-    expect(screen.getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
+    const assignmentSelect = await screen.findByLabelText("Канал для Готовый ролик");
+    expect(within(assignmentSelect).getByRole("option", { name: "Канал 1 — Первый канал" })).toBeInTheDocument();
   });
 
   it("sends an operator-selected time range to the non-uploading distribution preview", async () => {
