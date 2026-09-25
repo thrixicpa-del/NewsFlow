@@ -10,7 +10,8 @@ import type { QueueRow } from "./types";
 
 const badStates = new Set(["FAILED", "AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"]);
 const terminalStates = new Set(["SUCCESS", "SKIPPED", "NOT_REQUIRED"]);
-const uploadableStates = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED", "REUPLOAD_QUEUED"]);\nconst activeReuploadStates = new Set(["QUEUED", "RUNNING", "RETRYABLE", "UPLOADED", "PROCESSING"]);
+const uploadableStates = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED", "REUPLOAD_QUEUED"]);
+const activeReuploadStates = new Set(["QUEUED", "RUNNING", "RETRYABLE", "UPLOADED", "PROCESSING"]);
 const stepTone = (state: string): BadgeTone => terminalStates.has(state) ? "success" : badStates.has(state) ? "danger" : state === "RUNNING" ? "info" : "neutral";
 function stageIcon(state: string) { return terminalStates.has(state) ? <CheckCircle2 size={14}/> : badStates.has(state) ? <CircleX size={14}/> : <Circle size={14}/>; }
 
@@ -122,7 +123,8 @@ export function PublicationQueue({
   onThumbnail(snapshotId: string): void;
 }) {
   const [expanded, setExpanded] = useState<string[]>([]);
-  const [selected, setSelected] = useState<string[]>([]);\n  const [reuploadReason, setReuploadReason] = useState("Повторная private-загрузка после проверки результата YouTube");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [reuploadReason, setReuploadReason] = useState("Повторная private-загрузка после проверки результата YouTube");
   const counters = {
     active: rows.filter((row) => row.active).length,
     waiting: rows.filter((row) => !row.active && !row.youtubeVideoId).length,
