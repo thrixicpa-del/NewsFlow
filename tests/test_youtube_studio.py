@@ -1,6 +1,6 @@
 import unittest
 
-from scriptor.youtube_studio import (_click_exact_visible_button, planned_studio_actions, studio_details_url, studio_editor_url,
+from scriptor.youtube_studio import (_click_exact_visible_button, _open_video_editor, planned_studio_actions, studio_details_url, studio_editor_url,
                                      studio_shell_loaded, studio_control_labels, end_screen_requires_editor_entry,
                                      studio_transition_label)
 
@@ -83,3 +83,74 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         self.assertTrue(_click_exact_visible_button(page, "Перейти к редактору"))
         self.assertEqual(page.label, "Перейти к редактору")
         self.assertTrue(page.button.clicked)
+
+    def test_editor_navigation_uses_actionable_menuitem_not_first_text_container(self):
+        class TextNode:
+            def is_visible(self, timeout):
+                return True
+
+            def click(self, timeout):
+                return None
+
+        class MenuItem:
+            def __init__(self, page):
+                self.page = page
+
+            def is_visible(self, timeout):
+                return True
+
+            def click(self, timeout):
+                self.page.url = "https://studio.youtube.com/video/video-a/editor"
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Сведения о видео Редактор"
+
+        class Locator:
+            def __init__(self, body):
+                self.body = body
+
+            @property
+            def first(self):
+                return self.body
+
+            def is_visible(self, timeout):
+                return self.body.is_visible(timeout)
+
+            def click(self, timeout):
+                return self.body.click(timeout)
+
+            def inner_text(self, timeout):
+                return self.body.inner_text(timeout)
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.text_node = TextNode()
+                self.menuitem = MenuItem(self)
+                self.menuitem_request = None
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def locator(self, _selector):
+                return Locator(Body())
+
+            def get_by_text(self, _label):
+                return Locator(self.text_node)
+
+            def get_by_role(self, role, name, exact):
+                self.menuitem_request = (role, name, exact)
+                return Locator(self.menuitem)
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        page = Page()
+        try:
+            _open_video_editor(page, "video-a")
+            opened = page.url.endswith("/editor")
+        except Exception:
+            opened = False
+        self.assertTrue(opened)
+        self.assertEqual(page.menuitem_request, ("menuitem", "Редактор", True))

@@ -295,7 +295,13 @@ def _open_video_editor(page, video_id: str) -> None:
 
     page.goto(studio_details_url(video_id), wait_until="domcontentloaded", timeout=120_000)
     _wait_for_studio_shell(page)
-    _click_text(page, [r"^редактор$"])
+    # Current Studio repeats the word "Редактор" in nested non-interactive
+    # drawer containers before the actual navigation anchor.  Select only the
+    # interactive menu item; a text locator can click a harmless LI/DIV.
+    editor = page.get_by_role("menuitem", name="Редактор", exact=True)
+    if not editor.is_visible(timeout=1_500):
+        raise StudioAutomationError("В Studio недоступен пункт меню «Редактор».")
+    editor.click(timeout=10_000)
     for _attempt in range(40):
         if "/editor" in page.url:
             return
