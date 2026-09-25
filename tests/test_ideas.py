@@ -90,7 +90,7 @@ class IdeaParsingTests(unittest.TestCase):
         self.assertEqual(subjects, ["Россия"])
         self.assertEqual(object_name, "депортации и диаспоры")
 
-    def test_formula_provider_payload_is_augmented_instead_of_discarding_required_vector(self):
+    def test_formula_provider_payload_is_preserved_while_required_vector_stays_available(self):
         title = "Давление растёт — Москва и Киев держат позиции — переговоры снова в тупике"
         candidate = bridge._formula_candidate({
             "title": title,
@@ -99,12 +99,12 @@ class IdeaParsingTests(unittest.TestCase):
         }, topic="Россия-Украина — тупик переговоров")
 
         self.assertEqual(candidate["title"], title)
-        self.assertEqual(candidate["information_payload"]["source_note"], "provider-kept")
-        self.assertEqual(candidate["information_payload"]["core"], "Москва и Киев держат позиции")
-        self.assertEqual(candidate["information_payload"]["object"], "переговоры")
-        self.assertEqual(candidate["information_payload"]["consequence"], "переговоры снова в тупике")
+        self.assertEqual(candidate["information_payload"], {"source_note": "provider-kept"})
+        self.assertEqual(candidate["subjects"], ["Россия", "Украина"])
+        self.assertEqual(candidate["main_consequence"], "переговоры снова в тупике")
         self.assertIn("Назвать субъектов: Россия, Украина", candidate["script_requirements"])
         self.assertIn("Объяснить объект: переговоры", candidate["script_requirements"])
+        self.assertIn("Проверить последствие: переговоры снова в тупике", candidate["script_requirements"])
 
     def test_local_formula_never_reuses_generic_filler_across_default_directions(self):
         generic = {
