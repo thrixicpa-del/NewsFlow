@@ -277,4 +277,3 @@ class YouTubeStudioActionsTests(unittest.TestCase):
 
         self.assertEqual(open_section.call_count, 1)
         self.assertEqual(open_section.call_args.args[1], "cards")
-
