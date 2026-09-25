@@ -5080,7 +5080,9 @@ def generate_scenarios(payload: dict) -> dict:
         selected = [ScenarioRequest(request.index, request.title,
                                     "Ты редактор новостных сценариев NewsFlow. Напиши цельный, понятный текст "
                                     "по заданию; отделяй проверяемые факты от оценок, не выдумывай даты, цитаты "
-                                    "и цифры. Верни только готовый сценарий.\n\n" + request.prompt,
+                                    "и цифры. Если ниже есть «ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW», соблюдай "
+                                    "его как обязательный контракт длины, выше конфликтующих чисел в шаблоне. "
+                                    "Верни только готовый сценарий.\n\n" + request.prompt,
                                     request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max)
                     for request in selected]
     api_keys = [item for item in settings.openai_api_keys if item.active and item.secret.strip()]
