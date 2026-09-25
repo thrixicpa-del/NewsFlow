@@ -2703,6 +2703,8 @@ def update_idea_plan(payload: dict) -> dict:
         raise ValueError("Направление в плане не найдено")
     if payload.get("remove"):
         del settings.idea_plan[index]
+        if not settings.idea_plan:
+            allow_empty_release_state(settings, "idea_plan")
     elif "count" in payload:
         settings.idea_plan[index]["count"] = max(1, min(500, int(payload["count"])))
     save_settings(settings)
@@ -3234,8 +3236,48 @@ def _generate_for_vectors(settings, plan: list[dict], requirements: str) -> tupl
     }
 
 
+def _migrate_generated_headlines_from_suggestions(settings: Settings) -> int:
+    """Move old generated video titles out of reusable direction proposals.
+
+    Older builds stored generated headlines in idea_suggested_topics.  Only
+    entries carrying generated-title review metadata are migrated; ordinary
+    direction proposals stay untouched.
+    """
+    metadata = getattr(settings, "idea_title_metadata", {}) or {}
+    suggestions = list(getattr(settings, "idea_suggested_topics", []) or [])
+    results = list(getattr(settings, "idea_results", []) or [])
+    sources = dict(getattr(settings, "idea_result_sources", {}) or {})
+    known_results = {str(value).strip().casefold() for value in results if str(value).strip()}
+    remaining: list[str] = []
+    migrated = 0
+
+    for raw in suggestions:
+        title = str(raw).strip()
+        detail = metadata.get(title, {}) if isinstance(metadata, dict) else {}
+        review_status = str(detail.get("review_status", "")).strip().upper() if isinstance(detail, dict) else ""
+        if title and review_status in {"READY", "NEEDS_RESEARCH"}:
+            if title.casefold() not in known_results:
+                results.append(title)
+                known_results.add(title.casefold())
+            source = str(detail.get("topic", "")).strip()
+            if source and not str(sources.get(title, "")).strip():
+                sources[title] = source
+            migrated += 1
+            continue
+        remaining.append(raw)
+
+    if migrated:
+        settings.idea_results = results
+        settings.idea_result_sources = sources
+        settings.idea_suggested_topics = remaining
+        if suggestions and not remaining:
+            allow_empty_release_state(settings, "idea_suggested_topics")
+    return migrated
+
+
 def generate_ideas(payload: dict) -> dict:
     settings = load_settings()
+    migrated_headlines = _migrate_generated_headlines_from_suggestions(settings)
     plan = list(settings.idea_plan)
     # "Generate" is the one primary action in the desktop UI.  Selected topic
     # cards are accepted here as well, so users do not have to remember a
@@ -3274,36 +3316,41 @@ def generate_ideas(payload: dict) -> dict:
         if changed:
             save_settings(settings)
     if not plan:
+        if migrated_headlines:
+            save_settings(settings)
         raise ValueError("Добавьте направления в план выпуска")
     generated, generated_sources, generated_metadata, local_fallback_topics, provider_trace = _generate_for_vectors(
         settings, plan, requirements)
-    # Generation is an editorial ideation step, not a production acceptance
-    # gate.  Evidence changes the review status only; it may never hide a
-    # generated headline or silently write it into the release plan.
-    known_suggestions = {str(item).casefold() for item in settings.idea_suggested_topics}
-    suggestions = []
+    # Generated video headlines belong in Results.  Reusable direction
+    # proposals stay exclusively in idea_suggested_topics.
+    known_results = {str(item).casefold() for item in settings.idea_results}
+    new_results = []
     needs_research = 0
     ready = 0
     for title in generated:
-        if title.casefold() in known_suggestions:
+        if title.casefold() in known_results:
             continue
         topic = generated_sources.get(title, "")
         status = "READY" if _events_for_idea_direction(settings.idea_events, topic) else "NEEDS_RESEARCH"
         detail = {**generated_metadata.get(title, {}), "review_status": status}
         generated_metadata[title] = detail
-        suggestions.append(title)
-        known_suggestions.add(title.casefold())
+        new_results.append(title)
+        known_results.add(title.casefold())
         if status == "NEEDS_RESEARCH":
             needs_research += 1
         else:
             ready += 1
-    settings.idea_suggested_topics = [*settings.idea_suggested_topics, *suggestions]
+    settings.idea_results = [*settings.idea_results, *new_results]
+    settings.idea_result_sources = {
+        **getattr(settings, "idea_result_sources", {}),
+        **{title: generated_sources.get(title, "") for title in new_results},
+    }
     settings.idea_title_metadata = {**getattr(settings, "idea_title_metadata", {}), **generated_metadata}
     settings.idea_rejected_items = []
     settings.idea_portfolio_summary = {
         "requested": sum(max(1, int(item.get("count", 1))) for item in plan),
         "generated": len(generated),
-        "suggested": len(suggestions),
+        "suggested": len(new_results),
         "accepted": ready,
         "needs_research": needs_research,
         "rejected": 0,
@@ -3319,7 +3366,7 @@ def generate_ideas(payload: dict) -> dict:
                f"Готово: {summary['accepted']}. На research: {summary['needs_research']}. "
                f"Отклонено: 0. Источник: {provider_label}.")
     return {**snapshot(), "operationResult": {
-        "kind": "ideas", "count": len(suggestions), "message": message,
+        "kind": "ideas", "count": len(new_results), "message": message,
         "generation": {
             "requested": summary["requested"], "generated": summary["generated"],
             "suggested": summary["suggested"], "accepted": summary["accepted"],
