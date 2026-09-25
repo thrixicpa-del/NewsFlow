@@ -142,6 +142,7 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange],
             contract = _explicit_character_contract(template)
 
         target = minimum = maximum = 0
+        length_priority = ""
         if contract:
             target, minimum, maximum = contract
             if minimum and maximum:
@@ -150,11 +151,21 @@ def build_requests(titles: list[str], template: str, ranges: list[PromptRange],
                 bounds = f"не менее {minimum}"
             else:
                 bounds = f"не более {maximum}"
-            extras.append(
-                f"Runtime-проверка длины: цель {target} символов; допустимо {bounds} символов. "
-                "Фактическое количество символов считает Python после ответа."
+            length_priority = (
+                "ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW:\n"
+                f"- Целевой объем: {target} символов.\n"
+                f"- Допустимый итоговый диапазон: {bounds} символов.\n"
+                "- Планируй детализацию и количество абзацев сразу под этот объем; не выдавай заведомо "
+                "короткий черновик с обещанием расширить его позже.\n"
+                "- Фактическую длину готового ответа после генерации измеряет NewsFlow на Python "
+                "точно как len(text.strip()). Не полагайся на собственную приблизительную оценку числа символов.\n"
+                "- Не печатай подсчет символов, служебный отчет о длине или этот контракт в готовом сценарии.\n"
+                "- В вопросах количества символов этот контракт имеет приоритет над любыми конфликтующими "
+                "числами ниже в пользовательском шаблоне или дополнительных требованиях.\n\n"
+                "ПОЛНЫЙ ПОЛЬЗОВАТЕЛЬСКИЙ ШАБЛОН:\n"
             )
-        prompt = base + ("\n\nДополнительные требования:\n" + "\n".join(extras) if extras else "")
+        user_prompt = base + ("\n\nДополнительные требования:\n" + "\n".join(extras) if extras else "")
+        prompt = length_priority + user_prompt
         result.append(ScenarioRequest(
             position - 1,
             title,
