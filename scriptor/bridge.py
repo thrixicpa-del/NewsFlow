@@ -2863,6 +2863,7 @@ _IDEA_TITLE_TARGET_MIN_CHARS = 55
 _IDEA_TITLE_TARGET_MAX_CHARS = 95
 _IDEA_TITLE_MEMORY_LIMIT = 500
 _IDEA_TITLE_RECENT_WINDOW = 100
+_IDEA_TITLE_FORMULA_SEPARATOR = " — "
 _GENERIC_IDEA_TITLE_WORDS = {
     "глобальный", "глобальная", "глобальные", "политический", "политическая", "политические",
     "кризис", "кризиса", "кризисе", "экономический", "экономическая", "экономические",
@@ -3006,7 +3007,42 @@ def _metadata_for_idea_title(title: str, topic: str, candidate: dict | None = No
     }
 
 
-def _parse_idea_candidates(text: str) -> list[dict]:
+def _formula_part(value: object) -> str:
+    return _clean_idea_title(value).strip("—-:;!. ")
+
+
+def _formula_candidate(candidate: dict) -> dict | None:
+    """Return one canonical Hook — Action — Consequence idea title.
+
+    The visible title is a production contract, not a best-effort suggestion:
+    every accepted candidate must carry a provocative hook, a subject action,
+    and a consequence for the affected object. A model may provide those
+    fields directly or an already assembled three-part title, but a free-form
+    question never enters the Ideas result list.
+    """
+    explicit_parts = (
+        _formula_part(candidate.get("provocative_headline", candidate.get("provocativeHeadline", ""))),
+        _formula_part(candidate.get("subject_action", candidate.get("subjectAction", ""))),
+        _formula_part(candidate.get("object_consequence", candidate.get("objectConsequence", ""))),
+    )
+    if all(explicit_parts):
+        parts = explicit_parts
+    else:
+        parts = tuple(_formula_part(part) for part in _clean_idea_title(candidate.get("title", "")).split(
+            _IDEA_TITLE_FORMULA_SEPARATOR))
+    if len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
+        return None
+    title = _IDEA_TITLE_FORMULA_SEPARATOR.join(parts)
+    return {
+        **candidate,
+        "title": title,
+        "provocative_headline": parts[0],
+        "subject_action": parts[1],
+        "object_consequence": parts[2],
+    }
+
+
+def _parse_idea_candidates(text: str, *, formula_only: bool = False) -> list[dict]:
     """Accept JSON candidates from the model, but remain compatible with old lines."""
     raw = str(text or "").strip()
     fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE)
@@ -3020,9 +3056,14 @@ def _parse_idea_candidates(text: str) -> list[dict]:
         candidates = []
         for value in decoded:
             if isinstance(value, dict):
-                title = _clean_idea_title(value.get("title", ""))
-                if title:
-                    candidates.append({**value, "title": title})
+                if formula_only:
+                    formula = _formula_candidate(value)
+                    if formula:
+                        candidates.append(formula)
+                else:
+                    title = _clean_idea_title(value.get("title", ""))
+                    if title:
+                        candidates.append({**value, "title": title})
             else:
                 title = _clean_idea_title(value)
                 if title:
@@ -3032,12 +3073,17 @@ def _parse_idea_candidates(text: str) -> list[dict]:
     return [{"title": title} for title in _parse_ideas(raw)]
 
 
-def select_idea_title_candidates(topic: str, candidates: list[object], memory: list[dict], count: int) -> list[dict]:
+def select_idea_title_candidates(topic: str, candidates: list[object], memory: list[dict], count: int,
+                                 *, formula_only: bool = False) -> list[dict]:
     """Select diverse valid candidates with deterministic anti-duplicate checks."""
     selected: list[dict] = []
     comparison_memory = list(memory)
     for raw in candidates:
         candidate = raw if isinstance(raw, dict) else {"title": raw}
+        if formula_only:
+            candidate = _formula_candidate(candidate)
+            if not candidate:
+                continue
         validation = valid_idea_title(candidate.get("title", ""))
         if not validation["valid"]:
             continue
@@ -3071,6 +3117,37 @@ def _local_idea_drafts(topic: str, count: int) -> list[str]:
         "Что важно проверить перед новым поворотом в теме «{topic}»",
     )
     return [templates[index % len(templates)].format(topic=topic) for index in range(max(count, len(templates)))]
+
+
+def _local_idea_title_drafts(topic: str, count: int) -> list[dict]:
+    """Create safe offline candidates in the same visible three-part formula."""
+    topic_label = _clean_idea_title(topic)
+    if len(topic_label) > 24:
+        topic_label = f"{topic_label[:23].rstrip()}…"
+    hooks = (
+        "Ставки растут", "Новый разлом", "Решающий поворот", "Напряжение усиливается",
+        "Риск выходит наружу", "Баланс меняется", "Конфликт растёт", "Спор обостряется",
+        "Стороны повышают цену", "Точка давления найдена",
+    )
+    actions = (
+        "«{topic}» меняет позиции", "«{topic}» усиливает давление",
+        "«{topic}» идёт на риск", "«{topic}» ужесточает условия",
+        "«{topic}» меняет расчёт", "«{topic}» меняет баланс сил",
+        "«{topic}» проверяет уступки", "«{topic}» повышает ставки",
+        "«{topic}» меняет тактику", "«{topic}» спорит за влияние",
+    )
+    consequences = (
+        "Баланс сил под угрозой", "Условия для сторон жёстче",
+        "Интересы сторон под риском", "Цена ошибки растёт",
+        "Исход для сторон неясен", "Контроль над ситуацией слабеет",
+        "Риски для объекта выше", "Компромисс сложнее",
+        "Последствия для сторон нарастают", "Ставка для объекта выше",
+    )
+    return [{
+        "provocative_headline": hooks[index % len(hooks)],
+        "subject_action": actions[index % len(actions)].format(topic=topic_label),
+        "object_consequence": consequences[index % len(consequences)],
+    } for index in range(max(count, len(hooks)))]
 
 
 def _has_unresolved_headline_template(value: str) -> bool:
@@ -3111,7 +3188,8 @@ def _events_for_idea_direction(events: list[dict], direction: str, limit: int = 
 
 
 def _title_generation_prompt(topic: str, requirements: str, candidate_count: int,
-                             memory: list[dict], events: list[dict] | None = None) -> str:
+                             memory: list[dict], events: list[dict] | None = None,
+                             *, formula_only: bool = False) -> str:
     recent_openings = [str(item.get("opening_words", "")) for item in memory[-12:]
                        if isinstance(item, dict) and item.get("opening_words")]
     banned_openings = ", ".join(dict.fromkeys(recent_openings)) or "нет"
@@ -3123,6 +3201,32 @@ def _title_generation_prompt(topic: str, requirements: str, candidate_count: int
         entities = ", ".join(str(value) for value in event.get("primary_entities", []) if str(value).strip())
         evidence.append(f"- {core}" + (f" | участники: {entities}" if entities else ""))
     evidence_text = "\n".join(evidence) or "Нет подтверждённого события: не создавай готовые заголовки с утверждением фактов."
+    formula_instruction = (
+        "ОБЯЗАТЕЛЬНАЯ ФОРМУЛА КАЖДОГО ЗАГОЛОВКА: [ПРОВОКАЦИОННЫЙ ЗАГОЛОВОК] — "
+        "[ДЕЙСТВИЕ СУБЪЕКТА] — [ПОСЛЕДСТВИЕ ДЛЯ ОБЪЕКТА]. Это ровно три непустые части, "
+        "разделённые длинным тире; не используй вопросительную форму, двоеточие вместо частей или "
+        "свободный заголовок.\n"
+        if formula_only else
+        "Трёхчастная формула не выбрана оператором: используй её только если она действительно делает заголовок лучше.\n"
+    )
+    title_fields = (
+        "\"provocative_headline\":\"...\",\"subject_action\":\"...\",\"object_consequence\":\"...\","
+        "\"title\":\"Провокационный заголовок — Действие субъекта — Последствие для объекта\","
+        if formula_only else "\"title\":\"...\","
+    )
+    uncertainty_instruction = (
+        "Неподтверждённое формулируй как осторожный анализ, риск или необходимость проверки без "
+        "вопросительной формы, а не как установленный факт.\n"
+        if formula_only else
+        "Неподтверждённое формулируй как вопрос, анализ или необходимость проверки, а не как установленный факт.\n"
+    )
+    hypothetical_instruction = (
+        "HYPOTHETICAL Title обязан содержать маркер неопределённости вроде «возможен», «может», «риск» "
+        "без вопросительной формы. "
+        if formula_only else
+        "HYPOTHETICAL Title обязан содержать маркер неопределённости вроде «Что будет, если», «Может ли» "
+        "или «может». "
+    )
     return (
         f"Ты редактор новостного YouTube-канала. Подготовь {candidate_count} кандидатов заголовка "
         "для последующего автоматического отбора.\n"
@@ -3131,27 +3235,34 @@ def _title_generation_prompt(topic: str, requirements: str, candidate_count: int
         "Внутренне рассмотри минимум 10 разных углов: PERSONAL_CONFLICT, PRESSURE, ULTIMATUM, REVERSAL, "
         "RESPONSE, ESCALATION, LOSS, WIN, POLITICAL_PRICE, DEAL_TRAP, HIDDEN_RISK, POWER_SHIFT, "
         "BREAKING_EVENT, ECONOMIC_PAIN, INTERNATIONAL_REACTION, BORDER_CONFLICT, CONSEQUENCE или WHAT_IF. "
-        "Смешивай типы подачи и не начинай "
-        "варианты одинаковыми словами. Старая формула из трёх фраз и восклицательных знаков не обязательна: "
-        "используй её только если она действительно делает заголовок лучше.\n"
+        "Смешивай типы подачи и не начинай варианты одинаковыми словами.\n"
         "Строгие правила: до 100 символов; цель 55–95; без полного CAPS (допустимы 1–3 акцентных слова), "
-        "без бессмысленных !! или ???; конкретно и эмоционально, но без травли. Не предлагай сухие газетные "
+        "без бессмысленных !! или ???; конкретно и эмоционально, но без травли. "
+        "ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО JSON обязательно сам проверь длину каждого Title по точному правилу "
+        "Python len(title.strip()): считаются все символы, включая пробелы и знаки препинания внутри строки. "
+        "Если получилось больше 100 — перепиши заголовок и пересчитай, пока len(title.strip()) <= 100. "
+        "Не оценивай длину по словам, токенам или приблизительно. NewsFlow после ответа независимо повторно "
+        "проверит длину тем же правилом Python и не примет заголовок длиннее 100 символов. "
+        "Не предлагай сухие газетные "
         "заголовки «Почему снова обсуждают», «Что дальше», «Что происходит вокруг» без самостоятельной "
         "конфликтной ставки. Не выдумывай факты, даты, "
-        "цифры, цитаты, обвинения и последствия. Неподтверждённое формулируй как вопрос, анализ или "
-        "необходимость проверки, а не как установленный факт.\n"
+        "цифры, цитаты, обвинения и последствия. "
+        f"{uncertainty_instruction}"
+        f"{formula_instruction}"
         f"Недавние начала, которые нельзя повторять: {banned_openings}.\n"
         "Для каждого кандидата сначала выдели самостоятельную Topic (один отдельный ролик), затем Angle "
         "(редакционный угол), и только затем Title. Не выдавай две Topic, требующие одного сценария. "
         "Для каждого кандидата обязательно укажи framing_type: FACTUAL только для прямо подтверждённой "
         "подачи, EDITORIAL для творческой трактовки реального события (это режим по умолчанию), "
-        "HYPOTHETICAL только для явно помеченного сценария/прогноза. HYPOTHETICAL Title обязан содержать "
-        "маркер неопределённости вроде «Что будет, если», «Может ли» или «может». Для HYPOTHETICAL придумай "
+        "HYPOTHETICAL только для явно помеченного сценария/прогноза. "
+        f"{hypothetical_instruction}"
+        "Для HYPOTHETICAL придумай "
         "новый возможный конфликт, ультиматум, ответ, эскалацию, смену позиции или последствия, а не только "
         "осторожную переформулировку исходного события. Укажи information_payload "
         "как короткое ядро будущего сценария и script_requirements как список проверок для автора. "
         "Верни только JSON без Markdown: {\"candidates\":[{\"topic\":\"...\",\"angle\":\"...\","
-        "\"title\":\"...\",\"hook_type\":\"...\",\"title_structure\":\"...\",\"subjects\":[\"...\"],"
+        f"{title_fields}"
+        "\"hook_type\":\"...\",\"title_structure\":\"...\",\"subjects\":[\"...\"],"
         "\"framing_type\":\"EDITORIAL\",\"information_payload\":{\"core\":\"...\"},"
         "\"script_requirements\":[\"...\"]}]}"
     )
@@ -3198,7 +3309,8 @@ def build_generated_production_items(settings, titles: list[str], sources: dict[
     return idea_engine.select_production_portfolio(candidates, settings.idea_events, len(candidates))
 
 
-def _generate_for_vectors(settings, plan: list[dict], requirements: str) -> tuple[list[str], dict[str, str], dict[str, dict], list[str], dict]:
+def _generate_for_vectors(settings, plan: list[dict], requirements: str,
+                          *, formula_only: bool = False) -> tuple[list[str], dict[str, str], dict[str, dict], list[str], dict]:
     results: list[str] = []
     sources: dict[str, str] = {}
     metadata: dict[str, dict] = {}
@@ -3214,30 +3326,35 @@ def _generate_for_vectors(settings, plan: list[dict], requirements: str) -> tupl
         item_requirements = str(item.get("requirements", "")).strip() or requirements
         candidate_count = max(10, count * 3)
         evidence = _events_for_idea_direction(getattr(settings, "idea_events", []), topic)
-        prompt = _title_generation_prompt(topic, item_requirements, candidate_count, recent_memory, evidence)
+        prompt = _title_generation_prompt(
+            topic, item_requirements, candidate_count, recent_memory, evidence, formula_only=formula_only)
         provider = str(item.get("provider", "agent")).casefold()
         keys = [entry for entry in settings.openai_api_keys if entry.active and entry.secret.strip()
                 and (not item.get("key_label") or entry.label == item.get("key_label"))]
         if not keys:
             if provider != "agent":
                 raise ValueError(f"Активный ключ ChatGPT для «{topic}» не найден")
-            generated = [{"title": title} for title in _local_idea_drafts(topic, candidate_count)]
+            generated = (_local_idea_title_drafts(topic, candidate_count) if formula_only
+                         else [{"title": title} for title in _local_idea_drafts(topic, candidate_count)])
             local_fallback_topics.append(topic)
         else:
             pool = HybridTextPool([], keys, "", settings.openai_model)
             try:
                 provider_request_topics.append(topic)
-                generated = _parse_idea_candidates(asyncio.run(pool.generate(prompt)))
+                generated = _parse_idea_candidates(asyncio.run(pool.generate(prompt)), formula_only=formula_only)
                 provider_response_topics.append(topic)
             except OpenAIAPIError as exc:
                 if provider != "agent" or not exc.key_unavailable:
                     raise
-                generated = [{"title": title} for title in _local_idea_drafts(topic, candidate_count)]
+                generated = (_local_idea_title_drafts(topic, candidate_count) if formula_only
+                             else [{"title": title} for title in _local_idea_drafts(topic, candidate_count)])
                 local_fallback_topics.append(topic)
-        approved = select_idea_title_candidates(topic, generated, recent_memory, count)
+        approved = select_idea_title_candidates(topic, generated, recent_memory, count, formula_only=formula_only)
         if len(approved) < count:
-            fallback = [{"title": title} for title in _local_idea_drafts(topic, candidate_count)]
-            approved.extend(select_idea_title_candidates(topic, fallback, [*recent_memory, *approved], count - len(approved)))
+            fallback = (_local_idea_title_drafts(topic, candidate_count) if formula_only
+                        else [{"title": title} for title in _local_idea_drafts(topic, candidate_count)])
+            approved.extend(select_idea_title_candidates(
+                topic, fallback, [*recent_memory, *approved], count - len(approved), formula_only=formula_only))
             if topic not in local_fallback_topics:
                 local_fallback_topics.append(topic)
         for title_metadata in approved[:count]:
@@ -3303,6 +3420,7 @@ def generate_ideas(payload: dict) -> dict:
     # separate hidden prerequisite of first adding the same cards to the plan.
     requested_topics = [str(item).strip() for item in payload.get("topics", []) if str(item).strip()]
     requirements = str(payload.get("requirements", "")).strip()
+    formula_only = bool(payload.get("titleFormulaOnly", False))
     if requested_topics:
         provider = str(payload.get("provider", "agent")).strip().casefold()
         if provider not in {"agent", "openai"}:
@@ -3339,7 +3457,7 @@ def generate_ideas(payload: dict) -> dict:
             save_settings(settings)
         raise ValueError("Добавьте направления в план выпуска")
     generated, generated_sources, generated_metadata, local_fallback_topics, provider_trace = _generate_for_vectors(
-        settings, plan, requirements)
+        settings, plan, requirements, formula_only=formula_only)
     # Generated video headlines belong in Results.  Reusable direction
     # proposals stay exclusively in idea_suggested_topics.
     known_results = {str(item).casefold() for item in settings.idea_results}

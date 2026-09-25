@@ -167,7 +167,8 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertTrue(any("Правило второй темы" in prompt for prompt in prompts))
         self.assertFalse(any("Общее правило, которое не должно заменить личные" in prompt for prompt in prompts))
 
-    def test_generation_does_not_require_legacy_three_part_formula(self):
+    def test_generation_rejects_free_form_titles_and_falls_back_to_the_three_part_formula(self):
+        """A provider question must never bypass the operator's title formula."""
         settings = Settings(
             openai_api_keys=[OpenAIKey(label="Тест", secret="test-key", active=True)],
             idea_plan=[{
@@ -187,12 +188,72 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
              patch.object(bridge, "save_settings"), \
              patch.object(bridge, "snapshot", return_value={}), \
              patch.object(bridge, "HybridTextPool", return_value=FakePool()):
-            bridge.generate_ideas({})
+            bridge.generate_ideas({"titleFormulaOnly": True})
 
         self.assertEqual(settings.idea_suggested_topics, [])
         self.assertEqual(len(settings.idea_results), 2)
-        self.assertTrue(all("[" not in idea and "]" not in idea for idea in settings.idea_results))
-        self.assertTrue(all(idea.count("!") == 0 for idea in settings.idea_results))
+        for idea in settings.idea_results:
+            parts = idea.split(" — ")
+            self.assertEqual(len(parts), 3, idea)
+            self.assertTrue(all(part.strip() for part in parts), idea)
+            self.assertIn("Международные переговоры", idea)
+            self.assertNotIn("?", idea)
+
+    def test_generation_without_formula_keeps_free_form_provider_titles(self):
+        settings = Settings(
+            openai_api_keys=[OpenAIKey(label="Тест", secret="test-key", active=True)],
+            idea_plan=[{
+                "topic": "Международные переговоры",
+                "count": 2,
+                "provider": "openai",
+                "requirements": "",
+            }],
+        )
+
+        class FakePool:
+            async def generate(self, _prompt):
+                return "Переговоры зашли в тупик: у сторон остался один спорный вопрос\n" \
+                       "Вот что меняют новые условия для участников переговоров"
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=FakePool()):
+            bridge.generate_ideas({})
+
+        self.assertEqual(settings.idea_results, [
+            "Переговоры зашли в тупик: у сторон остался один спорный вопрос",
+            "Вот что меняют новые условия для участников переговоров",
+        ])
+
+    def test_formula_fallback_keeps_ten_long_topic_titles_valid_and_distinct(self):
+        topic = "Очень длинное международное направление переговоров и дипломатического давления"
+        drafts = bridge._local_idea_title_drafts(topic, 30)
+        selected = bridge.select_idea_title_candidates(
+            topic, drafts, [], 10, formula_only=True,
+        )
+
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(len({item["title"] for item in selected}), 10)
+        self.assertTrue(all(len(item["title"]) <= 100 for item in selected))
+        self.assertTrue(all(len(item["title"].split(" — ")) == 3 for item in selected))
+
+    def test_formula_mode_rejects_question_parts_and_uses_non_question_uncertainty_guidance(self):
+        self.assertIsNone(bridge._formula_candidate({
+            "title": "Кто уступит? — Стороны меняют позиции — Цена компромисса растёт",
+        }))
+        self.assertIsNone(bridge._formula_candidate({
+            "provocative_headline": "Кто уступит?",
+            "subject_action": "Стороны меняют позиции",
+            "object_consequence": "Цена компромисса растёт",
+        }))
+
+        prompt = bridge._title_generation_prompt(
+            "Международные переговоры", "", 3, [], [], formula_only=True,
+        )
+        self.assertIn("без вопросительной формы", prompt)
+        self.assertNotIn("Что будет, если", prompt)
+        self.assertNotIn("Может ли", prompt)
 
     def test_title_validation_rejects_long_caps_and_unfinished_templates(self):
         self.assertTrue(bridge.valid_idea_title(
@@ -212,6 +273,17 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertIn("Суда меняют маршруты через Ормузский пролив", prompt)
         self.assertIn("не добавляй неподтверждённые факты", prompt)
         self.assertIn("framing_type", prompt)
+
+    def test_title_prompt_requires_exact_python_character_count_before_final_json(self):
+        for formula_only in (False, True):
+            prompt = bridge._title_generation_prompt(
+                "Международные переговоры", "Пользовательский промпт", 3, [], [],
+                formula_only=formula_only,
+            )
+            self.assertIn("Пользовательский промпт", prompt)
+            self.assertIn("Python len(title.strip())", prompt)
+            self.assertIn("len(title.strip()) <= 100", prompt)
+            self.assertIn("не примет заголовок длиннее 100 символов", prompt)
 
     def test_candidate_selection_skips_recent_opening_and_keeps_metadata(self):
         selected = bridge.select_idea_title_candidates(

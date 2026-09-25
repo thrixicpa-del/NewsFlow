@@ -28,7 +28,21 @@ describe("Ideas Light view", () => {
       topics: [topic], count: 5, provider: "agent", requirements: "",
     });
     expect(command).toHaveBeenCalledWith("generate-ideas", {
-      topics: [topic], count: 5, provider: "agent", requirements: "",
+      topics: [topic], count: 5, provider: "agent", requirements: "", titleFormulaOnly: false,
+    });
+  });
+
+  it("sends the optional three-part formula contract when the checkbox is enabled", () => {
+    const command = vi.fn();
+    render(<Ideas data={fallback} go={vi.fn()} command={command} />);
+
+    const topic = fallback.ideaTopics[0];
+    fireEvent.click(screen.getByRole("button", { name: topic }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Только трёхчастная формула" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сгенерировать идеи" }));
+
+    expect(command).toHaveBeenCalledWith("generate-ideas", {
+      topics: [topic], count: 5, provider: "agent", requirements: "", titleFormulaOnly: true,
     });
   });
 
@@ -107,6 +121,26 @@ describe("Ideas Light view", () => {
     fireEvent.click(screen.getByRole("button", { name: "Добавить тему" }));
 
     expect(command).toHaveBeenCalledWith("add-topic", { topic: "Проверочная тема" });
+  });
+
+  it("keeps every manually added topic selected so they can enter the plan together", async () => {
+    const first = "Армения-Азербайджан — мирный процесс и Карабах";
+    const second = "Армения-Россия — охлаждение и разворот Пашиняна";
+    const data = { ...fallback, ideaTopics: [first, second] };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Ideas data={data} go={vi.fn()} command={command} />);
+
+    const entry = screen.getByLabelText("Новая тема");
+    fireEvent.change(entry, { target: { value: first } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить тему" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("add-topic", { topic: first }));
+
+    fireEvent.change(entry, { target: { value: second } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить тему" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("add-topic", { topic: second }));
+
+    expect(screen.getByRole("button", { name: first }).className).toContain("selected");
+    expect(screen.getByRole("button", { name: second }).className).toContain("selected");
   });
 
   it("keeps the main suggestion approval command contract", async () => {
