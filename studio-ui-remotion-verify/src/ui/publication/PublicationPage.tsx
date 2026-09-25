@@ -424,7 +424,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       <section className="nf-bulk-schedule" aria-label="Массовое планирование">
         <div>
           <b>Массовый диапазон по каналам</b>
-          <small>Каждый канал строит собственную сетку с собственным интервалом/timezone. Время только :00 / :15 / :30 / :45.</small>
+          <small>Каждый канал строит собственную сетку по своему timezone/окну; авто-распределение держит минимум 3 часа между роликами одного канала. Время только :00 / :15 / :30 / :45.</small>
         </div>
         <label>Дата диапазона<input aria-label="Дата диапазона" type="date" value={bulkSchedule.date} onChange={(event) => setBulkSchedule((current) => ({ ...current, date: event.target.value }))}/></label>
         <label>Начало диапазона<input aria-label="Начало диапазона" type="time" step="900" value={bulkSchedule.startTime} onChange={(event) => setBulkSchedule((current) => ({ ...current, startTime: event.target.value }))}/></label>
