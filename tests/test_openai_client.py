@@ -80,6 +80,24 @@ class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await task, "готово")
         pool.openai_clients[0].generate.assert_awaited_once()
 
+    async def test_responses_api_receives_the_complete_prompt_as_input_without_truncation(self):
+        prompt = (
+            "FULL_USER_PROMPT_BEGIN\\n"
+            + ("длинная пользовательская инструкция " * 600)
+            + "\\nFULL_USER_PROMPT_END"
+        )
+        client = OpenAITextClient("sk-test")
+        with patch.object(client, "_request", return_value={"output_text": "готово"}) as request:
+            result = await client.generate(prompt)
+
+        self.assertEqual(result, "готово")
+        args = request.call_args.args
+        self.assertEqual(args[0], "POST")
+        self.assertEqual(args[1], "/v1/responses")
+        self.assertEqual(args[2]["input"], prompt)
+        self.assertTrue(args[2]["input"].startswith("FULL_USER_PROMPT_BEGIN"))
+        self.assertTrue(args[2]["input"].endswith("FULL_USER_PROMPT_END"))
+
     def test_text_request_times_out_after_two_minutes_instead_of_blocking_the_batch(self):
         response = MagicMock()
         response.read.return_value = json.dumps({"data": []}).encode("utf-8")
