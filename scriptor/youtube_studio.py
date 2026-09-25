@@ -305,9 +305,19 @@ def _save_editor_changes(page) -> None:
             raise StudioIdentityVerificationRequired(
                 "YouTube Studio просит подтвердить личность перед сохранением."
             )
+        controls = []
+        for pattern in (re.compile(r"^сохранить$", re.IGNORECASE), re.compile(r"^save$", re.IGNORECASE)):
+            try:
+                controls.append(page.get_by_role("button", name=pattern).first)
+            except Exception:
+                pass
         for label in ("Сохранить", "Save"):
             try:
-                control = page.get_by_label(label, exact=True)
+                controls.append(page.get_by_label(label, exact=True))
+            except Exception:
+                pass
+        for control in controls:
+            try:
                 if not control.is_visible(timeout=700):
                     continue
                 saw_save = True
@@ -638,8 +648,9 @@ def _apply_end_screen(page, action: Mapping[str, object]) -> None:
 
 
 def _open_video_editor(page, video_id: str) -> None:
-    """Open the exact visible actionable Editor navigation item."""
-    page.goto(studio_details_url(video_id), wait_until="domcontentloaded", timeout=120_000)
+    """Open the exact visible actionable Editor navigation item for one video."""
+    clean_video_id = str(video_id or "").strip()
+    page.goto(studio_details_url(clean_video_id), wait_until="domcontentloaded", timeout=120_000)
     _wait_for_studio_shell(page)
     visible_text = page.locator("body").inner_text(timeout=3_000)
     if identity_verification_required(visible_text):
@@ -648,26 +659,28 @@ def _open_video_editor(page, video_id: str) -> None:
         )
     if _editor_access_denied(visible_text):
         raise StudioAutomationError("У текущего аккаунта YouTube Studio нет доступа к разделу «Редактор».")
-    clicked = bool(page.locator("body").evaluate("""() => {
+    clicked = bool(page.locator("body").evaluate("""(videoId) => {
       const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
+      const exactFragment = '/video/' + videoId + '/editor';
       const candidates = Array.from(document.querySelectorAll(
         'a[role="menuitem"], [role="menuitem"][href], a[href*="/editor"]'
-      ));
-      const target = candidates.find((node) =>
-        visible(node) && (
-          normalize(node.innerText) === 'редактор'
-          || String(node.getAttribute('href') || '').includes('/editor')
-        )
+      )).filter(visible);
+      const exact = candidates.find((node) =>
+        String(node.getAttribute('href') || '').includes(exactFragment)
       );
+      const fallback = candidates.find((node) =>
+        normalize(node.innerText) === 'редактор'
+      );
+      const target = exact || fallback;
       if (!target) return false;
       target.click();
       return true;
-    }"""))
+    }""", clean_video_id))
     if not clicked:
         raise StudioAutomationError("В Studio недоступен видимый пункт меню «Редактор».")
     for _attempt in range(60):
-        if "/editor" in str(page.url):
+        if f"/video/{clean_video_id}/editor" in str(page.url):
             return
         current_text = page.locator("body").inner_text(timeout=1_000)
         if identity_verification_required(current_text):
