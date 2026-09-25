@@ -42,9 +42,7 @@ def _is_test_runner_process() -> bool:
     argv0 = str(sys.argv[0] if sys.argv else "").replace("\\", "/").casefold().strip()
     basename = Path(argv0).name
     return (
-        argv0.endswith(" -m unittest")
-        or argv0.endswith("/unittest/__main__.py")
-        or argv0.endswith("/pytest/__main__.py")
+        argv0.endswith((" -m unittest", "/unittest/__main__.py", "/pytest/__main__.py"))
         or basename in {"pytest", "pytest.exe", "py.test", "py.test.exe"}
     )
 
