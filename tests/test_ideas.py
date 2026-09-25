@@ -199,6 +199,45 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             self.assertIn("Международные переговоры", idea)
             self.assertNotIn("?", idea)
 
+    def test_generation_without_formula_keeps_free_form_provider_titles(self):
+        settings = Settings(
+            openai_api_keys=[OpenAIKey(label="Тест", secret="test-key", active=True)],
+            idea_plan=[{
+                "topic": "Международные переговоры",
+                "count": 2,
+                "provider": "openai",
+                "requirements": "",
+            }],
+        )
+
+        class FakePool:
+            async def generate(self, _prompt):
+                return "Переговоры зашли в тупик: у сторон остался один спорный вопрос\n" \
+                       "Вот что меняют новые условия для участников переговоров"
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=FakePool()):
+            bridge.generate_ideas({})
+
+        self.assertEqual(settings.idea_results, [
+            "Переговоры зашли в тупик: у сторон остался один спорный вопрос",
+            "Вот что меняют новые условия для участников переговоров",
+        ])
+
+    def test_formula_fallback_keeps_ten_long_topic_titles_valid_and_distinct(self):
+        topic = "Очень длинное международное направление переговоров и дипломатического давления"
+        drafts = bridge._local_idea_title_drafts(topic, 30)
+        selected = bridge.select_idea_title_candidates(
+            topic, drafts, [], 10, formula_only=True,
+        )
+
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(len({item["title"] for item in selected}), 10)
+        self.assertTrue(all(len(item["title"]) <= 100 for item in selected))
+        self.assertTrue(all(len(item["title"].split(" — ")) == 3 for item in selected))
+
     def test_formula_mode_rejects_question_parts_and_uses_non_question_uncertainty_guidance(self):
         self.assertIsNone(bridge._formula_candidate({
             "title": "Кто уступит? — Стороны меняют позиции — Цена компромисса растёт",
