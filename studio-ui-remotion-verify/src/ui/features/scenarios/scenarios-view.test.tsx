@@ -94,7 +94,7 @@ describe("Scenarios and scripts Light views", () => {
           title: "Нужна корректировка длины",
           state: "Нужно действие",
           result: "Короткий текст",
-          error: "После 2 корректировок длина сценария осталась 6110 знаков",
+          error: "",
           lengthStatus: "SHORT" as const,
           actualChars: 6110,
           allowedMin: 9000,
@@ -108,6 +108,7 @@ describe("Scenarios and scripts Light views", () => {
     fireEvent.click(screen.getByRole("button", { name: "Написать все сценарии: 1" }));
 
     expect(command).toHaveBeenCalledWith("generate-scenarios", { provider: "agent" });
+    expect(screen.getByText(/Длина SHORT: 6110 знаков/)).not.toBeNull();
     expect(screen.queryByRole("button", { name: "Все сценарии готовы" })).toBeNull();
   });
 
