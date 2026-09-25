@@ -2123,15 +2123,6 @@ def begin_publication_stage(settings: Any, snapshot_id: str, worker_id: str, sta
         "error": None,
     })
     steps[normalized] = step
-    reupload = dict(execution.get("reupload", {}) or {})
-    if normalized == "VIDEO_UPLOAD" and str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING", "RETRYABLE"}:
-        reupload.update({
-            "status": "RETRYABLE" if classification == "RETRYABLE" else "FAILED",
-            "failedAt": now,
-            "lastCheckedAt": now,
-            "error": {"category": classification, "message": str(message)},
-        })
-        execution["reupload"] = reupload
     execution["steps"] = steps
     execution["currentStage"] = normalized
     execution["overallStatus"] = "FORMATTING"
@@ -2245,6 +2236,18 @@ def fail_publication_stage(settings: Any, snapshot_id: str, stage: str, category
         "progress": None,
     })
     steps[normalized] = step
+    reupload = dict(execution.get("reupload", {}) or {})
+    if normalized == "VIDEO_UPLOAD" and str(reupload.get("status", "")).upper() in {
+        "QUEUED", "RUNNING", "RETRYABLE",
+    }:
+        reupload.update({
+            "status": "RETRYABLE" if classification == "RETRYABLE" else "FAILED",
+            "lastCheckedAt": now,
+            "error": {"category": classification, "message": str(message)},
+        })
+        if classification != "RETRYABLE":
+            reupload["failedAt"] = now
+        execution["reupload"] = reupload
     execution["steps"] = steps
     execution["currentStage"] = normalized
     execution["overallStatus"] = "PARTIAL" if str(execution.get("youtubeVideoId") or "").strip() else step["status"]
