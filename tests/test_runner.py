@@ -61,12 +61,14 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_realistic_five_thousand_character_response_is_repaired_toward_ten_thousand(self):
         class LengthClient:
             fresh_calls = 0
+            repair_prompts = []
 
             async def generate(self, prompt, on_progress=None):
                 return "а" * 5000
 
             async def generate_fresh(self, prompt, on_progress=None):
                 self.fresh_calls += 1
+                self.repair_prompts.append(prompt)
                 return "б" * 10000
 
         client = LengthClient()
@@ -80,6 +82,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].length_status, "READY")
         self.assertEqual(jobs[0].actual_chars, 10000)
         self.assertEqual(jobs[0].length_repair_attempts, 1)
+        self.assertIn("len(text.strip())", client.repair_prompts[0])
+        self.assertIn("9000", client.repair_prompts[0])
+        self.assertIn("11000", client.repair_prompts[0])
 
     async def test_one_sided_minimum_length_repair_uses_a_truthful_instruction(self):
         class MinimumClient:
