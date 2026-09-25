@@ -63,6 +63,11 @@ def studio_control_labels(kind: str) -> str:
 def _open_editor_section(page, kind: str) -> None:
     """Click the visible plus control on a current Studio editor row."""
 
+    if identity_verification_required(page.locator("body").inner_text(timeout=3_000)):
+        raise StudioAutomationError(
+            "YouTube Studio просит подтвердите личность. Завершите проверку вручную в профиле канала и повторите действие."
+        )
+    _enter_new_editor_if_needed(page)
     label = studio_control_labels(kind)
     opened = page.locator("body").evaluate("""(needle) => {
       const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
@@ -87,10 +92,40 @@ def _open_editor_section(page, kind: str) -> None:
         raise StudioAutomationError(f"В новом редакторе не найдена кнопка + для раздела «{label}».")
 
 
+def _enter_new_editor_if_needed(page) -> None:
+    """Dismiss Studio's shared Editor welcome screen before any section action."""
+
+    visible_text = page.locator("body").inner_text(timeout=3_000)
+    if new_editor_sections_visible(visible_text) or not end_screen_requires_editor_entry(visible_text):
+        return
+    if not _click_exact_visible_button(page, studio_transition_label()):
+        raise StudioAutomationError("Не найдена большая кнопка перехода в новый видеоредактор Studio.")
+    for _attempt in range(40):
+        current_text = page.locator("body").inner_text(timeout=1_000)
+        if new_editor_sections_visible(current_text) or not end_screen_requires_editor_entry(current_text):
+            return
+        page.wait_for_timeout(250)
+    raise StudioAutomationError("Studio не открыл новый редактор после нажатия «Перейти к редактору».")
+
+
 def end_screen_requires_editor_entry(visible_text: str) -> bool:
     """Whether Studio is showing the legacy end-screen handoff panel."""
 
     return "перейти к редактору" in " ".join(str(visible_text or "").casefold().split())
+
+
+def new_editor_sections_visible(visible_text: str) -> bool:
+    """Recognise the loaded editor even when Studio retains its welcome DOM."""
+
+    normalized = " ".join(str(visible_text or "").casefold().split())
+    return "конечные заставки" in normalized and "подсказки" in normalized
+
+
+def identity_verification_required(visible_text: str) -> bool:
+    """Stop rather than interact through Studio's account-protection dialog."""
+
+    normalized = " ".join(str(visible_text or "").casefold().split())
+    return "подтверждение личности" in normalized and "подтвердите личность" in normalized
 
 
 def studio_transition_label() -> str:
@@ -257,16 +292,6 @@ def _apply_cards(page, action: Mapping[str, object]) -> None:
 
 
 def _apply_end_screen(page, action: Mapping[str, object]) -> None:
-    if end_screen_requires_editor_entry(page.locator("body").inner_text(timeout=3_000)):
-        if not _click_exact_visible_button(page, studio_transition_label()):
-            raise StudioAutomationError("Не найдена большая кнопка перехода в новый видеоредактор Studio.")
-        for _attempt in range(40):
-            current_text = page.locator("body").inner_text(timeout=1_000)
-            if not end_screen_requires_editor_entry(current_text):
-                break
-            page.wait_for_timeout(250)
-        else:
-            raise StudioAutomationError("Studio не открыл новый редактор после нажатия «Перейти к редактору».")
     _open_editor_section(page, "end-screen")
     # The Studio editor owns the exact positioning controls.  Insert elements
     # one by one so a changed template can never silently replace a video's

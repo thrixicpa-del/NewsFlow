@@ -59,6 +59,100 @@ class YouTubeStudioActionsTests(unittest.TestCase):
         self.assertEqual(studio_control_labels("cards"), "Подсказки")
         self.assertEqual(studio_control_labels("end-screen"), "Конечные заставки")
 
+    def test_cards_enter_the_new_editor_before_looking_for_the_section(self):
+        """The welcome handoff blocks Cards just like it blocks end screens."""
+        from scriptor.youtube_studio import _open_editor_section
+
+        class TransitionButton:
+            def __init__(self, page):
+                self.page = page
+
+            def is_visible(self, timeout):
+                return True
+
+            def click(self, timeout, force=False):
+                self.page.in_new_editor = True
+
+        class Body:
+            def __init__(self, page):
+                self.page = page
+
+            def inner_text(self, timeout):
+                return "Редактор" if self.page.in_new_editor else "Перейти к редактору"
+
+            def evaluate(self, _script, _label):
+                return self.page.in_new_editor
+
+        class Page:
+            def __init__(self):
+                self.in_new_editor = False
+                self.button = TransitionButton(self)
+
+            def locator(self, _selector):
+                return Body(self)
+
+            def get_by_label(self, _label, exact):
+                if not exact:
+                    raise AssertionError("The Studio handoff must use its exact accessible label")
+                return self.button
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        page = Page()
+        try:
+            _open_editor_section(page, "cards")
+        except StudioAutomationError as exc:
+            self.fail(f"Cards must pass the Studio welcome handoff before opening their section: {exc}")
+        self.assertTrue(page.in_new_editor)
+
+    def test_cards_accept_the_new_editor_when_the_welcome_text_is_retained(self):
+        """Studio retains the welcome DOM after it has revealed editor sections."""
+        from scriptor.youtube_studio import _open_editor_section
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Перейти к редактору Конечные заставки Подсказки"
+
+            def evaluate(self, _script, _label):
+                return True
+
+        class Page:
+            def locator(self, _selector):
+                return Body()
+
+            def wait_for_timeout(self, _milliseconds):
+                raise AssertionError("The retained welcome text must not trigger a wait loop")
+
+        try:
+            _open_editor_section(Page(), "cards")
+        except Exception as exc:
+            self.fail(f"The visible new-editor sections must win over retained welcome text: {exc}")
+
+    def test_editor_section_stops_for_identity_verification(self):
+        """Automation must not click controls behind Studio's identity gate."""
+        from scriptor.youtube_studio import _open_editor_section
+
+        class Body:
+            def inner_text(self, timeout):
+                return "Подтверждение личности Чтобы продолжить, подтвердите личность"
+
+            def evaluate(self, _script, _label):
+                raise AssertionError("The section control must not be evaluated behind verification")
+
+        class Page:
+            def locator(self, _selector):
+                return Body()
+
+        try:
+            _open_editor_section(Page(), "cards")
+        except StudioAutomationError as exc:
+            self.assertIn("подтвердите личность", str(exc).casefold())
+        except Exception as exc:
+            self.fail(f"Identity verification must be reported before touching editor controls: {exc}")
+        else:
+            self.fail("Identity verification must stop the Studio action")
+
     def test_legacy_transition_uses_accessible_button_label(self):
         class Button:
             def __init__(self):
