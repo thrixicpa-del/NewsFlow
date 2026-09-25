@@ -2754,26 +2754,82 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
         title = str(raw_title).strip()
         if not title or title.casefold() in existing:
             continue
-        direction = str(getattr(settings, "idea_result_sources", {}).get(title, "")).strip() or "Старое направление"
-        item = idea_engine.build_production_item(
-            {"direction": direction, "topic": direction, "angle": "legacy"}, title, [])
+        title_metadata = getattr(settings, "idea_title_metadata", {}) or {}
+        detail = title_metadata.get(title, {}) if isinstance(title_metadata, dict) else {}
+        detail = dict(detail) if isinstance(detail, dict) else {}
+        direction = str(getattr(settings, "idea_result_sources", {}).get(title, "")).strip() or str(
+            detail.get("topic", "")
+        ).strip() or "Старое направление"
+        seed = {
+            "direction": direction,
+            "topic": str(detail.get("topic", "")).strip() or direction,
+            "angle": str(detail.get("angle", "")).strip() or "legacy",
+            "framing_type": str(detail.get("framing_type", "EDITORIAL")).strip() or "EDITORIAL",
+            "main_consequence": str(detail.get("main_consequence", "")).strip(),
+            "information_payload": (
+                dict(detail.get("information_payload", {}))
+                if isinstance(detail.get("information_payload"), dict) else {}
+            ),
+            "script_requirements": (
+                [str(value).strip() for value in detail.get("script_requirements", []) if str(value).strip()]
+                if isinstance(detail.get("script_requirements"), list) else []
+            ),
+        }
+        item = idea_engine.build_production_item(seed, title, [])
         if item is None:
             normalised = idea_engine.normalise_title(title)
             item = {
-                "direction": direction, "topic": direction, "angle": "legacy", "title": normalised,
+                "direction": direction, "topic": seed["topic"], "angle": seed["angle"], "title": normalised,
                 "event_ids": [], "supporting_context": ["Унаследованный title-only проект"],
                 "core_event": direction, "core_claim": normalised, "conflict": "",
                 "promised_question": "Уточнить содержание перед сценарием",
                 "script_requirements": ["уточнить фактический контекст перед написанием сценария"],
                 "click_score": 0, "novelty_score": 0, "scriptability_score": 0,
                 "char_count": len(normalised), "hook_family": "legacy", "macro_event_id": "",
-                "primary_entity": "", "geography": [], "topic_family": "legacy", "angle_family": "legacy",
-                "manual": True, "framing_type": "EDITORIAL", "factual_risk_score": "UNKNOWN",
+                "primary_entity": "", "primary_entities": [], "geography": [],
+                "topic_family": seed["topic"], "angle_family": seed["angle"],
+                "manual": True, "framing_type": seed["framing_type"], "factual_risk_score": "UNKNOWN",
                 "cis_audience_relevance_score": 0, "why_cis_audience_cares": "Не оценивалось в legacy-проекте.",
                 "emotional_stakes_score": 0, "creative_amplification_score": 0, "direction_fit_score": 0,
                 "information_payload": {}, "main_consequence": "", "status": "LEGACY",
             }
-        item["legacy"] = True
+
+        if detail:
+            payload = (
+                dict(detail.get("information_payload", {}))
+                if isinstance(detail.get("information_payload"), dict) else {}
+            )
+            requirements = (
+                [str(value).strip() for value in detail.get("script_requirements", []) if str(value).strip()]
+                if isinstance(detail.get("script_requirements"), list) else []
+            )
+            subjects = (
+                [str(value).strip() for value in detail.get("subjects", []) if str(value).strip()]
+                if isinstance(detail.get("subjects"), list) else []
+            )
+            consequence = str(detail.get("main_consequence", "")).strip()
+            item["information_payload"] = payload
+            item["script_requirements"] = requirements or item.get("script_requirements", [])
+            item["main_consequence"] = consequence
+            item["framing_type"] = str(
+                detail.get("framing_type", item.get("framing_type", "EDITORIAL"))
+            ).strip().upper()
+            item["primary_entities"] = subjects
+            item["primary_entity"] = subjects[0] if subjects else str(item.get("primary_entity", ""))
+            if str(payload.get("core", "")).strip():
+                item["core_event"] = str(payload["core"]).strip()
+                if str(payload["core"]).strip() not in item.get("supporting_context", []):
+                    item["supporting_context"] = [
+                        str(payload["core"]).strip(),
+                        *list(item.get("supporting_context", [])),
+                    ]
+            if str(payload.get("object", "")).strip():
+                item["conflict"] = str(payload["object"]).strip()
+            if consequence:
+                item["promised_question"] = f"Проверить и объяснить последствие: {consequence}"
+        item["legacy"] = not bool(detail)
+        if detail and str(detail.get("review_status", "")).strip():
+            item["status"] = str(detail["review_status"]).strip().upper()
         ensure_production_item_ids([item])
         settings.idea_production_items.append(item)
         existing.add(title.casefold())
@@ -2870,6 +2926,16 @@ _GENERIC_IDEA_TITLE_WORDS = {
     "кризис", "кризиса", "кризисе", "экономический", "экономическая", "экономические",
     "неопределенность", "неопределённость", "международный", "международная", "международные",
     "ситуация", "ситуации", "обстановка", "происходит", "события", "новости",
+}
+
+_ABSTRACT_FORMULA_SUBJECTS = {"стороны", "участники", "они", "все"}
+_IDEA_ENTITY_EQUIVALENTS = {
+    "россия": {"россия", "москва"},
+    "украина": {"украина", "киев"},
+}
+_FORMULA_CONTEXT_STOP_WORDS = {
+    "и", "или", "по", "на", "в", "во", "к", "ко", "из", "от", "для", "при",
+    "под", "над", "с", "со", "за", "о", "об", "про",
 }
 
 
@@ -3015,30 +3081,267 @@ def _formula_part(value: object) -> str:
     return text
 
 
+def _formula_direction_parts(topic: str) -> tuple[str, str]:
+    """Split a plan direction without confusing an entity dash with the direction separator."""
+    clean_topic = _clean_idea_title(topic)
+    parts = re.split(r"\s+[—–]\s+|\s+-\s+", clean_topic, maxsplit=1)
+    left = _formula_part(parts[0]) if parts else ""
+    right = _formula_part(parts[1]) if len(parts) > 1 else ""
+    return left, right
+
+
+def _formula_topic_context(topic: str) -> tuple[list[str], str]:
+    """Extract explicit subjects and an object anchor from the plan direction only."""
+    left, right = _formula_direction_parts(topic)
+    entities: list[str] = []
+    paired = [part for part in re.split(r"(?<!\s)[-–](?!\s)", left) if str(part).strip()]
+    if len(paired) > 1:
+        entities = [_formula_part(part) for part in paired if len(_formula_part(part)) >= 2][:2]
+    elif left:
+        words = re.findall(r"[A-Za-zА-Яа-яЁё0-9.]+", left)
+        named_phrase = (
+            len(words) == 1
+            or (
+                len(words) <= 3
+                and all(word.isupper() or (word and word[0].isupper()) for word in words)
+            )
+        )
+        if named_phrase:
+            entities = [left]
+
+    lowered = right.casefold()
+    if re.search(r"\bпереговор\w*", lowered):
+        object_name = "переговоры"
+    elif re.search(r"\bсанкц\w*", lowered):
+        object_name = "санкции"
+    elif re.search(r"\bпоставк\w*", lowered):
+        object_name = "поставки"
+    elif re.search(r"\bинфраструктур\w*", lowered):
+        object_name = "инфраструктура"
+    elif re.search(r"\bотношен\w*", lowered):
+        object_name = "отношения"
+    elif re.search(r"\bпорт\w*", lowered):
+        object_name = "порт"
+    else:
+        object_name = right
+    return entities, object_name
+
+
+def _formula_words(value: object) -> set[str]:
+    return set(re.findall(r"[a-zа-яё0-9]{2,}", str(value or "").casefold()))
+
+
+def _formula_keyword_stems(value: object) -> set[str]:
+    words = [
+        word for word in _formula_words(value)
+        if word not in _FORMULA_CONTEXT_STOP_WORDS and len(word) >= 3
+    ]
+    return {word[:6] if len(word) > 6 else word for word in words}
+
+
+def _formula_entity_present(words: set[str], entity: str) -> bool:
+    normalized = entity.casefold().strip()
+    equivalents = _IDEA_ENTITY_EQUIVALENTS.get(normalized)
+    if equivalents:
+        return bool(words & equivalents)
+    tokens = _formula_words(entity)
+    return bool(tokens) and tokens.issubset(words)
+
+
+def _formula_seo_anchors(topic: str, entities: list[str], object_name: str) -> list[str]:
+    """Keep 2–5 natural anchors from the direction; never synthesize new names or facts."""
+    anchors: list[str] = []
+    for entity in entities:
+        if entity and entity.casefold() not in {value.casefold() for value in anchors}:
+            anchors.append(entity)
+    _left, right = _formula_direction_parts(topic)
+    source = object_name or right
+    for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9]{3,}", source):
+        if word.casefold() in _FORMULA_CONTEXT_STOP_WORDS:
+            continue
+        if word.casefold() not in {value.casefold() for value in anchors}:
+            anchors.append(word)
+        if len(anchors) >= 5:
+            break
+    return anchors[:5]
+
+
+def _formula_parts_need_contextual_fallback(parts: tuple[str, str, str], topic: str) -> bool:
+    """Reject a mood-only formula that drops the direction's subject or object."""
+    entities, object_name = _formula_topic_context(topic)
+    combined_words = _formula_words(" ".join(parts))
+    action_words = _formula_words(parts[1])
+    combined_stems = _formula_keyword_stems(" ".join(parts))
+    concrete_action_subject = any(_formula_entity_present(action_words, entity) for entity in entities)
+    if action_words & _ABSTRACT_FORMULA_SUBJECTS and not concrete_action_subject:
+        return True
+    if entities:
+        if not all(_formula_entity_present(combined_words, entity) for entity in entities):
+            return True
+        if not concrete_action_subject:
+            return True
+    else:
+        left, _right = _formula_direction_parts(topic)
+        left_stems = _formula_keyword_stems(left)
+        action_stems = _formula_keyword_stems(parts[1])
+        if left_stems and not (left_stems & action_stems):
+            return True
+
+    object_stems = _formula_keyword_stems(object_name)
+    return bool(object_stems and not (object_stems & combined_stems))
+
+
+def _fit_formula_part(value: object, limit: int) -> str:
+    """Fit a local fallback to the hard per-part limit without ellipses."""
+    text = _formula_part(value)
+    if len(text) <= limit:
+        return text
+    words = text.split()
+    while len(" ".join(words)) > limit and len(words) > 1:
+        words.pop()
+    compact = " ".join(words).strip("—-:;!?. ")
+    if compact and len(compact) <= limit:
+        return compact
+    return text[:limit].rstrip(" —-:;!?.,")
+
+
 def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
-    """Return concise complete phrases when a provider part does not fit."""
-    del topic
+    """Create a direction-specific local fallback without dropping a requested title.
+
+    Strong factual wording is used only when the direction already contains it.
+    Otherwise the fallback stays editorial: it names the direction subject and
+    object, but does not invent dates, figures, attacks, accusations or outcomes.
+    """
+    entities, object_name = _formula_topic_context(topic)
+    left, right = _formula_direction_parts(topic)
+    subject = " и ".join(entities) if entities else left
+    object_label = object_name or right or topic
+    lowered_right = right.casefold()
+
+    if (
+        len(entities) == 2
+        and object_name == "переговоры"
+        and "тупик" in lowered_right
+    ):
+        hooks = (
+            "Договориться не смогли",
+            "Переговоры снова в тупике",
+            "Выход из тупика не найден",
+            "Компромисс пока не найден",
+            "Тупик переговоров сохраняется",
+            "Переговоры остаются в тупике",
+            "Прорыва в переговорах пока нет",
+            "Сделка пока не складывается",
+            "Сближения позиций пока нет",
+            "Переговоры без прорыва",
+        )
+        actions = (
+            f"{entities[0]} и {entities[1]} не уступают",
+            f"{entities[0]} и {entities[1]} держат позиции",
+            f"{entities[0]} и {entities[1]} не сближаются",
+            "Москва и Киев держат позиции"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} держат позиции",
+            "Москва и Киев не сближаются"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не сближаются",
+            f"{entities[0]} и {entities[1]} расходятся",
+            "Москва и Киев не уступают"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} не уступают",
+            "Москва и Киев без компромисса"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} без компромисса",
+            f"{entities[0]} и {entities[1]} стоят на своём",
+            "Москва и Киев стоят на своём"
+            if entities == ["Россия", "Украина"] else f"{entities[0]} и {entities[1]} стоят на своём",
+        )
+        consequences = (
+            "переговоры снова в тупике",
+            "компромисс под вопросом",
+            "выход из тупика не найден",
+            "сделка пока не складывается",
+            "тупик сохраняется",
+            "переговоры без прорыва",
+            "компромисс пока не найден",
+            "сближения позиций пока нет",
+            "договорённости пока нет",
+            "выход из тупика под вопросом",
+        )
+        index = variant % len(hooks)
+        values = hooks[index], actions[index], consequences[index]
+        return tuple(
+            _fit_formula_part(value, limit)
+            for value, limit in zip(values, _IDEA_FORMULA_PART_LIMITS)
+        )
+
+    # The general fallback is intentionally editorial rather than factual.
+    # Its claims are about the selected direction itself, so it can preserve
+    # output count without pretending an unverified event already happened.
     hooks = (
-        "Ставки растут", "Новый разлом", "Решающий поворот", "Напряжение усиливается",
-        "Риск выходит наружу", "Баланс меняется", "Конфликт обостряется", "Вопрос становится жёстче",
-        "Стороны повышают цену", "Точка давления найдена",
+        f"Фокус смещается к {object_label}",
+        f"{object_label} выходит на первый план",
+        f"Главный вопрос теперь {object_label}",
+        f"Разбор начинается с {object_label}",
+        f"Редакционный фокус на {object_label}",
+        f"Ключевая тема {object_label}",
+        f"В центре внимания {object_label}",
+        f"Новая рамка темы {object_label}",
+        f"Контекст строится вокруг {object_label}",
+        f"Главная линия {object_label}",
     )
     actions = (
-        "Стороны меняют курс", "Стороны усиливают давление", "Участники идут на риск",
-        "Стороны ужесточают условия", "Участники меняют расчёт", "Стороны меняют баланс",
-        "Участники проверяют границы", "Стороны повышают ставки", "Участники меняют тактику",
-        "Стороны спорят за влияние",
+        f"{subject} в фокусе",
+        (
+            f"{subject} в центре"
+            if entities else f"В фокусе {subject}"
+        ),
+        (
+            f"{subject} в повестке"
+            if entities else f"Контекст {subject}"
+        ),
+        (
+            f"{subject} в центре темы"
+            if entities else f"Рамка темы {subject}"
+        ),
+        (
+            f"{subject} в поле внимания"
+            if entities else f"Разбор темы {subject}"
+        ),
+        (
+            f"{subject} задают рамку"
+            if len(entities) == 2 else f"Тема {subject} в центре"
+        ),
+        (
+            f"{subject} задают контекст"
+            if len(entities) == 2 else f"Фокус темы {subject}"
+        ),
+        (
+            f"{subject} остаются в фокусе"
+            if len(entities) == 2 else f"Контекст темы {subject}"
+        ),
+        (
+            f"{subject} в центре повестки"
+            if entities else f"В разборе {subject}"
+        ),
+        (
+            f"{subject} ключевые стороны"
+            if len(entities) == 2 else f"В центре {subject}"
+        ),
     )
     consequences = (
-        "Баланс сил под угрозой", "Условия для сторон жёстче", "Интересы сторон под риском",
-        "Цена ошибки растёт", "Исход для сторон неясен", "Контроль слабеет",
-        "Влияние на объект меняется", "Компромисс усложняется", "Последствия нарастают",
-        "Ставка для объекта выше",
+        f"Разбора требует {object_label}",
+        "выводы по теме требуют проверки",
+        "последствия отделяем от фактов",
+        "контекст темы остаётся ключевым",
+        "риски требуют отдельной проверки",
+        f"главный вопрос о {object_label}",
+        "факты и оценки нужно разделить",
+        "итог зависит от контекста темы",
+        "последствия требуют проверки",
+        "главный вопрос остаётся открытым",
     )
-    return (
-        hooks[variant % len(hooks)],
-        actions[variant % len(actions)],
-        consequences[variant % len(consequences)],
+    index = variant % len(hooks)
+    values = hooks[index], actions[index], consequences[index]
+    return tuple(
+        _fit_formula_part(value, limit)
+        for value, limit in zip(values, _IDEA_FORMULA_PART_LIMITS)
     )
 
 
@@ -3046,9 +3349,8 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
                        force_local_parts: bool = False) -> dict:
     """Return one canonical Hook — Action — Consequence idea title.
 
-    The visible title is a production contract.  A provider response is never
-    sent back for a forced rewrite or discarded solely for formatting: Python
-    materialises missing parts and compacts every accepted title locally.
+    Provider formatting is repaired locally, but contextual repair may use only
+    anchors already present in the selected plan direction.
     """
     explicit_parts = (
         _formula_part(candidate.get("provocative_headline", candidate.get("provocativeHeadline", ""))),
@@ -3067,17 +3369,85 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
     elif len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
         hook = raw_title.strip("?") if raw_title and not _has_unresolved_headline_template(raw_title) else fallback_parts[0]
         parts = (hook, fallback_parts[1], fallback_parts[2])
+    elif _formula_parts_need_contextual_fallback(parts, topic):
+        parts = fallback_parts
+
     parts = tuple(
-        part if len(part) <= limit and "…" not in part else fallback
+        _fit_formula_part(
+            fallback if (len(part) > limit or "…" in part) else part,
+            limit,
+        )
         for part, limit, fallback in zip(parts, _IDEA_FORMULA_PART_LIMITS, fallback_parts)
     )
+    if _formula_parts_need_contextual_fallback(parts, topic):
+        parts = fallback_parts
+
     title = _IDEA_TITLE_FORMULA_SEPARATOR.join(parts)
+    entities, object_name = _formula_topic_context(topic)
+    left, _right = _formula_direction_parts(topic)
+    supplied_subjects = candidate.get("subjects")
+    supplied = (
+        [str(value).strip() for value in supplied_subjects if str(value).strip()]
+        if isinstance(supplied_subjects, list) else []
+    )
+    title_words = _formula_words(title)
+    subjects = entities or [
+        value for value in supplied if _formula_entity_present(title_words, value)
+    ]
+    if (
+        not subjects and left and all(parts)
+        and _formula_keyword_stems(left) & _formula_keyword_stems(parts[1])
+    ):
+        subjects = [left]
+
+    information_payload = candidate.get("information_payload")
+    payload = dict(information_payload) if isinstance(information_payload, dict) else {}
+    seo_anchors = _formula_seo_anchors(topic, subjects, object_name)
+    canonical_payload = {
+        "core": parts[1],
+        "object": object_name,
+        "consequence": parts[2],
+        "seo_anchors": seo_anchors,
+    }
+    if not payload:
+        payload = {
+            key: value
+            for key, value in canonical_payload.items()
+            if value
+        }
+
+    script_requirements = candidate.get("script_requirements")
+    requirements = (
+        [str(value).strip() for value in script_requirements if str(value).strip()]
+        if isinstance(script_requirements, list) else []
+    )
+    mandatory = [
+        (
+            f"Назвать субъектов: {', '.join(subjects)}"
+            if subjects else
+            "Уточнить конкретного субъекта до фактических утверждений"
+        ),
+        (
+            f"Объяснить объект: {object_name}"
+            if object_name else
+            "Уточнить конкретный объект действия"
+        ),
+        f"Проверить последствие: {parts[2]}" if all(parts) else "Не выдумывать последствие",
+    ]
+    for requirement in mandatory:
+        if requirement not in requirements:
+            requirements.append(requirement)
+
     return {
         **candidate,
         "title": title,
-        "provocative_headline": parts[0],
-        "subject_action": parts[1],
-        "object_consequence": parts[2],
+        "provocative_headline": parts[0] if all(parts) else "",
+        "subject_action": parts[1] if all(parts) else "",
+        "object_consequence": parts[2] if all(parts) else "",
+        "subjects": subjects,
+        "main_consequence": parts[2] if all(parts) else "",
+        "information_payload": payload,
+        "script_requirements": requirements,
     }
 
 
@@ -3279,6 +3649,11 @@ def _title_generation_prompt(topic: str, requirements: str, candidate_count: int
         "заголовки «Почему снова обсуждают», «Что дальше», «Что происходит вокруг» без самостоятельной "
         "конфликтной ставки. Не выдумывай факты, даты, "
         "цифры, цитаты, обвинения и последствия. "
+        "В формульном Title назови конкретный субъект (страна, организация, человек или явно названная сторона), "
+        "а не «стороны» или «участники»; назови объект действия и понятное последствие. "
+        "Включи 2–5 естественных SEO-якорей из направления или доказательной выборки: имена, страны, города, "
+        "предмет спора, отрасль или событие. Пиши их в естественном русском предложении, без набора ключевых слов "
+        "и без искусственных слов вроде «лихорадит». "
         f"{uncertainty_instruction}"
         f"{formula_instruction}"
         f"Недавние начала, которые нельзя повторять: {banned_openings}.\n"
