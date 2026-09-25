@@ -3287,16 +3287,46 @@ def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
         f"Главная линия {object_label}",
     )
     actions = (
-        f"Контекст задаёт {subject}",
-        f"В фокусе остаётся {subject}",
-        f"Ключевая сторона {subject}",
-        f"Рамку определяет {subject}",
-        f"Контекст формирует {subject}",
-        f"В центре разбора {subject}",
-        f"Повестку задаёт {subject}",
-        f"Ключевым остаётся {subject}",
-        f"Тему определяет {subject}",
-        f"В центре повестки {subject}",
+        (
+            f"{subject} в фокусе"
+            if entities else f"{subject} в фокусе"
+        ),
+        (
+            f"{subject} в центре"
+            if entities else f"В фокусе {subject}"
+        ),
+        (
+            f"{subject} в повестке"
+            if entities else f"Контекст {subject}"
+        ),
+        (
+            f"{subject} в центре темы"
+            if entities else f"Рамка темы {subject}"
+        ),
+        (
+            f"{subject} в поле внимания"
+            if entities else f"Разбор темы {subject}"
+        ),
+        (
+            f"{subject} задают рамку"
+            if len(entities) == 2 else f"Тема {subject} в центре"
+        ),
+        (
+            f"{subject} задают контекст"
+            if len(entities) == 2 else f"Фокус темы {subject}"
+        ),
+        (
+            f"{subject} остаются в фокусе"
+            if len(entities) == 2 else f"Контекст темы {subject}"
+        ),
+        (
+            f"{subject} в центре повестки"
+            if entities else f"В разборе {subject}"
+        ),
+        (
+            f"{subject} ключевые стороны"
+            if len(entities) == 2 else f"В центре {subject}"
+        ),
     )
     consequences = (
         f"Разбора требует {object_label}",
@@ -3304,7 +3334,7 @@ def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
         "последствия отделяем от фактов",
         "контекст темы остаётся ключевым",
         "риски требуют отдельной проверки",
-        f"главный вопрос — {object_label}",
+        f"главный вопрос о {object_label}",
         "факты и оценки нужно разделить",
         "итог зависит от контекста темы",
         "последствия требуют проверки",
