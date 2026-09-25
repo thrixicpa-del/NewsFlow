@@ -850,14 +850,33 @@ export function App() {
         </Sidebar>}
       header={!isPublicationV2 ? <PageHeader eyebrow={page === "dashboard" ? "РАБОЧЕЕ ПРОСТРАНСТВО" : "NEWSFLOW STUDIO"} title={<><Icon size={27} />{meta.title}</>} description={meta.subtitle} meta={<><StatCard label="Ожидают" value={data.counts.ideas} /><StatCard label="В работе" value={page === "editor" ? data.montageTasks.filter((task) => !["Готово", "Ошибка"].includes(task.status || "")).length : 0} tone="info" /><StatCard label="Готово" value={data.counts.montage} tone="success" /></>} /> : null}
       notice={notice ? <Toast message={notice} onDismiss={() => setNotice("")} /> : null}
-      taskCenter={<TaskCenter data={data} onSelect={setSelectedTask} />}
-      inspector={<ContextInspector
+      taskCenter={<>
+        {uiPreferences.inspectorCollapsed ? (
+          <div className="toolbar compact" aria-label="Управление инспектором">
+            <UiButton
+              variant="secondary"
+              onClick={() => setUiPreferences((current) => ({ ...current, inspectorCollapsed: false }))}
+            >
+              Развернуть инспектор
+            </UiButton>
+          </div>
+        ) : null}
+        <TaskCenter
+          data={data}
+          onSelect={(entry) => {
+            setSelectedTask(entry);
+            setUiPreferences((current) => ({ ...current, inspectorCollapsed: false }));
+          }}
+        />
+      </>}
+      inspector={uiPreferences.inspectorCollapsed ? undefined : <ContextInspector
         entry={selectedTask}
         width={uiPreferences.inspectorWidth}
         density={uiPreferences.density}
         onDensityChange={(density) => setUiPreferences((current) => ({ ...current, density }))}
         onWidthChange={(inspectorWidth) => setUiPreferences((current) => ({ ...current, inspectorWidth }))}
         onClose={() => setSelectedTask(null)}
+        onHide={() => setUiPreferences((current) => ({ ...current, inspectorCollapsed: true }))}
       />}
       inspectorWidth={uiPreferences.inspectorWidth}
     >
