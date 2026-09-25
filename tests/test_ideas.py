@@ -230,6 +230,24 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             self.assertTrue(all(part.strip() for part in title.split(" — ")), title)
             self.assertNotIn("…", title, title)
 
+    def test_formula_selection_repairs_normalization_collisions_without_losing_metadata(self):
+        """Repeated provider titles must become distinct local formula cards without another request."""
+        candidates = [{
+            "title": "Ставки растут — Стороны меняют курс — Цена ошибки растёт",
+            "angle": f"angle-{index}",
+            "framing_type": "ANALYSIS",
+            "information_payload": {"event": index},
+        } for index in range(10)]
+
+        selected = bridge.select_idea_title_candidates(
+            "Международные переговоры", candidates, [], 10, formula_only=True,
+        )
+
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(len({item["title"] for item in selected}), 10)
+        self.assertEqual([item["angle"] for item in selected], [f"angle-{index}" for index in range(10)])
+        self.assertEqual([item["information_payload"] for item in selected], [{"event": index} for index in range(10)])
+
     def test_generation_without_formula_keeps_free_form_provider_titles(self):
         settings = Settings(
             openai_api_keys=[OpenAIKey(label="Тест", secret="test-key", active=True)],

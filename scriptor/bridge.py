@@ -3042,7 +3042,8 @@ def _local_formula_parts(topic: str, variant: int) -> tuple[str, str, str]:
     )
 
 
-def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0) -> dict:
+def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0,
+                       force_local_parts: bool = False) -> dict:
     """Return one canonical Hook — Action — Consequence idea title.
 
     The visible title is a production contract.  A provider response is never
@@ -3061,7 +3062,9 @@ def _formula_candidate(candidate: dict, *, topic: str = "", variant: int = 0) ->
         parts = tuple(_formula_part(part) for part in raw_title.split(
             _IDEA_TITLE_FORMULA_SEPARATOR))
     fallback_parts = _local_formula_parts(topic, variant)
-    if len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
+    if force_local_parts:
+        parts = fallback_parts
+    elif len(parts) != 3 or not all(parts) or any("?" in part for part in parts):
         hook = raw_title.strip("?") if raw_title and not _has_unresolved_headline_template(raw_title) else fallback_parts[0]
         parts = (hook, fallback_parts[1], fallback_parts[2])
     parts = tuple(
@@ -3120,8 +3123,25 @@ def select_idea_title_candidates(topic: str, candidates: list[object], memory: l
         if not validation["valid"]:
             continue
         duplicate, score, _reason = _duplicate_details(validation["title"], comparison_memory)
-        if duplicate and not formula_only:
-            continue
+        if duplicate:
+            if not formula_only:
+                continue
+            for collision_variant in range(variant, variant + 10):
+                replacement = _formula_candidate(
+                    candidate, topic=topic, variant=collision_variant, force_local_parts=True,
+                )
+                replacement_validation = valid_idea_title(replacement["title"])
+                replacement_duplicate, replacement_score, _reason = _duplicate_details(
+                    replacement_validation["title"], comparison_memory,
+                )
+                if replacement_validation["valid"] and not replacement_duplicate:
+                    candidate = replacement
+                    validation = replacement_validation
+                    score = replacement_score
+                    duplicate = False
+                    break
+            if duplicate:
+                continue
         metadata = _metadata_for_idea_title(validation["title"], topic, candidate, score)
         selected.append(metadata)
         comparison_memory.append(metadata)
