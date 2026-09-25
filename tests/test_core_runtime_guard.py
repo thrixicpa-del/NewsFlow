@@ -21,6 +21,7 @@ REQUIRED_SOURCES = (
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
+    "scriptor/openai_client.py",
     "scriptor/timeline.py",
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
@@ -177,6 +178,20 @@ class CoreRuntimeGuardTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(relative, result.stderr)
                 self.assertIn("Пересоберите core-bin", result.stderr)
+
+    def test_guard_rejects_changed_openai_client_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "scriptor" / "openai_client.py").write_text(
+                "# changed OpenAI runtime transport\n",
+                encoding="utf-8",
+            )
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scriptor/openai_client.py", result.stderr)
+            self.assertIn("Пересоберите core-bin", result.stderr)
 
     def test_guard_rejects_changed_footage_index_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
