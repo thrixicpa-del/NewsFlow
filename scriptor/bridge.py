@@ -894,7 +894,8 @@ def _cover_face_catalog(settings: Settings) -> list[dict]:
             for key, paths in sorted(groups.items()) if paths]
 
 
-def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False) -> tuple[str, str, str]:
+def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False,
+                                prepared_only: bool = False) -> tuple[str, str, str]:
     """Find a portrait only where the identity is explicitly present in the topic."""
     if item.get("face_reference_disabled"):
         return "", "", ""
@@ -917,7 +918,11 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
     topic_tokens = set(title_tokens)
     best_score = 0
     candidates: list[Path] = []
+    prepared_folder = _cover_prepared_face_folder(settings, folder)
     for source in files:
+        prepared_candidate = _cover_processed_face_path(source, folder, prepared_folder)
+        if prepared_only and not prepared_candidate.is_file():
+            continue
         try:
             relative = source.relative_to(folder)
         except ValueError:
@@ -944,8 +949,12 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
     # choose one to avoid four thumbnails using the identical Putin/Trump/etc.
     # photo; the rendered layout itself remains remembered per selected photo.
     source = random.choice(candidates)
-    prepared = _cover_processed_face_path(source, folder, _cover_prepared_face_folder(settings, folder))
-    chosen = prepared if settings.cover_face_remove_background and prepared.is_file() else source
+    prepared = _cover_processed_face_path(source, folder, prepared_folder)
+    if prepared_only:
+        _compress_prepared_face_for_fastgen(prepared)
+        chosen = prepared
+    else:
+        chosen = prepared if settings.cover_face_remove_background and prepared.is_file() else source
     label = source.parent.name if source.parent != folder else source.stem
     return str(chosen), label, "auto"
 
@@ -953,7 +962,8 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
 def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
                                face_mode: str = "auto", position: int = 0,
                                max_references: int = 10,
-                               preserve_face_selection: bool = False) -> tuple[list[str], str]:
+                               preserve_face_selection: bool = False,
+                               prepared_auto_face: bool = False) -> tuple[list[str], str]:
     """Keep references within the operation limit and reserve a selected face slot."""
     manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
     if face_mode == "without" or item.get("face_reference_disabled"):
@@ -966,7 +976,7 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
         face_source = "manual"
     else:
         face_path, face_label, face_source = _match_cover_face_reference(
-            item, settings, force=face_mode == "with"
+            item, settings, force=face_mode == "with", prepared_only=prepared_auto_face,
         )
     # Scene/style references can arrive from four places: a manually uploaded
     # image, an existing gallery cover, a FastGen pack and an AI-reference
@@ -7213,6 +7223,21 @@ _COVER_WORD_PAIRING = {
 }
 _COVER_WORD_GENERIC_STEMS = {"важн", "главн", "новост", "сегодн", "ситуац", "событ", "проблем", "изменен", "вопрос", "сценар", "последств", "шок", "срочно"}
 _COVER_WORD_FOREIGN_ENTITIES = {"трамп", "путин", "зеленск", "макрон", "али", "эрдоган", "нетан", "китай", "росси", "украин", "европ", "нато", "сша", "иран", "израил"}
+_COVER_WORD_GENERIC_ENTITY_TOKENS = {
+    "стороны", "сторона", "участники", "участник", "чиновники", "чиновник",
+    "власти", "люди", "рынок", "переговоры", "кризис", "ситуация",
+}
+_COVER_WORD_STRENGTHENING_RULES = (
+    (
+        ("бросил вызов", "бросила вызов", "бросает вызов", "бросают вызов"),
+        ("бросил вызов", "бросила вызов", "бросает вызов", "бросают вызов"),
+    ),
+    (("ультимат",), ("ультимат",)),
+    (
+        ("пригроз", "угрожает", "угрожают", "угрожал", "угрожала"),
+        ("пригроз", "угрожает", "угрожают", "угрожал", "угрожала"),
+    ),
+)
 _COVER_WORD_RISK_TERMS = ("может", "могут", "риск", "вероят", "возмож", "угроз")
 _COVER_WORD_ASSERTIVE_TERMS = ("взлетел", "рухнул", "обвалил", "закрыл", "остановил", "сорвал")
 _COVER_WORD_SEMANTIC_GROUPS = {
@@ -7321,10 +7346,45 @@ def _cover_word_foreign_entities(value: str, item: dict) -> set[str]:
 
 
 def _cover_word_named_source_entities(item: dict) -> set[str]:
-    """Named topic anchors, excluding incidental people from a long script."""
+    """Return concrete topic anchors without learning names from a long script.
+
+    Prefer structured ProductionItem entities. For direction strings such as
+    Armenia-Azerbaijan followed by a direction separator, the named left side
+    is also an explicit anchor. The legacy known-entity vocabulary remains a
+    compatibility fallback for title/topic rows without structured fields.
+    """
+    anchors: set[str] = set()
+
+    def add_words(value: object, *, trust_structure: bool = False) -> None:
+        text = _cover_context_values(value)
+        for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text):
+            lowered = word.casefold()
+            if lowered in _COVER_WORD_GENERIC_ENTITY_TOKENS:
+                continue
+            if trust_structure or word.isupper() or word[:1].isupper():
+                anchors.add(lowered[:4])
+
+    for field in ("primary_entities", "primary_entity", "entities", "geography"):
+        if item.get(field):
+            add_words(item.get(field), trust_structure=True)
+
+    for field in ("direction", "topic"):
+        value = _cover_context_values(item.get(field))
+        if not value:
+            continue
+        left = re.split(r"\s+[—–]\s+|\s+-\s+", value, maxsplit=1)[0]
+        parts = [part.strip() for part in re.split(r"(?<!\s)[-–/](?!\s)", left) if part.strip()]
+        if not parts:
+            parts = [left]
+        for part in parts:
+            words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", part)
+            if words and all(word.isupper() or word[:1].isupper() for word in words):
+                add_words(part)
+
     topic_fields = (
-        "title", "topic", "angle", "event_context", "primary_entities",
-        "primary_entity", "entities", "geography", "conflict", "framing",
+        "title", "topic", "direction", "angle", "event_context",
+        "primary_entities", "primary_entity", "entities", "geography",
+        "conflict", "framing",
     )
     topic_text = " ".join(
         _cover_context_values(item.get(field)) for field in topic_fields if item.get(field)
@@ -7332,11 +7392,24 @@ def _cover_word_named_source_entities(item: dict) -> set[str]:
     source_tokens = {
         word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", topic_text.casefold())
     }
-    return {
+    anchors.update(
         entity[:4]
         for entity in _COVER_WORD_FOREIGN_ENTITIES
         if entity[:4] in source_tokens
-    }
+    )
+    return anchors
+
+
+def _cover_word_strengthens_source(value: str, item: dict) -> bool:
+    """Detect materially stronger cover claims than the source carries."""
+    phrase = " ".join(str(value or "").casefold().split())
+    source = " ".join(_cover_word_source_text(item).casefold().split())
+    for output_markers, source_markers in _COVER_WORD_STRENGTHENING_RULES:
+        if any(marker in phrase for marker in output_markers) and not any(
+            marker in source for marker in source_markers
+        ):
+            return True
+    return False
 
 
 def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "",
@@ -7388,6 +7461,12 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         result.update(reason_code="GENERIC_ONLY", reason_detail="Фраза состоит только из общего кликбейта")
         return result
     source = _cover_word_source_text(item).casefold()
+    if kind == "headline" and _cover_word_strengthens_source(raw, item):
+        result.update(
+            reason_code="CLAIM_STRENGTH_ERROR",
+            reason_detail="Headline усиливает исходный факт более жёстким действием, которого нет в теме или контексте",
+        )
+        return result
     if (any(token in raw.casefold() for token in _COVER_WORD_ASSERTIVE_TERMS)
             and any(token in source for token in _COVER_WORD_RISK_TERMS)
             and "?" not in raw
@@ -8646,6 +8725,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 face_mode=face_mode if use_my_face else "without", position=index,
                 max_references=operation_reference_limit if operation_reference_limit is not None else 10,
                 preserve_face_selection=not use_my_face,
+                prepared_auto_face=use_my_face,
             )
             # A full-FastGen face cover is accepted only when the provider can
             # receive the selected portrait. Falling back to a name-only prompt
