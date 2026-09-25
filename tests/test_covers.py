@@ -951,6 +951,55 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertIn("Не уступает", prompt)
         self.assertIn("Не усиливай исходное действие", prompt)
 
+    def test_named_anchor_guard_covers_new_direction_entities_not_in_legacy_vocabulary(self):
+        item = {
+            "title": "Мирный процесс снова в центре внимания",
+            "direction": "Армения-Азербайджан — мирный процесс и Карабах",
+            "topic": "Армения-Азербайджан — мирный процесс и Карабах",
+        }
+
+        abstract = _validate_cover_word("headline", "Мирный процесс буксует", item)
+        concrete = _validate_cover_word("headline", "Армения обсуждает мирный процесс", item)
+
+        self.assertFalse(abstract["valid"], abstract)
+        self.assertEqual(abstract["reason_code"], "MISSING_NAMED_ANCHOR")
+        self.assertTrue(concrete["valid"], concrete)
+
+    def test_named_anchor_guard_uses_structured_entities_even_when_they_are_lowercase(self):
+        item = {
+            "title": "Мирный процесс меняет повестку",
+            "primary_entities": ["армении", "азербайджана"],
+        }
+
+        abstract = _validate_cover_word("headline", "Мирный процесс меняется", item)
+        concrete = _validate_cover_word("headline", "Армения меняет подход", item)
+
+        self.assertFalse(abstract["valid"], abstract)
+        self.assertEqual(abstract["reason_code"], "MISSING_NAMED_ANCHOR")
+        self.assertTrue(concrete["valid"], concrete)
+
+    def test_headline_guard_rejects_stronger_challenge_or_ultimatum_than_the_source(self):
+        item = {
+            "title": "Зеленский не уступает Трампу",
+            "topic": "Трамп-Зеленский — давление и переговоры",
+        }
+
+        for value in ("Зеленский бросил вызов", "Трамп выдвинул ультиматум"):
+            with self.subTest(value=value):
+                validation = _validate_cover_word("headline", value, item)
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "CLAIM_STRENGTH_ERROR")
+
+    def test_headline_guard_allows_strong_wording_when_the_source_contains_it(self):
+        item = {
+            "title": "Трамп выдвинул ультиматум Зеленскому",
+            "topic": "Трамп-Зеленский — ультиматум на переговорах",
+        }
+
+        validation = _validate_cover_word("headline", "Трамп выдвинул ультиматум", item)
+
+        self.assertTrue(validation["valid"], validation)
+
     def test_topic_gets_one_clear_pair_structure(self):
         headline, subheadline = _cover_text_structure("Тегеран усиливает давление на Ормузский пролив")
         self.assertTrue(headline)
@@ -991,6 +1040,129 @@ class CoverFaceLibraryTests(unittest.TestCase):
             self.assertEqual(label, "Алиев")
             self.assertEqual(source, "auto")
             self.assertEqual(_match_cover_face_reference({"title": "Тегеран усиливает давление на Ормуз"}, settings), ("", "", ""))
+
+    def test_prepared_only_auto_match_returns_prepared_png_even_when_background_flag_is_off(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            prepared_root = root / "Готовые PNG"
+            source = sources / "Зеленский" / "portrait.jpg"
+            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source.parent.mkdir(parents=True)
+            prepared.parent.mkdir(parents=True)
+            source.write_bytes(b"source-jpg")
+            prepared.write_bytes(b"prepared-png")
+            settings = Settings(
+                cover_face_library_folder=str(sources),
+                cover_face_prepared_folder=str(prepared_root),
+                cover_face_library_enabled=True,
+                cover_face_remove_background=False,
+            )
+
+            path, label, source_kind = _match_cover_face_reference(
+                {"title": "Зеленский обсуждает переговоры"},
+                settings,
+                prepared_only=True,
+            )
+
+        self.assertEqual(Path(path), prepared)
+        self.assertEqual(label, "Зеленский")
+        self.assertEqual(source_kind, "auto")
+        self.assertEqual(Path(path).suffix.casefold(), ".png")
+
+    def test_prepared_only_auto_match_does_not_fall_back_to_raw_source_portrait(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            source = sources / "Зеленский" / "portrait.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"source-jpg")
+            settings = Settings(
+                cover_face_library_folder=str(sources),
+                cover_face_prepared_folder=str(root / "Готовые PNG"),
+                cover_face_library_enabled=True,
+            )
+
+            result = _match_cover_face_reference(
+                {"title": "Зеленский обсуждает переговоры"},
+                settings,
+                prepared_only=True,
+            )
+
+        self.assertEqual(result, ("", "", ""))
+
+    def test_my_faces_route_uses_prepared_auto_png_and_fastgen_only_route_sends_no_user_face(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            prepared_root = root / "Готовые PNG"
+            source = sources / "Зеленский" / "portrait.jpg"
+            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source.parent.mkdir(parents=True)
+            prepared.parent.mkdir(parents=True)
+            source.write_bytes(b"source-jpg")
+            prepared.write_bytes(b"prepared-png")
+
+            def make_settings():
+                settings = Settings(
+                    cover_output_folder=directory,
+                    cover_variant_count=1,
+                    cover_operation="reference_image_edit",
+                    cover_face_library_folder=str(sources),
+                    cover_face_prepared_folder=str(prepared_root),
+                    cover_face_library_enabled=True,
+                    cover_face_remove_background=False,
+                )
+                settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+                settings.fastgen_capabilities_cache = {"image": [{
+                    "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+                }]}
+                settings.cover_queue = [{
+                    "title": "Зеленский обсуждает переговоры",
+                    "topic": "Трамп-Зеленский — давление и переговоры",
+                    "production_item_id": "production:0",
+                    "image_prompt": "Topic-accurate editorial news scene",
+                    "cover_headline": "ЗЕЛЕНСКИЙ НА ПЕРЕГОВОРАХ",
+                    "cover_subheadline": "ДАВЛЕНИЕ НА КИЕВ РАСТЁТ",
+                    "paths": [],
+                }]
+                return settings
+
+            for build_mode, expected in (
+                ("fastgen-full-my-face", (str(prepared),)),
+                ("fastgen-full", ()),
+            ):
+                settings = make_settings()
+                calls = []
+
+                def render(_prompt, _output, _stem, _operation, _ratio, **kwargs):
+                    calls.append(tuple(str(path) for path in kwargs.get("references") or []))
+                    return [root / f"{build_mode}.png"]
+
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                     patch.object(bridge, "_save_cover_state"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                    bridge.generate_covers({
+                        "indices": [0],
+                        "productionItemIds": ["production:0"],
+                        "_parallel_cover_worker": True,
+                        "buildMode": build_mode,
+                        "faceMode": "auto",
+                        "textMode": "fastgen",
+                        "localFaceOnly": False,
+                        "operation": "reference_image_edit",
+                    })
+
+                self.assertEqual(calls, [expected])
+                if build_mode == "fastgen-full-my-face":
+                    self.assertEqual(settings.cover_queue[0]["face_reference_path"], str(prepared))
+                    self.assertEqual(settings.cover_queue[0]["face_reference_source"], "auto")
+                else:
+                    self.assertNotIn("face_reference_label", settings.cover_queue[0])
 
     def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
         with TemporaryDirectory() as directory:
