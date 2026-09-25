@@ -3,7 +3,12 @@ import threading
 import unittest
 
 from scriptor.core import ScenarioRequest
-from scriptor.runner import ParallelRunner, RunState, looks_like_action_required, scenario_length_status
+from scriptor.runner import (
+    ParallelRunner,
+    RunState,
+    looks_like_action_required,
+    scenario_length_status,
+)
 
 
 class FakeClient:
@@ -58,16 +63,22 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.fresh_calls, 1)
         self.assertEqual(jobs[0].state, RunState.DONE)
 
-    async def test_realistic_five_thousand_character_response_is_not_rewritten(self):
+    async def test_realistic_five_thousand_character_response_is_repaired_toward_ten_thousand(self):
         class LengthClient:
-            fresh_calls = 0
+            def __init__(self):
+                self.fresh_calls = 0
+                self.budgets = []
+                self.repair_prompt = ""
 
-            async def generate(self, prompt, on_progress=None):
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.budgets.append(max_output_tokens)
                 return "а" * 5000
 
-            async def generate_fresh(self, prompt, on_progress=None):
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
                 self.fresh_calls += 1
-                raise AssertionError("length mismatch must not trigger a rewrite")
+                self.budgets.append(max_output_tokens)
+                self.repair_prompt = prompt
+                return "б" * 10000
 
         client = LengthClient()
         request = ScenarioRequest(
@@ -75,16 +86,66 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         jobs = await ParallelRunner(client, 1).run([request])
 
-        self.assertEqual(client.fresh_calls, 0)
-        self.assertEqual(jobs[0].state, RunState.ERROR)
-        self.assertEqual(jobs[0].length_status, "SHORT")
-        self.assertEqual(jobs[0].actual_chars, 5000)
-        self.assertEqual(jobs[0].length_repair_attempts, 0)
-        self.assertIn("9000–11000 знаков", jobs[0].error)
-        self.assertIn("Автоматическое переписывание по длине отключено", jobs[0].error)
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(client.budgets, [9216, 9216])
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].length_status, "READY")
+        self.assertEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(jobs[0].length_repair_attempts, 1)
+        self.assertIn("len(text.strip())", client.repair_prompt)
+        self.assertIn("9000", client.repair_prompt)
+        self.assertIn("11000", client.repair_prompt)
 
-    async def test_one_sided_minimum_length_failure_is_truthful_without_rewrite(self):
+    async def test_one_sided_minimum_length_is_repaired_with_a_truthful_instruction(self):
         class MinimumClient:
+            def __init__(self):
+                self.fresh_calls = 0
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None):
+                return "мало"
+
+            async def generate_fresh(self, prompt, on_progress=None):
+                self.fresh_calls += 1
+                self.prompts.append(prompt)
+                return "а" * 9000
+
+        client = MinimumClient()
+        request = ScenarioRequest(0, "S", "P", target_chars=9000, allowed_min=9000)
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].length_status, "READY")
+        self.assertIn("не менее 9000 знаков", client.prompts[0])
+        self.assertNotIn("9000 до 0", client.prompts[0])
+
+    async def test_one_sided_maximum_length_is_repaired_with_a_truthful_instruction(self):
+        class MaximumClient:
+            def __init__(self):
+                self.fresh_calls = 0
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None):
+                return "а" * 12000
+
+            async def generate_fresh(self, prompt, on_progress=None):
+                self.fresh_calls += 1
+                self.prompts.append(prompt)
+                return "а" * 10000
+
+        client = MaximumClient()
+        request = ScenarioRequest(0, "S", "P", target_chars=10000, allowed_max=10000)
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].length_status, "READY")
+        self.assertIn("не более 10000 знаков", client.prompts[0])
+        self.assertNotIn("0 до 10000", client.prompts[0])
+
+    async def test_exhausted_length_repairs_need_user_action_instead_of_terminal_error(self):
+        class AlwaysShortClient:
             fresh_calls = 0
 
             async def generate(self, prompt, on_progress=None):
@@ -92,36 +153,18 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             async def generate_fresh(self, prompt, on_progress=None):
                 self.fresh_calls += 1
-                raise AssertionError("length mismatch must not trigger a rewrite")
+                return "мало"
 
-        client = MinimumClient()
-        request = ScenarioRequest(0, "S", "P", target_chars=9000, allowed_min=9000)
+        client = AlwaysShortClient()
+        request = ScenarioRequest(0, "S", "P", target_chars=12, allowed_min=10, allowed_max=14)
         jobs = await ParallelRunner(client, 1).run([request])
 
-        self.assertEqual(client.fresh_calls, 0)
-        self.assertEqual(jobs[0].state, RunState.ERROR)
+        self.assertEqual(client.fresh_calls, 2)
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
         self.assertEqual(jobs[0].length_status, "SHORT")
-        self.assertIn("не менее 9000 знаков", jobs[0].error)
-
-    async def test_one_sided_maximum_length_failure_is_truthful_without_rewrite(self):
-        class MaximumClient:
-            fresh_calls = 0
-
-            async def generate(self, prompt, on_progress=None):
-                return "а" * 12000
-
-            async def generate_fresh(self, prompt, on_progress=None):
-                self.fresh_calls += 1
-                raise AssertionError("length mismatch must not trigger a rewrite")
-
-        client = MaximumClient()
-        request = ScenarioRequest(0, "S", "P", target_chars=10000, allowed_max=10000)
-        jobs = await ParallelRunner(client, 1).run([request])
-
-        self.assertEqual(client.fresh_calls, 0)
-        self.assertEqual(jobs[0].state, RunState.ERROR)
-        self.assertEqual(jobs[0].length_status, "LONG")
-        self.assertIn("не более 10000 знаков", jobs[0].error)
+        self.assertEqual(jobs[0].length_repair_attempts, 2)
+        self.assertNotEqual(jobs[0].state, RunState.ERROR)
+        self.assertIn("После 2 корректировок", jobs[0].error)
 
     async def test_in_range_script_finishes_after_one_provider_response(self):
         class LengthClient:

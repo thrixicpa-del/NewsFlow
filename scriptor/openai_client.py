@@ -63,11 +63,15 @@ class OpenAITextClient:
         return content
 
     async def generate(self, prompt: str, on_progress=None, before_request=None,
-                       image_paths: list[str] | None = None) -> str:
+                       image_paths: list[str] | None = None,
+                       max_output_tokens: int | None = None) -> str:
         content = [{"type": "input_text", "text": prompt}] + self._reference_content(image_paths)
         request_input: object = prompt if len(content) == 1 else [{"role": "user", "content": content}]
+        payload = {"model": self.model, "input": request_input}
+        if max_output_tokens and max_output_tokens > 0:
+            payload["max_output_tokens"] = int(max_output_tokens)
         result = await asyncio.to_thread(
-            self._request, "POST", "/v1/responses", {"model": self.model, "input": request_input}
+            self._request, "POST", "/v1/responses", payload
         )
         text = result.get("output_text", "")
         if not text:
@@ -109,7 +113,8 @@ class HybridTextPool:
         self._queue: asyncio.Queue[OpenAITextClient] | None = None
 
     async def generate(self, prompt: str, on_progress=None, before_request=None,
-                       image_paths: list[str] | None = None) -> str:
+                       image_paths: list[str] | None = None,
+                       max_output_tokens: int | None = None) -> str:
         if self._queue is None:
             self._queue = asyncio.Queue()
             for client in self._slots:
@@ -118,11 +123,12 @@ class HybridTextPool:
         try:
             if before_request:
                 await before_request()
+            output_kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens else {}
             # Preserve compatibility with lightweight provider adapters and
             # tests that implement the historical two-argument method.
             if image_paths is None:
-                return await client.generate(prompt, on_progress)
-            return await client.generate(prompt, on_progress, image_paths=image_paths)
+                return await client.generate(prompt, on_progress, **output_kwargs)
+            return await client.generate(prompt, on_progress, image_paths=image_paths, **output_kwargs)
         except OpenAIAPIError as first:
             if not first.key_unavailable:
                 raise
@@ -133,8 +139,8 @@ class HybridTextPool:
                     if before_request:
                         await before_request()
                     if image_paths is None:
-                        return await fallback.generate(prompt, on_progress)
-                    return await fallback.generate(prompt, on_progress, image_paths=image_paths)
+                        return await fallback.generate(prompt, on_progress, **output_kwargs)
+                    return await fallback.generate(prompt, on_progress, image_paths=image_paths, **output_kwargs)
                 except OpenAIAPIError as exc:
                     if not exc.key_unavailable:
                         raise
@@ -142,8 +148,12 @@ class HybridTextPool:
         finally:
             self._queue.put_nowait(client)
 
-    async def generate_fresh(self, prompt: str, on_progress=None, image_paths: list[str] | None = None) -> str:
-        return await self.generate(prompt, on_progress, image_paths=image_paths)
+    async def generate_fresh(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
+                             max_output_tokens: int | None = None) -> str:
+        return await self.generate(prompt, on_progress, image_paths=image_paths,
+                                   max_output_tokens=max_output_tokens)
 
-    async def generate_openai(self, prompt: str, on_progress=None, image_paths: list[str] | None = None) -> str:
-        return await self.generate(prompt, on_progress, image_paths=image_paths)
+    async def generate_openai(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
+                              max_output_tokens: int | None = None) -> str:
+        return await self.generate(prompt, on_progress, image_paths=image_paths,
+                                   max_output_tokens=max_output_tokens)

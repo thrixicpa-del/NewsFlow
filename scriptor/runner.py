@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import math
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -90,6 +92,36 @@ def scenario_length_requirement(request: ScenarioRequest) -> str:
     return "без ограничения длины"
 
 
+def scenario_output_token_budget(request: ScenarioRequest) -> int | None:
+    """Reserve enough Responses output for the requested character contract.
+
+    ``max_output_tokens`` also includes model reasoning tokens, so this uses a
+    conservative 1.25 characters-per-token estimate plus one 1,024-token
+    reserve and rounds up to a whole 1,024-token block.  The upper cap keeps a
+    malformed preset from issuing an unexpectedly expensive request.
+    """
+    expected_chars = max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
+    if not expected_chars:
+        return None
+    requested = math.ceil(expected_chars / 1.25) + 1024
+    return min(32768, max(2048, math.ceil(requested / 1024) * 1024))
+
+
+def scenario_length_repair_instruction(request: ScenarioRequest) -> str:
+    """Provider instruction that preserves one-sided contracts correctly."""
+    target = f" Цель: {request.target_chars} знаков." if request.target_chars else ""
+    if request.allowed_min and request.allowed_max:
+        return (
+            f"Верни только готовый сценарий длиной строго от {request.allowed_min} "
+            f"до {request.allowed_max} знаков.{target}"
+        )
+    if request.allowed_min:
+        return f"Верни только готовый сценарий длиной не менее {request.allowed_min} знаков.{target}"
+    if request.allowed_max:
+        return f"Верни только готовый сценарий длиной не более {request.allowed_max} знаков.{target}"
+    return "Верни только полный готовый сценарий."
+
+
 
 
 class ParallelRunner:
@@ -119,21 +151,69 @@ class ParallelRunner:
         if self.on_change:
             self.on_change(job)
 
-    async def _validate_length(self, job: Job) -> bool:
-        """Validate one provider response; never regenerate solely to change its length."""
+    @staticmethod
+    def _accepts_keyword(method, keyword: str) -> bool:
+        """Keep lightweight legacy adapters usable without hiding provider errors."""
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(parameter.name == keyword or parameter.kind is parameter.VAR_KEYWORD
+                   for parameter in parameters)
+
+    async def _generate_for_request(self, method, prompt: str, request: ScenarioRequest) -> str:
+        budget = scenario_output_token_budget(request)
+        if budget and self._accepts_keyword(method, "max_output_tokens"):
+            return await method(prompt, max_output_tokens=budget)
+        return await method(prompt)
+
+    async def _repair_length_if_needed(self, job: Job) -> bool:
+        """Make at most two explicit repairs before asking the operator to decide."""
         status, actual_chars = scenario_length_status(job.request, job.result)
         job.length_status = status
         job.actual_chars = actual_chars
-        job.length_repair_attempts = 0
-        if status in {"SHORT", "LONG"}:
-            job.state = RunState.ERROR
+        if status not in {"SHORT", "LONG"}:
+            job.length_repair_attempts = 0
+            return True
+
+        generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+        for attempt in range(1, 3):
+            job.length_repair_attempts = attempt
             job.error = (
                 f"Длина {actual_chars} знаков вне требования "
                 f"{scenario_length_requirement(job.request)}. "
-                "Автоматическое переписывание по длине отключено."
+                f"Корректировка длины {attempt}/2."
             )
-            return False
-        return True
+            self._notify(job)
+            repair_prompt = (
+                "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
+                f"{scenario_length_repair_instruction(job.request)} "
+                "ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину готового сценария "
+                "по правилу Python len(text.strip()); не печатай собственный подсчет символов и не считай "
+                "его доказательством соответствия. NewsFlow после ответа независимо повторит ту же проверку. "
+                "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
+                f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
+            )
+            job.result = await self._generate_for_request(generate_fresh, repair_prompt, job.request)
+            if looks_like_action_required(job.result):
+                job.length_status = "FAILED"
+                job.actual_chars = len(str(job.result or "").strip())
+                job.state = RunState.PAUSED
+                job.error = "Текстовый агент не вернул сценарий при корректировке длины"
+                return False
+            status, actual_chars = scenario_length_status(job.request, job.result)
+            job.length_status = status
+            job.actual_chars = actual_chars
+            if status == "READY":
+                return True
+
+        job.state = RunState.PAUSED
+        job.error = (
+            f"После {job.length_repair_attempts} корректировок длина сценария "
+            f"осталась {job.actual_chars} знаков; требуется "
+            f"{scenario_length_requirement(job.request)}. Проверьте текст и запустите выбранный сценарий повторно."
+        )
+        return False
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:
@@ -141,7 +221,7 @@ class ParallelRunner:
             job.error = ""
             self._notify(job)
             try:
-                job.result = await self.client.generate(job.request.prompt)
+                job.result = await self._generate_for_request(self.client.generate, job.request.prompt, job.request)
                 refused = looks_like_action_required(job.result)
                 for attempt in range(1, 3):
                     if not refused:
@@ -156,7 +236,7 @@ class ParallelRunner:
                         f"ЗАДАЧА:\n{job.request.prompt}"
                     )
                     generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-                    job.result = await generate_fresh(retry_prompt)
+                    job.result = await self._generate_for_request(generate_fresh, retry_prompt, job.request)
                     refused = looks_like_action_required(job.result)
                 if refused:
                     generate_openai = getattr(self.client, "generate_openai", None)
@@ -169,17 +249,17 @@ class ParallelRunner:
                             "безопасный вариант. Верни только готовый сценарий без комментариев.\n\n"
                             f"ЗАДАЧА:\n{job.request.prompt}"
                         )
-                        job.result = await generate_openai(openai_prompt)
+                        job.result = await self._generate_for_request(generate_openai, openai_prompt, job.request)
                         refused = looks_like_action_required(job.result)
                     if refused:
                         job.state = RunState.PAUSED
                         job.error = "Текстовый агент и доступные ключи ChatGPT API не вернули готовый сценарий"
                     else:
-                        if await self._validate_length(job):
+                        if await self._repair_length_if_needed(job):
                             job.state = RunState.DONE
                             job.error = ""
                 else:
-                    if await self._validate_length(job):
+                    if await self._repair_length_if_needed(job):
                         job.state = RunState.DONE
                         job.error = ""
             except Exception as exc:
