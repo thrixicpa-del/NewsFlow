@@ -68,7 +68,7 @@ function uploadState(row: QueueRow) {
   if (processingStatus === "FAILED" || badStates.has(processingStatus)) {
     return { label: "Ошибка обработки", tone: "danger" as BadgeTone };
   }
-  return { label: "Передано 100%", tone: "success" as BadgeTone };
+  return { label: "Загружен", tone: "success" as BadgeTone };
 }
 
 function formatReuploadStatus(value?: string) {
@@ -213,8 +213,12 @@ export function PublicationQueue({
 
 export function PublicationExecutionDetails({ row, channelName, onRetry, onResolveUpload, onIdentity, onCancel, onThumbnail }: { row: QueueRow; channelName(id: string): string; onRetry(snapshotId: string, stage: string): void; onResolveUpload(snapshotId: string, outcome: "found" | "not_found", youtubeVideoId?: string): void; onIdentity(snapshotId: string): void; onCancel(snapshotId: string): void; onThumbnail(snapshotId: string): void }) {
   const [reconciledVideoId, setReconciledVideoId] = useState("");
-  const failed = Object.entries(row.steps).find(([, step]) => badStates.has(String(step.status)));
-  const identityRequired = Object.values(row.steps).some((step) => errorCategory(step) === "STUDIO_IDENTITY_REQUIRED");
+  const identityStep = Object.entries(row.steps).find(
+    ([, step]) => errorCategory(step) === "STUDIO_IDENTITY_REQUIRED",
+  );
+  const failed = identityStep
+    ?? Object.entries(row.steps).find(([, step]) => badStates.has(String(step.status)));
+  const identityRequired = Boolean(identityStep);
   const uploadNeedsReconciliation = String(row.steps.VIDEO_UPLOAD?.status || "").toUpperCase() === "USER_ACTION_REQUIRED" && !row.youtubeVideoId;
   const thumbnailPending = Boolean(row.youtubeVideoId) && !terminalStates.has(String(row.steps.THUMBNAIL?.status || "").toUpperCase());
   return <div className="nf-queue-details">
