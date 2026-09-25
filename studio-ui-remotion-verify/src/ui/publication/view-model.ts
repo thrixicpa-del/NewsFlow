@@ -170,13 +170,22 @@ export function buildPublicationView(data: NewsFlowSnapshot): PublicationViewMod
     return { ...row, status: statusFor(row) };
   }).sort((a, b) => a.number - b.number);
 
-  const channelRows: ChannelRow[] = channels.map(({ channel, id }) => ({
-    ...defaultRule(id, record(rules[id])),
+  const channelRows: ChannelRow[] = channels.map(({ channel, id }) => {
+    const savedRule = record(rules[id]);
+    const detectedMonetization = Boolean((channel as any).monetaryAccess ?? (channel as any).monetary_access);
+    return {
+    ...defaultRule(id, {
+      ...savedRule,
+      // Fresh channel metadata is the default for a newly discovered channel.
+      // A saved boolean remains the operator's explicit override.
+      monetized: typeof savedRule.monetized === "boolean" ? savedRule.monetized : detectedMonetization,
+    }),
     name: channel.name || channel.channel || id,
     oauthConnected: Boolean(channel.oauthConnected),
     subscribers: channel.subscribers || "—",
     assigned: videoRows.filter((video) => video.channelId === id).length,
-  }));
+    };
+  });
   const receiptsRaw = record(rawV2.receipts);
   const receipts: ReceiptRow[] = Object.entries(receiptsRaw).map(([snapshotId, raw]) => {
     const receipt = record(raw);

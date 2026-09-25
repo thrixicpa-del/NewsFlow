@@ -1048,6 +1048,274 @@ def build_channel_schedule(
         candidate = slot + timedelta(minutes=interval)
     return result
 
+
+def _adaptive_bulk_slots(
+    production_item_ids: list[str],
+    *,
+    start: datetime,
+    end: datetime,
+    channel_id: str,
+    occupied: set[datetime],
+    can_use: Any = None,
+    on_choose: Any = None,
+) -> dict[str, datetime | None]:
+    """Spread one channel across a selected day window without synchronising channels.
+
+    The offsets are deterministic: rebuilding the same preview must not move
+    the operator's plan, but the schedule should not look like a metronome.
+    """
+    slots: list[datetime] = []
+    current = start
+    while current <= end:
+        slots.append(current)
+        current += timedelta(minutes=15)
+    if not slots:
+        return {production_item_id: None for production_item_id in production_item_ids}
+
+    result: dict[str, datetime | None] = {}
+    count = len(production_item_ids)
+    for position, production_item_id in enumerate(production_item_ids):
+        if count == 1:
+            ideal = (len(slots) - 1) // 2
+        else:
+            ideal = round(position * (len(slots) - 1) / (count - 1))
+        # Keep the variation modest enough that the per-channel plan remains
+        # visibly spread.  One grid point is enough to avoid a metronome
+        # without turning a five-item day plan into visible bursts.
+        neighbour_span = min(1, max(0, (len(slots) - 1) // max(1, count - 1) // 3))
+        seed = int(sha256(f"{channel_id}|{production_item_id}|{start.isoformat()}".encode()).hexdigest()[:8], 16)
+        jitter = (seed % (neighbour_span * 2 + 1)) - neighbour_span if neighbour_span else 0
+        target = min(len(slots) - 1, max(0, ideal + jitter))
+        candidates = sorted(
+            range(len(slots)),
+            key=lambda index: (
+                abs(index - target),
+                abs(index - ideal),
+                (seed + index * 17) % 97,
+            ),
+        )
+        chosen = next((
+            slots[index]
+            for index in candidates
+            if slots[index].astimezone(timezone.utc) not in occupied
+            and (can_use is None or bool(can_use(slots[index], production_item_id)))
+        ), None)
+        if chosen is None:
+            result[production_item_id] = None
+            continue
+        occupied.add(chosen.astimezone(timezone.utc))
+        if on_choose is not None:
+            on_choose(chosen, production_item_id)
+        result[production_item_id] = chosen
+    return result
+
+
+def _apply_adaptive_bulk_schedule_range(
+    assignments: list[dict],
+    schedule: dict[str, Any],
+    channel_rules: dict[str, dict],
+    item_topics: dict[str, str] | None = None,
+) -> list[dict]:
+    """Apply a date-only adaptive schedule on a shared 15-minute grid.
+
+    Every channel receives its own evenly-spaced sequence, with a stable
+    jitter and no duplicate instant across channels.  Locked rows are never
+    moved and reserve their existing instant when it belongs to the preview.
+    """
+    date_value = str(schedule.get("date", "")).strip()
+    start_value = str(schedule.get("startTime", "")).strip()
+    end_value = str(schedule.get("endTime", "")).strip()
+    fallback_zone_name = str(schedule.get("timezone", "")).strip() or "UTC"
+    if not date_value or not start_value or not end_value:
+        raise ValueError("Укажите дату, начало и конец массового диапазона.")
+
+    result = [dict(row) for row in assignments]
+    topics = {
+        str(production_item_id): str(topic or "").strip().casefold()
+        for production_item_id, topic in dict(item_topics or {}).items()
+    }
+    occupied: set[datetime] = set()
+    channel_slots: dict[str, list[tuple[datetime, str]]] = {}
+    for row in result:
+        raw = str(row.get("publishAt", "")).strip()
+        if not raw or not bool(row.get("locked", False)):
+            continue
+        try:
+            instant = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        channel_id = str(row.get("channelId", "")).strip()
+        rule = dict(channel_rules.get(channel_id, {}) or {})
+        zone_name = str(rule.get("timezone", "")).strip() or fallback_zone_name
+        try:
+            zone = ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"Некорректный часовой пояс канала {channel_id or 'публикации'}.") from error
+        local_instant = instant.replace(tzinfo=zone) if instant.tzinfo is None else instant.astimezone(zone)
+        occupied.add(local_instant.astimezone(timezone.utc))
+        if channel_id:
+            channel_slots.setdefault(channel_id, []).append((local_instant, str(row.get("productionItemId", "")).strip()))
+
+    positions_by_channel: dict[str, list[int]] = {}
+    for index, row in enumerate(result):
+        channel_id = str(row.get("channelId", "")).strip()
+        if channel_id and not bool(row.get("locked", False)):
+            positions_by_channel.setdefault(channel_id, []).append(index)
+
+    def schedule_positions(window_positions: list[int], start_value: str, end_value: str) -> None:
+        positions_by_window_channel: dict[str, list[int]] = {}
+        for position in window_positions:
+            channel_id = str(result[position].get("channelId", "")).strip()
+            if channel_id:
+                positions_by_window_channel.setdefault(channel_id, []).append(position)
+        for channel_id in sorted(positions_by_window_channel):
+            positions = positions_by_window_channel[channel_id]
+            rule = dict(channel_rules.get(channel_id, {}) or {})
+            zone_name = str(rule.get("timezone", "")).strip() or fallback_zone_name
+            try:
+                zone = ZoneInfo(zone_name)
+                start = datetime.fromisoformat(f"{date_value}T{start_value}").replace(tzinfo=zone)
+                end = datetime.fromisoformat(f"{date_value}T{end_value}").replace(tzinfo=zone)
+            except Exception as error:
+                raise ValueError("Укажите корректные дату, начало, конец и часовой пояс диапазона.") from error
+            if end < start:
+                raise ValueError("Конец диапазона должен быть не раньше начала.")
+            if not _is_quarter_hour(start) or not _is_quarter_hour(end):
+                raise ValueError("Начало и конец массового диапазона должны быть кратны 15 минутам.")
+
+            def can_use(
+                candidate: datetime,
+                production_item_id: str,
+                rule_for_channel: dict = rule,
+                channel_zone: ZoneInfo = zone,
+                channel_key: str = channel_id,
+            ) -> bool:
+                allowed = rule_for_channel.get("allowedWeekdays")
+                weekdays = {int(value) for value in allowed} if isinstance(allowed, list) and allowed else set(range(7))
+                if candidate.weekday() not in weekdays:
+                    return False
+                rule_start, rule_end = _clock(rule_for_channel.get("publishWindowStart")), _clock(rule_for_channel.get("publishWindowEnd"))
+                candidate_time = candidate.timetz().replace(tzinfo=None)
+                within_channel_window = (
+                    not rule_start or not rule_end
+                    or (rule_start <= rule_end and rule_start <= candidate_time <= rule_end)
+                    or (rule_start > rule_end and (candidate_time >= rule_start or candidate_time <= rule_end))
+                )
+                if not within_channel_window:
+                    return False
+                try:
+                    if _blackout_end_for_slot(candidate, rule_for_channel, channel_zone) is not None:
+                        return False
+                except ValueError:
+                    return False
+                existing = channel_slots.get(channel_key, [])
+                daily_cap = max(0, int(rule_for_channel.get("dailyCap", 0) or 0))
+                if daily_cap and sum(point.date() == candidate.date() for point, _value in existing) >= daily_cap:
+                    return False
+                max_per_hour = max(0, int(rule_for_channel.get("maxVideosPerHour", 0) or 0))
+                if max_per_hour and sum(abs(candidate - point) < timedelta(hours=1) for point, _value in existing) >= max_per_hour:
+                    return False
+                topic_cooldown = max(0, int(rule_for_channel.get("topicCooldownMinutes", 0) or 0))
+                topic = topics.get(production_item_id, "")
+                return not (
+                    topic and topic_cooldown and any(
+                        topics.get(existing_id, "") == topic and abs(candidate - point) < timedelta(minutes=topic_cooldown)
+                        for point, existing_id in existing
+                    )
+                )
+
+            def remember(candidate: datetime, production_item_id: str, channel_key: str = channel_id) -> None:
+                channel_slots.setdefault(channel_key, []).append((candidate, production_item_id))
+
+            production_item_ids = [str(result[position]["productionItemId"]) for position in positions]
+            slots_by_id = _adaptive_bulk_slots(
+                production_item_ids,
+                start=start,
+                end=end,
+                channel_id=channel_id,
+                occupied=occupied,
+                can_use=can_use,
+                on_choose=remember,
+            )
+            for position in positions:
+                row = result[position]
+                slot = slots_by_id[str(row["productionItemId"])]
+                if slot is None:
+                    row["scheduleWarning"] = "В выбранном диапазоне нет свободного 15-минутного слота, совместимого с правилами канала."
+                    row["scheduleSuggestion"] = "Расширьте диапазон, включите другое окно или измените квоту/правила канала."
+                    row.pop("publishAt", None)
+                    continue
+                row.pop("scheduleWarning", None)
+                row.pop("scheduleSuggestion", None)
+                row.update({
+                    "publishAt": slot.isoformat(),
+                    "timezone": zone.key,
+                    "source": "bulk_range_adaptive",
+                })
+
+    raw_windows = schedule.get("timeWindows")
+    if isinstance(raw_windows, list):
+        windows: list[tuple[str, str, int]] = []
+        for raw_window in raw_windows:
+            if not isinstance(raw_window, dict) or not bool(raw_window.get("enabled", False)):
+                continue
+            try:
+                quota = max(0, int(raw_window.get("quota", 0) or 0))
+            except (TypeError, ValueError) as error:
+                raise ValueError("Квота окна публикации должна быть числом.") from error
+            start_value = str(raw_window.get("startTime", "")).strip()
+            end_value = str(raw_window.get("endTime", "")).strip()
+            if start_value and end_value:
+                windows.append((start_value, end_value, quota))
+
+        # Interleave channels before applying a window quota so one channel
+        # cannot consume an entire preferred period merely because its rows
+        # happened to arrive first in the production registry.
+        channel_queues = {channel_id: list(positions) for channel_id, positions in sorted(positions_by_channel.items())}
+        ordered_positions: list[int] = []
+        while any(channel_queues.values()):
+            for channel_id in sorted(channel_queues):
+                if channel_queues[channel_id]:
+                    ordered_positions.append(channel_queues[channel_id].pop(0))
+
+        explicit_quota = sum(quota for _start, _end, quota in windows if quota > 0)
+        automatic_indexes = [index for index, (_start, _end, quota) in enumerate(windows) if quota == 0]
+        remaining_for_automatic = max(0, len(ordered_positions) - explicit_quota)
+        automatic_base, automatic_extra = divmod(remaining_for_automatic, len(automatic_indexes) or 1)
+
+        cursor = 0
+        for index, (start_value, end_value, quota) in enumerate(windows):
+            effective_quota = quota
+            if quota == 0:
+                automatic_position = automatic_indexes.index(index)
+                effective_quota = automatic_base + (1 if automatic_position < automatic_extra else 0)
+            window_positions = ordered_positions[cursor:cursor + effective_quota]
+            cursor += len(window_positions)
+            if not window_positions:
+                continue
+            # Adjacent preference windows share a textual boundary (12:00,
+            # 17:00). Reserve it for the following window to keep one global
+            # no-collision grid.
+            effective_end = end_value
+            if index + 1 < len(windows) and end_value == windows[index + 1][0]:
+                end_point = datetime.fromisoformat(f"{date_value}T{end_value}") - timedelta(minutes=15)
+                effective_end = end_point.time().isoformat(timespec="minutes")
+            schedule_positions(window_positions, start_value, effective_end)
+
+        for position in ordered_positions[cursor:]:
+            result[position]["scheduleWarning"] = "В выбранных окнах не хватает квоты для ролика."
+            result[position]["scheduleSuggestion"] = "Увеличьте квоту окна, включите другое окно или уменьшите квоту канала."
+            result[position].pop("publishAt", None)
+        return result
+
+    schedule_positions(
+        [position for positions in positions_by_channel.values() for position in positions],
+        start_value,
+        end_value,
+    )
+    return result
+
+
 def apply_bulk_schedule_range(
     assignments: list[dict],
     schedule: dict[str, Any],
@@ -1060,6 +1328,13 @@ def apply_bulk_schedule_range(
     shared global sequence. Channel interval/timezone/window/day rules remain
     authoritative, while explicit locked/manual slots are preserved.
     """
+    if str(schedule.get("spacingStrategy", "")).strip() == "adaptive_jittered":
+        return _apply_adaptive_bulk_schedule_range(
+            assignments,
+            schedule,
+            dict(channel_rules or {}),
+            dict(item_topics or {}),
+        )
     date_value = str(schedule.get("date", "")).strip()
     start_value = str(schedule.get("startTime", "")).strip()
     end_value = str(schedule.get("endTime", "")).strip()

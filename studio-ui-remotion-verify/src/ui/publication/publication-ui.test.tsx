@@ -132,6 +132,14 @@ describe("PublicationPage", () => {
     expect(metricValue("Свободно по квотам")).toHaveTextContent("88");
   });
 
+  it("uses refreshed channel monetization as the default publication priority", () => {
+    render(<PublicationPage data={fixture} command={command} />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
+
+    expect(screen.getAllByText("Вкл")).toHaveLength(2);
+  });
+
   it("keeps ProductionItem ID inspectable without replacing the human video title", () => {
     render(<PublicationPage data={fixture} command={command} />);
 
