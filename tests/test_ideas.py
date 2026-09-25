@@ -199,6 +199,23 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
             self.assertIn("Международные переговоры", idea)
             self.assertNotIn("?", idea)
 
+    def test_formula_mode_rejects_question_parts_and_uses_non_question_uncertainty_guidance(self):
+        self.assertIsNone(bridge._formula_candidate({
+            "title": "Кто уступит? — Стороны меняют позиции — Цена компромисса растёт",
+        }))
+        self.assertIsNone(bridge._formula_candidate({
+            "provocative_headline": "Кто уступит?",
+            "subject_action": "Стороны меняют позиции",
+            "object_consequence": "Цена компромисса растёт",
+        }))
+
+        prompt = bridge._title_generation_prompt(
+            "Международные переговоры", "", 3, [], [], formula_only=True,
+        )
+        self.assertIn("без вопросительной формы", prompt)
+        self.assertNotIn("Что будет, если", prompt)
+        self.assertNotIn("Может ли", prompt)
+
     def test_title_validation_rejects_long_caps_and_unfinished_templates(self):
         self.assertTrue(bridge.valid_idea_title(
             "Переговоры зашли в тупик: у сторон остался один спорный вопрос"
