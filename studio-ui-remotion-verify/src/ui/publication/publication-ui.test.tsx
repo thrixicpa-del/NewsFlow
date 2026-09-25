@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { PublicationPage } from "./PublicationPage";
 import { PublicationHistory } from "./PublicationHistory";
@@ -190,8 +190,12 @@ describe("PublicationPage", () => {
       onChange={vi.fn()}
     />);
 
-    expect(screen.queryByRole("option", { name: "Канал 1 — Канал 1" })).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Канал 2 — Канал 2" })).toBeInTheDocument();
+    const assignmentSelect = screen.getByLabelText("Канал для Ролик 1");
+    const channelFilter = screen.getByLabelText("Фильтр назначений по каналу");
+    expect(within(assignmentSelect).queryByRole("option", { name: "Канал 1 — Канал 1" })).not.toBeInTheDocument();
+    expect(within(assignmentSelect).getByRole("option", { name: "Канал 2 — Канал 2" })).toBeInTheDocument();
+    expect(within(channelFilter).queryByRole("option", { name: "Канал 1 — Канал 1" })).not.toBeInTheDocument();
+    expect(within(channelFilter).getByRole("option", { name: "Канал 2 — Канал 2" })).toBeInTheDocument();
   });
 
   it("keeps ProductionItem ID inspectable without replacing the human video title", () => {
