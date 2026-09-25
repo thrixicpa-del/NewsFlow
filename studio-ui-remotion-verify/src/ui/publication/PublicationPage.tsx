@@ -132,6 +132,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       const video = model.videos.find((row) => row.id === assignment.productionItemId);
       return {
         productionItemId: assignment.productionItemId,
+        videoNumber: video?.number || 0,
         title: video?.title || assignment.productionItemId,
         duration: video?.duration || "—",
         channelId: assignment.channelId,
@@ -210,6 +211,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
         const channelId = String(assignment.channelId || "");
         return {
           productionItemId: video.id,
+          videoNumber: video.number,
           title: video.title,
           duration: video.duration,
           channelId,
@@ -334,6 +336,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     ? distribution
     : model.queue.map((row) => ({
       productionItemId: row.productionItemId,
+      videoNumber: model.videos.find((video) => video.id === row.productionItemId)?.number || 0,
       title: row.title || row.productionItemId,
       duration: "—",
       channelId: row.channelId,
@@ -443,7 +446,7 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
                   : current.channelIds.filter((id) => id !== channel.channelId),
               }))}
             />
-            {channel.name}
+            Канал {channel.number} — {channel.name}
           </label>)}
         </div>
         <UiButton variant="secondary" disabled={!bulkSchedule.date || !bulkSchedule.startTime || !bulkSchedule.endTime || !bulkSchedule.channelIds.length} onClick={() => void buildPreview(bulkSchedule)}><Clock3 size={15}/>Показать диапазон</UiButton>
