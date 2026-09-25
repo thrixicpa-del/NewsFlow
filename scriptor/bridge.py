@@ -272,8 +272,14 @@ def _restore_cover_face_config(settings: Settings, value: dict[str, object]) -> 
 
 
 def _active_cover_production_ids(settings: Settings) -> set[str]:
-    """Return only identities owned by the current durable scenario session."""
-    titles, _jobs = load_session()
+    """Return only identities owned by the current durable scenario session.
+
+    The session job is the strongest current identity once scenario work has
+    started. Title-indexed settings are only a fallback for rows that have not
+    yet received a Job.
+    """
+    titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
     ids_by_title = {
         str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
         for item in getattr(settings, "idea_production_items", [])
@@ -284,10 +290,14 @@ def _active_cover_production_ids(settings: Settings) -> set[str]:
         for title, item in getattr(settings, "idea_scenario_context", {}).items()
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     })
-    return {
-        identity for title in titles
-        if (identity := ids_by_title.get(str(title).casefold(), ""))
-    }
+    identities: set[str] = set()
+    for index, title in enumerate(titles):
+        job = jobs_by_index.get(index)
+        job_identity = str(job.request.production_item_id if job else "").strip()
+        identity = job_identity or ids_by_title.get(str(title).casefold(), "")
+        if identity:
+            identities.add(identity)
+    return identities
 
 
 def _select_current_cover_generation_rows(
@@ -5028,7 +5038,12 @@ def add_scenarios(payload: dict) -> dict:
         raise ValueError("Добавьте хотя бы один заголовок сценария")
     titles, jobs = load_session()
     known = {title.casefold() for title in titles}
-    titles.extend(title for title in incoming if title.casefold() not in known)
+    added = [title for title in incoming if title.casefold() not in known]
+    titles.extend(added)
+    if added:
+        settings = load_settings()
+        ensure_idea_production_items(settings, active_titles=added)
+        save_settings(settings)
     save_session(titles, jobs)
     return snapshot()
 
@@ -5071,6 +5086,16 @@ def production_item_prompt(item: dict) -> str:
 def generate_scenarios(payload: dict) -> dict:
     settings = load_settings()
     titles, existing_jobs = load_session()
+    existing_jobs_by_index = {job.request.index: job for job in existing_jobs}
+    missing_identity_titles = [
+        title for index, title in enumerate(titles)
+        if not str(existing_jobs_by_index.get(index).request.production_item_id
+                   if existing_jobs_by_index.get(index) else "").strip()
+    ]
+    if missing_identity_titles and ensure_idea_production_items(
+        settings, active_titles=missing_identity_titles,
+    ):
+        save_settings(settings)
     provider = str(payload.get("provider", settings.scenario_provider)).strip()
     if provider not in {"agent", "openai"}:
         raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
@@ -5088,6 +5113,11 @@ def generate_scenarios(payload: dict) -> dict:
         for item in settings.idea_production_items
         if isinstance(item, dict) and str(item.get("id", "")).strip()
     }
+    for index, title in enumerate(titles):
+        job = existing_jobs_by_index.get(index)
+        job_identity = str(job.request.production_item_id if job else "").strip()
+        if job_identity:
+            production_id_by_title[str(title).casefold()] = job_identity
     all_requests = [ScenarioRequest(
         request.index, request.title, request.prompt,
         production_id_by_title.get(request.title.casefold(), ""),
@@ -5446,13 +5476,16 @@ def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bo
 
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
-    """Keep a single automatic cover entry for every scenario topic."""
+    """Keep a single automatic cover entry for every current scenario identity."""
     script = job.result if job and job.state == RunState.DONE else ""
     production_item = dict(getattr(settings, "idea_scenario_context", {}).get(title, {}) or {})
-    production_item_id = str(production_item.get("id", "")).strip()
+    job_identity = str(job.request.production_item_id if job else "").strip()
+    production_item_id = job_identity or str(production_item.get("id", "")).strip()
     existing = next((item for item in settings.cover_queue
                      if (production_item_id and str(item.get("production_item_id", "")).strip() == production_item_id)
-                     or (not production_item_id and str(item.get("title", "")).casefold() == title.casefold())), None)
+                     or (not str(item.get("production_item_id", "")).strip()
+                         and int(item.get("scenario_index", index + 1) or index + 1) == index + 1
+                         and str(item.get("title", "")).casefold() == title.casefold())), None)
     context_keys = (
         "direction", "topic", "angle", "event_ids", "event_context", "supporting_context",
         "primary_entities", "primary_entity", "entities", "geography", "conflict",
@@ -5478,21 +5511,44 @@ def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Jo
 def _sync_current_scenario_covers(settings: Settings) -> bool:
     """Project exactly one cover row for each current scenario identity."""
     titles, jobs = load_session()
+    jobs_by_index = {job.request.index: job for job in jobs}
+    missing_identity_titles = [
+        title for index, title in enumerate(titles)
+        if not str(jobs_by_index.get(index).request.production_item_id
+                   if jobs_by_index.get(index) else "").strip()
+    ]
+    changed = (
+        ensure_idea_production_items(settings, active_titles=missing_identity_titles)
+        if missing_identity_titles else False
+    )
+
+    for index, title in enumerate(titles):
+        job = jobs_by_index.get(index)
+        context = dict(getattr(settings, "idea_scenario_context", {}).get(str(title), {}) or {})
+        identity = str(job.request.production_item_id if job else "").strip() or str(context.get("id", "")).strip()
+        if not identity:
+            continue
+        for item in settings.cover_queue:
+            if not isinstance(item, dict) or str(item.get("production_item_id", "")).strip():
+                continue
+            try:
+                scenario_index = int(item.get("scenario_index", index + 1) or index + 1)
+            except (TypeError, ValueError):
+                continue
+            if scenario_index == index + 1 and str(item.get("title", "")).casefold() == str(title).casefold():
+                item["production_item_id"] = identity
+                changed = True
+                break
+
     active_ids = _active_cover_production_ids(settings)
-    # Direct cover-reference/compositor actions can deliberately operate on a
-    # manually supplied in-memory row before a production session exists.
-    # There is no current session identity to reconcile in that case, so do
-    # not erase the operator's row.  Hydration itself still refuses to restore
-    # an old persistent gallery when the current session is empty.
     if not active_ids:
-        return False
+        return changed
     before = list(settings.cover_queue)
     settings.cover_queue = [
         item for item in settings.cover_queue
         if isinstance(item, dict) and str(item.get("production_item_id", "")).strip() in active_ids
     ]
-    jobs_by_index = {job.request.index: job for job in jobs}
-    changed = settings.cover_queue != before
+    changed = settings.cover_queue != before or changed
     for index, title in enumerate(titles):
         changed = _sync_scenario_to_covers(settings, index, str(title), jobs_by_index.get(index)) or changed
     _assign_cover_production_ids(settings)
