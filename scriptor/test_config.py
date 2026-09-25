@@ -20,9 +20,38 @@ from .session import load_session, save_session
 
 
 class TestStorageIsolationTests(unittest.TestCase):
-    def test_test_runtime_refuses_production_storage_without_explicit_test_root(self):
-        """A test process must fail before it can create/write canonical NewsFlow data."""
+    def test_direct_unittest_runtime_refuses_production_storage_without_explicit_test_root(self):
+        """A direct unittest runner must fail before it can write canonical NewsFlow data."""
+        with patch.dict(os.environ, {}, clear=False), \
+             patch.object(sys, "argv", ["python -m unittest", "scriptor.test_config"]):
+            os.environ.pop("NEWSFLOW_TEST_MODE", None)
+            os.environ.pop("NEWSFLOW_TEST_ROOT", None)
+            with self.assertRaisesRegex(RuntimeError, "NEWSFLOW_TEST_ROOT"):
+                app_data_root()
+
+    def test_explicit_test_runtime_refuses_production_storage_without_explicit_test_root(self):
         with patch.dict(os.environ, {}, clear=False):
+            os.environ["NEWSFLOW_TEST_MODE"] = "1"
+            os.environ.pop("NEWSFLOW_TEST_ROOT", None)
+            with self.assertRaisesRegex(RuntimeError, "NEWSFLOW_TEST_ROOT"):
+                app_data_root()
+
+    def test_production_runtime_ignores_imported_unittest_without_explicit_test_mode(self):
+        """Provider imports must not turn a normal packaged runtime into a test."""
+        with tempfile.TemporaryDirectory() as directory:
+            production_parent = Path(directory) / "production-local-appdata"
+            with patch.dict(os.environ, {
+                "LOCALAPPDATA": str(production_parent),
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(production_parent),
+            }, clear=False), patch.object(sys, "argv", ["NewsFlowCore.exe"]):
+                os.environ.pop("NEWSFLOW_TEST_MODE", None)
+                os.environ.pop("NEWSFLOW_TEST_ROOT", None)
+                self.assertIn("unittest", sys.modules)
+                self.assertEqual(app_data_root(), production_parent / "NewsFlow")
+
+    def test_pytest_runner_requires_explicit_test_root_without_test_mode(self):
+        with patch.dict(os.environ, {}, clear=False), \
+             patch.object(sys, "argv", [r"C:\Python\Lib\site-packages\pytest\__main__.py"]):
             os.environ.pop("NEWSFLOW_TEST_MODE", None)
             os.environ.pop("NEWSFLOW_TEST_ROOT", None)
             with self.assertRaisesRegex(RuntimeError, "NEWSFLOW_TEST_ROOT"):
