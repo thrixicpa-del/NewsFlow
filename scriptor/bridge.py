@@ -1467,6 +1467,7 @@ def _queue_youtube_engagement_task(settings: Settings, record: dict, post_draft:
     catalog = [
         {
             "videoId": item.get("videoId", ""), "channelId": item.get("channelId", ""),
+            "title": item.get("seoTitle") or item.get("title", ""),
             "privacyStatus": item.get("youtubePrivacyStatus", ""),
             "publishedAt": item.get("publishAt", ""), "score": item.get("engagementScore", 0),
         }
@@ -16397,6 +16398,7 @@ def run_publication_v2_studio(payload: dict) -> dict:
         {
             "videoId": str(item.get("videoId", "")).strip(),
             "channelId": str(item.get("channelId", "")).strip(),
+            "title": str(item.get("seoTitle") or item.get("title", "")).strip(),
             "privacyStatus": str(item.get("youtubePrivacyStatus", "")).strip(),
             "publishedAt": str(item.get("publishAt", "")).strip(),
             "score": item.get("engagementScore", 0),
@@ -16409,9 +16411,11 @@ def run_publication_v2_studio(payload: dict) -> dict:
         known_video_id = str(known_execution.get("youtubeVideoId") or "").strip()
         if not known_video_id:
             continue
+        known_metadata = dict(dict(known_snapshot or {}).get("metadata", {}) or {})
         catalog.append({
             "videoId": known_video_id,
             "channelId": str(dict(known_snapshot or {}).get("channelId", "")).strip(),
+            "title": str(known_metadata.get("title", "")).strip(),
             "privacyStatus": str(known_execution.get("youtubePrivacyStatus") or "").strip(),
             "publishedAt": str(known_execution.get("actualPublishedAt") or known_execution.get("confirmedPublishAt") or "").strip(),
             "score": 0,
@@ -16592,6 +16596,15 @@ def run_publication_v2_studio(payload: dict) -> dict:
                 complete_publication_stage(settings, snapshot_id, worker_id, stage, provider_result)
                 save_settings(settings)
                 succeeded += 1
+            except StudioIdentityVerificationRequired as exc:
+                fail_publication_stage(
+                    settings, snapshot_id, stage,
+                    "STUDIO_IDENTITY_REQUIRED", str(exc),
+                )
+                release_execution(settings, snapshot_id, worker_id)
+                save_settings(settings)
+                failed += 1
+                break
             except StudioAutomationError as exc:
                 fail_publication_stage(settings, snapshot_id, stage, "RETRYABLE", str(exc))
                 release_execution(settings, snapshot_id, worker_id)
