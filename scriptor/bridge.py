@@ -908,9 +908,13 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    title_tokens = _cover_face_tokens(str(item.get("title", "")))
+    # A long script can mention unrelated countries, people or markets.  Face
+    # selection must follow the title/topic which the operator actually chose,
+    # never an incidental word from the body text.
+    title_tokens = _cover_face_tokens(" ".join((
+        str(item.get("title", "")), str(item.get("topic", "")),
+    )))
     topic_tokens = set(title_tokens)
-    topic_tokens |= _cover_face_tokens(" ".join(str(item.get("script", "")).split())[:1200])
     best_score = 0
     candidates: list[Path] = []
     for source in files:
@@ -948,7 +952,8 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
 
 def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
                                face_mode: str = "auto", position: int = 0,
-                               max_references: int = 10) -> tuple[list[str], str]:
+                               max_references: int = 10,
+                               preserve_face_selection: bool = False) -> tuple[list[str], str]:
     """Keep references within the operation limit and reserve a selected face slot."""
     manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
     if face_mode == "without" or item.get("face_reference_disabled"):
@@ -983,7 +988,7 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
     references = [str(_prepare_cover_visual_reference(Path(reference))) for reference in scene_references]
     if face_path:
         item.update(face_reference_path=face_path, face_reference_label=face_label, face_reference_source=face_source)
-    else:
+    elif not preserve_face_selection:
         item.pop("face_reference_path", None)
         item.pop("face_reference_label", None)
         item.pop("face_reference_source", None)
@@ -5800,7 +5805,7 @@ def save_cover_settings(payload: dict) -> dict:
     if str(payload.get("textMode", settings.cover_text_mode)) in {"overlay", "fastgen"}:
         settings.cover_text_mode = str(payload.get("textMode"))
     build_mode = str(payload.get("buildMode", settings.cover_build_mode))
-    if build_mode in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
+    if build_mode in {"fastgen-full", "fastgen-full-my-face"}:
         settings.cover_build_mode = build_mode
     if "headlineTemplate" in payload:
         settings.cover_headline_template = str(payload["headlineTemplate"]).strip() or settings.cover_headline_template
@@ -8147,11 +8152,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         _run_parallel_cover_workers(sorted(requested), run_topic)
         return snapshot()
     refine_with_face = bool(payload.get("refineWithFace"))
-    # FastGen accepts the scene/text instruction, while NewsFlow composites
-    # the local cut-out portrait afterwards. This keeps the person sharp and
-    # avoids sending a portrait as an unreliable remote reference for the
-    # text-only rerender path.
-    local_face_only = bool(payload.get("localFaceOnly"))
+    # Both supported routes are final FastGen renders.  The optional portrait
+    # route transports one prepared reference but never performs local face
+    # compositing after the provider response.
+    local_face_only = False
     face_mode = str(payload.get("faceMode", "auto")).casefold()
     # A one-off FastGen text render must not overwrite the user's usual
     # local-overlay preference for future covers.
@@ -8161,8 +8165,9 @@ def _generate_covers_unlocked(payload: dict) -> dict:
     if face_mode not in {"auto", "with", "without"}:
         face_mode = "auto"
     build_mode = str(payload.get("buildMode", settings.cover_build_mode)).casefold()
-    if build_mode not in {"fastgen-full", "newsflow-full", "fastgen-text-local-face", "fastgen-text-auto-face"}:
-        build_mode = settings.cover_build_mode
+    if build_mode not in {"fastgen-full", "fastgen-full-my-face"}:
+        build_mode = "fastgen-full-my-face"
+    use_my_face = build_mode == "fastgen-full-my-face"
     operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
     operation_reference_limit = _cover_operation_reference_limit(settings, operation)
     operation_accepts_references = _cover_operation_accepts_references(settings, operation)
@@ -8226,25 +8231,15 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         try:
             references, face_label = _cover_references_for_item(
                 item, settings, refine=refine_with_face,
-                face_mode="without" if local_face_only else face_mode, position=index,
+                face_mode=face_mode if use_my_face else "without", position=index,
                 max_references=operation_reference_limit if operation_reference_limit is not None else 10,
+                preserve_face_selection=not use_my_face,
             )
-            if local_face_only and face_mode != "without":
-                face_path, face_label, face_source = _match_cover_face_reference(
-                    item, settings, force=face_mode == "with"
-                )
-                if face_path:
-                    item.update(face_reference_path=face_path, face_reference_label=face_label,
-                                face_reference_source=face_source)
-                else:
-                    item.pop("face_reference_path", None)
-                    item.pop("face_reference_label", None)
-                    item.pop("face_reference_source", None)
             # A full-FastGen face cover is accepted only when the provider can
             # receive the selected portrait. Falling back to a name-only prompt
             # would silently produce a different person and cannot count as the
             # requested scene + face + text workflow.
-            if build_mode == "fastgen-full" and face_label and operation_reference_limit is None:
+            if use_my_face and face_label and operation_reference_limit is None:
                 detail = (
                     "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
                     "обновите список моделей или выберите reference-capable operation."
@@ -8253,10 +8248,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item["error"] = detail
                 _save_cover_state(settings)
                 continue
-            if build_mode == "fastgen-full" and face_label and not operation_accepts_references:
+            if use_my_face and face_label and not operation_accepts_references:
                 detail = (
                     f"Операция FastGen {operation} не поддерживает image/reference input; "
-                    "выберите reference-capable operation для режима «Всё через FastGen»."
+                    "выберите reference-capable operation для режима «FastGen всё + мои лица»."
                 )
                 _cover_step(item, "Операция FastGen без references", 100, detail)
                 item["error"] = detail
@@ -8280,7 +8275,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         identity_notes: list[str] = []
         reference_notes: list[str] = []
         composition_notes: list[str] = []
-        face_requirement = _cover_face_visual_requirement(face_mode, face_label)
+        face_requirement = _cover_face_visual_requirement(face_mode if use_my_face else "auto", face_label)
         if face_requirement:
             identity_notes.append(face_requirement)
         if references:
@@ -8306,9 +8301,16 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             reference_notes.append(
                 "Use the first supplied image as the existing composition reference while redrawing a clean topic-relevant scene."
             )
+        # Preserve a manual selection on the row for a later my-faces retry,
+        # but do not let its identity leak into the FastGen-only prompt.
+        prompt_item = item
+        if not use_my_face:
+            prompt_item = dict(item)
+            for key in ("face_reference_path", "face_reference_label", "face_reference_source"):
+                prompt_item.pop(key, None)
         final_prompt_options = [
             build_final_provider_prompt(
-                visual_prompt, item,
+                visual_prompt, prompt_item,
                 identity_notes=" ".join(note for note in identity_notes if note),
                 reference_notes=" ".join(note for note in reference_notes if note),
                 composition_notes=" ".join(note for note in composition_notes if note),
@@ -8825,7 +8827,8 @@ def regenerate_cover_with_face(payload: dict) -> dict:
     })
     return regenerate_covers({
         "indices": [index], "productionItemIds": [production_item_id],
-        "faceMode": "with", "textMode": "fastgen", "localFaceOnly": True,
+        "buildMode": "fastgen-full-my-face", "faceMode": "auto",
+        "textMode": "fastgen", "localFaceOnly": False,
     })
 
 
@@ -8892,7 +8895,8 @@ def refine_cover_faces(payload: dict) -> dict:
     return generate_covers({
         "indices": [index for index, _item in selected],
         "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
-        "refineWithFace": True, "localFaceOnly": True,
+        "refineWithFace": True, "buildMode": "fastgen-full-my-face",
+        "faceMode": "auto", "textMode": "fastgen", "localFaceOnly": False,
     })
 
 
