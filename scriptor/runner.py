@@ -79,6 +79,32 @@ def scenario_length_status(request: ScenarioRequest, text: str) -> tuple[str, in
     return "READY", actual_chars
 
 
+def scenario_length_requirement(request: ScenarioRequest) -> str:
+    """Human-readable bounds for progress/errors without inventing a missing side."""
+    if request.allowed_min and request.allowed_max:
+        return f"{request.allowed_min}–{request.allowed_max} знаков"
+    if request.allowed_min:
+        return f"не менее {request.allowed_min} знаков"
+    if request.allowed_max:
+        return f"не более {request.allowed_max} знаков"
+    return "без ограничения длины"
+
+
+def scenario_length_repair_instruction(request: ScenarioRequest) -> str:
+    """Provider instruction that preserves one-sided contracts correctly."""
+    target = f" Цель: {request.target_chars} знаков." if request.target_chars else ""
+    if request.allowed_min and request.allowed_max:
+        return (
+            f"Верни только готовый сценарий длиной строго от {request.allowed_min} "
+            f"до {request.allowed_max} знаков.{target}"
+        )
+    if request.allowed_min:
+        return f"Верни только готовый сценарий длиной не менее {request.allowed_min} знаков.{target}"
+    if request.allowed_max:
+        return f"Верни только готовый сценарий длиной не более {request.allowed_max} знаков.{target}"
+    return "Верни только полный готовый сценарий."
+
+
 class ParallelRunner:
     def __init__(self, client, max_concurrency: int = 8, on_change: Callable[[Job], None] | None = None):
         self.client = client
@@ -123,14 +149,13 @@ class ParallelRunner:
         for attempt in range(1, 3):
             job.length_repair_attempts = attempt
             job.error = (
-                f"Длина {actual_chars} знаков вне диапазона "
-                f"{job.request.allowed_min}–{job.request.allowed_max}; корректировка {attempt}/2"
+                f"Длина {actual_chars} знаков вне требования "
+                f"{scenario_length_requirement(job.request)}; корректировка {attempt}/2"
             )
             self._notify(job)
             repair_prompt = (
                 "Это новая отдельная редакторская задача. Перепиши сценарий целиком по исходному заданию. "
-                f"Верни только готовый сценарий длиной строго от {job.request.allowed_min} "
-                f"до {job.request.allowed_max} знаков (цель: {job.request.target_chars} знаков). "
+                f"{scenario_length_repair_instruction(job.request)} "
                 "Не добавляй комментарии, объяснения, заголовки проверки длины или служебный текст.\n\n"
                 f"ИСХОДНОЕ ЗАДАНИЕ:\n{job.request.prompt}"
             )
@@ -151,8 +176,8 @@ class ParallelRunner:
         job.state = RunState.ERROR
         job.error = (
             f"После {job.length_repair_attempts} корректировок длина сценария "
-            f"осталась {job.actual_chars} знаков; требуется {job.request.allowed_min}–"
-            f"{job.request.allowed_max}"
+            f"осталась {job.actual_chars} знаков; требуется "
+            f"{scenario_length_requirement(job.request)}"
         )
         return False
 
