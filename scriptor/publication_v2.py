@@ -1966,8 +1966,12 @@ def begin_upload_attempt(settings: Any, snapshot_id: str, worker_id: str) -> Non
                    "attempts": int(upload.get("attempts", 0) or 0) + 1, "progress": {"state": "starting"}})
     steps["VIDEO_UPLOAD"] = upload
     reupload = dict(execution.get("reupload", {}) or {})
-    if str(reupload.get("status", "")).upper() == "QUEUED":
-        reupload.update({"status": "RUNNING", "startedAt": now, "lastCheckedAt": now})
+    if str(reupload.get("status", "")).upper() in {"QUEUED", "RETRYABLE"}:
+        reupload.update({
+            "status": "RUNNING",
+            "startedAt": reupload.get("startedAt") or now,
+            "lastCheckedAt": now,
+        })
         execution["reupload"] = reupload
     execution.update({"steps": steps, "currentStage": "VIDEO_UPLOAD", "overallStatus": "UPLOADING",
                       "startedAt": execution.get("startedAt") or now, "uploadStartedAt": now})
