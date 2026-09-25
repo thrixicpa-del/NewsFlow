@@ -1796,6 +1796,100 @@ def retry_publication_stage(settings: Any, snapshot_id: str, stage: str) -> None
     settings.youtube_publication_executions = executions
 
 
+def queue_publication_reupload(
+    settings: Any,
+    snapshot_id: str,
+    reason: str,
+    *,
+    metadata_confirmed: bool = False,
+) -> None:
+    """Queue one explicit private replacement upload and preserve the old identity."""
+    snapshots = dict(getattr(settings, "youtube_publication_snapshots", {}) or {})
+    executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
+    snapshot = dict(snapshots.get(snapshot_id, {}) or {})
+    execution = dict(executions.get(snapshot_id, {}) or {})
+    if not snapshot or not execution:
+        raise ValueError("Publication snapshot или execution не найден")
+    if not metadata_confirmed:
+        raise ValueError("Перед перезаливом подтвердите актуальность frozen metadata.")
+    if execution.get("activeLease"):
+        raise ValueError("Нельзя перезалить ролик: текущая попытка ещё выполняется")
+
+    current_reupload = dict(execution.get("reupload", {}) or {})
+    if str(current_reupload.get("status", "")).upper() in {
+        "QUEUED", "RUNNING", "UPLOADED", "PROCESSING",
+    }:
+        raise ValueError("Этот ролик уже находится в активном перезаливе")
+
+    old_video_id = str(execution.get("youtubeVideoId") or "").strip()
+    old_video_url = str(execution.get("youtubeVideoUrl") or "").strip()
+    if not old_video_id:
+        raise ValueError("Перезалив доступен только после подтверждённого YouTube ID")
+    clean_reason = " ".join(str(reason or "").split())
+    if not clean_reason:
+        raise ValueError("Укажите причину перезалива")
+
+    now = _now()
+    previous_reupload = dict(current_reupload)
+    reupload_history = list(execution.get("reuploadHistory", []) or [])
+    if previous_reupload:
+        reupload_history.append(previous_reupload)
+
+    steps = dict(execution.get("steps", {}) or {})
+    reset_steps: dict[str, dict[str, Any]] = {}
+    for stage in _STAGES:
+        previous = dict(steps.get(stage, {}) or {})
+        if stage == "AUTH_CHECK":
+            reset_steps[stage] = _step("PENDING")
+        elif stage == "VIDEO_UPLOAD":
+            reset_steps[stage] = {
+                **_step("PENDING"),
+                "attempts": 0,
+                "detail": "Оператор подтвердил новый private upload; прежний ролик сохранён.",
+            }
+        elif str(previous.get("status", "")).upper() == "NOT_REQUIRED":
+            # Channel policy remains immutable for this frozen snapshot.
+            reset_steps[stage] = previous
+        else:
+            reset_steps[stage] = _step("PENDING")
+
+    execution.update({
+        "youtubeVideoId": None,
+        "youtubeVideoUrl": None,
+        "steps": reset_steps,
+        "currentStage": "VIDEO_UPLOAD",
+        "overallStatus": "REUPLOAD_QUEUED",
+        "activeLease": None,
+        "resumableUpload": None,
+        "reuploadHistory": reupload_history[-20:],
+        "reupload": {
+            "status": "QUEUED",
+            "oldVideoId": old_video_id,
+            "oldVideoUrl": old_video_url or None,
+            "reason": clean_reason,
+            "requestedAt": now,
+            "lastCheckedAt": now,
+            "originalPrivacy": snapshot.get("privacy", "private"),
+            "originalPublishMode": snapshot.get("publishMode", "publish_now"),
+            "originalPublishAt": snapshot.get("requestedPublishAt"),
+            "metadataConfirmedAt": now,
+            "replacementPrivacy": "private",
+            "scheduleApplied": False,
+        },
+    })
+    execution.setdefault("timeline", []).append({
+        "at": now,
+        "stage": "VIDEO_UPLOAD",
+        "status": "REUPLOAD_QUEUED",
+        "detail": (
+            "Новый private upload поставлен в очередь. Старый YouTube ID сохранён; "
+            "исходное расписание автоматически не применяется."
+        ),
+    })
+    executions[snapshot_id] = execution
+    settings.youtube_publication_executions = executions
+
+
 def release_execution(settings: Any, snapshot_id: str, worker_id: str) -> bool:
     """Release only the worker's own lease; another worker cannot unlock it."""
     executions = dict(getattr(settings, "youtube_publication_executions", {}) or {})
@@ -1831,7 +1925,7 @@ def next_upload_candidates(settings: Any) -> list[str]:
     available = max(0, limit - active_uploads)
     if not available:
         return []
-    allowed = {"WAITING", "READY", "RETRYING", "RETRYABLE"}
+    allowed = {"WAITING", "READY", "RETRYING", "RETRYABLE", "REUPLOAD_QUEUED"}
     candidates: list[str] = []
     for snapshot_id in sorted(executions):
         execution = dict(executions[snapshot_id] or {})
@@ -1871,6 +1965,10 @@ def begin_upload_attempt(settings: Any, snapshot_id: str, worker_id: str) -> Non
     upload.update({"status": "RUNNING", "startedAt": now, "finishedAt": None, "error": None,
                    "attempts": int(upload.get("attempts", 0) or 0) + 1, "progress": {"state": "starting"}})
     steps["VIDEO_UPLOAD"] = upload
+    reupload = dict(execution.get("reupload", {}) or {})
+    if str(reupload.get("status", "")).upper() == "QUEUED":
+        reupload.update({"status": "RUNNING", "startedAt": now, "lastCheckedAt": now})
+        execution["reupload"] = reupload
     execution.update({"steps": steps, "currentStage": "VIDEO_UPLOAD", "overallStatus": "UPLOADING",
                       "startedAt": execution.get("startedAt") or now, "uploadStartedAt": now})
     execution.setdefault("timeline", []).append({"at": now, "stage": "VIDEO_UPLOAD", "status": "RUNNING", "detail": "Передача MP4 начата"})
@@ -1895,8 +1993,19 @@ def complete_upload_attempt(settings: Any, snapshot_id: str, worker_id: str, pro
     upload = dict(steps.get("VIDEO_UPLOAD", {}) or _step())
     upload.update({"status": "SUCCESS", "finishedAt": now, "providerResult": dict(provider_result), "progress": {"state": "complete"}})
     steps["VIDEO_UPLOAD"] = upload
+    reupload = dict(execution.get("reupload", {}) or {})
+    if str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING"}:
+        reupload.update({
+            "status": "UPLOADED",
+            "newVideoId": video_id,
+            "newVideoUrl": str(provider_result.get("videoUrl", "")).strip() or None,
+            "uploadedAt": now,
+            "lastCheckedAt": now,
+        })
+        execution["reupload"] = reupload
     execution.update({"steps": steps, "youtubeVideoId": video_id, "youtubeVideoUrl": str(provider_result.get("videoUrl", "")).strip() or None,
-                      "currentStage": "YOUTUBE_PROCESSING", "overallStatus": "PROCESSING", "uploadCompletedAt": now})
+                      "currentStage": "YOUTUBE_PROCESSING", "overallStatus": "PROCESSING", "uploadCompletedAt": now,
+                      "resumableUpload": None})
     execution.setdefault("timeline", []).append({"at": now, "stage": "VIDEO_UPLOAD", "status": "SUCCESS", "detail": f"YouTube ID: {video_id}"})
     executions[snapshot_id] = execution
     settings.youtube_publication_executions = executions
@@ -1930,6 +2039,16 @@ def reconcile_youtube_video_state(settings: Any, snapshot_id: str, video: dict[s
     else:
         processing_step.update({"status": "RUNNING", "providerResult": {"processingStatus": processing_status or "unknown"}})
     steps["YOUTUBE_PROCESSING"] = processing_step
+    reupload = dict(execution.get("reupload", {}) or {})
+    if reupload:
+        reupload["lastCheckedAt"] = now
+        if processing_status == "succeeded":
+            reupload.update({"status": "SUCCEEDED", "completedAt": now})
+        elif processing_status in {"failed", "terminated"}:
+            reupload.update({"status": "FAILED", "failedAt": now})
+        elif str(reupload.get("status", "")).upper() in {"UPLOADED", "PROCESSING"}:
+            reupload["status"] = "PROCESSING"
+        execution["reupload"] = reupload
 
     expected_description = compose_youtube_description(
         str(expected.get("description", "")),
@@ -2000,6 +2119,15 @@ def begin_publication_stage(settings: Any, snapshot_id: str, worker_id: str, sta
         "error": None,
     })
     steps[normalized] = step
+    reupload = dict(execution.get("reupload", {}) or {})
+    if normalized == "VIDEO_UPLOAD" and str(reupload.get("status", "")).upper() in {"QUEUED", "RUNNING"}:
+        reupload.update({
+            "status": "FAILED",
+            "failedAt": now,
+            "lastCheckedAt": now,
+            "error": {"category": classification, "message": str(message)},
+        })
+        execution["reupload"] = reupload
     execution["steps"] = steps
     execution["currentStage"] = normalized
     execution["overallStatus"] = "FORMATTING"
@@ -2174,6 +2302,7 @@ def resolve_uncertain_upload(
             "currentStage": "VIDEO_UPLOAD",
             "overallStatus": "RETRYING",
             "activeLease": None,
+            "resumableUpload": None,
         })
         execution.setdefault("timeline", []).append({
             "at": now,
@@ -2230,14 +2359,47 @@ def reconcile_publication_executions(settings: Any) -> dict[str, int]:
         video_id = str(execution.get("youtubeVideoId") or "").strip()
         upload = dict(steps.get("VIDEO_UPLOAD", {}) or {})
         if not video_id and str(upload.get("status", "")).upper() == "RUNNING":
-            upload.update({
-                "status": "USER_ACTION_REQUIRED",
-                "error": {"category": "USER_ACTION_REQUIRED", "message": "Загрузка была прервана до подтверждения YouTube ID. Автоповтор отключён, чтобы не создать дубликат."},
-                "finishedAt": _now(),
-            })
-            steps["VIDEO_UPLOAD"] = upload
-            execution.update({"steps": steps, "currentStage": "VIDEO_UPLOAD", "overallStatus": "USER_ACTION_REQUIRED"})
-            execution.setdefault("timeline", []).append({"at": _now(), "stage": "VIDEO_UPLOAD", "status": "USER_ACTION_REQUIRED", "detail": "Нужна безопасная сверка прерванной загрузки."})
+            resume = dict(execution.get("resumableUpload", {}) or {})
+            if str(resume.get("sessionUri", "")).strip():
+                upload.update({
+                    "status": "RETRYING",
+                    "error": None,
+                    "finishedAt": None,
+                    "progress": {
+                        "state": "resumable",
+                        "bytesSent": int(resume.get("bytesSent", 0) or 0),
+                        "totalBytes": int(resume.get("totalBytes", 0) or 0),
+                    },
+                })
+                steps["VIDEO_UPLOAD"] = upload
+                execution.update({
+                    "steps": steps,
+                    "currentStage": "VIDEO_UPLOAD",
+                    "overallStatus": "RETRYING",
+                })
+                execution.setdefault("timeline", []).append({
+                    "at": _now(), "stage": "VIDEO_UPLOAD", "status": "RETRYING",
+                    "detail": "Перезапуск: сохранена resumable session, будет продолжена без нового videos.insert.",
+                })
+            else:
+                upload.update({
+                    "status": "USER_ACTION_REQUIRED",
+                    "error": {
+                        "category": "USER_ACTION_REQUIRED",
+                        "message": "Загрузка прервана до сохранения resumable session/YouTube ID. Нужна сверка канала.",
+                    },
+                    "finishedAt": _now(),
+                })
+                steps["VIDEO_UPLOAD"] = upload
+                execution.update({
+                    "steps": steps,
+                    "currentStage": "VIDEO_UPLOAD",
+                    "overallStatus": "USER_ACTION_REQUIRED",
+                })
+                execution.setdefault("timeline", []).append({
+                    "at": _now(), "stage": "VIDEO_UPLOAD", "status": "USER_ACTION_REQUIRED",
+                    "detail": "Нужна безопасная сверка прерванной загрузки.",
+                })
             interrupted += 1
         elif video_id:
             failed_downstream = any(
@@ -2287,6 +2449,7 @@ def publication_receipt(settings: Any, snapshot_id: str) -> dict[str, Any]:
         "publishMode": snapshot.get("publishMode", "publish_now"),
         "requestedPublishAt": snapshot.get("requestedPublishAt"),
         "confirmedPublishAt": execution.get("confirmedPublishAt"),
+        "reupload": dict(execution.get("reupload", {}) or {}),
         "ads": {
             "status": str(ads_step.get("status", "PENDING")).upper(),
             "mode": str(ads_result.get("mode", "NONE" if str(ads_step.get("status", "")).upper() in {"NOT_REQUIRED", "SKIPPED"} else "")),
@@ -2347,6 +2510,7 @@ def publication_queue_projection(settings: Any) -> dict[str, Any]:
             "completion": {"completed": completed, "total": total}, "steps": steps,
             "timeline": list(execution.get("timeline", []) or [])[-100:],
             "active": bool(execution.get("activeLease")),
+            "reupload": dict(execution.get("reupload", {}) or {}),
         })
     assigned_channels: dict[str, str] = {}
     for production_id, assignment in assignments.items():
