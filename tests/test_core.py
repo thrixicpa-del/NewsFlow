@@ -111,6 +111,17 @@ class PromptTests(unittest.TestCase):
             for item in requests
         ))
 
+    def test_target_without_an_explicit_minimum_uses_a_strict_ten_percent_band(self):
+        request = build_requests(
+            ["Тема"],
+            "Напиши: {title}",
+            [],
+            default_target_chars=2000,
+            default_allowed_max=120000,
+        )[0]
+
+        self.assertEqual((request.target_chars, request.allowed_min, request.allowed_max), (2000, 1800, 2200))
+
     def test_range_length_contract_overrides_the_global_preset_contract(self):
         requests = build_requests(
             ["Первый", "Второй"],

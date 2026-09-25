@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import math
+import re
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -139,6 +140,52 @@ def scenario_length_continuation_instruction(request: ScenarioRequest, actual_ch
     )
 
 
+def continuation_repeats_draft(draft: str, continuation: str) -> bool:
+    """Reject an attempted restart before it can be appended to one scenario."""
+    draft_words = re.findall(r"[^\W\d_]+", str(draft or "").casefold(), flags=re.UNICODE)
+    continuation_words = re.findall(r"[^\W\d_]+", str(continuation or "").casefold(), flags=re.UNICODE)
+    if len(draft_words) < 5 or len(continuation_words) < 5:
+        return False
+    draft_ngrams = {tuple(draft_words[index:index + 5]) for index in range(len(draft_words) - 4)}
+    continuation_ngrams = [tuple(continuation_words[index:index + 5])
+                           for index in range(len(continuation_words) - 4)]
+    repeated = sum(ngram in draft_ngrams for ngram in continuation_ngrams)
+    return repeated >= max(3, math.ceil(len(continuation_ngrams) * .10))
+
+
+def trim_continuation_to_fit(draft: str, continuation: str, allowed_max: int) -> str:
+    """Keep a unique continuation within the contract without restarting it.
+
+    The model can legitimately produce more text than remains in the selected
+    range.  Do not ask it to rewrite the complete scenario in that case: keep
+    only complete sentences that fit after the already accepted draft.
+    """
+    text = str(continuation or "").strip()
+    if not allowed_max or not text:
+        return text
+    available = allowed_max - len(str(draft or "").rstrip()) - 2
+    if available <= 0 or len(text) <= available:
+        return text if available > 0 else ""
+
+    prefix = text[:available]
+    endpoint = max(prefix.rfind(mark) for mark in ".!?…")
+    # Do not append a tiny, contextless fragment merely to satisfy the range.
+    if endpoint + 1 < min(120, max(1, available // 2)):
+        return ""
+    return prefix[:endpoint + 1].strip()
+
+
+def scenario_length_repair_limit(request: ScenarioRequest, actual_chars: int) -> int:
+    """Allow enough continuations when a provider voluntarily stops early."""
+    missing = max(0, max(request.target_chars, request.allowed_min) - actual_chars)
+    expected = max(request.target_chars, request.allowed_min)
+    minimum_attempts = 3 if expected >= 5000 else 2
+    # Real long-form responses may add only a sentence or two per request even
+    # with a large output budget.  Keep this bounded, but do not strand a 10k+
+    # scenario below its selected range after merely two such continuations.
+    return min(6, max(minimum_attempts, math.ceil(missing / 2000)))
+
+
 
 
 class ParallelRunner:
@@ -194,12 +241,13 @@ class ParallelRunner:
             return True
 
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-        for attempt in range(1, 3):
+        repair_limit = scenario_length_repair_limit(job.request, actual_chars)
+        for attempt in range(1, repair_limit + 1):
             job.length_repair_attempts = attempt
             job.error = (
                 f"Длина {actual_chars} знаков вне требования "
                 f"{scenario_length_requirement(job.request)}. "
-                f"Корректировка длины {attempt}/2."
+                f"Корректировка длины {attempt}/{repair_limit}."
             )
             self._notify(job)
             if status == "SHORT":
@@ -225,7 +273,35 @@ class ParallelRunner:
                 job.error = "Текстовый агент не вернул сценарий при корректировке длины"
                 return False
             if status == "SHORT":
-                job.result = f"{job.result.rstrip()}\n\n{repaired_text.strip()}"
+                if continuation_repeats_draft(job.result, repaired_text):
+                    job.error = (
+                        f"Корректировка длины {attempt}/{repair_limit} повторяет уже написанный текст; "
+                        "она не добавлена к сценарию."
+                    )
+                    self._notify(job)
+                    continue
+                accepted_continuation = trim_continuation_to_fit(
+                    job.result,
+                    repaired_text,
+                    job.request.allowed_max,
+                )
+                if not accepted_continuation:
+                    job.error = (
+                        f"Корректировка длины {attempt}/{repair_limit} не содержит полного предложения, "
+                        "которое помещается в верхнюю границу; она не добавлена к сценарию."
+                    )
+                    self._notify(job)
+                    continue
+                candidate = f"{job.result.rstrip()}\n\n{accepted_continuation}"
+                candidate_status, _candidate_chars = scenario_length_status(job.request, candidate)
+                if candidate_status == "LONG":
+                    job.error = (
+                        f"Корректировка длины {attempt}/{repair_limit} превышает верхнюю границу; "
+                        "она не добавлена к сценарию."
+                    )
+                    self._notify(job)
+                    continue
+                job.result = candidate
             else:
                 job.result = repaired_text
             status, actual_chars = scenario_length_status(job.request, job.result)

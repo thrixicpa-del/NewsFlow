@@ -42,12 +42,16 @@ def _normalise_character_contract(target_chars: int = 0, allowed_min: int = 0,
     target = max(0, int(target_chars or 0))
     minimum = max(0, int(allowed_min or 0))
     maximum = max(0, int(allowed_max or 0))
+    has_explicit_minimum = bool(minimum)
     if minimum and maximum and minimum > maximum:
         raise ValueError("Минимальная длина больше максимальной")
     if target:
         if not minimum:
             minimum = max(1, int(round(target * .9)))
-        if not maximum:
+        # A broad storage ceiling is not a useful length contract when the
+        # operator selected a concrete target.  Without an explicit minimum,
+        # make the target actionable as the same +/-10% band used by presets.
+        if not maximum or not has_explicit_minimum:
             maximum = max(minimum, int(round(target * 1.1)))
     elif minimum and maximum:
         target = (minimum + maximum) // 2

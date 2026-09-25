@@ -7,6 +7,7 @@ from scriptor.runner import (
     ParallelRunner,
     RunState,
     looks_like_action_required,
+    scenario_length_repair_limit,
     scenario_length_status,
 )
 
@@ -32,6 +33,11 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scenario_length_status(request, "а" * 10000), ("READY", 10000))
         self.assertEqual(scenario_length_status(request, "а" * 15000), ("READY", 15000))
         self.assertEqual(scenario_length_status(request, "а" * 15001), ("LONG", 15001))
+
+    def test_long_contract_reserves_three_continuations_when_the_provider_stops_early(self):
+        request = ScenarioRequest(0, "S", "P", target_chars=10000, allowed_min=9000, allowed_max=11000)
+
+        self.assertEqual(scenario_length_repair_limit(request, 6500), 3)
 
     def test_detects_claude_request_to_rephrase_but_not_normal_script(self):
         self.assertTrue(looks_like_action_required("К сожалению, я не могу написать это. Переформулируйте тему."))
@@ -120,6 +126,81 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].length_status, "READY")
         self.assertEqual(jobs[0].actual_chars, 15004)
         self.assertEqual(jobs[0].length_repair_attempts, 2)
+
+    async def test_twenty_thousand_character_contract_uses_as_many_continuations_as_needed(self):
+        class SegmentedClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                return "а" * 5000
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                return "б" * 5000
+
+        client = SegmentedClient()
+        request = ScenarioRequest(
+            0, "S", "P", target_chars=20000, allowed_min=18000, allowed_max=22000,
+        )
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 3)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].actual_chars, 20006)
+
+    async def test_repeated_continuation_is_rejected_before_it_can_be_appended(self):
+        first_segment = ("В городе открыли парк для жителей с прогулочными маршрутами. " * 30).strip()
+        unique_continuation = ("В следующем этапе благоустроят освещение, детские площадки и входные зоны. " * 30).strip()
+
+        class DuplicateThenUniqueClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                return first_segment
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                return first_segment if self.fresh_calls == 1 else unique_continuation
+
+        client = DuplicateThenUniqueClient()
+        request = ScenarioRequest(
+            0, "S", "P", target_chars=3000, allowed_min=2000, allowed_max=6000,
+        )
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 2)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].result, f"{first_segment}\n\n{unique_continuation}")
+        self.assertIn("В следующем этапе благоустроят", jobs[0].result)
+
+    async def test_unique_continuation_is_trimmed_at_a_sentence_boundary_instead_of_restarting(self):
+        first_segment = ("Первый блок описывает открытие городского парка для жителей. " * 120).strip()[:7000]
+        continuation = ("Новый фрагмент добавляет детали о маршрутах, освещении и площадках. " * 120).strip()
+
+        class LongContinuationClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                return first_segment
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                return continuation
+
+        client = LongContinuationClient()
+        request = ScenarioRequest(
+            0, "S", "P", target_chars=10000, allowed_min=9000, allowed_max=11000,
+        )
+        jobs = await ParallelRunner(client, 1).run([request])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertGreaterEqual(jobs[0].actual_chars, 9000)
+        self.assertLessEqual(jobs[0].actual_chars, 11000)
+        self.assertTrue(jobs[0].result.endswith("."))
 
     async def test_one_sided_minimum_length_is_repaired_with_a_truthful_instruction(self):
         class MinimumClient:
