@@ -147,12 +147,8 @@ class YouTubeStudioActionsTests(unittest.TestCase):
                 return None
 
         page = Page()
-        try:
-            _open_video_editor(page, "video-a")
-            opened = page.url.endswith("/editor")
-        except Exception:
-            opened = False
-        self.assertTrue(opened)
+        _open_video_editor(page, "video-a")
+        self.assertTrue(page.url.endswith("/editor"))
         self.assertEqual(page.menuitem_request, ("menuitem", "Редактор", True))
 
     def test_editor_navigation_reports_studio_access_denied_before_clicking(self):
@@ -196,6 +192,46 @@ class YouTubeStudioActionsTests(unittest.TestCase):
 
             def get_by_role(self, *_args, **_kwargs):
                 return Locator(DisabledMenuItem())
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        with self.assertRaises(StudioAutomationError) as raised:
+            _open_video_editor(Page(), "video-a")
+        self.assertIn("нет доступа", str(raised.exception).casefold())
+
+    def test_editor_navigation_reports_access_denied_after_studio_redirect(self):
+        class MenuItem:
+            def __init__(self, page):
+                self.page = page
+
+            def is_visible(self, timeout):
+                return True
+
+            def click(self, timeout):
+                self.page.url = "https://studio.youtube.com/channel/channel-a/videos"
+                self.page.text = "У вас нет доступа к этому разделу"
+
+        class Body:
+            def __init__(self, page):
+                self.page = page
+
+            def inner_text(self, timeout):
+                return self.page.text
+
+        class Page:
+            def __init__(self):
+                self.url = ""
+                self.text = "Сведения о видео Редактор"
+
+            def goto(self, url, **_kwargs):
+                self.url = url
+
+            def locator(self, _selector):
+                return Body(self)
+
+            def get_by_role(self, *_args, **_kwargs):
+                return MenuItem(self)
 
             def wait_for_timeout(self, _milliseconds):
                 return None

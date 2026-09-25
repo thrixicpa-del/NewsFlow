@@ -97,6 +97,10 @@ def studio_transition_label() -> str:
     return "Перейти к редактору"
 
 
+def _editor_access_denied(visible_text: str) -> bool:
+    return "нет доступа к этому разделу" in " ".join(str(visible_text or "").casefold().split())
+
+
 def _click_exact_visible_button(page, label: str) -> bool:
     """Click one visible button by its accessible label, then DOM fallback."""
 
@@ -295,8 +299,8 @@ def _open_video_editor(page, video_id: str) -> None:
 
     page.goto(studio_details_url(video_id), wait_until="domcontentloaded", timeout=120_000)
     _wait_for_studio_shell(page)
-    visible_text = " ".join(page.locator("body").inner_text(timeout=3_000).casefold().split())
-    if "нет доступа к этому разделу" in visible_text:
+    visible_text = page.locator("body").inner_text(timeout=3_000)
+    if _editor_access_denied(visible_text):
         raise StudioAutomationError(
             "У текущего аккаунта YouTube Studio нет доступа к разделу «Редактор». "
             "Проверьте роль владельца или редактора канала."
@@ -311,6 +315,11 @@ def _open_video_editor(page, video_id: str) -> None:
     for _attempt in range(40):
         if "/editor" in page.url:
             return
+        if _editor_access_denied(page.locator("body").inner_text(timeout=1_000)):
+            raise StudioAutomationError(
+                "У текущего аккаунта YouTube Studio нет доступа к разделу «Редактор». "
+                "Проверьте роль владельца или редактора канала."
+            )
         page.wait_for_timeout(250)
     raise StudioAutomationError("Studio не открыл вкладку «Редактор» со страницы сведений ролика.")
 
