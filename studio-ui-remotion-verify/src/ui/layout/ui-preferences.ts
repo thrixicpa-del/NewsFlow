@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 export type UiPreferences = {
   sidebarCollapsed: boolean;
+  inspectorCollapsed: boolean;
   inspectorWidth: number;
   density: "comfortable" | "compact";
 };
@@ -10,25 +11,36 @@ export const UI_PREFERENCES_STORAGE_KEY = "newsflow.ui-preferences.v1";
 
 const defaults: UiPreferences = {
   sidebarCollapsed: false,
+  inspectorCollapsed: false,
   inspectorWidth: 360,
   density: "comfortable",
 };
 
-function isUiPreferences(value: unknown): value is UiPreferences {
-  if (!value || typeof value !== "object") return false;
+function normalizeUiPreferences(value: unknown): UiPreferences | null {
+  if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<UiPreferences>;
-  return typeof candidate.sidebarCollapsed === "boolean"
-    && typeof candidate.inspectorWidth === "number"
-    && candidate.inspectorWidth >= 280
-    && candidate.inspectorWidth <= 640
-    && (candidate.density === "comfortable" || candidate.density === "compact");
+  if (
+    typeof candidate.sidebarCollapsed !== "boolean"
+    || typeof candidate.inspectorWidth !== "number"
+    || candidate.inspectorWidth < 280
+    || candidate.inspectorWidth > 640
+    || (candidate.density !== "comfortable" && candidate.density !== "compact")
+  ) {
+    return null;
+  }
+  return {
+    sidebarCollapsed: candidate.sidebarCollapsed,
+    inspectorCollapsed: candidate.inspectorCollapsed === true,
+    inspectorWidth: candidate.inspectorWidth,
+    density: candidate.density,
+  };
 }
 
 export function loadUiPreferences(): UiPreferences {
   try {
     const stored = localStorage.getItem(UI_PREFERENCES_STORAGE_KEY);
     const parsed: unknown = stored ? JSON.parse(stored) : null;
-    return isUiPreferences(parsed) ? parsed : defaults;
+    return normalizeUiPreferences(parsed) || defaults;
   } catch {
     return defaults;
   }
