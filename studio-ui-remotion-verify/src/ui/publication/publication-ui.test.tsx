@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { PublicationPage } from "./PublicationPage";
 import { PublicationHistory } from "./PublicationHistory";
+import { buildPublicationView } from "./view-model";
 
 const command = vi.fn().mockResolvedValue(undefined);
 
@@ -132,12 +133,25 @@ describe("PublicationPage", () => {
     expect(metricValue("Свободно по квотам")).toHaveTextContent("88");
   });
 
-  it("uses refreshed channel monetization as the default publication priority", () => {
-    render(<PublicationPage data={fixture} command={command} />);
+  it("uses refreshed monetization as default priority while preserving an explicit override", () => {
+    const discovered = buildPublicationView(fixture);
+    expect(discovered.channels.slice(0, 3).map((channel) => channel.channelPriority)).toEqual([10, 10, 0]);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Каналы" }));
+    const overridden = buildPublicationView({
+      ...fixture,
+      publication: {
+        ...fixture.publication,
+        v2: {
+          ...fixture.publication.v2,
+          channelRules: {
+            "channel-1": { channelId: "channel-1", monetized: true, channelPriority: 0 },
+          },
+        },
+      },
+    } as unknown as NewsFlowSnapshot);
 
-    expect(screen.getAllByText("Вкл")).toHaveLength(2);
+    expect(overridden.channels[0].monetized).toBe(true);
+    expect(overridden.channels[0].channelPriority).toBe(0);
   });
 
   it("keeps ProductionItem ID inspectable without replacing the human video title", () => {
