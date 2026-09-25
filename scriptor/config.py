@@ -29,15 +29,36 @@ def _is_same_or_descendant(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
+def _is_test_runner_process() -> bool:
+    """Detect an actual test runner without treating imported test modules as test mode."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+
+    original = [str(value).casefold().strip() for value in getattr(sys, "orig_argv", [])]
+    for index, value in enumerate(original[:-1]):
+        if value == "-m" and original[index + 1] in {"unittest", "pytest"}:
+            return True
+
+    argv0 = str(sys.argv[0] if sys.argv else "").replace("\\", "/").casefold().strip()
+    basename = Path(argv0).name
+    return (
+        argv0.endswith(" -m unittest")
+        or argv0.endswith("/unittest/__main__.py")
+        or argv0.endswith("/pytest/__main__.py")
+        or basename in {"pytest", "pytest.exe", "py.test", "py.test.exe"}
+    )
+
+
 def _test_storage_root() -> Path | None:
     """Return the required isolated root for a test process, never production.
 
-    Unit tests commonly exercise real persistence code.  Requiring an explicit
-    root makes an accidental ``python -m unittest`` fail before it can create
-    or rewrite `%LOCALAPPDATA%/NewsFlow` or the default media folders.
+    Unit tests commonly exercise real persistence code. Requiring an explicit
+    root makes an accidental direct test-runner invocation fail before it can
+    create or rewrite `%LOCALAPPDATA%/NewsFlow` or the default media folders.
+    Importing unittest/pytest inside a normal packaged runtime is not itself
+    evidence that the runtime is a test.
     """
-    under_test = (os.environ.get(_TEST_MODE_ENV) == "1"
-                  or "unittest" in sys.modules or "pytest" in sys.modules)
+    under_test = (os.environ.get(_TEST_MODE_ENV) == "1" or _is_test_runner_process())
     if not under_test:
         return None
     value = str(os.environ.get(_TEST_ROOT_ENV, "")).strip()
