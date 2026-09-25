@@ -129,6 +129,11 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             lock["builtFromGitSha"],
             "4ceef4cee2b5b765d65dc136cce77f9614c40514",
         )
+        self.assertEqual(
+            set(lock["sourceGitBlobs"]),
+            set(REQUIRED_SOURCES),
+            "Frozen Core lock must identify every source covered by the runtime guard",
+        )
 
         resources = package["build"]["extraResources"]
         core_resource = next(resource for resource in resources if resource.get("to") == "core-bin")
