@@ -44,7 +44,7 @@ type BulkSchedule = {
   timeWindows: TimeWindow[];
 };
 
-const uploadableStatuses = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED"]);
+const uploadableStatuses = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED", "REUPLOAD_QUEUED"]);
 
 function queueFromSnapshot(state: NewsFlowSnapshot | undefined): QueueRow[] {
   const raw = (state?.publication as any)?.v2?.queue;
@@ -315,8 +315,18 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
     const ids = model.queue
       .filter((row) => row.youtubeVideoId && (!explicit.size || explicit.has(row.snapshotId)))
       .map((row) => row.snapshotId);
-    if (ids.length) void command("reconcile-publication-v2-youtube", { snapshotIds: ids });
+    if (ids.length) void command("reconcile-publication-v2-youtube", { snapshotIds: ids, statusOnly: true });
   };
+
+  const openIdentityVerification = (snapshotId: string) =>
+    void command("open-publication-v2-identity-verification", { snapshotId });
+
+  const queueReupload = (snapshotIds: string[], reason: string) =>
+    void command("queue-publication-v2-reupload", {
+      snapshotIds,
+      reason,
+      metadataConfirmed: true,
+    });
 
   const updateChannel = (patch: Partial<ChannelRow>) => {
     if (!editingChannel) return;
@@ -476,6 +486,8 @@ export function PublicationPage({ data, command }: { data: NewsFlowSnapshot; com
       continuing={continuing}
       onReconcile={reconcile}
       onRetry={(snapshotId, stage) => void command("retry-publication-v2-stage", { snapshotId, stage })}
+      onIdentity={openIdentityVerification}
+      onReupload={queueReupload}
       onResolveUpload={(snapshotId, outcome, youtubeVideoId) => void command("resolve-publication-v2-uncertain-upload", {
         snapshotId,
         outcome,
