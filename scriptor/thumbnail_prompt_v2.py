@@ -304,13 +304,14 @@ def build_final_provider_prompt(
         ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
     )
     final_prompt = "\n\n".join(f"{name}:\n{content}" for name, content in blocks)
-    collision_source = " ".join((
-        str(scene_prompt or ""),
+    # Only the source topic may authorise an oil-market scene.  The script
+    # may mention prices/supply incidentally, and a broken scene prompt must
+    # never be allowed to justify its own contradiction.
+    topic_source = " ".join((
         str((item or {}).get("title", "")),
         str((item or {}).get("topic", "")),
-        str((item or {}).get("script", "")),
     )).casefold()
-    explicit_energy = any(term in collision_source for term in (
+    explicit_energy = any(term in topic_source for term in (
         "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
         "энергорын", "energy market",
     ))
