@@ -28,6 +28,11 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_covers.CoverGalleryFileStateTests.test_universal_fallback_uses_current_topic_without_named_runtime_routes tests.test_covers.CoverGalleryFileStateTests.test_structured_scene_still_controls_named_fixture_without_runtime_special_case tests.test_covers.CoverHeadlineGuardTests.test_named_anchor_guard_covers_new_direction_entities_not_in_legacy_vocabulary tests.test_covers.CoverHeadlineGuardTests.test_named_anchor_guard_uses_structured_entities_even_when_they_are_lowercase tests.test_covers.CoverFaceLibraryTests.test_face_tree_matches_arbitrary_person_from_structured_metadata tests.test_covers.CoverFaceLibraryTests.test_face_tree_does_not_infer_a_person_from_country_or_place_only tests.test_covers.CoverFaceLibraryTests.test_my_faces_route_uses_prepared_auto_png_and_fastgen_only_route_sends_no_user_face -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python -m ruff check scriptor/bridge.py scriptor/thumbnail_prompt_v2.py tests/test_covers.py --select E9,F63,F7,F82
+      - run: git diff --check origin/main...HEAD
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
