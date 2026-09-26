@@ -1837,10 +1837,43 @@ class CoverLocalCompositorTests(unittest.TestCase):
         self.assertEqual({key: value for key, value in payload.items() if key != "productionItemIds"}, {
             "indices": [0], "buildMode": "fastgen-full-my-face", "faceMode": "auto",
             "textMode": "fastgen", "localFaceOnly": False,
-            "operation": "flower_image_generate",
+            "operation": "flower_image_generate", "repeatCurrentContract": True,
         })
         self.assertEqual(len(payload["productionItemIds"]), 1)
         self.assertTrue(payload["productionItemIds"][0].startswith("production:manual:"))
+
+    def test_repeat_current_rejects_legacy_row_before_deleting_existing_image(self):
+        """Without a saved provider prompt, Repeat Current must not destroy the current image."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            old_path = Path(temporary) / "existing.png"
+            old_path.write_bytes(b"existing-cover")
+            settings = Settings(cover_output_folder=temporary)
+            settings.cover_queue = [{
+                "production_item_id": "production:legacy",
+                "title": "Legacy",
+                "image_prompt": "legacy semantic prompt only",
+                "paths": [str(old_path)],
+                "render_profile": {
+                    "build_mode": "fastgen-full", "face_mode": "auto",
+                    "text_mode": "fastgen", "local_face_only": False,
+                    "operation": "flower_image_generate",
+                },
+            }]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "generate_covers") as generate:
+                with self.assertRaisesRegex(ValueError, "Final FastGen prompt"):
+                    regenerate_covers({
+                        "indices": [0],
+                        "productionItemIds": ["production:legacy"],
+                        "currentProfile": True,
+                    })
+
+            self.assertTrue(old_path.exists())
+            generate.assert_not_called()
 
     def test_nato_cover_request_uses_topic_semantics_without_a_legacy_render_tail(self):
         """The builder owns the final prompt; NATO scene values remain semantic and topic-grounded."""
