@@ -421,14 +421,20 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
     def test_universal_fallback_uses_current_topic_without_named_runtime_routes(self):
         import inspect
+        from scriptor import bridge
         from scriptor.thumbnail_prompt_v2 import _topic_scene_defaults, build_final_provider_prompt
 
-        runtime_source = inspect.getsource(_topic_scene_defaults).casefold()
+        runtime_sources = "\n".join((
+            inspect.getsource(_topic_scene_defaults),
+            inspect.getsource(bridge._cover_topic_visual_plan),
+            inspect.getsource(bridge._match_cover_face_reference),
+        )).casefold()
         for forbidden in (
             "karabakh", "карабах", "wildberries", "вайлдберриз", "tomato", "помидор",
             "trump", "трамп", "putin", "путин", "hormuz", "ормуз", "nato", "нато",
+            "zelensk", "зеленск", "aliyev", "алиев", "pashinyan", "пашинян",
         ):
-            self.assertNotIn(forbidden, runtime_source)
+            self.assertNotIn(forbidden, runtime_sources)
 
         fixtures = [
             {"title": "Компания Север закрывает фабрику после аварии"},
