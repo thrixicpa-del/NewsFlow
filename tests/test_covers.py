@@ -548,18 +548,27 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", payloads[0])
         self.assertNotIn("Energy traders react to changing oil prices", payloads[0])
 
+
     def test_provider_payload_equals_final_prompt(self):
-        """No adapter, retry or render guard is allowed to append provider text."""
+        """No adapter, retry or render guard may append or replace provider text."""
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
             settings = Settings(cover_output_folder=directory, cover_auto_overlay_text=False)
             settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            scene = (
+                "STORY CONTEXT:\nA new water filter is tested in a laboratory.\n\n"
+                "MAIN SUBJECT:\nEngineers testing a transparent water-filtration prototype\n\n"
+                "VISIBLE ACTION:\nEngineers inspect clear water leaving the prototype\n\n"
+                "VISUAL EVIDENCE:\nTransparent pipes, filter cartridge and measuring instruments\n\n"
+                "ENVIRONMENT:\nReal laboratory test bench\n\n"
+                "EMOTION:\nFocused scientific urgency"
+            )
             item = {
-                "title": "Ормуз на грани! Иран давит на танкеры! Нефтяной рынок ждёт шок!",
-                "image_prompt": "Wide tanker scene. Photorealistic, 16:9, breaking-news image.",
-                "cover_headline": "ОРМУЗ НА ГРАНИ",
-                "cover_subheadline": "ТАНКЕРЫ ПОД ДАВЛЕНИЕМ",
+                "title": "Новая мембрана ускоряет очистку воды",
+                "image_prompt": scene,
+                "cover_headline": "ВОДА СТАЛА ЧИЩЕ",
+                "cover_subheadline": "НОВАЯ МЕМБРАНА В ДЕЛЕ",
             }
             settings.cover_queue = [item]
             payloads = []
@@ -579,10 +588,16 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                     patch("scriptor.bridge.FastGenPool.generate_media", side_effect=render):
                 bridge.generate_covers({"indices": [0], "textMode": "fastgen"})
 
-            self.assertEqual(payloads, [bridge._normalize_cover_photo_prompt(item["image_prompt"], item)])
-            self.assertIn("MAIN SUBJECT:\nIranian pressure on oil shipping routes", payloads[0])
-            self.assertIn("VISIBLE ACTION:\nOil tankers affected near Strait of Hormuz", payloads[0])
-            self.assertIn("VISUAL EVIDENCE:\nTankers, maritime tension, naval presence, crisis atmosphere", payloads[0])
+            self.assertEqual(payloads, [settings.cover_queue[0]["final_provider_prompt"]])
+            self.assertIn(
+                "MAIN SUBJECT:\nEngineers testing a transparent water-filtration prototype",
+                payloads[0],
+            )
+            self.assertIn(
+                "VISIBLE ACTION:\nEngineers inspect clear water leaving the prototype",
+                payloads[0],
+            )
+            self.assertIn("ENVIRONMENT:\nReal laboratory test bench", payloads[0])
             self.assertEqual(settings.cover_queue[0]["prompt_sources"], {
                 "CORE STYLE": "Universal V2",
                 "SCENE": "Topic Planner",
@@ -1758,12 +1773,19 @@ class CoverVisualInstructionTests(unittest.TestCase):
         instruction = _cover_instruction({"title": "Ормузский пролив", "script": ""}, 0, settings)
         self.assertNotIn("Сделай всё фиолетовым", instruction)
 
-    def test_prompt_builder_owns_the_realistic_newsroom_treatment(self):
-        prompt = _normalize_cover_photo_prompt("Officials and cameras at a consultation", {"title": "НАТО и Россия — риск новой эскалации"})
-        self.assertNotIn("breaking-news", prompt.casefold())
-        self.assertIn("CORE STYLE:\nNEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.", prompt)
-        self.assertIn("Official NATO and EU fabric flags", prompt)
 
+    def test_prompt_builder_owns_realistic_art_direction_without_named_fallback(self):
+        prompt = _normalize_cover_photo_prompt(
+            "Engineers inspect a transparent water-filtration prototype in a real laboratory.",
+            {"title": "Новая мембрана ускоряет очистку воды"},
+        )
+        self.assertNotIn("breaking-news", prompt.casefold())
+        self.assertIn(
+            "CORE STYLE:\nCreate a realistic, highly clickable, photorealistic YouTube news thumbnail image.",
+            prompt,
+        )
+        self.assertIn("water-filtration prototype", prompt.casefold())
+        self.assertNotIn("Official NATO and EU fabric flags", prompt)
 
     def test_runtime_cover_routing_has_no_named_fixture_tables(self):
         from scriptor import bridge, thumbnail_prompt_v2
@@ -1855,6 +1877,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
         settings = Settings()
         settings.cover_queue = [{
             "title": "Ормуз", "image_prompt": "scene",
+            "final_provider_prompt": "SAVED FINAL PROMPT",
+            "final_provider_prompt_options": ["SAVED FINAL PROMPT"],
             "render_profile": {
                 "build_mode": "fastgen-full-my-face", "face_mode": "auto",
                 "text_mode": "fastgen", "local_face_only": False,
@@ -1872,17 +1896,155 @@ class CoverLocalCompositorTests(unittest.TestCase):
         self.assertEqual({key: value for key, value in payload.items() if key != "productionItemIds"}, {
             "indices": [0], "buildMode": "fastgen-full-my-face", "faceMode": "auto",
             "textMode": "fastgen", "localFaceOnly": False,
-            "operation": "flower_image_generate",
+            "operation": "flower_image_generate", "repeatCurrentContract": True,
         })
         self.assertEqual(len(payload["productionItemIds"]), 1)
         self.assertTrue(payload["productionItemIds"][0].startswith("production:manual:"))
 
-    def test_nato_cover_request_uses_topic_semantics_without_a_legacy_render_tail(self):
-        """The builder owns the final prompt; NATO scene values remain semantic and topic-grounded."""
+
+    def test_repeat_current_contract_reuses_saved_prompt_profile_and_reference_without_reselection(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "saved-face.png"
+            reference.write_bytes(b"saved-face")
+            saved_prompt = "SAVED FINAL FASTGEN PROMPT\nBYTE FOR BYTE"
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_variant_count=1,
+                cover_operation="new-current-operation-that-must-be-ignored",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            # Deliberately no current capability metadata for the saved
+            # reference operation: exact repeat must not silently drop the PNG.
+            settings.fastgen_capabilities_cache = {"image": []}
+            settings.cover_queue = [{
+                "production_item_id": "production:repeat",
+                "title": "Repeat",
+                "image_prompt": "semantic prompt that must not be rebuilt",
+                "final_provider_prompt": saved_prompt,
+                "final_provider_prompt_options": [saved_prompt],
+                "final_provider_reference_paths": [str(reference)],
+                "final_provider_face_label": "Saved Person",
+                "final_provider_face_reference_count": 1,
+                "face_reference_path": str(reference),
+                "face_reference_label": "Saved Person",
+                "face_reference_source": "auto",
+                "face_reference_count": 1,
+                "render_profile": {
+                    "build_mode": "fastgen-full-my-face",
+                    "face_mode": "auto",
+                    "text_mode": "fastgen",
+                    "local_face_only": False,
+                    "operation": "saved-reference-operation",
+                },
+                "paths": [],
+            }]
+            calls = []
+
+            def render(prompt, _output, _title, operation, _ratio, **kwargs):
+                calls.append((prompt, operation, tuple(kwargs.get("references", []))))
+                return [Path(temporary) / "repeat.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "build_final_provider_prompt", side_effect=AssertionError("prompt rebuilt")), \
+                 patch.object(bridge, "_match_cover_face_reference", side_effect=AssertionError("face reselected")), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:repeat"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "without",
+                    "textMode": "overlay",
+                    "operation": "new-current-operation-that-must-be-ignored",
+                    "repeatCurrentContract": True,
+                })
+
+            self.assertEqual(
+                calls,
+                [(saved_prompt, "saved-reference-operation", (str(reference),))],
+            )
+            self.assertEqual(settings.cover_queue[0]["final_provider_prompt"], saved_prompt)
+            self.assertEqual(settings.cover_queue[0]["face_reference_count"], 1)
+            self.assertEqual(
+                settings.cover_queue[0]["render_profile"]["operation"],
+                "saved-reference-operation",
+            )
+
+    def test_repeat_current_rejects_legacy_row_before_deleting_existing_image(self):
+        """Without a saved provider prompt, Repeat Current must not destroy the current image."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            old_path = Path(temporary) / "existing.png"
+            old_path.write_bytes(b"existing-cover")
+            settings = Settings(cover_output_folder=temporary)
+            settings.cover_queue = [{
+                "production_item_id": "production:legacy",
+                "title": "Legacy",
+                "image_prompt": "legacy semantic prompt only",
+                "paths": [str(old_path)],
+                "render_profile": {
+                    "build_mode": "fastgen-full", "face_mode": "auto",
+                    "text_mode": "fastgen", "local_face_only": False,
+                    "operation": "flower_image_generate",
+                },
+            }]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "generate_covers") as generate:
+                with self.assertRaisesRegex(ValueError, "Final FastGen prompt"):
+                    regenerate_covers({
+                        "indices": [0],
+                        "productionItemIds": ["production:legacy"],
+                        "currentProfile": True,
+                    })
+
+            self.assertTrue(old_path.exists())
+            generate.assert_not_called()
+
+    def test_repeat_current_rejects_missing_render_profile_before_deleting_existing_image(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            old_path = Path(temporary) / "existing-profile.png"
+            old_path.write_bytes(b"existing-cover")
+            settings = Settings(cover_output_folder=temporary)
+            settings.cover_queue = [{
+                "production_item_id": "production:no-profile",
+                "title": "No profile",
+                "image_prompt": "saved semantic prompt",
+                "final_provider_prompt": "SAVED FINAL PROMPT",
+                "final_provider_prompt_options": ["SAVED FINAL PROMPT"],
+                "paths": [str(old_path)],
+            }]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "generate_covers") as generate:
+                with self.assertRaisesRegex(ValueError, "render profile"):
+                    regenerate_covers({
+                        "indices": [0],
+                        "productionItemIds": ["production:no-profile"],
+                        "currentProfile": True,
+                        "operation": "caller-must-not-override",
+                    })
+
+            self.assertTrue(old_path.exists())
+            generate.assert_not_called()
+
+
+    def test_arbitrary_cover_request_uses_current_scene_without_a_legacy_render_tail(self):
         settings = Settings(cover_auto_overlay_text=False)
         settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
         settings.cover_queue = [{
-            "title": "НАТО и ЕС обсуждают риск эскалации", "image_prompt": "dramatic breaking news scene",
+            "title": "Новая мембрана ускоряет очистку воды",
+            "image_prompt": "Engineers inspect a transparent water-filtration prototype in a real laboratory.",
         }]
         captured = []
         with patch("scriptor.bridge.load_settings", return_value=settings), \
@@ -1893,11 +2055,12 @@ class CoverLocalCompositorTests(unittest.TestCase):
              patch("scriptor.bridge.snapshot", return_value={}), \
              patch("scriptor.bridge.FastGenPool.generate_media", side_effect=lambda prompt, *args, **kwargs: captured.append(prompt) or [Path("cover.png")]):
             generate_covers({"indices": [0], "textMode": "overlay", "localFaceOnly": False})
-        self.assertIn("official nato and eu fabric flags", captured[0].casefold())
-        self.assertIn("press", captured[0].casefold())
+
+        self.assertIn("water-filtration prototype", captured[0].casefold())
         self.assertEqual(captured[0].count("CORE STYLE:"), 1)
         self.assertEqual(captured[0].count("FINAL NEGATIVE RULES:"), 1)
-        self.assertNotIn("structured production context", captured[0].casefold())
+        self.assertNotIn("nato summit", captured[0].casefold())
+        self.assertNotIn("energy-market trading floor", captured[0].casefold())
 
     def test_prepared_cutout_is_resaved_under_fastgen_size_limit(self):
         from PIL import Image
@@ -3168,28 +3331,38 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         self.assertEqual(generate.call_args.args[0]["indices"], [0, 1])
         self.assertEqual(generate.call_args.args[0]["productionItemIds"], ["production:z", "production:a"])
 
+
     def test_manual_retry_preserves_current_prompt_text_face_and_render_profile(self):
         from scriptor import bridge
 
         with TemporaryDirectory() as temporary:
             old_path = Path(temporary) / "old.png"
             old_path.write_bytes(b"old")
+            face_path = Path(temporary) / "same-face.png"
+            face_path.write_bytes(b"face")
             settings = Settings(cover_output_folder=temporary, cover_queue=[self._row(
                 0,
                 status="Нужен новый промпт",
                 error="FastGen отклонил текущий prompt 4 раза",
                 image_prompt="Keep this exact visual prompt",
                 image_prompt_options=["Keep this exact visual prompt"],
+                final_provider_prompt="SAVED FINAL PROMPT",
+                final_provider_prompt_options=["SAVED FINAL PROMPT"],
+                final_provider_reference_paths=[str(face_path)],
+                final_provider_face_label="Текущий человек",
+                final_provider_face_reference_count=1,
                 cover_headline="ТЕКУЩИЙ ЗАГОЛОВОК",
                 cover_subheadline="Текущая вторая строка",
-                face_reference_path="same-face.png",
+                face_reference_path=str(face_path),
                 face_reference_label="Текущий человек",
+                face_reference_source="auto",
+                face_reference_count=1,
                 render_profile={
-                    "build_mode": "fastgen-text-local-face",
-                    "face_mode": "with",
+                    "build_mode": "fastgen-full-my-face",
+                    "face_mode": "auto",
                     "text_mode": "fastgen",
-                    "local_face_only": True,
-                    "operation": "nano_banana_pro_image_generate",
+                    "local_face_only": False,
+                    "operation": "reference_image_edit",
                 },
                 path=str(old_path),
                 paths=[str(old_path)],
@@ -3210,18 +3383,20 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         render.assert_called_once_with({
             "indices": [0],
             "productionItemIds": ["production:0"],
-            "buildMode": "fastgen-text-local-face",
-            "faceMode": "with",
+            "buildMode": "fastgen-full-my-face",
+            "faceMode": "auto",
             "textMode": "fastgen",
-            "localFaceOnly": True,
-            "operation": "nano_banana_pro_image_generate",
+            "localFaceOnly": False,
+            "operation": "reference_image_edit",
+            "repeatCurrentContract": True,
         })
         row = settings.cover_queue[0]
         self.assertEqual(row["image_prompt"], "Keep this exact visual prompt")
+        self.assertEqual(row["final_provider_prompt"], "SAVED FINAL PROMPT")
         self.assertEqual(row["cover_headline"], "ТЕКУЩИЙ ЗАГОЛОВОК")
         self.assertEqual(row["cover_subheadline"], "Текущая вторая строка")
-        self.assertEqual(row["face_reference_path"], "same-face.png")
-        self.assertEqual(row["render_profile"]["operation"], "nano_banana_pro_image_generate")
+        self.assertEqual(row["face_reference_path"], str(face_path))
+        self.assertEqual(row["render_profile"]["operation"], "reference_image_edit")
         self.assertEqual(row["paths"], [])
         self.assertNotIn("generation_prebilling_attempt_count", row)
         self.assertNotIn("generation_history", row)
