@@ -28,6 +28,13 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_covers.CoverGalleryFileStateTests.test_topic_fallbacks_do_not_turn_generic_market_words_into_oil_traders tests.test_covers.CoverGalleryFileStateTests.test_final_prompt_rejects_known_oil_market_collision_for_non_energy_topic tests.test_covers.CoverGalleryFileStateTests.test_final_prompt_preserves_structured_scene_fields_over_generic_script_fallback tests.test_covers.CoverGalleryFileStateTests.test_fastgen_payload_keeps_multiline_scene_slots_from_the_saved_prompt tests.test_covers.CoverFaceLibraryTests.test_my_faces_route_uses_prepared_auto_png_and_fastgen_only_route_sends_no_user_face -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python -m ruff check scriptor/bridge.py scriptor/thumbnail_prompt_v2.py tests/test_covers.py --select E9,F63,F7,F82
+      - run: git diff --check origin/main...HEAD
+      - run: pnpm exec vitest run src/ui/features/covers/covers-view.test.tsx
+        working-directory: studio-ui-remotion-verify
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
