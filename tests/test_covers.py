@@ -461,6 +461,42 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 },
             )
 
+    def test_provider_is_not_called_when_final_prompt_has_a_topic_collision(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(cover_output_folder=directory, cover_variant_count=1)
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.cover_queue = [{
+                "title": "Армения и Азербайджан обсуждают Карабах",
+                "topic": "Карабахский мирный процесс",
+                "production_item_id": "production:collision",
+                "image_prompt_options": ["Documentary diplomatic meeting"],
+                "visible_action": "Energy traders react to changing oil prices on live market boards",
+                "environment": "Energy-market trading floor with oil logistics context",
+                "cover_headline": "ПЕРЕГОВОРЫ",
+                "paths": [],
+            }]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media") as render:
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:collision"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full",
+                    "faceMode": "without",
+                    "textMode": "fastgen",
+                })
+
+        render.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка промпта")
+        self.assertIn("oil-market scene contradicts", settings.cover_queue[0]["error"])
+        self.assertEqual(settings.cover_queue[0]["final_provider_prompt_options"], [])
+
     def test_fastgen_payload_keeps_multiline_scene_slots_from_the_saved_prompt(self):
         """The bridge must not flatten the planner draft before the provider boundary."""
         from scriptor import bridge
