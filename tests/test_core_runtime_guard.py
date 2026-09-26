@@ -21,6 +21,7 @@ REQUIRED_SOURCES = (
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
+    "scriptor/story_planner.py",
     "scriptor/openai_client.py",
     "scriptor/timeline.py",
     "scriptor/thumbnail_prompt_v2.py",
@@ -120,15 +121,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r20")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r23")
         self.assertEqual(
             lock["coreExeSha256"],
-            "5164cf3da1678adc73306c69013356949207d62c527c9b67ce5d1da6808ec55b",
+            "dcfb271a2aac475f51d31e603071a938c04c85b154aef53820340fb7b60fe6d7",
         )
-        self.assertEqual(lock["coreExeSize"], 34253442)
+        self.assertEqual(lock["coreExeSize"], 34272703)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "2ee5782c007d65eec736f3c5c7680209fcf369c6",
+            "824926ae49bd1d189c126100167f1947adab97c5",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),
@@ -168,7 +169,7 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             self.assertIn("актуально по содержимому", result.stdout)
 
     def test_guard_rejects_changed_scenario_runtime_support_content(self):
-        for relative in ("scriptor/config.py", "scriptor/runner.py"):
+        for relative in ("scriptor/config.py", "scriptor/runner.py", "scriptor/story_planner.py"):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
                 fixture_root, fixture_app, _ = self._fixture(temporary)
                 (fixture_root / relative).write_text("# changed scenario runtime support\n", encoding="utf-8")

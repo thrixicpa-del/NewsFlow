@@ -6,10 +6,20 @@ import math
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from .core import ScenarioRequest
+from .story_planner import (
+    StoryPlan,
+    StoryPlanCapacityInsufficient,
+    build_story_planner_prompt,
+    build_story_writer_prompt,
+    calculate_story_part_targets,
+    parse_story_plan_response,
+    story_plan_from_dict,
+)
 
 
 def looks_like_action_required(text: str) -> bool:
@@ -64,6 +74,9 @@ class Job:
     actual_chars: int = 0
     length_status: str = ""
     length_repair_attempts: int = 0
+    story_plan: dict[str, Any] | None = None
+    accepted_story_parts: list[dict[str, Any]] = field(default_factory=list)
+    story_planner_status: str = ""
 
 
 def scenario_length_status(request: ScenarioRequest, text: str) -> tuple[str, int]:
@@ -82,18 +95,7 @@ def scenario_length_status(request: ScenarioRequest, text: str) -> tuple[str, in
     return "READY", actual_chars
 
 
-def scenario_length_requirement(request: ScenarioRequest) -> str:
-    """Human-readable bounds for progress/errors without inventing a missing side."""
-    if request.allowed_min and request.allowed_max:
-        return f"{request.allowed_min}–{request.allowed_max} знаков"
-    if request.allowed_min:
-        return f"не менее {request.allowed_min} знаков"
-    if request.allowed_max:
-        return f"не более {request.allowed_max} знаков"
-    return "без ограничения длины"
-
-
-def scenario_output_token_budget(request: ScenarioRequest) -> int | None:
+def scenario_output_token_budget(request: ScenarioRequest, expected_chars: int | None = None) -> int | None:
     """Reserve enough Responses output for the requested character contract.
 
     ``max_output_tokens`` also includes model reasoning tokens, so this uses a
@@ -101,66 +103,16 @@ def scenario_output_token_budget(request: ScenarioRequest) -> int | None:
     reserve and rounds up to a whole 1,024-token block.  The upper cap keeps a
     malformed preset from issuing an unexpectedly expensive request.
     """
-    expected_chars = max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
-    if not expected_chars:
-        return None
-    requested = math.ceil(expected_chars / 1.25) + 1024
-    return min(32768, max(2048, math.ceil(requested / 1024) * 1024))
-
-
-def scenario_length_repair_instruction(request: ScenarioRequest) -> str:
-    """Provider instruction that preserves one-sided contracts correctly."""
-    target = f" Цель: {request.target_chars} знаков." if request.target_chars else ""
-    if request.allowed_min and request.allowed_max:
-        return (
-            f"Верни только готовый сценарий длиной строго от {request.allowed_min} "
-            f"до {request.allowed_max} знаков.{target}"
-        )
-    if request.allowed_min:
-        return f"Верни только готовый сценарий длиной не менее {request.allowed_min} знаков.{target}"
-    if request.allowed_max:
-        return f"Верни только готовый сценарий длиной не более {request.allowed_max} знаков.{target}"
-    return "Верни только полный готовый сценарий."
-
-
-def scenario_length_continuation_instruction(request: ScenarioRequest, actual_chars: int) -> str:
-    """Tell the provider to extend one short result instead of restarting it."""
-    needed_total = max(request.target_chars, request.allowed_min)
-    remaining = max(1, needed_total - actual_chars)
-    maximum = max(0, request.allowed_max - actual_chars) if request.allowed_max else 0
-    upper_bound = f" Не добавляй более {maximum} знаков." if maximum else ""
-    return (
-        "Это продолжение уже написанного сценария, а не новая версия. ПРОДОЛЖИ текст строго с места, "
-        "на котором он заканчивается: не повторяй начало, не пересказывай готовые абзацы и не добавляй "
-        "заголовки или комментарии. Молча выдели уже раскрытые тезисы и напиши только следующий "
-        "нераскрытый смысловой блок: новый факт, контекст, позицию участника, последствие, риск, "
-        "хронологический этап или вывод — без повторения прежних общих формулировок. "
-        f"Уже сохранено {actual_chars} знаков; добавь примерно {remaining} знаков, чтобы общий текст "
-        f"соответствовал требованию {scenario_length_requirement(request)}.{upper_bound} "
-        "Перед отправкой сам проверь длину добавленного продолжения и помни: NewsFlow склеит оба фрагмента "
-        "и проверит итог через len(text.strip()). Верни только следующий фрагмент сценария."
+    requested_chars = max(
+        0,
+        int(expected_chars or 0),
+        int(request.target_chars or 0) if expected_chars is None else 0,
+        int(request.allowed_min or 0) if expected_chars is None else 0,
     )
-
-
-def continuation_repeats_draft(draft: str, continuation: str) -> bool:
-    """Reject an attempted restart before it can be appended to one scenario."""
-    normalized_draft = str(draft or "").strip().casefold()
-    normalized_continuation = str(continuation or "").strip().casefold()
-    # The n-gram heuristic below intentionally needs enough words to make a
-    # meaningful semantic comparison.  An exact short retry (for example a
-    # provider repeatedly returning one sentence) is nevertheless certainly
-    # not a continuation and must never be concatenated into the scenario.
-    if normalized_draft and normalized_draft == normalized_continuation:
-        return True
-    draft_words = re.findall(r"[^\W\d_]+", str(draft or "").casefold(), flags=re.UNICODE)
-    continuation_words = re.findall(r"[^\W\d_]+", str(continuation or "").casefold(), flags=re.UNICODE)
-    if len(draft_words) < 5 or len(continuation_words) < 5:
-        return False
-    draft_ngrams = {tuple(draft_words[index:index + 5]) for index in range(len(draft_words) - 4)}
-    continuation_ngrams = [tuple(continuation_words[index:index + 5])
-                           for index in range(len(continuation_words) - 4)]
-    repeated = sum(ngram in draft_ngrams for ngram in continuation_ngrams)
-    return repeated >= max(3, math.ceil(len(continuation_ngrams) * .10))
+    if not requested_chars:
+        return None
+    requested = math.ceil(requested_chars / 1.25) + 1024
+    return min(32768, max(2048, math.ceil(requested / 1024) * 1024))
 
 
 def trim_text_to_sentence_boundary(text: str, allowed_max: int) -> str:
@@ -173,34 +125,6 @@ def trim_text_to_sentence_boundary(text: str, allowed_max: int) -> str:
     if endpoint >= 0:
         return prefix[:endpoint + 1].strip()
     return prefix.rstrip()
-
-
-def trim_continuation_to_fit(draft: str, continuation: str, allowed_max: int) -> str:
-    """Keep a unique continuation within the contract without restarting it.
-
-    The model can legitimately produce more text than remains in the selected
-    range.  Do not ask it to rewrite the complete scenario in that case: keep
-    only complete sentences that fit after the already accepted draft.
-    """
-    if not allowed_max:
-        return str(continuation or "").strip()
-    available = allowed_max - len(str(draft or "").rstrip()) - 2
-    if available <= 0:
-        return ""
-    return trim_text_to_sentence_boundary(continuation, available)
-
-
-def scenario_length_repair_limit(request: ScenarioRequest, actual_chars: int) -> int:
-    """Allow enough continuations when a provider voluntarily stops early."""
-    missing = max(0, max(request.target_chars, request.allowed_min) - actual_chars)
-    expected = max(request.target_chars, request.allowed_min)
-    minimum_attempts = 3 if expected >= 5000 else 2
-    # Real long-form responses may add only a sentence or two per request even
-    # with a large output budget.  Keep this bounded, but do not strand a 10k+
-    # scenario below its selected range after merely two such continuations.
-    return min(6, max(minimum_attempts, math.ceil(missing / 2000)))
-
-
 
 
 class ParallelRunner:
@@ -240,74 +164,173 @@ class ParallelRunner:
         return any(parameter.name == keyword or parameter.kind is parameter.VAR_KEYWORD
                    for parameter in parameters)
 
-    async def _generate_for_request(self, method, prompt: str, request: ScenarioRequest) -> str:
-        budget = scenario_output_token_budget(request)
+    async def _generate_for_request(
+        self, method, prompt: str, request: ScenarioRequest, expected_chars: int | None = None,
+    ) -> str:
+        budget = scenario_output_token_budget(request, expected_chars)
         if budget and self._accepts_keyword(method, "max_output_tokens"):
             return await method(prompt, max_output_tokens=budget)
         return await method(prompt)
 
-    async def _repair_length_if_needed(self, job: Job) -> bool:
-        """Finish a single scenario without full-text rewrites or length errors."""
-        status, actual_chars = scenario_length_status(job.request, job.result)
-        job.length_status = status
-        job.actual_chars = actual_chars
-        if status not in {"SHORT", "LONG"}:
-            job.length_repair_attempts = 0
-            return True
-
-        if status == "LONG":
-            job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
-            status, actual_chars = scenario_length_status(job.request, job.result)
-            job.length_status = status
-            job.actual_chars = actual_chars
-            if status != "SHORT":
-                job.length_repair_attempts = 0
-                return True
-
-        generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-        repair_limit = scenario_length_repair_limit(job.request, actual_chars)
-        for attempt in range(1, repair_limit + 1):
-            job.length_repair_attempts = attempt
-            repair_prompt = (
-                f"{scenario_length_continuation_instruction(job.request, actual_chars)}\n\n"
-                f"УЖЕ НАПИСАННЫЙ ТЕКСТ:\n{job.result.strip()}"
+    async def _generate_usable(self, prompt: str, request: ScenarioRequest, expected_chars: int | None = None) -> str:
+        """Retry an unusable provider reply before any scenario prose is accepted."""
+        result = await self._generate_for_request(self.client.generate, prompt, request, expected_chars)
+        refused = looks_like_action_required(result)
+        for attempt in range(1, 3):
+            if not refused:
+                break
+            retry_prompt = (
+                "This is a new standalone task. Complete it now without discussing prior replies. "
+                "Return only the requested result, with no questions or meta commentary.\n\n"
+                f"TASK:\n{prompt}"
             )
-            repaired_text = await self._generate_for_request(generate_fresh, repair_prompt, job.request)
-            if looks_like_action_required(repaired_text):
-                job.length_status = "FAILED"
-                job.actual_chars = len(str(repaired_text or "").strip())
-                job.state = RunState.PAUSED
-                job.error = "Текстовый агент не вернул сценарий при корректировке длины"
-                return False
-            if status == "SHORT":
-                if continuation_repeats_draft(job.result, repaired_text):
-                    continue
-                accepted_continuation = trim_continuation_to_fit(
-                    job.result,
-                    repaired_text,
-                    job.request.allowed_max,
+            generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+            result = await self._generate_for_request(generate_fresh, retry_prompt, request, expected_chars)
+            refused = looks_like_action_required(result)
+        if refused:
+            generate_openai = getattr(self.client, "generate_openai", None)
+            if generate_openai is not None:
+                openai_prompt = (
+                    "Return only the completed requested result. Do not ask questions or explain limitations.\n\n"
+                    f"TASK:\n{prompt}"
                 )
-                if not accepted_continuation:
-                    continue
-                candidate = f"{job.result.rstrip()}\n\n{accepted_continuation}"
-                candidate_status, _candidate_chars = scenario_length_status(job.request, candidate)
-                if candidate_status == "LONG":
-                    continue
-                job.result = candidate
-            else:
-                job.result = repaired_text
-            status, actual_chars = scenario_length_status(job.request, job.result)
-            job.length_status = status
-            job.actual_chars = actual_chars
-            if status == "READY":
-                return True
+                result = await self._generate_for_request(generate_openai, openai_prompt, request, expected_chars)
+        return result
 
-        # Preserve the best usable text without misclassifying an out-of-range
-        # result as production-ready. The operator can retry it later from the
-        # existing batch action; this is a paused task, not an error.
-        job.state = RunState.PAUSED
-        job.error = ""
-        return False
+    @staticmethod
+    def _story_target_chars(request: ScenarioRequest) -> int:
+        return max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
+
+    def _next_story_part_target(
+        self, job: Job, plan: StoryPlan, part_index: int,
+    ) -> int:
+        """Rebalance only the remaining character budget; never rewrite accepted prose."""
+        part = plan.parts[part_index]
+        if not job.accepted_story_parts:
+            return max(1, int(part.target_chars or 1))
+        overall_target = self._story_target_chars(job.request)
+        if not overall_target:
+            return max(1, int(part.target_chars or 1))
+        accepted_text = self._assembled_story(plan, job.accepted_story_parts)
+        remaining_parts = len(plan.parts) - part_index
+        # Each future accepted part adds one deterministic "\n\n" separator
+        # to the already assembled prefix.
+        remaining_separators = 2 * remaining_parts
+        remaining_prose = max(
+            remaining_parts,
+            overall_target - len(accepted_text) - remaining_separators,
+        )
+        quotient, remainder = divmod(remaining_prose, remaining_parts)
+        return max(1, quotient + (1 if remainder else 0))
+
+    @staticmethod
+    def _assembled_story(plan: StoryPlan, accepted_parts: list[dict[str, Any]]) -> str:
+        expected_ids = [part.id for part in plan.parts]
+        accepted_ids = [str(record.get("part_id", "")) for record in accepted_parts]
+        if accepted_ids != expected_ids[:len(accepted_ids)]:
+            raise ValueError("accepted story parts must be one ordered plan prefix")
+        for part, record in zip(plan.parts, accepted_parts, strict=False):
+            if list(record.get("content_ids", [])) != list(part.content_ids):
+                raise ValueError("accepted story part content ownership does not match its plan")
+            if not str(record.get("text", "")).strip():
+                raise ValueError("accepted story part cannot be empty")
+        return "\n\n".join(
+            str(record.get("text", "")).strip()
+            for record in accepted_parts
+            if str(record.get("text", "")).strip()
+        ).strip()
+
+    @staticmethod
+    def _writer_output_is_structural(text: str) -> bool:
+        """Reject planner/part labels before they can enter the user scenario."""
+        return bool(re.search(
+            r"(?im)^\s*(?:part|часть|p\d+|\{\s*\"(?:part|text|content))\b",
+            str(text or "").strip(),
+        ))
+
+    async def _run_planned_story(self, job: Job) -> bool:
+        """Plan long work once, then accept and persist a contiguous writer prefix."""
+        target = self._story_target_chars(job.request)
+        part_targets = calculate_story_part_targets(target)
+        if len(part_targets) == 1:
+            job.result = await self._generate_usable(job.request.prompt, job.request)
+            if looks_like_action_required(job.result):
+                job.state = RunState.PAUSED
+                job.error = "Текстовый агент и доступные ключи ChatGPT API не вернули готовый сценарий"
+                job.actual_chars = len(job.result.strip())
+                job.length_status = "FAILED"
+                return False
+            job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
+            if job.length_status == "LONG":
+                job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
+                job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
+            return job.length_status not in {"SHORT", "LONG"}
+
+        if job.story_plan:
+            plan = story_plan_from_dict(job.story_plan)
+            if tuple(part.target_chars for part in plan.parts) != part_targets:
+                raise ValueError("persisted story plan no longer matches the selected length contract")
+        else:
+            planner_prompt = build_story_planner_prompt(job.request, part_targets)
+            planner_budget = max(2048, min(8192, 1024 + len(part_targets) * 350))
+            planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
+            if looks_like_action_required(planner_response):
+                job.result = planner_response
+                job.actual_chars = len(planner_response.strip())
+                job.length_status = "FAILED"
+                job.state = RunState.PAUSED
+                job.error = "Планировщик сценария не вернул рабочий план"
+                return False
+            try:
+                plan = parse_story_plan_response(planner_response, part_targets)
+            except StoryPlanCapacityInsufficient as exc:
+                job.story_planner_status = "CAPACITY_INSUFFICIENT"
+                job.state = RunState.PAUSED
+                job.error = f"Недостаточно различающегося материала для выбранной длины: {exc.reason}"
+                job.result = ""
+                job.actual_chars = 0
+                job.length_status = "SHORT" if job.request.allowed_min else "CAPACITY"
+                return False
+            job.story_plan = plan.to_dict()
+            job.accepted_story_parts = []
+            job.story_planner_status = "READY"
+            # Persist the complete plan before a prose part is accepted.
+            self._notify(job)
+
+        self._assembled_story(plan, job.accepted_story_parts)
+        for part_index, part in enumerate(plan.parts):
+            if part_index < len(job.accepted_story_parts):
+                continue
+            active_target = self._next_story_part_target(job, plan, part_index)
+            writer_prompt = build_story_writer_prompt(
+                job.request, plan, job.accepted_story_parts, part_index, active_target,
+            )
+            writer_result = await self._generate_for_request(
+                self.client.generate, writer_prompt, job.request, active_target,
+            )
+            if (looks_like_action_required(writer_result) or not writer_result.strip()
+                    or self._writer_output_is_structural(writer_result)):
+                job.state = RunState.PAUSED
+                job.error = f"Писатель части {part.id} не вернул готовый фрагмент"
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = f"PART {part_index + 1}/{len(plan.parts)}"
+                return False
+            job.accepted_story_parts.append({
+                "part_id": part.id,
+                "text": writer_result.strip(),
+                "content_ids": list(part.content_ids),
+                "target_chars": active_target,
+            })
+            job.result = self._assembled_story(plan, job.accepted_story_parts)
+            job.actual_chars = len(job.result)
+            job.length_status = f"PART {part_index + 1}/{len(plan.parts)}"
+            # Every accepted part is durable before calling the next writer.
+            self._notify(job)
+
+        job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
+        job.length_repair_attempts = 0
+        return job.length_status not in {"SHORT", "LONG"}
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:
@@ -315,47 +338,14 @@ class ParallelRunner:
             job.error = ""
             self._notify(job)
             try:
-                job.result = await self._generate_for_request(self.client.generate, job.request.prompt, job.request)
-                refused = looks_like_action_required(job.result)
-                for attempt in range(1, 3):
-                    if not refused:
-                        break
-                    job.error = f"Повтор {attempt}/2 — повторный запрос к текстовому агенту"
-                    self._notify(job)
-                    retry_prompt = (
-                        "Это новая отдельная задача. Сразу выполни её полностью и не обсуждай предыдущие ответы. "
-                        "Если отдельная деталь недопустима, молча замени только её на безопасный близкий вариант, "
-                        "но обязательно создай результат. Не задавай вопросов и не объясняй ограничения. "
-                        "Верни только полный готовый текст.\n\n"
-                        f"ЗАДАЧА:\n{job.request.prompt}"
-                    )
-                    generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-                    job.result = await self._generate_for_request(generate_fresh, retry_prompt, job.request)
-                    refused = looks_like_action_required(job.result)
-                if refused:
-                    generate_openai = getattr(self.client, "generate_openai", None)
-                    if generate_openai is not None:
-                        job.error = "Агент не вернул готовый сценарий — задача передана следующему ключу ChatGPT API"
-                        self._notify(job)
-                        openai_prompt = (
-                            "Напиши полный готовый сценарий по заданию ниже. Не задавай уточняющих вопросов. "
-                            "Если отдельную формулировку нужно смягчить, самостоятельно используй ближайший "
-                            "безопасный вариант. Верни только готовый сценарий без комментариев.\n\n"
-                            f"ЗАДАЧА:\n{job.request.prompt}"
-                        )
-                        job.result = await self._generate_for_request(generate_openai, openai_prompt, job.request)
-                        refused = looks_like_action_required(job.result)
-                    if refused:
-                        job.state = RunState.PAUSED
-                        job.error = "Текстовый агент и доступные ключи ChatGPT API не вернули готовый сценарий"
-                    else:
-                        if await self._repair_length_if_needed(job):
-                            job.state = RunState.DONE
-                            job.error = ""
-                else:
-                    if await self._repair_length_if_needed(job):
-                        job.state = RunState.DONE
-                        job.error = ""
+                if await self._run_planned_story(job):
+                    job.state = RunState.DONE
+                    job.error = ""
+                elif job.state is RunState.RUNNING:
+                    # Keep usable but out-of-contract text visible and honest;
+                    # do not append a generic continuation or rewrite it.
+                    job.state = RunState.PAUSED
+                    job.error = "Сценарий не уложился в выбранный диапазон длины"
             # This is the runner's deliberately broad provider boundary: it
             # converts any adapter failure into durable per-job state instead
             # of leaving a background worker unobserved.
@@ -366,8 +356,21 @@ class ParallelRunner:
             self._notify(job)
             return job
 
-    async def run(self, requests: list[ScenarioRequest]) -> list[Job]:
-        jobs = [Job(request) for request in requests]
+    async def run(
+        self, requests: list[ScenarioRequest], resume_jobs: dict[int, Job] | None = None,
+    ) -> list[Job]:
+        """Run new requests or verified persisted prefixes keyed by request index."""
+        resumable = resume_jobs or {}
+        jobs: list[Job] = []
+        for request in requests:
+            job = resumable.get(request.index)
+            if job is None:
+                jobs.append(Job(request))
+                continue
+            job.request = request
+            job.state = RunState.WAITING
+            job.error = ""
+            jobs.append(job)
         if not jobs:
             return jobs
         work: asyncio.Queue[Job | None] = asyncio.Queue()

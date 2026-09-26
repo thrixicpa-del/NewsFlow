@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -9,6 +10,25 @@ from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import load_session, save_session, session_path
+from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
+
+
+def _story_plan(part_count: int = 2) -> str:
+    roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
+    return json.dumps({
+        "thesis": "Одна история",
+        "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+        "content_atoms": [
+            {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}"}
+            for index in range(1, part_count + 1)
+        ],
+        "parts": [
+            {"id": f"P{index}", "role": roles[index - 1], "purpose": f"Блок {index}",
+             "macro_id": "M1", "content_ids": [f"C{index:03d}"], "opens": [], "closes": [],
+             "transition_direction": f"к блоку {index + 1}" if index < part_count else "финал"}
+            for index in range(1, part_count + 1)
+        ],
+    }, ensure_ascii=False)
 
 
 class ScenarioGenerationTests(unittest.TestCase):
@@ -247,8 +267,10 @@ class ScenarioGenerationTests(unittest.TestCase):
         class FakePool:
             concurrency = 1
 
-            async def generate(self, _prompt):
-                return "а" * 10000
+            async def generate(self, prompt):
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(2)
+                return "а" * 5000
 
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "save_settings"), \
@@ -397,7 +419,10 @@ class ScenarioGenerationTests(unittest.TestCase):
 
             async def generate(self, prompt):
                 self.prompts.append(prompt)
-                return "а" * 10000
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(3)
+                target = int(__import__("re").search(r"CURRENT TARGET: approximately (\d+) characters", prompt).group(1))
+                return "а" * target
 
         def run(payload):
             settings = Settings(scenario_provider="agent", template=user_prompt, prompt_ranges=[])
@@ -415,13 +440,59 @@ class ScenarioGenerationTests(unittest.TestCase):
         all_prompts, all_jobs = run({"provider": "agent"})
         selected_prompts, selected_jobs = run({"provider": "agent", "indices": [1]})
 
-        self.assertEqual(len(all_prompts), 2)
-        self.assertEqual(len(selected_prompts), 1)
+        self.assertEqual(len(all_prompts), 8)
+        self.assertEqual(len(selected_prompts), 4)
         self.assertTrue(all("CURRENT USER RULE" in prompt for prompt in [*all_prompts, *selected_prompts]))
         self.assertTrue(all("10000–15000" in prompt for prompt in [*all_prompts, *selected_prompts]))
         self.assertTrue(all(job.length_status == "READY" for job in [*all_jobs, *selected_jobs]))
         self.assertTrue(all((job.request.target_chars, job.request.allowed_min, job.request.allowed_max) == (12500, 10000, 15000)
                             for job in [*all_jobs, *selected_jobs]))
+
+    def test_both_provider_modes_resume_a_persisted_story_at_the_next_part(self):
+        title = "Тема для возобновления"
+        plan = parse_story_plan_response(
+            _story_plan(2), calculate_story_part_targets(10000),
+        ).to_dict()
+        for provider in ("agent", "openai"):
+            with self.subTest(provider=provider):
+                settings = Settings(
+                    scenario_provider=provider, template="USER CONTRACT {title}", prompt_ranges=[],
+                    scenario_target_chars=10000, scenario_allowed_min=9000, scenario_allowed_max=11000,
+                )
+                old = Job(
+                    ScenarioRequest(0, title, "old", target_chars=10000, allowed_min=9000, allowed_max=11000),
+                    RunState.PAUSED, "а" * 5000, "", story_plan=plan,
+                    accepted_story_parts=[{"part_id": "P1", "text": "а" * 5000, "content_ids": ["C001"], "target_chars": 5000}],
+                    story_planner_status="READY",
+                )
+
+                class FakePool:
+                    concurrency = 1
+
+                    def __init__(self):
+                        self.prompts = []
+
+                    async def generate(self, prompt):
+                        self.prompts.append(prompt)
+                        if "NewsFlow Story Planner" in prompt:
+                            raise AssertionError("resume must not generate a new plan")
+                        return "б" * 5000
+
+                pool = FakePool()
+                saved_batches = []
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=([title], [old])), \
+                     patch.object(bridge, "save_session", side_effect=lambda _titles, jobs, batches=saved_batches: batches.append(list(jobs))), \
+                     patch.object(bridge, "save_settings"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=pool):
+                    bridge.generate_scenarios({"provider": provider, "indices": [0]})
+
+                self.assertEqual(len(pool.prompts), 1)
+                self.assertIn("CURRENT PART: P2", pool.prompts[0])
+                self.assertIn("USER CONTRACT", pool.prompts[0])
+                self.assertEqual(saved_batches[-1][0].state, RunState.DONE)
+                self.assertEqual(len(saved_batches[-1][0].accepted_story_parts), 2)
 
     def test_force_rewrite_updates_only_selected_ready_scenario_and_preserves_identities(self):
         titles = ["Переписать", "Не трогать"]

@@ -19,6 +19,7 @@ const requiredSources = [
   'scriptor/config.py',
   'scriptor/core.py',
   'scriptor/runner.py',
+  'scriptor/story_planner.py',
   'scriptor/openai_client.py',
   'scriptor/timeline.py',
   'scriptor/thumbnail_prompt_v2.py',

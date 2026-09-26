@@ -45,6 +45,7 @@ def remove_scenarios(titles: list[str], jobs: list[Job], indices: set[int]) -> t
         new_jobs.append(Job(
             request, job.state, job.result, job.error,
             job.actual_chars, job.length_status, job.length_repair_attempts,
+            job.story_plan, job.accepted_story_parts, job.story_planner_status,
         ))
     return new_titles, new_jobs
 
@@ -63,6 +64,7 @@ def rename_scenario(titles: list[str], jobs: list[Job], index: int, new_title: s
             updated_jobs.append(Job(
                 request, job.state, job.result, job.error,
                 job.actual_chars, job.length_status, job.length_repair_attempts,
+                job.story_plan, job.accepted_story_parts, job.story_planner_status,
             ))
         else:
             updated_jobs.append(job)
@@ -88,6 +90,9 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
                 "actual_chars": job.actual_chars,
                 "length_status": job.length_status,
                 "length_repair_attempts": job.length_repair_attempts,
+                "story_plan": job.story_plan,
+                "accepted_story_parts": job.accepted_story_parts,
+                "story_planner_status": job.story_planner_status,
             }
             # Keep in-progress jobs too: the Electron UI reads this file from
             # a separate lightweight snapshot process and can therefore show
@@ -134,6 +139,8 @@ def _read_session(path: Path) -> tuple[list[str], list[Job]]:
             max(0, int(item.get("allowed_max", 0) or 0)),
         )
         state = RunState(item.get("state", RunState.WAITING.value))
+        story_plan = item.get("story_plan")
+        accepted_parts = item.get("accepted_story_parts")
         jobs.append(Job(
             request,
             state,
@@ -142,6 +149,9 @@ def _read_session(path: Path) -> tuple[list[str], list[Job]]:
             max(0, int(item.get("actual_chars", 0) or 0)),
             str(item.get("length_status", "") or ""),
             max(0, int(item.get("length_repair_attempts", 0) or 0)),
+            story_plan if isinstance(story_plan, dict) else None,
+            accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
+            str(item.get("story_planner_status", "") or ""),
         ))
     return titles, jobs
 
@@ -281,6 +291,9 @@ def _recover_legacy_jobs(current_titles: list[str]) -> list[Job]:
             by_title[_title_key(title)].actual_chars,
             by_title[_title_key(title)].length_status,
             by_title[_title_key(title)].length_repair_attempts,
+            by_title[_title_key(title)].story_plan,
+            by_title[_title_key(title)].accepted_story_parts,
+            by_title[_title_key(title)].story_planner_status,
         )
         for index, title in enumerate(current_titles)
     ]

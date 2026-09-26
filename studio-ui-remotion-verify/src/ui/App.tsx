@@ -2589,7 +2589,9 @@ export function Scenarios({
         cell: ({ row }) => {
           const scenario = row.original;
           return scenario.error ||
-            (scenario.lengthStatus
+            (scenario.storyPartCount
+              ? `План истории: ${scenario.completedStoryParts || 0}/${scenario.storyPartCount} частей${scenario.storyPlannerStatus ? ` · ${scenario.storyPlannerStatus}` : ""}`
+              : scenario.lengthStatus
               ? `Длина ${scenario.lengthStatus}: ${scenario.actualChars || 0} знаков${scenario.allowedMin || scenario.allowedMax ? ` · допустимо ${scenario.allowedMin || 0}–${scenario.allowedMax || "∞"}` : ""}${scenario.lengthRepairAttempts ? ` · корректировок: ${scenario.lengthRepairAttempts}` : ""}`
               : scenario.state === "В обработке"
                 ? "Пишется через выбранного исполнителя…"
