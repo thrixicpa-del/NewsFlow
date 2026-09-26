@@ -6,6 +6,7 @@ from scriptor.core import ScenarioRequest
 from scriptor.runner import (
     ParallelRunner,
     RunState,
+    continuation_repeats_draft,
     looks_like_action_required,
     scenario_length_repair_limit,
     scenario_length_status,
@@ -33,6 +34,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scenario_length_status(request, "а" * 10000), ("READY", 10000))
         self.assertEqual(scenario_length_status(request, "а" * 15000), ("READY", 15000))
         self.assertEqual(scenario_length_status(request, "а" * 15001), ("LONG", 15001))
+
+    def test_exact_short_continuation_repeat_is_rejected_before_ngram_threshold(self):
+        draft = "Короткий итоговый абзац."
+
+        self.assertTrue(continuation_repeats_draft(draft, "  КОРОТКИЙ ИТОГОВЫЙ АБЗАЦ.  "))
+        self.assertFalse(continuation_repeats_draft(draft, "Другой короткий абзац."))
 
     def test_long_contract_reserves_three_continuations_when_the_provider_stops_early(self):
         request = ScenarioRequest(0, "S", "P", target_chars=10000, allowed_min=9000, allowed_max=11000)
