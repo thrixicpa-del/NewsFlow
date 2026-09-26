@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -314,6 +315,84 @@ def fetch_current_channel(credentials_payload: dict[str, Any]) -> tuple[dict[str
     return parse_current_channel(response), json.loads(credentials.to_json())
 
 
+YOUTUBE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+class ResumableUploadSessionExpired(RuntimeError):
+    """YouTube rejected a previously persisted resumable upload URI."""
+
+
+def _upload_http_status(error: BaseException) -> int | None:
+    response = getattr(error, "resp", None)
+    status = getattr(response, "status", None)
+    if status is None:
+        status = getattr(error, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient_upload_error(error: BaseException) -> bool:
+    if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+        return True
+    return _upload_http_status(error) in {500, 502, 503, 504}
+
+
+def consume_resumable_upload(
+    request: Any,
+    *,
+    total_bytes: int,
+    on_progress: Callable[[dict[str, int]], None] | None = None,
+    on_session_state: Callable[[dict[str, Any]], None] | None = None,
+    max_retries: int = 5,
+    sleep: Callable[[float], None] = time.sleep,
+    resumed: bool = False,
+) -> dict[str, Any]:
+    """Drive one resumable request and persist only safe session metadata."""
+    retries = 0
+
+    def publish_session() -> None:
+        if on_session_state is None:
+            return
+        uri = str(getattr(request, "resumable_uri", "") or "").strip()
+        if not uri:
+            return
+        on_session_state({
+            "sessionUri": uri,
+            "bytesSent": max(0, int(getattr(request, "resumable_progress", 0) or 0)),
+            "totalBytes": max(0, int(total_bytes or 0)),
+        })
+
+    while True:
+        try:
+            status, response = request.next_chunk()
+        except Exception as exc:
+            publish_session()
+            http_status = _upload_http_status(exc)
+            if resumed and http_status in {404, 410}:
+                raise ResumableUploadSessionExpired(
+                    "YouTube resumable session истёк; требуется явная сверка перед новым videos.insert."
+                ) from exc
+            if not _is_transient_upload_error(exc) or retries >= max_retries:
+                raise
+            sleep(float(min(16, 2 ** retries)))
+            retries += 1
+            continue
+
+        retries = 0
+        publish_session()
+        if status is not None and on_progress is not None:
+            sent = max(0, int(getattr(status, "resumable_progress", 0) or 0))
+            total = max(0, int(getattr(status, "total_size", 0) or total_bytes or 0))
+            percent = min(100, int((sent * 100) / total)) if total else 0
+            on_progress({"bytesSent": sent, "totalBytes": total, "percent": percent})
+        if response is not None:
+            if not isinstance(response, dict):
+                raise RuntimeError("YouTube вернул некорректный ответ завершения загрузки")
+            return response
+
+
 def upload_private_video(
     credentials_payload: dict[str, Any],
     *,
@@ -321,14 +400,11 @@ def upload_private_video(
     body: dict[str, Any],
     thumbnail_path: str = "",
     on_insert_started: Callable[[], None] | None = None,
+    on_progress: Callable[[dict[str, int]], None] | None = None,
+    on_session_state: Callable[[dict[str, Any]], None] | None = None,
+    resume_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Upload one NewsFlow package using an explicitly authorised channel.
-
-    The request is always created from ``build_private_video_insert_body``:
-    it is private until YouTube reaches the selected ``publishAt``.  A
-    returned ID is the only proof used by the queue to mark a job uploaded.
-    """
-
+    """Upload or resume one private NewsFlow video without blind duplicate inserts."""
     source = Path(video_path)
     if not source.is_file():
         raise ValueError("MP4 для публикации не найден")
@@ -339,21 +415,41 @@ def upload_private_video(
         from googleapiclient.http import MediaFileUpload
     except ImportError as exc:
         raise RuntimeError("В runtime NewsFlow не установлены библиотеки Google YouTube API.") from exc
+
     credentials = Credentials.from_authorized_user_info(credentials_payload)
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(Request())
     youtube = build("youtube", "v3", credentials=credentials, cache_discovery=False)
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=MediaFileUpload(str(source), mimetype="video/mp4", resumable=True),
+    media = MediaFileUpload(
+        str(source),
+        mimetype="video/mp4",
+        chunksize=YOUTUBE_UPLOAD_CHUNK_BYTES,
+        resumable=True,
     )
-    if on_insert_started is not None:
+    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+    resume = dict(resume_state or {})
+    session_uri = str(resume.get("sessionUri", "") or "").strip()
+    resumed = bool(session_uri)
+    if resumed:
+        request.resumable_uri = session_uri
+        request.resumable_progress = max(0, int(resume.get("bytesSent", 0) or 0))
+    elif on_insert_started is not None:
+        # This marks the duplicate-risk boundary before the first network
+        # request can create a new remote insert session.
         on_insert_started()
-    response = request.execute()
-    video_id = str(response.get("id", "")).strip() if isinstance(response, dict) else ""
+
+    response = consume_resumable_upload(
+        request,
+        total_bytes=source.stat().st_size,
+        on_progress=on_progress,
+        on_session_state=on_session_state,
+        resumed=resumed,
+    )
+    video_id = str(response.get("id", "")).strip()
     if not video_id:
         raise RuntimeError("YouTube не вернул ID после загрузки ролика")
+
     cover = Path(thumbnail_path)
     if cover.is_file():
         youtube.thumbnails().set(
@@ -363,7 +459,7 @@ def upload_private_video(
     return {
         "videoId": video_id,
         "videoUrl": f"https://www.youtube.com/watch?v={video_id}",
-        "privacyStatus": str((response.get("status") or {}).get("privacyStatus", "private")) if isinstance(response, dict) else "private",
+        "privacyStatus": str((response.get("status") or {}).get("privacyStatus", "private")),
     }, json.loads(credentials.to_json())
 
 

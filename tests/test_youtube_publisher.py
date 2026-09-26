@@ -16,8 +16,10 @@ from scriptor.youtube_allocation import (
     recommend_quota,
 )
 from scriptor.youtube_api import (
+    ResumableUploadSessionExpired,
     build_private_video_insert_body,
     compose_youtube_description,
+    consume_resumable_upload,
     normalize_youtube_tags,
     parse_analytics_rows,
     parse_current_channel,
@@ -39,6 +41,73 @@ from scriptor.youtube_publisher import (
     schedule_publication,
     suggest_youtube_title,
 )
+
+
+class YouTubeResumableTransportTests(unittest.TestCase):
+    def test_transient_chunk_failure_retries_same_request_and_reports_real_byte_progress(self):
+        class Status:
+            resumable_progress = 8
+            total_size = 16
+
+        class Request:
+            def __init__(self):
+                self.resumable_uri = "https://upload.youtube.test/session-1"
+                self.resumable_progress = 0
+                self.calls = 0
+
+            def next_chunk(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("temporary timeout")
+                if self.calls == 2:
+                    self.resumable_progress = 8
+                    return Status(), None
+                self.resumable_progress = 16
+                return None, {"id": "yt-new"}
+
+        request = Request()
+        progress = []
+        session_states = []
+        sleeps = []
+
+        result = consume_resumable_upload(
+            request,
+            total_bytes=16,
+            on_progress=progress.append,
+            on_session_state=session_states.append,
+            max_retries=2,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual(result["id"], "yt-new")
+        self.assertEqual(request.calls, 3)
+        self.assertEqual(progress, [{"bytesSent": 8, "totalBytes": 16, "percent": 50}])
+        self.assertTrue(session_states)
+        self.assertTrue(all(item["sessionUri"].endswith("session-1") for item in session_states))
+        self.assertEqual(sleeps, [1.0])
+
+    def test_expired_restored_session_fails_closed_instead_of_starting_a_new_insert(self):
+        class Response:
+            status = 410
+
+        class Expired(Exception):
+            resp = Response()
+
+        class Request:
+            resumable_uri = "https://upload.youtube.test/expired"
+            resumable_progress = 1024
+
+            def next_chunk(self):
+                raise Expired("gone")
+
+        with self.assertRaises(ResumableUploadSessionExpired):
+            consume_resumable_upload(
+                Request(),
+                total_bytes=4096,
+                resumed=True,
+                max_retries=5,
+                sleep=lambda _seconds: None,
+            )
 
 
 class PublicationJobTests(unittest.TestCase):

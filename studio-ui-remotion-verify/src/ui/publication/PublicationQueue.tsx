@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ColumnDef } from "@tanstack/react-table";
-import { CheckCircle2, Circle, CircleX, ExternalLink, Pause, Play, RefreshCw, Upload } from "lucide-react";
+import { CheckCircle2, Circle, CircleX, ExternalLink, Pause, Play, RefreshCw, RotateCcw, ShieldCheck, Upload } from "lucide-react";
 import { Badge, type BadgeTone } from "../components/badge";
 import { DataTable } from "../components/data-table";
 import { UiButton } from "../components/button";
@@ -10,7 +10,8 @@ import type { QueueRow } from "./types";
 
 const badStates = new Set(["FAILED", "AUTH_REQUIRED", "QUOTA_BLOCKED", "USER_ACTION_REQUIRED"]);
 const terminalStates = new Set(["SUCCESS", "SKIPPED", "NOT_REQUIRED"]);
-const uploadableStates = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED"]);
+const uploadableStates = new Set(["READY", "WAITING", "RETRYING", "SCHEDULED", "REUPLOAD_QUEUED"]);
+const activeReuploadStates = new Set(["QUEUED", "RUNNING", "RETRYABLE", "UPLOADED", "PROCESSING"]);
 const stepTone = (state: string): BadgeTone => terminalStates.has(state) ? "success" : badStates.has(state) ? "danger" : state === "RUNNING" ? "info" : "neutral";
 function stageIcon(state: string) { return terminalStates.has(state) ? <CheckCircle2 size={14}/> : badStates.has(state) ? <CircleX size={14}/> : <Circle size={14}/>; }
 
@@ -39,6 +40,51 @@ function adsState(row: QueueRow) {
   return { label: "ОЖИДАЕТ", tone: "warning" as BadgeTone };
 }
 
+function errorCategory(step: QueueRow["steps"][string] | undefined) {
+  const error = step?.error;
+  if (!error || typeof error !== "object") return "";
+  return String((error as { category?: unknown }).category || "").toUpperCase();
+}
+
+function uploadState(row: QueueRow) {
+  const upload = row.steps.VIDEO_UPLOAD || {};
+  const processing = row.steps.YOUTUBE_PROCESSING || {};
+  const progress = upload.progress;
+  const reuploadStatus = String(row.reupload?.status || "").toUpperCase();
+  if (!row.youtubeVideoId) {
+    if (progress?.state === "transferring" && typeof progress.percent === "number") {
+      return { label: `${progress.percent}%`, tone: "info" as BadgeTone };
+    }
+    if (reuploadStatus === "QUEUED") return { label: "Перезалив в очереди", tone: "warning" as BadgeTone };
+    if (reuploadStatus === "RETRYABLE") return { label: "Перезалив · повтор", tone: "warning" as BadgeTone };
+    if (row.currentStage === "VIDEO_UPLOAD" || String(upload.status).toUpperCase() === "RUNNING") {
+      return { label: "Передача", tone: "info" as BadgeTone };
+    }
+    return { label: "—", tone: "neutral" as BadgeTone };
+  }
+  const processingStatus = String(processing.status || "").toUpperCase();
+  if (processingStatus === "RUNNING") return { label: "Обработка YouTube", tone: "info" as BadgeTone };
+  if (processingStatus === "SUCCESS") return { label: "Обработка завершена", tone: "success" as BadgeTone };
+  if (processingStatus === "FAILED" || badStates.has(processingStatus)) {
+    return { label: "Ошибка обработки", tone: "danger" as BadgeTone };
+  }
+  return { label: "Загружен", tone: "success" as BadgeTone };
+}
+
+function formatReuploadStatus(value?: string) {
+  const status = String(value || "").toUpperCase();
+  const labels: Record<string, string> = {
+    QUEUED: "Перезалив в очереди",
+    RUNNING: "Перезалив выполняется",
+    RETRYABLE: "Перезалив ждёт повтора",
+    UPLOADED: "Новый upload передан",
+    PROCESSING: "Новый ролик обрабатывается",
+    SUCCEEDED: "Перезалив завершён",
+    FAILED: "Перезалив завершён ошибкой",
+  };
+  return labels[status] || status || "—";
+}
+
 export function PublicationQueue({
   rows,
   channelName,
@@ -53,6 +99,8 @@ export function PublicationQueue({
   onReconcile,
   onRetry,
   onResolveUpload,
+  onIdentity,
+  onReupload,
   onCancel,
   onThumbnail,
 }: {
@@ -69,11 +117,14 @@ export function PublicationQueue({
   onReconcile(snapshotIds?: string[]): void;
   onRetry(snapshotId: string, stage: string): void;
   onResolveUpload(snapshotId: string, outcome: "found" | "not_found", youtubeVideoId?: string): void;
+  onIdentity(snapshotId: string): void;
+  onReupload(snapshotIds: string[], reason: string): void;
   onCancel(snapshotId: string): void;
   onThumbnail(snapshotId: string): void;
 }) {
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
+  const [reuploadReason, setReuploadReason] = useState("Повторная private-загрузка после проверки результата YouTube");
   const counters = {
     active: rows.filter((row) => row.active).length,
     waiting: rows.filter((row) => !row.active && !row.youtubeVideoId).length,
@@ -84,8 +135,13 @@ export function PublicationQueue({
   const toggleAll = () => setSelected(allSelected ? [] : rows.map((row) => row.snapshotId));
   const toggle = (snapshotId: string) => setSelected((current) => current.includes(snapshotId) ? current.filter((id) => id !== snapshotId) : [...current, snapshotId]);
   const actionIds = selected.length ? selected : [];
-  const actionScope = selected.length ? rows.filter((row) => selected.includes(row.snapshotId)) : rows;
+  const selectedRows = rows.filter((row) => selected.includes(row.snapshotId));
+  const actionScope = selected.length ? selectedRows : rows;
   const hasKnownYoutube = actionScope.some((row) => Boolean(row.youtubeVideoId));
+  const reuploadRows = selectedRows.filter((row) => {
+    const state = String(row.reupload?.status || "").toUpperCase();
+    return Boolean(row.youtubeVideoId) && !row.active && !activeReuploadStates.has(state);
+  });
   const hasUploadable = actionScope.some((row) =>
     !row.youtubeVideoId && !row.active && uploadableStates.has(String(row.status || "").toUpperCase())
   );
@@ -112,9 +168,9 @@ export function PublicationQueue({
       cell: ({ row }) => <button className="nf-expand" aria-label={`Раскрыть ход публикации ${row.original.title || row.original.productionItemId}`} onClick={() => setExpanded((items) => items.includes(row.original.snapshotId) ? items.filter((id) => id !== row.original.snapshotId) : [...items, row.original.snapshotId])}>{expanded.includes(row.original.snapshotId) ? "−" : "+"}</button>,
     },
     { accessorKey: "title", header: "Ролик", cell: ({ row }) => <b>{row.original.title || row.original.productionItemId}</b> },
-    { id: "channel", header: "Канал", cell: ({ row }) => channelName(row.original.channelId) },
+    { id: "channel", header: "Канал", cell: ({ row }) => <div><span>{channelName(row.original.channelId)}</span>{activeReuploadStates.has(String(row.original.reupload?.status || "").toUpperCase()) ? <Badge tone="warning">Перезалив</Badge> : null}</div> },
     { accessorKey: "publishAt", header: "Выход", cell: ({ row }) => <small>{row.original.publishAt || "—"}</small> },
-    { id: "upload", header: "Upload", cell: ({ row }) => row.original.youtubeVideoId ? <Badge tone="success">100%</Badge> : <Badge tone={row.original.currentStage === "VIDEO_UPLOAD" ? "info" : "neutral"}>{row.original.currentStage === "VIDEO_UPLOAD" ? "Передача" : "—"}</Badge> },
+    { id: "upload", header: "Upload", cell: ({ row }) => { const value = uploadState(row.original); return <Badge tone={value.tone}>{value.label}</Badge>; } },
     { id: "ads", header: "Реклама", cell: ({ row }) => { const value = adsState(row.original); return <Badge tone={value.tone}>{value.label}</Badge>; } },
     { id: "completion", header: "Оформление", cell: ({ row }) => `${row.original.completion.completed}/${row.original.completion.total}` },
     { id: "stage", header: "Текущий этап", cell: ({ row }) => stageLabel(row.original.currentStage) },
@@ -130,20 +186,39 @@ export function PublicationQueue({
       <span>Ошибки: <b>{counters.errors}</b></span>
       <span>Выбрано: <b>{selected.length || "все"}</b></span>
       <div>
-        <UiButton variant="secondary" disabled={!hasKnownYoutube} onClick={() => onReconcile(actionIds)}><RefreshCw size={15}/>Проверить YouTube</UiButton>
+        <UiButton variant="secondary" disabled={!hasKnownYoutube} onClick={() => onReconcile(actionIds)}><RefreshCw size={15}/>Обновить статусы YouTube</UiButton>
         <UiButton variant="secondary" disabled={continuing || !hasKnownYoutube} onClick={() => onContinue(actionIds)}><RefreshCw size={15}/>{continuing ? "Оформление…" : selected.length ? "Продолжить выбранные" : "Продолжить оформление"}</UiButton>
         <UiButton variant={paused ? "primary" : "secondary"} onClick={onPause}>{paused ? <Play size={15}/> : <Pause size={15}/>}{paused ? "Продолжить" : "Пауза"}</UiButton>
         <UiButton variant="primary" disabled={paused || starting || !hasUploadable} onClick={() => onStart(actionIds)}><Upload size={15}/>{starting ? "Запуск…" : selected.length ? `Запустить выбранные (${selected.length})` : "Запустить очередь"}</UiButton>
       </div>
+      <div className="nf-reupload-controls">
+        <label>Причина перезалива<input aria-label="Причина перезалива" value={reuploadReason} onChange={(event) => setReuploadReason(event.target.value)}/></label>
+        <UiButton
+          variant="secondary"
+          disabled={!reuploadRows.length || !reuploadReason.trim()}
+          onClick={() => {
+            const titles = reuploadRows.map((row) => row.title || row.productionItemId).join("\n• ");
+            const confirmed = window.confirm(
+              `Перезалить выбранные ролики как новые PRIVATE uploads?\n\n• ${titles}\n\nПричина: ${reuploadReason.trim()}\n\nFrozen metadata подтверждается как актуальная. Старые YouTube ID не удаляются и не публикуются; исходное расписание автоматически не переносится.`,
+            );
+            if (confirmed) onReupload(reuploadRows.map((row) => row.snapshotId), reuploadReason.trim());
+          }}
+        ><RotateCcw size={15}/>Перезалить выбранные ({reuploadRows.length})</UiButton>
+      </div>
     </div>
     {channelProgress.length ? <div className="nf-channel-progress-strip" aria-label="Прогресс по каналам">{channelProgress.map((item) => <div className="nf-channel-progress-card" key={item.channelId}><b>{channelName(item.channelId)}</b><small>Готово {item.complete}/{item.total} · Upload {item.uploaded}/{item.total} · Ошибки {item.errors}</small></div>)}</div> : null}
-    <DataTable data={rows} columns={columns} preferenceKey="publication-queue" ariaLabel="Очередь публикации" expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onResolveUpload={onResolveUpload} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
+    <DataTable data={rows} columns={columns} preferenceKey="publication-queue" ariaLabel="Очередь публикации" expanded={(row) => expanded.includes(row.snapshotId) ? <PublicationExecutionDetails row={row} channelName={channelName} onRetry={onRetry} onResolveUpload={onResolveUpload} onIdentity={onIdentity} onCancel={onCancel} onThumbnail={onThumbnail}/> : null}/>
   </section>;
 }
 
-export function PublicationExecutionDetails({ row, channelName, onRetry, onResolveUpload, onCancel, onThumbnail }: { row: QueueRow; channelName(id: string): string; onRetry(snapshotId: string, stage: string): void; onResolveUpload(snapshotId: string, outcome: "found" | "not_found", youtubeVideoId?: string): void; onCancel(snapshotId: string): void; onThumbnail(snapshotId: string): void }) {
+export function PublicationExecutionDetails({ row, channelName, onRetry, onResolveUpload, onIdentity, onCancel, onThumbnail }: { row: QueueRow; channelName(id: string): string; onRetry(snapshotId: string, stage: string): void; onResolveUpload(snapshotId: string, outcome: "found" | "not_found", youtubeVideoId?: string): void; onIdentity(snapshotId: string): void; onCancel(snapshotId: string): void; onThumbnail(snapshotId: string): void }) {
   const [reconciledVideoId, setReconciledVideoId] = useState("");
-  const failed = Object.entries(row.steps).find(([, step]) => badStates.has(String(step.status)));
+  const identityStep = Object.entries(row.steps).find(
+    ([, step]) => errorCategory(step) === "STUDIO_IDENTITY_REQUIRED",
+  );
+  const failed = identityStep
+    ?? Object.entries(row.steps).find(([, step]) => badStates.has(String(step.status)));
+  const identityRequired = Boolean(identityStep);
   const uploadNeedsReconciliation = String(row.steps.VIDEO_UPLOAD?.status || "").toUpperCase() === "USER_ACTION_REQUIRED" && !row.youtubeVideoId;
   const thumbnailPending = Boolean(row.youtubeVideoId) && !terminalStates.has(String(row.steps.THUMBNAIL?.status || "").toUpperCase());
   return <div className="nf-queue-details">
@@ -153,6 +228,15 @@ export function PublicationExecutionDetails({ row, channelName, onRetry, onResol
       <div><small>YOUTUBE</small><p>{row.youtubeVideoUrl ? <a href={row.youtubeVideoUrl} target="_blank" rel="noreferrer">{row.youtubeVideoId}<ExternalLink size={13}/></a> : "ещё не загружен"}</p></div>
       <div><small>РЕКЛАМА</small><p><Badge tone={adsState(row).tone}>{adsState(row).label}</Badge></p></div>
     </div>
+    {row.reupload ? <div className="nf-reupload-audit">
+      <small>ПЕРЕЗАЛИВ</small>
+      <p><b>{formatReuploadStatus(row.reupload.status)}</b></p>
+      <p>Старый ID: {row.reupload.oldVideoUrl ? <a href={row.reupload.oldVideoUrl} target="_blank" rel="noreferrer">{row.reupload.oldVideoId}<ExternalLink size={13}/></a> : row.reupload.oldVideoId || "—"}</p>
+      <p>Новый ID: {row.youtubeVideoUrl ? <a href={row.youtubeVideoUrl} target="_blank" rel="noreferrer">{row.youtubeVideoId}<ExternalLink size={13}/></a> : row.reupload.newVideoId || "—"}</p>
+      <p>Причина: {row.reupload.reason || "—"}</p>
+      <p>Последняя проверка: {row.reupload.lastCheckedAt || row.reupload.requestedAt || "—"}</p>
+      <p>Исходное расписание: {row.reupload.originalPublishAt || "без расписания"} · автоматически не перенесено</p>
+    </div> : null}
     <div className="nf-stage-list">
       <small>ЭТАПЫ · оформление {row.completion.completed}/{row.completion.total}</small>
       {Object.entries(row.steps).map(([stage, step]) => {
@@ -173,7 +257,8 @@ export function PublicationExecutionDetails({ row, channelName, onRetry, onResol
         <UiButton variant="secondary" disabled={!reconciledVideoId.trim()} onClick={() => onResolveUpload(row.snapshotId, "found", reconciledVideoId.trim())}>Привязать найденный YouTube ID</UiButton>
         <UiButton variant="secondary" onClick={() => onResolveUpload(row.snapshotId, "not_found")}>Я проверил канал: видео нет — разрешить повтор</UiButton>
       </div> : null}
-      {failed && !uploadNeedsReconciliation ? <UiButton variant="secondary" onClick={() => onRetry(row.snapshotId, failed[0])}><RefreshCw size={15}/>Повторить {stageLabel(failed[0])}</UiButton> : null}
+      {identityRequired ? <UiButton variant="secondary" onClick={() => onIdentity(row.snapshotId)}><ShieldCheck size={15}/>Пройти 2FA</UiButton> : null}
+      {failed && !uploadNeedsReconciliation ? <UiButton variant="secondary" onClick={() => onRetry(row.snapshotId, failed[0])}><RefreshCw size={15}/>Попробовать ещё раз · {stageLabel(failed[0])}</UiButton> : null}
       {thumbnailPending ? <UiButton variant="secondary" onClick={() => onThumbnail(row.snapshotId)}>Поставить обложку</UiButton> : null}
       {!uploadNeedsReconciliation ? <UiButton variant="destructive" onClick={() => onCancel(row.snapshotId)}>Отменить автоматизацию</UiButton> : null}
     </div>

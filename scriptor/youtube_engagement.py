@@ -31,6 +31,7 @@ def _eligible_catalog(job: Mapping[str, object], catalog: Sequence[Mapping[str, 
         if str(item.get("channelId", "")).strip() == channel_id
         and str(item.get("privacyStatus", "")).strip() == "public"
         and str(item.get("videoId", "")).strip()
+        and str(item.get("title", "")).strip()
         and str(item.get("videoId", "")).strip() != current_video_id
     ]
     return sorted(
@@ -98,9 +99,17 @@ def build_engagement_plan(
 
     duration = _duration(job)
     targets = _eligible_catalog(job, catalog)
+    # YouTube Studio allows up to five cards.  Plan only same-channel
+    # public videos that have a visible title, because Studio's own-video
+    # picker is reliable by title rather than by opaque video ID.
+    card_ratios = (0.17, 0.33, 0.50, 0.67, 0.83)
     cards = [
-        {"videoId": str(item["videoId"]), "atSeconds": round(duration * ratio)}
-        for ratio, item in zip((0.35, 0.65), targets[:2])
+        {
+            "videoId": str(item["videoId"]),
+            "videoTitle": str(item["title"]).strip(),
+            "atSeconds": round(duration * ratio),
+        }
+        for ratio, item in zip(card_ratios, targets[:5])
         if round(duration * ratio) < duration - 20
     ]
     if duration < 25:
@@ -116,14 +125,21 @@ def build_engagement_plan(
             ),
             "",
         )
+        end_screen_items = [
+            *([
+                {
+                    "kind": "video",
+                    "videoId": str(targets[0]["videoId"]),
+                    "videoTitle": str(targets[0]["title"]).strip(),
+                },
+            ] if targets else []),
+            {"kind": "best-for-viewer"},
+            *([{"kind": "playlist", "playlistId": playlist}] if playlist else []),
+            {"kind": "subscribe"},
+        ][:4]
         end_screen = {
             "startSeconds": round(duration - 20),
-            "items": [
-                *([{"kind": "video", "videoId": str(targets[0]["videoId"])}] if targets else []),
-                {"kind": "best-for-viewer"},
-                *([{"kind": "playlist", "playlistId": playlist}] if playlist else []),
-                {"kind": "subscribe"},
-            ],
+            "items": end_screen_items,
         }
     return {"cards": cards, "endScreen": end_screen}
 

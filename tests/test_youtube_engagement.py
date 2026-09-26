@@ -74,6 +74,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
             [
                 {
                     "videoId": "current-video",
+                    "title": "Текущий выпуск",
                     "channelId": "channel-a",
                     "privacyStatus": "public",
                     "publishedAt": "2026-09-01T10:00:00+00:00",
@@ -81,6 +82,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 },
                 {
                     "videoId": "relevant-video",
+                    "title": "Релевантный выпуск",
                     "channelId": "channel-a",
                     "privacyStatus": "public",
                     "publishedAt": "2026-08-31T10:00:00+00:00",
@@ -88,6 +90,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 },
                 {
                     "videoId": "latest-video",
+                    "title": "Последний выпуск",
                     "channelId": "channel-a",
                     "privacyStatus": "public",
                     "publishedAt": "2026-08-30T10:00:00+00:00",
@@ -95,6 +98,7 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
                 },
                 {
                     "videoId": "private-video",
+                    "title": "Приватный выпуск",
                     "channelId": "channel-a",
                     "privacyStatus": "private",
                     "publishedAt": "2026-08-29T10:00:00+00:00",
@@ -107,11 +111,66 @@ class YouTubeEngagementPlanTests(unittest.TestCase):
         self.assertEqual(
             plan["cards"],
             [
-                {"videoId": "relevant-video", "atSeconds": 210},
-                {"videoId": "latest-video", "atSeconds": 390},
+                {"videoId": "relevant-video", "videoTitle": "Релевантный выпуск", "atSeconds": 102},
+                {"videoId": "latest-video", "videoTitle": "Последний выпуск", "atSeconds": 198},
             ],
         )
         self.assertEqual(plan["endScreen"]["startSeconds"], 580)
+        self.assertLessEqual(len(plan["endScreen"]["items"]), 4)
+
+    def test_engagement_plan_caps_cards_at_five_and_end_screen_at_four_with_visible_titles(self):
+        catalog = [
+            {
+                "videoId": f"video-{index}",
+                "title": f"Публичный ролик {index}",
+                "channelId": "channel-a",
+                "privacyStatus": "public",
+                "publishedAt": f"2026-08-{20 + index:02d}T10:00:00+00:00",
+                "score": 100 - index,
+            }
+            for index in range(1, 8)
+        ]
+
+        plan = build_engagement_plan(
+            {
+                "id": "new-job",
+                "channelId": "channel-a",
+                "videoId": "current-video",
+                "durationSeconds": 900,
+            },
+            catalog,
+            [
+                {"channelId": "channel-a", "playlistId": "playlist-a", "public": True},
+                {"channelId": "channel-a", "playlistId": "playlist-b", "public": True},
+            ],
+        )
+
+        self.assertEqual(len(plan["cards"]), 5)
+        self.assertTrue(all(card["videoTitle"].startswith("Публичный ролик") for card in plan["cards"]))
+        self.assertLessEqual(len(plan["endScreen"]["items"]), 4)
+        video_items = [item for item in plan["endScreen"]["items"] if item.get("kind") == "video"]
+        self.assertTrue(all(item.get("videoTitle") for item in video_items))
+
+    def test_catalog_without_visible_title_is_not_eligible_for_studio_selection(self):
+        plan = build_engagement_plan(
+            {
+                "id": "new-job",
+                "channelId": "channel-a",
+                "videoId": "current-video",
+                "durationSeconds": 600,
+            },
+            [{
+                "videoId": "untitled-video",
+                "channelId": "channel-a",
+                "privacyStatus": "public",
+                "publishedAt": "2026-08-31T10:00:00+00:00",
+                "score": 1,
+            }],
+            [],
+        )
+
+        self.assertEqual(plan["cards"], [])
+        self.assertFalse(any(item.get("kind") == "video" for item in plan["endScreen"]["items"]))
 
     def test_completed_post_cannot_return_to_pending(self):
         state = new_engagement_state("job-a", "channel-a")
