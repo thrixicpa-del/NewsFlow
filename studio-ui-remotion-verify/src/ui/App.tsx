@@ -2652,7 +2652,7 @@ export function Scenarios({
       }
     }
   };
-  const write = async (indices?: number[]) => {
+  const write = async (indices?: number[], force = false) => {
     if (scenarioGenerationLock.current) return;
     scenarioGenerationLock.current = true;
     setGenerating(true);
@@ -2660,6 +2660,7 @@ export function Scenarios({
       await command("generate-scenarios", {
         ...(indices?.length ? { indices } : {}),
         provider,
+        ...(force ? { force: true } : {}),
       });
     } finally {
       scenarioGenerationLock.current = false;
@@ -2727,6 +2728,13 @@ export function Scenarios({
         >
           <Sparkles size={17} />
           Написать выбранные
+        </Button>
+        <Button
+          disabled={generating || !selected.length}
+          onClick={() => void write(selected, true)}
+        >
+          <Sparkles size={17} />
+          Переписать выбранные
         </Button>
         <Button
           kind="primary"
