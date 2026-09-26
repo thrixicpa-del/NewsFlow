@@ -28,6 +28,11 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_covers.CoverHeadlineGuardTests.test_named_anchor_guard_supports_arbitrary_structured_entity_without_vocabulary tests.test_covers.CoverHeadlineGuardTests.test_foreign_entity_guard_rejects_arbitrary_new_name_not_in_source tests.test_covers.CoverHeadlineGuardTests.test_cover_word_runtime_has_no_fixed_known_entity_vocabulary tests.test_covers.CoverHeadlineGuardTests.test_named_anchor_guard_covers_new_direction_entities_not_in_legacy_vocabulary tests.test_covers.CoverHeadlineGuardTests.test_named_anchor_guard_uses_structured_entities_even_when_they_are_lowercase tests.test_covers.CoverHeadlineGuardTests.test_does_not_require_an_incidental_script_person_as_the_headline_anchor tests.test_covers.CoverHeadlineGuardTests.test_rejects_weak_headlines_that_drop_named_people_from_the_topic tests.test_covers.CoverHeadlineGuardTests.test_accepts_a_standalone_headline_with_a_named_topic_anchor -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python -m ruff check scriptor/bridge.py tests/test_covers.py --select E9,F63,F7,F82
+      - run: git diff --check origin/main...HEAD
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
