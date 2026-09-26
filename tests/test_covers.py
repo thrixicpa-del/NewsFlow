@@ -548,18 +548,27 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", payloads[0])
         self.assertNotIn("Energy traders react to changing oil prices", payloads[0])
 
+
     def test_provider_payload_equals_final_prompt(self):
-        """No adapter, retry or render guard is allowed to append provider text."""
+        """No adapter, retry or render guard may append or replace provider text."""
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
             settings = Settings(cover_output_folder=directory, cover_auto_overlay_text=False)
             settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            scene = (
+                "STORY CONTEXT:\nA new water filter is tested in a laboratory.\n\n"
+                "MAIN SUBJECT:\nEngineers testing a transparent water-filtration prototype\n\n"
+                "VISIBLE ACTION:\nEngineers inspect clear water leaving the prototype\n\n"
+                "VISUAL EVIDENCE:\nTransparent pipes, filter cartridge and measuring instruments\n\n"
+                "ENVIRONMENT:\nReal laboratory test bench\n\n"
+                "EMOTION:\nFocused scientific urgency"
+            )
             item = {
-                "title": "Ормуз на грани! Иран давит на танкеры! Нефтяной рынок ждёт шок!",
-                "image_prompt": "Wide tanker scene. Photorealistic, 16:9, breaking-news image.",
-                "cover_headline": "ОРМУЗ НА ГРАНИ",
-                "cover_subheadline": "ТАНКЕРЫ ПОД ДАВЛЕНИЕМ",
+                "title": "Новая мембрана ускоряет очистку воды",
+                "image_prompt": scene,
+                "cover_headline": "ВОДА СТАЛА ЧИЩЕ",
+                "cover_subheadline": "НОВАЯ МЕМБРАНА В ДЕЛЕ",
             }
             settings.cover_queue = [item]
             payloads = []
@@ -580,9 +589,15 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 bridge.generate_covers({"indices": [0], "textMode": "fastgen"})
 
             self.assertEqual(payloads, [bridge._normalize_cover_photo_prompt(item["image_prompt"], item)])
-            self.assertIn("MAIN SUBJECT:\nIranian pressure on oil shipping routes", payloads[0])
-            self.assertIn("VISIBLE ACTION:\nOil tankers affected near Strait of Hormuz", payloads[0])
-            self.assertIn("VISUAL EVIDENCE:\nTankers, maritime tension, naval presence, crisis atmosphere", payloads[0])
+            self.assertIn(
+                "MAIN SUBJECT:\nEngineers testing a transparent water-filtration prototype",
+                payloads[0],
+            )
+            self.assertIn(
+                "VISIBLE ACTION:\nEngineers inspect clear water leaving the prototype",
+                payloads[0],
+            )
+            self.assertIn("ENVIRONMENT:\nReal laboratory test bench", payloads[0])
             self.assertEqual(settings.cover_queue[0]["prompt_sources"], {
                 "CORE STYLE": "Universal V2",
                 "SCENE": "Topic Planner",
@@ -1758,12 +1773,19 @@ class CoverVisualInstructionTests(unittest.TestCase):
         instruction = _cover_instruction({"title": "Ормузский пролив", "script": ""}, 0, settings)
         self.assertNotIn("Сделай всё фиолетовым", instruction)
 
-    def test_prompt_builder_owns_the_realistic_newsroom_treatment(self):
-        prompt = _normalize_cover_photo_prompt("Officials and cameras at a consultation", {"title": "НАТО и Россия — риск новой эскалации"})
-        self.assertNotIn("breaking-news", prompt.casefold())
-        self.assertIn("CORE STYLE:\nNEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.", prompt)
-        self.assertIn("Official NATO and EU fabric flags", prompt)
 
+    def test_prompt_builder_owns_realistic_art_direction_without_named_fallback(self):
+        prompt = _normalize_cover_photo_prompt(
+            "Engineers inspect a transparent water-filtration prototype in a real laboratory.",
+            {"title": "Новая мембрана ускоряет очистку воды"},
+        )
+        self.assertNotIn("breaking-news", prompt.casefold())
+        self.assertIn(
+            "CORE STYLE:\nCreate a realistic, highly clickable, photorealistic YouTube news thumbnail image.",
+            prompt,
+        )
+        self.assertIn("water-filtration prototype", prompt.casefold())
+        self.assertNotIn("Official NATO and EU fabric flags", prompt)
 
     def test_runtime_cover_routing_has_no_named_fixture_tables(self):
         from scriptor import bridge, thumbnail_prompt_v2
