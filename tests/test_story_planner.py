@@ -4,6 +4,7 @@ import unittest
 from scriptor.core import ScenarioRequest
 from scriptor.story_planner import (
     StoryPlanCapacityInsufficient,
+    build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
@@ -98,6 +99,18 @@ class StoryPlanValidationTests(unittest.TestCase):
             parse_story_plan_response(response, (5000,) * 10)
 
         self.assertIn("без повторов", raised.exception.reason)
+
+
+class StoryPlannerPromptTests(unittest.TestCase):
+    def test_operator_style_rules_are_reference_constraints_not_content_atoms(self):
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "Тема", "МИКРО-ХУКИ. НЕ ПОВТОРЯЙСЯ. Факт темы: объект повреждён."),
+            (4999, 4999),
+        )
+        self.assertIn("REFERENCE DATA FOR PLANNING", prompt)
+        self.assertIn("constraints, NOT story material", prompt)
+        self.assertIn("never turn rules such as hooks", prompt)
+        self.assertIn("Факт темы: объект повреждён", prompt)
 
 
 class StoryWriterContextTests(unittest.TestCase):
