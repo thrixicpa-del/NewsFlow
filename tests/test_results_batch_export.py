@@ -10,7 +10,7 @@ from scriptor.runner import Job, RunState
 
 
 class ResultsBatchExportTests(unittest.TestCase):
-    def test_exports_three_numbered_txt_files_without_repeating_topics_in_seo_or_tags(self):
+    def test_exports_three_numbered_txt_files_with_readable_topic_bound_seo_and_tags(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             destination = root / "destination"
@@ -71,11 +71,21 @@ class ResultsBatchExportTests(unittest.TestCase):
             )
             self.assertEqual(
                 (exported / "02-SEO-и-хештеги.txt").read_text(encoding="utf-8"),
-                "001. Строка один\nСтрока два\n#первая\n002.\n003.\n",
+                "001. Заголовок: SEO первая\n"
+                "SEO-описание: Строка один\nСтрока два\n"
+                "Хештеги: #первая\n\n"
+                "002. Заголовок: Средняя тема\n"
+                "SEO-описание: \n"
+                "Хештеги: \n\n"
+                "003. Заголовок: Третья тема\n"
+                "SEO-описание: \n"
+                "Хештеги: \n",
             )
             self.assertEqual(
                 (exported / "03-теги.txt").read_text(encoding="utf-8"),
-                "001. тег один, тег два\n002.\n003. тег три\n",
+                "001. Теги: тег один, тег два\n"
+                "002. Теги: \n"
+                "003. Теги: тег три\n",
             )
             self.assertEqual(sorted(path.name for path in (exported / "MP4").iterdir()), [
                 "001 — Первая тема.mp4", "003 — Третья тема.mp4",

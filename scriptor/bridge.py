@@ -14448,13 +14448,19 @@ def export_results_batch(payload: dict) -> dict:
         cover = covers_by_id.get(production_item_id, {}) if production_item_id else legacy_covers.get(title.casefold(), {})
         seo_ready = str(seo.get("status", "")) == "Готово"
         tags_ready = str(seo.get("tags_status", "")) == "Готово"
+        seo_title = (str(seo.get("title", "") or "").strip() if seo_ready else "") or title
         description = str(seo.get("description", "") or "").strip() if seo_ready else ""
         hashtags = _seo_hashtags(seo) if seo_ready else []
+        hashtag_text = " ".join(hashtags)
         tags = seo.get("tags", []) if tags_ready and isinstance(seo.get("tags", []), list) else []
         tag_text = ", ".join(str(value).strip() for value in tags if str(value).strip())
         headings.append(f"{ordinal:03d}. {title}")
-        descriptions.append("\n".join(filter(None, [f"{ordinal:03d}. {description}".rstrip(), " ".join(hashtags)])))
-        tags_section.append(f"{ordinal:03d}. {tag_text}".rstrip())
+        descriptions.append("\n".join([
+            f"{ordinal:03d}. Заголовок: {seo_title}",
+            f"SEO-описание: {description}",
+            f"Хештеги: {hashtag_text}",
+        ]))
+        tags_section.append(f"{ordinal:03d}. Теги: {tag_text}")
         if not description:
             missing_description.append(ordinal)
         if not tag_text:
@@ -14481,7 +14487,7 @@ def export_results_batch(payload: dict) -> dict:
         else:
             missing_mp4.append(ordinal)
     (folder / "01-заголовки.txt").write_text("\n".join(headings) + "\n", encoding="utf-8")
-    (folder / "02-SEO-и-хештеги.txt").write_text("\n".join(descriptions) + "\n", encoding="utf-8")
+    (folder / "02-SEO-и-хештеги.txt").write_text("\n\n".join(descriptions) + "\n", encoding="utf-8")
     (folder / "03-теги.txt").write_text("\n".join(tags_section) + "\n", encoding="utf-8")
     settings.results_last_export_folder = str(folder)
     save_settings(settings)

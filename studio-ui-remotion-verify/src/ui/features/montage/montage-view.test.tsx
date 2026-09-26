@@ -256,12 +256,14 @@ describe("Montage Light view", () => {
     confirm.mockRestore();
   });
 
-  it("keeps completed output packages in a durable artifact index", () => {
+  it("keeps Results focused on the manual batch export instead of legacy publication packages", () => {
     const data = { ...fallback, outputs: [{ folder: "D:/results/ormuz", video: "D:/results/ormuz/video.mp4" }] };
     render(<Outputs data={data} command={vi.fn()} />);
 
     expect(screen.getByLabelText("Output Artifact Index")).toBeTruthy();
-    expect(screen.getByRole("table", { name: "Готовые пакеты роликов" })).toBeTruthy();
+    expect(screen.queryByRole("table", { name: "Готовые пакеты роликов" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Собрать пакеты для публикации" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Собрать результаты" })).toBeTruthy();
   });
 
   it("shows only snapshot-backed provenance when an MP4 task is inspected", () => {
