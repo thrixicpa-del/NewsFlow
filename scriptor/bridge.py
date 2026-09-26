@@ -2902,8 +2902,8 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
                      if isinstance(candidate, dict)
                      and str(candidate.get("title", "")).casefold() == title_key
                      and not bool(candidate.get("legacy"))
-                     and str(candidate.get("status", "")).upper() != "LEGACY"
-                     and str(candidate.get("id", "")).strip()), None)
+                     and str(candidate.get("id", "")).strip()
+                     and str(candidate.get("id", "")).strip() not in deleted_ids), None)
         if item is None:
             item = {"title": title, "manual": True}
             ensure_production_item_ids([item])
@@ -4033,7 +4033,23 @@ def add_ideas_to_scenarios(payload: dict) -> dict:
     known = {title.casefold() for title in titles}
     added = [value for value in requested if value.casefold() not in known]
     titles.extend(added)
-    save_session(titles, jobs)
+    if added:
+        ensure_idea_production_items(settings, active_titles=added)
+        deleted_title_keys = {
+            " ".join(str(value).split()).casefold()
+            for value in settings.deleted_scenario_titles
+            if str(value).strip()
+        }
+        jobs_by_index = {job.request.index: job for job in jobs}
+        for index, title in enumerate(titles):
+            if title not in added or index in jobs_by_index:
+                continue
+            if " ".join(title.split()).casefold() not in deleted_title_keys:
+                continue
+            context = settings.idea_scenario_context.get(title, {})
+            production_item_id = str(context.get("id", "")).strip() if isinstance(context, dict) else ""
+            if production_item_id and production_item_id not in settings.deleted_scenario_production_ids:
+                jobs.append(Job(ScenarioRequest(index, title, "", production_item_id)))
     by_title = {str(item.get("title", "")).casefold(): item
                 for item in settings.idea_production_items if isinstance(item, dict)}
     for title in requested:
@@ -4041,6 +4057,7 @@ def add_ideas_to_scenarios(payload: dict) -> dict:
         if item:
             settings.idea_scenario_context[title] = dict(item)
     save_settings(settings)
+    save_session(titles, jobs)
     return {**snapshot(), "operationResult": {
         "kind": "ideas-to-scenarios",
         "count": len(added),
@@ -4070,22 +4087,24 @@ def transfer_ideas(payload: dict) -> dict:
         # Keep the same ProductionItem→Script contract whichever Ideas button
         # the operator uses to hand titles off to the scenario queue.
         return add_ideas_to_scenarios({"ideas": requested})
-    titles, jobs = load_session()
+    # Covers, SEO and Voice share the same durable Ideas→Scenario identity
+    # boundary.  In particular, an explicitly re-added title must receive a
+    # new current ProductionItem ID before any downstream stage sees it.
+    handoff = add_ideas_to_scenarios({"ideas": requested})
+    titles, _jobs = load_session()
     indexes = {title.casefold(): index for index, title in enumerate(titles)}
-    created = 0
     selected_indices: list[int] = []
     for idea in requested:
         key = idea.casefold()
         if key not in indexes:
-            indexes[key] = len(titles)
-            titles.append(idea)
-            created += 1
+            # add_ideas_to_scenarios is the durable authority. Reaching this
+            # branch would otherwise falsely report a downstream hand-off.
+            raise RuntimeError("Идея не была сохранена в очередь сценариев")
         selected_indices.append(indexes[key])
-    save_session(titles, jobs)
     result = transfer_scenarios({"target": target, "indices": selected_indices})
     label = {"scenarios": "написания сценариев", "covers": "обложек", "seo": "SEO-пакетов", "voice": "озвучки"}[target]
     return {**result, "operationResult": {
-        "kind": "ideas-transfer", "count": created,
+        "kind": "ideas-transfer", "count": handoff["operationResult"]["count"],
         "message": f"Идеи переданы в очередь {label}."
     }}
 
