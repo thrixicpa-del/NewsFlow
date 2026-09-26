@@ -198,7 +198,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Недостаточно", jobs[0].error)
 
     async def test_resume_uses_persisted_plan_and_starts_at_first_unfinished_part(self):
-        from scriptor.story_planner import parse_story_plan_response
+        from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
 
         class ResumeClient:
             def __init__(self):
@@ -213,7 +213,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         request = ScenarioRequest(0, "Тема", "OPERATOR CONTRACT", target_chars=30000,
                                   allowed_min=28000, allowed_max=32000)
-        plan = parse_story_plan_response(self._story_plan_json(6), (5000,) * 6)
+        plan = parse_story_plan_response(
+            self._story_plan_json(6), calculate_story_part_targets(request.target_chars),
+        )
         job = __import__("scriptor.runner", fromlist=["Job"]).Job(
             request=request,
             story_plan=plan.to_dict(),
