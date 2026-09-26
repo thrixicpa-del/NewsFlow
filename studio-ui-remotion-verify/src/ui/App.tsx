@@ -6761,6 +6761,18 @@ export function Covers({
                     <dd>{cover.prompt_provider || "Не сообщён текущим snapshot"}</dd>
                   </div>
                   <div>
+                    <dt>Scene source</dt>
+                    <dd>{cover.prompt_sources?.SCENE || "Не сообщён текущим snapshot"}</dd>
+                  </div>
+                  <div>
+                    <dt>Face selection</dt>
+                    <dd>
+                      {cover.faceSelectionMode
+                        ? `${cover.faceSelectionMode} · ${cover.semantic_face_label || cover.face_reference_label || "no match"} · ${cover.faceSelectionReason || "reason unavailable"}`
+                        : "Не сообщён текущим snapshot"}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Последнее событие</dt>
                     <dd>{cover.generation_history?.at(-1)?.at || "Не получено"}</dd>
                   </div>
@@ -6773,6 +6785,12 @@ export function Covers({
                     <dd>Текущий snapshot не сообщает признак устаревания</dd>
                   </div>
                 </dl>
+                {cover.final_provider_prompt ? (
+                  <details className="cover-final-prompt">
+                    <summary>Final FastGen prompt</summary>
+                    <pre>{cover.final_provider_prompt}</pre>
+                  </details>
+                ) : null}
                 <button
                   className="cover-select"
                   onClick={(event) =>

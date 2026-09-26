@@ -44,6 +44,38 @@ def _topic_scene_defaults(title: str, source: str) -> dict[str, str]:
         "environment": f"The real-world location directly connected to “{title}”.",
         "emotion": "Focused news tension tied to the visible development.",
     }
+    if any(term in source for term in ("карабах", "karabakh", "армени", "armenia", "азербайдж", "azerbaijan")):
+        return {
+            "main_subject": "Armenian and Azerbaijani officials in the Karabakh peace process",
+            "visible_action": "Delegations study documents and a regional map during direct negotiations",
+            "visual_evidence": "Karabakh map, negotiation papers, microphones and Armenian/Azerbaijani flags",
+            "environment": "Real diplomatic negotiation room in the South Caucasus",
+            "emotion": "Tense consequential bargaining",
+        }
+    if any(term in source for term in ("трамп", "trump")) and any(term in source for term in ("путин", "putin")):
+        return {
+            "main_subject": "Donald Trump and Vladimir Putin in high-level political contact",
+            "visible_action": "The two leaders speak or confer while aides and press observe",
+            "visual_evidence": "Trump, Putin, official flags, briefing papers and press cameras",
+            "environment": "Real presidential meeting or diplomatic contact setting",
+            "emotion": "High-stakes geopolitical tension",
+        }
+    if any(term in source for term in ("wildberries", "вайлдберриз", "warehouse", "склад")):
+        return {
+            "main_subject": "The Wildberries warehouse incident and its immediate operational impact",
+            "visible_action": "Warehouse staff and emergency responders work around the affected logistics site",
+            "visual_evidence": "Warehouse racks, parcels, loading bays, staff and emergency response details",
+            "environment": "Real e-commerce warehouse and logistics loading area",
+            "emotion": "Operational urgency and disruption",
+        }
+    if any(term in source for term in ("томат", "помидор", "tomato")):
+        return {
+            "main_subject": "Tomato supply and the produce market affected by the reported change",
+            "visible_action": "Growers, wholesalers or shoppers inspect tomato crates as supply changes become visible",
+            "visual_evidence": "Tomato crates, produce labels, wholesale pallets and market counters",
+            "environment": "Real produce market, greenhouse or wholesale distribution setting",
+            "emotion": "Visible concern about food supply and prices",
+        }
     if any(term in source for term in ("ормуз", "hormuz", "ormuz")):
         return {
             "main_subject": "Iranian pressure on oil shipping routes",
@@ -80,7 +112,10 @@ def _topic_scene_defaults(title: str, source: str) -> dict[str, str]:
             "environment": environment,
             "emotion": "Operational urgency around a disrupted essential service",
         }
-    if any(term in source for term in ("нефт", "oil", "рынок", "market", "инфляц", "inflation", "цен", "price", "поставк")):
+    if any(term in source for term in (
+        "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
+        "энергорын", "energy market",
+    )):
         return {
             "main_subject": "Oil price movement and the supply decision behind it",
             "visible_action": "Energy traders react to changing oil prices on live market boards",
@@ -171,6 +206,37 @@ def _semantic_scene(value: object, fallback: str) -> str:
     return _clean(". ".join(semantic), fallback)
 
 
+_STRUCTURED_SCENE_FIELDS = (
+    ("MAIN SUBJECT", "main_subject"),
+    ("SELECTED PEOPLE", "selected_people"),
+    ("VISIBLE ACTION", "visible_action"),
+    ("VISUAL EVIDENCE", "visual_evidence"),
+    ("ENVIRONMENT", "environment"),
+    ("EMOTION", "emotion"),
+)
+_STRUCTURED_PROMPT_LABELS = (
+    "CORE STYLE", "STORY CONTEXT", *[name for name, _key in _STRUCTURED_SCENE_FIELDS],
+    "SELECTED COMPOSITION", "IDENTITY / REFERENCES", "HEADLINE", "SUBHEADLINE",
+    "TYPOGRAPHY", "RED EDGE ACCENTS", "FINAL NEGATIVE RULES",
+)
+
+
+def _structured_scene_values(value: object) -> dict[str, str]:
+    """Read planner scene slots from a multiline V2 draft without style leakage."""
+    raw = str(value or "")
+    if not re.search(r"(?im)^\s*STORY CONTEXT:\s*", raw):
+        return {}
+    next_label = "|".join(re.escape(label) for label in _STRUCTURED_PROMPT_LABELS)
+    values: dict[str, str] = {}
+    for label, key in _STRUCTURED_SCENE_FIELDS:
+        match = re.search(
+            rf"(?ims)^\s*{re.escape(label)}:\s*(.*?)(?=^\s*(?:{next_label}):|\Z)", raw,
+        )
+        if match and (text := " ".join(match.group(1).split())):
+            values[key] = text
+    return values
+
+
 def prompt_sources_debug() -> dict[str, str]:
     """Human-readable provenance stored with a render, outside the provider prompt."""
     return {
@@ -192,7 +258,8 @@ def build_final_provider_prompt(
     text_mode: str = "fastgen",
 ) -> str:
     """Build the one immutable FastGen payload from semantic values and V2 rules."""
-    brief = visual_brief(item)
+    scene_values = _structured_scene_values(scene_prompt)
+    brief = visual_brief({**dict(item or {}), **scene_values})
     scene = _semantic_scene(scene_prompt, brief["title"])
     identity = "; ".join(part for part in (identity_notes, reference_notes) if part.strip()) or "No additional identity or reference instruction."
     composition = "; ".join(part for part in (brief["layout"], composition_notes) if part.strip())
@@ -236,7 +303,26 @@ def build_final_provider_prompt(
         ("RED EDGE ACCENTS", "Use one bold vivid red curved-corner frame with no words around all four outer edges of the image: continuous perimeter treatment, flush to the boundary, zero inset and zero empty margin. It must read as a deliberate red arc/frame, never as two thin side stripes."),
         ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
     )
-    return "\n\n".join(f"{name}:\n{content}" for name, content in blocks)
+    final_prompt = "\n\n".join(f"{name}:\n{content}" for name, content in blocks)
+    # Only the source topic may authorise an oil-market scene.  The script
+    # may mention prices/supply incidentally, and a broken scene prompt must
+    # never be allowed to justify its own contradiction.
+    topic_source = " ".join((
+        str((item or {}).get("title", "")),
+        str((item or {}).get("topic", "")),
+    )).casefold()
+    explicit_energy = any(term in topic_source for term in (
+        "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
+        "энергорын", "energy market",
+    ))
+    final_lower = final_prompt.casefold()
+    oil_collision = (
+        "energy traders react to changing oil prices" in final_lower
+        or "energy-market trading floor" in final_lower
+    )
+    if oil_collision and not explicit_energy:
+        raise ValueError("FastGen prompt conflict: oil-market scene contradicts the current topic")
+    return final_prompt
 
 
 def universal_thumbnail_core_v2(item: Mapping[str, object] | None = None) -> str:
