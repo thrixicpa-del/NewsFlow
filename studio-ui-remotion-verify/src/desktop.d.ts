@@ -90,6 +90,7 @@ interface NewsFlowSnapshot {
         snapshotId: string; productionItemId: string; title: string; channelId: string; publishAt?: string;
         privacy: 'private' | 'unlisted' | 'public'; publishMode: string; youtubeVideoId?: string; youtubeVideoUrl?: string;
         currentStage: string; status: string; active: boolean;
+        reupload?: { status?: string; oldVideoId?: string; oldVideoUrl?: string; newVideoId?: string; newVideoUrl?: string; reason?: string; requestedAt?: string; startedAt?: string; uploadedAt?: string; completedAt?: string; failedAt?: string; lastCheckedAt?: string; originalPrivacy?: string; originalPublishMode?: string; originalPublishAt?: string; metadataConfirmedAt?: string; replacementPrivacy?: string; scheduleApplied?: boolean };
         ads?: { status?: string; mode?: string; automatic?: boolean; manualSlotsSeconds?: number[]; confirmedManualSlotsSeconds?: number[] };
         completion: { completed: number; total: number };
         steps: Record<string, { status?: string; error?: unknown; detail?: string; startedAt?: string; finishedAt?: string; durationSeconds?: number; providerResult?: Record<string, unknown>; progress?: Record<string, unknown> }>;
