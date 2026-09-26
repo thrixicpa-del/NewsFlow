@@ -10,7 +10,7 @@ from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import load_session, save_session, session_path
-from scriptor.story_planner import parse_story_plan_response
+from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
 
 
 def _story_plan(part_count: int = 2) -> str:
@@ -450,7 +450,9 @@ class ScenarioGenerationTests(unittest.TestCase):
 
     def test_both_provider_modes_resume_a_persisted_story_at_the_next_part(self):
         title = "Тема для возобновления"
-        plan = parse_story_plan_response(_story_plan(2), (5000, 5000)).to_dict()
+        plan = parse_story_plan_response(
+            _story_plan(2), calculate_story_part_targets(10000),
+        ).to_dict()
         for provider in ("agent", "openai"):
             with self.subTest(provider=provider):
                 settings = Settings(
