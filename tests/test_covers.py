@@ -1160,10 +1160,10 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             "primary_entities": ["lumira"],
         }
 
-        validation = _validate_cover_word("headline", "Компания Norvel меняет поставки", item)
+        validation = _validate_cover_word("headline", "Lumira и Norvel меняют поставки", item)
 
         self.assertFalse(validation["valid"], validation)
-        self.assertEqual(validation["reason_code"], "MISSING_NAMED_ANCHOR")
+        self.assertEqual(validation["reason_code"], "FOREIGN_ENTITY")
 
     def test_cover_word_runtime_has_no_fixed_known_entity_vocabulary(self):
         from scriptor import bridge
