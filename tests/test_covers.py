@@ -1730,6 +1730,25 @@ class CoverVisualInstructionTests(unittest.TestCase):
         self.assertIn("Official NATO and EU fabric flags", prompt)
 
 
+    def test_runtime_cover_routing_has_no_named_fixture_tables(self):
+        from scriptor import bridge, thumbnail_prompt_v2
+
+        prompt_source = Path(thumbnail_prompt_v2.__file__).read_text(encoding="utf-8")
+        fallback = prompt_source.split("def _topic_scene_defaults", 1)[1].split("def visual_brief", 1)[0].casefold()
+        bridge_source = Path(bridge.__file__).read_text(encoding="utf-8")
+        visual_plan = bridge_source.split("def _cover_topic_visual_plan", 1)[1].split(
+            "def _cover_news_conflict_requirement", 1
+        )[0].casefold()
+
+        for forbidden in (
+            "karabakh", "карабах", "wildberries", "вайлдберриз", "hormuz", "ормуз",
+            "donald trump", "vladimir putin", "nato summit",
+        ):
+            self.assertNotIn(forbidden, fallback)
+            self.assertNotIn(forbidden, visual_plan)
+        self.assertNotIn("_COVER_FACE_TOPIC_HINTS", bridge_source)
+        self.assertNotIn("_COVER_FACE_ALIASES", bridge_source)
+
     def test_topic_plan_is_universal_and_agent_owned(self):
         plan = _cover_topic_visual_plan({
             "title": "Редкий минерал меняет производство аккумуляторов",
