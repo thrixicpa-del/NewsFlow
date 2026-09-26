@@ -73,7 +73,12 @@ def calculate_story_part_targets(target_chars: int) -> tuple[int, ...]:
     if not target:
         return (0,)
     part_count = max(1, (target + PREFERRED_PART_CHARS // 2) // PREFERRED_PART_CHARS)
-    quotient, remainder = divmod(target, part_count)
+    # Final assembly inserts exactly two newline characters between accepted
+    # parts. Keep those deterministic separators inside the overall character
+    # budget instead of making an exact max contract spuriously LONG.
+    separator_chars = 2 * (part_count - 1)
+    prose_target = max(0, target - separator_chars)
+    quotient, remainder = divmod(prose_target, part_count)
     return tuple(quotient + (1 if index < remainder else 0) for index in range(part_count))
 
 
