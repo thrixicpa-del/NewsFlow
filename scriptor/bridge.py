@@ -1942,6 +1942,8 @@ def snapshot() -> dict:
             "subheadlinePaused": settings.cover_subheadlines_paused,
             "textMode": settings.cover_text_mode,
             "buildMode": settings.cover_build_mode,
+            "buildModeRanges": settings.cover_build_mode_ranges,
+            "allowVariedTextPalette": settings.cover_allow_varied_text_palette,
             "ranges": settings.cover_prompt_ranges,
             "presets": settings.cover_prompt_presets,
             "referenceMode": settings.cover_reference_mode,
@@ -6233,6 +6235,10 @@ def save_cover_settings(payload: dict) -> dict:
     build_mode = str(payload.get("buildMode", settings.cover_build_mode))
     if build_mode in {"fastgen-full", "fastgen-full-my-face"}:
         settings.cover_build_mode = build_mode
+    if isinstance(payload.get("buildModeRanges"), list):
+        settings.cover_build_mode_ranges = _clean_cover_build_mode_ranges(payload["buildModeRanges"])
+    if isinstance(payload.get("allowVariedTextPalette"), bool):
+        settings.cover_allow_varied_text_palette = bool(payload["allowVariedTextPalette"])
     if "headlineTemplate" in payload:
         settings.cover_headline_template = str(payload["headlineTemplate"]).strip() or settings.cover_headline_template
     if "subheadlineTemplate" in payload:
@@ -6674,6 +6680,47 @@ def _clean_cover_ranges(value: list) -> list[dict]:
     return result
 
 
+def _clean_cover_build_mode_ranges(value: list) -> list[dict]:
+    """Normalise one-based routes and reject ambiguous overlapping modes."""
+    allowed = {"fastgen-full", "fastgen-full-my-face"}
+    result: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        start = max(1, int(item.get("start", 1) or 1))
+        end = max(start, int(item.get("end", start) or start))
+        build_mode = str(item.get("buildMode", item.get("build_mode", ""))).casefold()
+        if build_mode not in allowed:
+            raise ValueError("Неизвестный режим диапазона обложек")
+        result.append({"start": start, "end": end, "buildMode": build_mode})
+    result.sort(key=lambda item: (item["start"], item["end"], item["buildMode"]))
+    for index, current in enumerate(result):
+        for other in result[index + 1:]:
+            if other["start"] > current["end"]:
+                break
+            if current["buildMode"] != other["buildMode"]:
+                raise ValueError(
+                    f"Диапазоны режимов пересекаются: {current['start']}–{current['end']} и "
+                    f"{other['start']}–{other['end']}"
+                )
+    return result
+
+
+def _cover_build_mode_for_item(item: dict, position: int, settings: Settings,
+                               default_mode: str | None = None) -> str:
+    """Resolve the persisted route by the visible one-based scenario number."""
+    mode = str(default_mode or settings.cover_build_mode).casefold()
+    if mode not in {"fastgen-full", "fastgen-full-my-face"}:
+        mode = "fastgen-full"
+    scenario_index = max(1, int(item.get("scenario_index") or position + 1))
+    for group in settings.cover_build_mode_ranges:
+        if int(group.get("start", 1)) <= scenario_index <= int(group.get("end", 0)):
+            ranged = str(group.get("buildMode", group.get("build_mode", ""))).casefold()
+            if ranged in {"fastgen-full", "fastgen-full-my-face"}:
+                return ranged
+    return mode
+
+
 def _clean_cover_reference_ranges(value: list) -> list[dict]:
     """Validate channel style packs. First matching range intentionally wins."""
     result: list[dict] = []
@@ -6929,14 +6976,17 @@ def _cover_instruction(item: dict, position: int, settings) -> str:
     # only additive after the user deliberately enables their custom brief.
     base = range_prompt or (settings.cover_prompt_template if settings.cover_use_custom_prompt else "")
     request = (
-        "Ты планировщик сцены для новостной YouTube-обложки. Верни только краткое, естественное английское "
+        "Ты профессиональный арт-директор YouTube-обложек и планировщик новостной сцены. Верни только краткое, естественное английское "
         "описание фактов сцены: кто/что в кадре, видимое действие, материальные доказательства и среда. "
+        "Сделай сцену максимально кликабельной за счёт ясного конфликта, ставки, реакции людей и одного мгновенно понятного визуального доказательства. "
+        "Толпа, страх, военные, разрушения и последствия атаки допустимы только когда это подтверждено темой или сценарием. "
         "Не добавляй style prompt, photorealism, typography, headline/subheadline instructions, negative rules, "
         "устаревший шаблон, формат кадра или технические требования: их единожды добавит Final Prompt Builder. "
         "Верни JSON строго формата "
         '{"prompts":["..."],"recommended":1} без Markdown и пояснений. '
         f"Создай ровно {settings.cover_prompt_variant_count} разных semantic scene descriptions. "
-        "Каждый вариант обязан передавать конкретное действие, визуальное доказательство и тему.\n\n"
+        "Каждый вариант обязан передавать конкретное действие, визуальное доказательство и тему, а также заметно отличаться композицией, "
+        "ракурсом, дистанцией камеры и расположением людей/объектов от остальных вариантов.\n\n"
         f"ТЕМА: {title}\n{_cover_structured_context(item)}\n{_cover_topic_visual_plan(item)}"
     )
     if base:
@@ -8623,6 +8673,9 @@ def generate_covers(payload: dict) -> dict:
 def _generate_covers_unlocked(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
+    settings.cover_build_mode_ranges = _clean_cover_build_mode_ranges(
+        settings.cover_build_mode_ranges,
+    )
     # "Create covers" is an explicit operator decision to resume this queue.
     # Without this edge, the worker starts successfully but immediately turns
     # every row back into "Paused" and never submits a FastGen request.
@@ -8696,7 +8749,16 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         text_mode = settings.cover_text_mode
     if face_mode not in {"auto", "with", "without"}:
         face_mode = "auto"
-    build_mode = str(payload.get("buildMode", settings.cover_build_mode)).casefold()
+    requested_index = min(requested)
+    requested_mode = str(payload.get("buildMode", settings.cover_build_mode))
+    build_mode = (
+        _cover_build_mode_for_item(
+            settings.cover_queue[requested_index], requested_index, settings,
+            default_mode=requested_mode,
+        )
+        if payload.get("useBuildModeRanges")
+        else requested_mode.casefold()
+    )
     if build_mode not in {"fastgen-full", "fastgen-full-my-face"}:
         build_mode = "fastgen-full-my-face"
     use_my_face = build_mode == "fastgen-full-my-face"
@@ -8825,6 +8887,11 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             _save_cover_state(settings)
             continue
         message = _cover_face_requirement_message(face_mode, face_label)
+        if use_my_face and not face_label:
+            message = (
+                "Для режима «FastGen всё + мои лица» не найден релевантный подготовленный PNG. "
+                "Проверьте папку лиц, подготовьте PNG и обновите библиотеку; NewsFlow не переключает режим и не выбирает случайное лицо."
+            )
         if message:
             _cover_step(item, "Нет подходящего лица", 100, message)
             item["error"] = message
@@ -8876,6 +8943,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     reference_notes=" ".join(note for note in reference_notes if note),
                     composition_notes=" ".join(note for note in composition_notes if note),
                     text_mode=text_mode,
+                    allow_varied_text_palette=settings.cover_allow_varied_text_palette,
                 )
                 for visual_prompt in prompt_options
             ]
@@ -9344,6 +9412,7 @@ def regenerate_covers(payload: dict) -> dict:
         "localFaceOnly": bool(payload.get("localFaceOnly")),
         "faceMode": payload.get("faceMode", "with"),
         "textMode": payload.get("textMode", "fastgen"),
+        "useBuildModeRanges": bool(payload.get("useBuildModeRanges", False)),
     })
 
 

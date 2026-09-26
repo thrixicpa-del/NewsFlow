@@ -256,11 +256,31 @@ def build_final_provider_prompt(
     reference_notes: str = "",
     composition_notes: str = "",
     text_mode: str = "fastgen",
+    allow_varied_text_palette: bool = False,
 ) -> str:
     """Build the one immutable FastGen payload from semantic values and V2 rules."""
     scene_values = _structured_scene_values(scene_prompt)
     brief = visual_brief({**dict(item or {}), **scene_values})
     scene = _semantic_scene(scene_prompt, brief["title"])
+    topic_source = " ".join((
+        str((item or {}).get("title", "")),
+        str((item or {}).get("topic", "")),
+    )).casefold()
+    explicit_energy = any(term in topic_source for term in (
+        "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
+        "энергорын", "energy market",
+    ))
+    # A provider draft can be stale or copied from another topic. When an
+    # energy-market scene contradicts the current non-energy title, rebuild
+    # STORY CONTEXT from the title-grounded semantic slots instead of sending
+    # the collision to FastGen or merely rejecting the whole batch.
+    if not explicit_energy and any(term in scene.casefold() for term in (
+        "oil price", "energy trader", "energy-market", "barrel", "opec",
+    )):
+        scene = "; ".join(value for value in (
+            brief["main_subject"], brief["visible_action"],
+            brief["visual_evidence"], brief["environment"],
+        ) if value)
     identity = "; ".join(part for part in (identity_notes, reference_notes) if part.strip()) or "No additional identity or reference instruction."
     composition = "; ".join(part for part in (brief["layout"], composition_notes) if part.strip())
     if brief["headline"] and text_mode == "fastgen":
@@ -275,12 +295,19 @@ def build_final_provider_prompt(
             "Do not add punctuation, translate, rewrite or add words."
             if brief["subheadline"] else "None supplied."
         )
+        palette = (
+            "You may choose a different contrasting text and panel colour pair when it fits the scene better; "
+            "keep deliberate red/yellow accents and preserve the mandatory red outer frame."
+            if allow_varied_text_palette else
+            "Use yellow or light lettering on a red panel with deliberate red/yellow accents."
+        )
         typography = (
-            "Act as the thumbnail art director: choose the strongest readable composition for this exact photograph, "
-            "never thin, horror-style, low-contrast or decorative lettering. Use ultra-heavy condensed Cyrillic, "
-            "large at phone size, with a thick black outer stroke and hard dark shadow. Prefer yellow lettering on a red panel; "
-            "when it creates stronger separation from the scene, use red lettering on a yellow panel instead. "
-            "The panel must sit behind every headline word, keep the lettering within its bounds, and leave most of the photograph visible."
+            "Act as a professional YouTube thumbnail designer and art director. Choose varied, expressive, immediately readable "
+            "typography and the strongest hierarchy for this exact photograph; vary font treatment, panel shape and text placement "
+            "to suit this topic rather than repeating one template. Never use thin, horror-style, low-contrast or decorative lettering. "
+            "Use an ultra-heavy Cyrillic display face, large at phone size, with a thick dark outer stroke or hard shadow where needed. "
+            f"{palette} The contrasting solid panel must sit behind every headline word, keep the lettering within its bounds, "
+            "and leave the central evidence and recognisable faces visible."
         )
     else:
         headline = "None supplied; do not generate words."
@@ -300,21 +327,13 @@ def build_final_provider_prompt(
         ("HEADLINE", headline),
         ("SUBHEADLINE", subheadline),
         ("TYPOGRAPHY", typography),
-        ("RED EDGE ACCENTS", "Use one bold vivid red curved-corner frame with no words around all four outer edges of the image: continuous perimeter treatment, flush to the boundary, zero inset and zero empty margin. It must read as a deliberate red arc/frame, never as two thin side stripes."),
-        ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
+        ("RED EDGE ACCENTS", "Always draw one straight vivid red frame around the complete outer perimeter: equal thickness on all four edges, square corners, flush to the image boundary, zero inset and zero empty margin. It must be a clean rectangular border, never arcs, side stripes or decorative corner marks."),
+        ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. Use crowds, soldiers, fear, damage or destruction only when the title or scenario supports them. No circles, ovals, circular frames or rings. No meaningless icons. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
     )
     final_prompt = "\n\n".join(f"{name}:\n{content}" for name, content in blocks)
     # Only the source topic may authorise an oil-market scene.  The script
     # may mention prices/supply incidentally, and a broken scene prompt must
     # never be allowed to justify its own contradiction.
-    topic_source = " ".join((
-        str((item or {}).get("title", "")),
-        str((item or {}).get("topic", "")),
-    )).casefold()
-    explicit_energy = any(term in topic_source for term in (
-        "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
-        "энергорын", "energy market",
-    ))
     final_lower = final_prompt.casefold()
     oil_collision = (
         "energy traders react to changing oil prices" in final_lower

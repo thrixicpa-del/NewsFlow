@@ -3787,12 +3787,22 @@ export function Covers({
   // A portable build can briefly run with a previous Python core after a UI
   // update.  Keep the covers page usable even if that core has not yet sent a
   // newly added optional setting.
+  const extendedCoverSettings = rawData.coverSettings as NewsFlowSnapshot["coverSettings"] & {
+    buildModeRanges?: Array<{
+      start: number;
+      end: number;
+      buildMode: "fastgen-full" | "fastgen-full-my-face";
+    }>;
+    allowVariedTextPalette?: boolean;
+  };
   const data = {
     ...rawData,
     coverCounts: rawData.coverCounts || fallback.coverCounts,
     coverSettings: {
       ...fallback.coverSettings,
       ...(rawData.coverSettings || {}),
+      buildModeRanges: extendedCoverSettings.buildModeRanges || [],
+      allowVariedTextPalette: Boolean(extendedCoverSettings.allowVariedTextPalette),
       ranges: rawData.coverSettings?.ranges || [],
       presets: rawData.coverSettings?.presets || [],
       headlinePresets: rawData.coverSettings?.headlinePresets || [],
@@ -3812,6 +3822,8 @@ export function Covers({
     },
   };
   const [selected, setSelected] = useState<number[]>([]);
+  const selectionAnchorRef = useRef<number | null>(null);
+  const selectedProductionIdsRef = useRef<string[]>([]);
   const [inspectedCoverIndex, setInspectedCoverIndex] = useState<number | null>(
     null,
   );
@@ -3917,6 +3929,12 @@ export function Covers({
   const [coverBuildMode, setCoverBuildMode] = useState<CoverBuildMode>(
     normaliseCoverBuildMode(data.coverSettings.buildMode),
   );
+  const [buildModeRanges, setBuildModeRanges] = useState(
+    data.coverSettings.buildModeRanges || [],
+  );
+  const [allowVariedTextPalette, setAllowVariedTextPalette] = useState(
+    data.coverSettings.allowVariedTextPalette,
+  );
   const [coverGenerationStarting, setCoverGenerationStarting] = useState(false);
   const coverGenerationStartRef = useRef(false);
   useEffect(() => {
@@ -3950,6 +3968,8 @@ export function Covers({
     setAvoidTextRepeats(data.coverSettings.avoidTextRepeats);
     setTextMode(data.coverSettings.textMode);
     setCoverBuildMode(normaliseCoverBuildMode(data.coverSettings.buildMode));
+    setBuildModeRanges(data.coverSettings.buildModeRanges || []);
+    setAllowVariedTextPalette(data.coverSettings.allowVariedTextPalette);
   // `data.coverSettings` above is a deliberately normalised object created
   // for every render. Depending on it here makes a missing optional field
   // (for example `selectedKeyLabels`) allocate a new fallback array forever
@@ -3991,6 +4011,46 @@ export function Covers({
   );
   const selectedModel = models.find((item) => item.id === operation);
   const fastgenUsage = data.fastgenUsage?.keys || [];
+  useEffect(() => {
+    selectedProductionIdsRef.current = selected
+      .map((index) => String(data.covers[index]?.production_item_id || "").trim())
+      .filter(Boolean);
+  }, [selected]);
+  useEffect(() => {
+    if (!selectedProductionIdsRef.current.length) return;
+    const remapped = selectedProductionIdsRef.current
+      .map((identity) => data.covers.findIndex(
+        (cover) => String(cover.production_item_id || "").trim() === identity,
+      ))
+      .filter((index) => index >= 0);
+    setSelected((current) =>
+      current.length === remapped.length && current.every((value, index) => value === remapped[index])
+        ? current
+        : remapped,
+    );
+  }, [data.covers]);
+  const updateCoverSelection = (
+    index: number,
+    event: { ctrlKey: boolean; shiftKey: boolean },
+  ) => {
+    setSelected((current) => {
+      if (event.shiftKey && selectionAnchorRef.current !== null) {
+        const start = Math.min(selectionAnchorRef.current, index);
+        const end = Math.max(selectionAnchorRef.current, index);
+        const range = Array.from({ length: end - start + 1 }, (_unused, offset) => start + offset);
+        return event.ctrlKey
+          ? [...current, ...range.filter((value) => !current.includes(value))]
+          : range;
+      }
+      selectionAnchorRef.current = index;
+      if (event.ctrlKey) {
+        return current.includes(index)
+          ? current.filter((value) => value !== index)
+          : [...current, index];
+      }
+      return [index];
+    });
+  };
   const activeCoverRows = selected.length
     ? data.covers.filter((_cover, index) => selected.includes(index))
     : data.covers;
@@ -4024,15 +4084,7 @@ export function Covers({
             <button
               className="nf-table-select"
               aria-label={`${isSelected ? "Снять выбор" : "Выбрать"}: ${cover.title}`}
-              onClick={(event) =>
-                setSelected((current) =>
-                  event.ctrlKey
-                    ? current.includes(index)
-                      ? current.filter((value) => value !== index)
-                      : [...current, index]
-                    : [index],
-                )
-              }
+              onClick={(event) => updateCoverSelection(index, event)}
             >
               {isSelected ? "✓" : "○"}
             </button>
@@ -4176,6 +4228,34 @@ export function Covers({
         String(cover.cover_headline || "").trim(),
     ),
   );
+  const buildModeRangeError = buildModeRanges.some((range) => range.end < range.start)
+    ? "Конец диапазона не может быть меньше начала."
+    : buildModeRanges.some((range, index) =>
+        buildModeRanges.some((other, otherIndex) =>
+          otherIndex > index &&
+          range.buildMode !== other.buildMode &&
+          Math.max(range.start, other.start) <= Math.min(range.end, other.end),
+        ),
+      )
+      ? "Диапазоны разных режимов пересекаются. Исправьте границы перед запуском."
+      : "";
+  const addBuildModeRange = () =>
+    setBuildModeRanges((current) => [
+      ...current,
+      {
+        start: 1,
+        end: Math.max(1, data.covers.length),
+        buildMode: coverBuildMode,
+      },
+    ]);
+  const updateBuildModeRange = (
+    index: number,
+    patch: Partial<(typeof buildModeRanges)[number]>,
+  ) => setBuildModeRanges((current) => current.map((range, row) =>
+    row === index ? { ...range, ...patch } : range,
+  ));
+  const removeBuildModeRange = (index: number) =>
+    setBuildModeRanges((current) => current.filter((_range, row) => row !== index));
   const coverSettingsPayload = () => ({
     operation,
     aspectRatio: ratio,
@@ -4192,6 +4272,8 @@ export function Covers({
     avoidTextRepeats,
     textMode,
     buildMode: coverBuildMode,
+    buildModeRanges,
+    allowVariedTextPalette,
     ranges,
     referenceMode,
     referencePaths: references,
@@ -4213,6 +4295,10 @@ export function Covers({
   });
   const save = () =>
     void command("save-cover-settings", coverSettingsPayload());
+  const saveBuildModePolicy = () => {
+    if (buildModeRangeError) return;
+    void command("save-cover-settings", coverSettingsPayload());
+  };
   const selectFastGenOperation = (value: string) => {
     setOperation(value);
     // Persist immediately: snapshot polling otherwise restores the previous
@@ -4354,6 +4440,7 @@ export function Covers({
   const generate = async (
     mode: CoverBuildMode = coverBuildMode,
   ) => {
+    if (buildModeRangeError) return;
     if (coverGenerationStartRef.current) return;
     coverGenerationStartRef.current = true;
     setCoverGenerationStarting(true);
@@ -4380,6 +4467,7 @@ export function Covers({
         resumeGeneration: true,
         operation,
         buildMode: mode,
+        useBuildModeRanges: true,
         faceMode,
         textMode: fastgenText ? "fastgen" : "overlay",
         localFaceOnly,
@@ -4544,7 +4632,15 @@ export function Covers({
     );
     if (path) void command("export-covers", { path, indices: selected });
   };
-  const rendererPayload = () => ({ currentProfile: true, operation });
+  const rendererPayload = () => ({
+    currentProfile: false,
+    useBuildModeRanges: true,
+    operation,
+    buildMode: coverBuildMode,
+    faceMode: "auto",
+    textMode: "fastgen",
+    localFaceOnly: false,
+  });
   const regenerate = () =>
     void command("regenerate-covers", {
       ...coverSelectionPayload(),
@@ -4841,6 +4937,72 @@ export function Covers({
                   ? "FastGen сам рисует сцену, лица и текст; пользовательский PNG не загружается."
                   : "NewsFlow подбирает только подтверждённо релевантный PNG и отправляет один референс в FastGen. FastGen сам рисует финальную сцену, лицо и текст."}
               </small>
+              <div className="cover-mode-ranges" aria-label="Диапазоны режимов FastGen">
+                <div className="toolbar compact">
+                  <Button onClick={addBuildModeRange}>
+                    Добавить диапазон режимов
+                  </Button>
+                  <Button onClick={buildModeRangeError ? undefined : saveBuildModePolicy}>
+                    Сохранить диапазоны режимов
+                  </Button>
+                </div>
+                {buildModeRanges.map((range, index) => (
+                  <div className="cover-mode-range" key={`cover-mode-range-${index}`}>
+                    <label>
+                      С
+                      <input
+                        aria-label="Начало диапазона режима"
+                        type="number"
+                        min="1"
+                        value={range.start}
+                        onChange={(event) => updateBuildModeRange(index, {
+                          start: Math.max(1, Number(event.target.value) || 1),
+                        })}
+                      />
+                    </label>
+                    <label>
+                      По
+                      <input
+                        aria-label="Конец диапазона режима"
+                        type="number"
+                        min="1"
+                        value={range.end}
+                        onChange={(event) => updateBuildModeRange(index, {
+                          end: Math.max(1, Number(event.target.value) || 1),
+                        })}
+                      />
+                    </label>
+                    <label>
+                      Режим
+                      <select
+                        aria-label="Режим диапазона"
+                        value={range.buildMode}
+                        onChange={(event) => updateBuildModeRange(index, {
+                          buildMode: normaliseCoverBuildMode(event.target.value),
+                        })}
+                      >
+                        <option value="fastgen-full">Всё через FastGen</option>
+                        <option value="fastgen-full-my-face">FastGen всё + мои лица</option>
+                      </select>
+                    </label>
+                    <Button kind="danger" onClick={() => removeBuildModeRange(index)}>
+                      Удалить диапазон
+                    </Button>
+                  </div>
+                ))}
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={allowVariedTextPalette}
+                    onChange={(event) => setAllowVariedTextPalette(event.target.checked)}
+                  />
+                  Разрешить разные цветовые схемы текста и плашки
+                </label>
+                <small>
+                  Без галочки: светлый/жёлтый текст на красной плашке. С галочкой FastGen выбирает контрастную пару под сцену. Ровная красная рамка остаётся обязательной.
+                </small>
+                {buildModeRangeError ? <small className="error">{buildModeRangeError}</small> : null}
+              </div>
               <div className="cover-workflow-faces">
                 <Button onClick={() => void chooseFaceLibrary()}>
                   <FolderOpen size={15} />
@@ -6773,6 +6935,20 @@ export function Covers({
                     </dd>
                   </div>
                   <div>
+                    <dt>Режим FastGen</dt>
+                    <dd>{cover.render_profile?.build_mode || "Ещё не запускался"}</dd>
+                  </div>
+                  <div>
+                    <dt>PNG в FastGen</dt>
+                    <dd>
+                      {cover.faceSelectionMode === "prepared-reference"
+                        ? `1 · ${cover.face_reference_path || cover.face_reference_label || "подготовленный портрет"}`
+                        : cover.faceSelectionMode === "semantic-only"
+                          ? "0 · лицо задано семантически"
+                          : "Ещё не определено"}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Последнее событие</dt>
                     <dd>{cover.generation_history?.at(-1)?.at || "Не получено"}</dd>
                   </div>
@@ -6793,15 +6969,7 @@ export function Covers({
                 ) : null}
                 <button
                   className="cover-select"
-                  onClick={(event) =>
-                    setSelected((current) =>
-                      event.ctrlKey
-                        ? current.includes(index)
-                          ? current.filter((value) => value !== index)
-                          : [...current, index]
-                        : [index],
-                    )
-                  }
+                  onClick={(event) => updateCoverSelection(index, event)}
                 >
                   <span>{selected.includes(index) ? "✓" : "○"}</span>
                   <span>{cover.scenario_index || index + 1}</span>

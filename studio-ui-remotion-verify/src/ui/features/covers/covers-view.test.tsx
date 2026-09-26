@@ -230,6 +230,59 @@ describe("Covers Light view", () => {
     expect(screen.getByText("Выбрано: 1")).toBeTruthy();
   });
 
+  it("supports Shift ranges in the lower ready-cover queue", () => {
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:a", title: "A", image_prompt: "A", paths: ["a.png"] },
+        { production_item_id: "production:b", title: "B", image_prompt: "B", paths: ["b.png"] },
+        { production_item_id: "production:c", title: "C", image_prompt: "C", paths: ["c.png"] },
+        { production_item_id: "production:d", title: "D", image_prompt: "D", paths: ["d.png"] },
+      ],
+    };
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: B" }));
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: D" }), { shiftKey: true });
+
+    expect(screen.getByText("Выбрано: 3")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Снять выбор: B" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Снять выбор: C" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Снять выбор: D" })).toBeTruthy();
+  });
+
+  it("edits unlimited build-mode ranges and the varied palette policy", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:a", title: "A", image_prompt: "A", paths: [] },
+        { production_item_id: "production:b", title: "B", image_prompt: "B", paths: [] },
+      ],
+      coverSettings: {
+        ...fallback.coverSettings,
+        buildModeRanges: [],
+        allowVariedTextPalette: false,
+      },
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Добавить диапазон режимов" }));
+    expect(screen.getAllByLabelText("Начало диапазона режима")).toHaveLength(1);
+    fireEvent.change(screen.getByLabelText("Конец диапазона режима"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Режим диапазона"), { target: { value: "fastgen-full-my-face" } });
+    fireEvent.click(screen.getByLabelText("Разрешить разные цветовые схемы текста и плашки"));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить диапазоны режимов" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-cover-settings",
+      expect.objectContaining({
+        buildModeRanges: [{ start: 1, end: 2, buildMode: "fastgen-full-my-face" }],
+        allowVariedTextPalette: true,
+      }),
+    ));
+  });
+
   it("manually retries only an exact eligible durable selection with the current render contract", async () => {
     const command = vi.fn(async () => undefined);
     const data = {
@@ -320,7 +373,8 @@ describe("Covers Light view", () => {
     expect(renderSelected.hasAttribute("disabled")).toBe(false);
     fireEvent.click(renderSelected);
     expect(command).toHaveBeenCalledWith("regenerate-covers", expect.objectContaining({
-      indices: [0, 1], productionItemIds: ["production:a", "production:b"], currentProfile: true,
+      indices: [0, 1], productionItemIds: ["production:a", "production:b"],
+      currentProfile: false, useBuildModeRanges: true,
     }));
   });
 
@@ -414,6 +468,7 @@ describe("Covers Light view", () => {
         faceSelectionMode: "semantic-only" as const,
         faceSelectionReason: "topic-relevant face-tree metadata match",
         semantic_face_label: "Трамп",
+        render_profile: { build_mode: "fastgen-full", text_mode: "fastgen" },
         final_provider_prompt: "FINAL PROMPT MARKER",
         paths: [],
       }],
@@ -427,6 +482,9 @@ describe("Covers Light view", () => {
     expect(screen.getByText("agent")).toBeTruthy();
     expect(screen.getByText("Topic Planner")).toBeTruthy();
     expect(screen.getByText(/semantic-only · Трамп/)).toBeTruthy();
+    expect(screen.getByText("Режим FastGen")).toBeTruthy();
+    expect(screen.getByText("fastgen-full")).toBeTruthy();
+    expect(screen.getByText("0 · лицо задано семантически")).toBeTruthy();
     expect(screen.getByText("Final FastGen prompt")).toBeTruthy();
     expect(screen.getByText("FINAL PROMPT MARKER")).toBeTruthy();
   });

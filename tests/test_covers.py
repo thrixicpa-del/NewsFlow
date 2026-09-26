@@ -252,6 +252,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("semantic scene descriptions", prompt)
         self.assertIn("конкретное действие", prompt)
         self.assertIn("визуальное доказательство", prompt)
+        self.assertIn("профессиональный арт-директор YouTube-обложек", prompt)
+        self.assertIn("заметно отличаться композицией", prompt)
+        self.assertIn("только когда это подтверждено темой или сценарием", prompt)
         self.assertIn("Final Prompt Builder", prompt)
         self.assertNotIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", prompt)
         self.assertNotIn("CLICKABILITY = HIGH.", prompt)
@@ -288,7 +291,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertEqual(len(payloads), 1)
         self.assertIn("CLICKABILITY = HIGH.", payloads[0])
         self.assertIn("ACTION = HIGH.", payloads[0])
-        self.assertIn("bold vivid red curved-corner frame", payloads[0])
+        self.assertIn("straight vivid red frame", payloads[0])
         self.assertNotIn("breaking-news", payloads[0].casefold())
 
     def test_prompt_has_single_style_block(self):
@@ -625,10 +628,32 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("port operations", body)
         self.assertIn("container", body)
         self.assertNotIn("energy-market trading floor", body)
-        self.assertIn("red curved-corner frame", body)
-        self.assertIn("all four outer edges", body)
-        self.assertIn("yellow lettering on a red panel", body)
-        self.assertIn("red lettering on a yellow panel", body)
+        self.assertIn("straight vivid red frame", body)
+        self.assertIn("all four edges", body)
+        self.assertIn("yellow or light lettering on a red panel", body)
+
+    def test_final_fastgen_prompt_enforces_square_frame_and_palette_policy(self):
+        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+        fixed = build_final_provider_prompt(
+            "A real editorial negotiation scene",
+            {"title": "Трамп и Зеленский обсуждают переговоры", "cover_headline": "ДАВЛЕНИЕ РАСТЁТ"},
+            allow_varied_text_palette=False,
+        )
+        varied = build_final_provider_prompt(
+            "A real editorial negotiation scene",
+            {"title": "Трамп и Зеленский обсуждают переговоры", "cover_headline": "ДАВЛЕНИЕ РАСТЁТ"},
+            allow_varied_text_palette=True,
+        )
+
+        for prompt in (fixed, varied):
+            self.assertIn("professional YouTube thumbnail designer and art director", prompt)
+            self.assertIn("straight vivid red frame", prompt)
+            self.assertIn("square corners", prompt)
+            self.assertIn("No circles, ovals, circular frames or rings", prompt)
+            self.assertNotIn("curved-corner frame", prompt)
+        self.assertIn("yellow or light lettering on a red panel", fixed.casefold())
+        self.assertIn("choose a different contrasting text and panel colour pair", varied.casefold())
 
     def test_semantic_scene_planner_resolves_concrete_values_for_supported_news_topics(self):
         """V2 receives scene facts, never planner instructions or generic placeholders."""
@@ -797,7 +822,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             self.assertIn("CLICKABILITY = HIGH.", payload)
             self.assertIn("PHOTOREALISM = MAXIMUM.", payload)
             self.assertIn("SELECTED COMPOSITION:\n", payload)
-            self.assertIn("bold vivid red curved-corner frame", payload)
+            self.assertIn("straight vivid red frame", payload)
             self.assertIn(f"HEADLINE:\n<exact-text>{headline}</exact-text>", payload)
             self.assertIn(f"SUBHEADLINE:\n<exact-text>{subheadline}</exact-text>", payload)
             self.assertNotIn("breaking-news", payload.casefold())
@@ -1324,6 +1349,113 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     self.assertIn("recognisable editorial portrait of Зеленский", settings.cover_queue[0]["final_provider_prompt"])
                     self.assertNotIn(str(prepared), settings.cover_queue[0]["final_provider_prompt"])
 
+    def test_mixed_mode_ranges_send_zero_then_exactly_one_prepared_png(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "Лица"
+            prepared_root = root / "Готовые PNG"
+            source = sources / "Зеленский" / "portrait.jpg"
+            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source.parent.mkdir(parents=True)
+            prepared.parent.mkdir(parents=True)
+            source.write_bytes(b"source")
+            prepared.write_bytes(b"prepared")
+            settings = Settings(
+                cover_output_folder=directory,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+                cover_face_library_folder=str(sources),
+                cover_face_prepared_folder=str(prepared_root),
+                cover_face_library_enabled=True,
+            )
+            settings.cover_build_mode_ranges = [
+                {"start": 1, "end": 1, "buildMode": "fastgen-full"},
+                {"start": 2, "end": 2, "buildMode": "fastgen-full-my-face"},
+            ]
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+            }]}
+            settings.cover_queue = [
+                {
+                    "title": "Зеленский обсуждает переговоры", "scenario_index": 1,
+                    "production_item_id": "production:1", "image_prompt": "Negotiation scene",
+                    "cover_headline": "ПЕРЕГОВОРЫ", "paths": [],
+                },
+                {
+                    "title": "Зеленский не уступает", "scenario_index": 2,
+                    "production_item_id": "production:2", "image_prompt": "Press conference scene",
+                    "cover_headline": "НЕ УСТУПАЕТ", "paths": [],
+                },
+            ]
+            calls: list[tuple[str, ...]] = []
+
+            def render(_prompt, _output, _stem, _operation, _ratio, **kwargs):
+                calls.append(tuple(str(path) for path in kwargs.get("references") or []))
+                return [root / f"result-{len(calls)}.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_run_parallel_cover_workers",
+                              side_effect=lambda indices, worker: [worker(index) for index in indices]), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge._generate_covers_unlocked({
+                    "indices": [0, 1],
+                    "productionItemIds": ["production:1", "production:2"],
+                    "buildMode": "fastgen-full",
+                    "useBuildModeRanges": True,
+                    "faceMode": "auto",
+                    "textMode": "fastgen",
+                    "operation": "reference_image_edit",
+                })
+
+        self.assertEqual(calls, [(), (str(prepared),)])
+        self.assertEqual(settings.cover_queue[0]["render_profile"]["build_mode"], "fastgen-full")
+        self.assertEqual(settings.cover_queue[1]["render_profile"]["build_mode"], "fastgen-full-my-face")
+
+    def test_my_faces_mode_fails_clearly_without_a_prepared_topic_match(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+                cover_build_mode="fastgen-full-my-face",
+                cover_face_library_folder=str(Path(directory) / "missing-faces"),
+                cover_face_prepared_folder=str(Path(directory) / "missing-prepared"),
+                cover_face_library_enabled=True,
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+            }]}
+            settings.cover_queue = [{
+                "title": "Зеленский обсуждает переговоры", "scenario_index": 1,
+                "production_item_id": "production:1", "image_prompt": "Negotiation scene",
+                "cover_headline": "ПЕРЕГОВОРЫ", "paths": [],
+            }]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media") as render:
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:1"],
+                    "_parallel_cover_worker": True, "buildMode": "fastgen-full-my-face",
+                    "faceMode": "auto", "textMode": "fastgen",
+                    "operation": "reference_image_edit",
+                })
+
+        render.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["status"], "Нет подходящего лица")
+        self.assertIn("подготовленный PNG", settings.cover_queue[0]["error"])
+
     def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
         with TemporaryDirectory() as directory:
             folder = Path(directory)
@@ -1839,6 +1971,52 @@ class CoverLocalCompositorTests(unittest.TestCase):
              patch("scriptor.bridge.snapshot", return_value={}):
             save_cover_settings({"buildMode": "fastgen-full-my-face"})
         self.assertEqual(settings.cover_build_mode, "fastgen-full-my-face")
+
+    def test_cover_build_mode_ranges_and_palette_are_persisted(self):
+        settings = Settings()
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}):
+            save_cover_settings({
+                "buildModeRanges": [
+                    {"start": 1, "end": 3, "buildMode": "fastgen-full"},
+                    {"start": 4, "end": 8, "buildMode": "fastgen-full-my-face"},
+                ],
+                "allowVariedTextPalette": True,
+            })
+
+        self.assertEqual(settings.cover_build_mode_ranges, [
+            {"start": 1, "end": 3, "buildMode": "fastgen-full"},
+            {"start": 4, "end": 8, "buildMode": "fastgen-full-my-face"},
+        ])
+        self.assertTrue(settings.cover_allow_varied_text_palette)
+
+    def test_cover_build_mode_ranges_reject_overlaps(self):
+        settings = Settings()
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             self.assertRaisesRegex(ValueError, "пересекаются"):
+            save_cover_settings({"buildModeRanges": [
+                {"start": 1, "end": 5, "buildMode": "fastgen-full"},
+                {"start": 5, "end": 9, "buildMode": "fastgen-full-my-face"},
+            ]})
+
+    def test_cover_build_mode_ranges_resolve_by_visible_scenario_number(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_build_mode="fastgen-full")
+        settings.cover_build_mode_ranges = [
+            {"start": 2, "end": 4, "buildMode": "fastgen-full-my-face"},
+        ]
+        self.assertEqual(
+            bridge._cover_build_mode_for_item({"scenario_index": 3}, 0, settings),
+            "fastgen-full-my-face",
+        )
+        self.assertEqual(
+            bridge._cover_build_mode_for_item({"scenario_index": 7}, 6, settings),
+            "fastgen-full",
+        )
 
     def test_ai_reference_settings_are_saved_separately_from_fastgen_references(self):
         settings = Settings()

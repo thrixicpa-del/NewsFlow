@@ -675,6 +675,13 @@ class Settings:
     # may send one selected portrait as a remote reference; it never composites
     # a local face onto the returned image.
     cover_build_mode: str = "fastgen-full"
+    # One-based inclusive scenario ranges may override the default route.
+    # Ranges are validated as non-overlapping before persistence so a batch
+    # can never silently pick an arbitrary mode for the same topic.
+    cover_build_mode_ranges: list[dict] = field(default_factory=list)
+    # The red outer frame is invariant. This flag controls only whether
+    # FastGen may vary the contrasting headline/panel colour pair.
+    cover_allow_varied_text_palette: bool = False
     cover_headline_template: str = (
         "Придумай короткую фразу для текста на YouTube-обложке по теме «{title}». "
         "1–5 слов, конкретно, интригующе, без ложных фактов и без повторения полного заголовка."
@@ -1271,6 +1278,9 @@ def load_settings() -> Settings:
             cover_build_mode=("fastgen-full"
                               if str(data.get("cover_build_mode", "fastgen-full")) == "fastgen-full"
                               else "fastgen-full-my-face"),
+            cover_build_mode_ranges=[item for item in data.get("cover_build_mode_ranges", [])
+                                     if isinstance(item, dict)],
+            cover_allow_varied_text_palette=bool(data.get("cover_allow_varied_text_palette", False)),
             cover_headline_template=data.get("cover_headline_template") or Settings().cover_headline_template,
             cover_subheadline_template=data.get("cover_subheadline_template") or Settings().cover_subheadline_template,
             cover_headline_presets=data.get("cover_headline_presets", []),
@@ -1727,6 +1737,8 @@ def save_settings(settings: Settings):
         "cover_headline_provider": settings.cover_headline_provider,
         "cover_text_mode": settings.cover_text_mode,
         "cover_build_mode": settings.cover_build_mode,
+        "cover_build_mode_ranges": settings.cover_build_mode_ranges,
+        "cover_allow_varied_text_palette": settings.cover_allow_varied_text_palette,
         "cover_headline_template": settings.cover_headline_template,
         "cover_subheadline_template": settings.cover_subheadline_template,
         "cover_headline_presets": settings.cover_headline_presets,
