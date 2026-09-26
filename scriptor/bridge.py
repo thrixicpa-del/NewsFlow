@@ -8637,6 +8637,7 @@ def generate_covers(payload: dict) -> dict:
 def _generate_covers_unlocked(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
+    repeat_current_contract = bool(payload.get("repeatCurrentContract"))
     settings.cover_build_mode_ranges = _clean_cover_build_mode_ranges(
         settings.cover_build_mode_ranges,
     )
@@ -8773,10 +8774,21 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 prompt = settings.cover_prompt_template.replace("{title}", title).replace("{excerpt}", excerpt)
                 item["image_prompt"] = prompt
             prompt_options = [prompt]
+        saved_provider_prompts = _cover_saved_provider_prompts(item) if repeat_current_contract else []
+        if repeat_current_contract and not saved_provider_prompts:
+            detail = (
+                "Для этой темы не сохранён Final FastGen prompt. "
+                "Используйте «Создать новые промпты», чтобы не переписывать старый контракт скрытно."
+            )
+            _cover_step(item, "Нет сохранённого Final FastGen prompt", 100, detail)
+            item["error"] = detail
+            _save_cover_state(settings)
+            continue
         # Keep a whole topic together.  This deliberately waits before the
         # first request when the remaining hourly allowance cannot complete
         # all prompt variants, so a resume never regenerates a partial topic.
-        requested_images = len(prompt_options) * settings.cover_variant_count
+        requested_prompt_count = len(saved_provider_prompts) if repeat_current_contract else len(prompt_options)
+        requested_images = requested_prompt_count * settings.cover_variant_count
         rate = cover_rate_limit_decision(
             settings.cover_rate_usage_events,
             requested=requested_images,
@@ -8790,7 +8802,38 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             _save_cover_state(settings)
             continue
         try:
-            if use_my_face:
+            if repeat_current_contract:
+                references = _cover_saved_provider_references(item)
+                missing_references = [
+                    reference for reference in references
+                    if not Path(reference).expanduser().is_file()
+                ]
+                if missing_references:
+                    raise ValueError(
+                        "Сохранённый FastGen reference недоступен: "
+                        + ", ".join(missing_references)
+                    )
+                face_label = str(
+                    item.get("final_provider_face_label")
+                    or item.get("face_reference_label")
+                    or item.get("semantic_face_label")
+                    or ""
+                ).strip()
+                try:
+                    saved_face_count = int(
+                        item.get("final_provider_face_reference_count",
+                                 item.get("face_reference_count", 0)) or 0
+                    )
+                except (TypeError, ValueError):
+                    saved_face_count = 0
+                item["face_reference_count"] = saved_face_count if use_my_face else 0
+                item["faceSelectionMode"] = "prepared-reference" if use_my_face else "semantic-only"
+                item["faceSelectionReason"] = (
+                    "reused saved provider reference contract"
+                    if saved_face_count
+                    else "reused saved zero-PNG provider contract"
+                )
+            elif use_my_face:
                 references, face_label = _cover_references_for_item(
                     item, settings, refine=refine_with_face, face_mode=face_mode, position=index,
                     max_references=operation_reference_limit if operation_reference_limit is not None else 10,
@@ -8806,9 +8849,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     else "no confident prepared face-tree match; continued without PNG"
                 )
             else:
-                # All-FastGen has no local image input at all.  It still uses
-                # the topical face tree to name the most relevant public
-                # figure in the prompt, then lets FastGen draw that person.
+                # All-FastGen has no local portrait input. It still uses the
+                # topical face tree to name the most relevant public figure.
                 references = []
                 face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
                 item["faceSelectionMode"] = "semantic-only"
@@ -8907,31 +8949,39 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 prompt_item.pop(key, None)
             if face_label:
                 prompt_item["selected_people"] = face_label
-        try:
-            final_prompt_options = [
-                build_final_provider_prompt(
-                    visual_prompt, prompt_item,
-                    identity_notes=" ".join(note for note in identity_notes if note),
-                    reference_notes=" ".join(note for note in reference_notes if note),
-                    composition_notes=" ".join(note for note in composition_notes if note),
-                    text_mode=text_mode,
-                    allow_varied_text_palette=settings.cover_allow_varied_text_palette,
-                )
-                for visual_prompt in prompt_options
-            ]
-        except ValueError as exc:
-            detail = str(exc)
-            _cover_step(item, "Ошибка промпта", 100, detail)
-            item["error"] = detail
+        if repeat_current_contract:
+            final_prompt_options = list(saved_provider_prompts)
+        else:
+            try:
+                final_prompt_options = [
+                    build_final_provider_prompt(
+                        visual_prompt, prompt_item,
+                        identity_notes=" ".join(note for note in identity_notes if note),
+                        reference_notes=" ".join(note for note in reference_notes if note),
+                        composition_notes=" ".join(note for note in composition_notes if note),
+                        text_mode=text_mode,
+                        allow_varied_text_palette=settings.cover_allow_varied_text_palette,
+                    )
+                    for visual_prompt in prompt_options
+                ]
+            except ValueError as exc:
+                detail = str(exc)
+                _cover_step(item, "Ошибка промпта", 100, detail)
+                item["error"] = detail
+                item["prompt_sources"] = prompt_sources_debug()
+                item["final_provider_prompt_options"] = []
+                item["final_provider_prompt"] = ""
+                _save_cover_state(settings)
+                continue
             item["prompt_sources"] = prompt_sources_debug()
-            item["final_provider_prompt_options"] = []
-            item["final_provider_prompt"] = ""
-            _save_cover_state(settings)
-            continue
         item["final_provider_prompt_options"] = final_prompt_options
         item["final_provider_prompt"] = final_prompt_options[0]
-        item["prompt_sources"] = prompt_sources_debug()
-        _cover_step(item, "Подготовка запросов", 10, f"Промптов: {len(prompt_options)} · картинок на промпт: {settings.cover_variant_count}")
+        item["final_provider_reference_paths"] = list(references)
+        item["final_provider_face_label"] = face_label
+        item["final_provider_face_reference_count"] = (
+            int(item.get("face_reference_count", 0) or 0) if use_my_face else 0
+        )
+        _cover_step(item, "Подготовка запросов", 10, f"Промптов: {len(final_prompt_options)} · картинок на промпт: {settings.cover_variant_count}")
         # Never let a previous local-face request leak into this attempt. If
         # FastGen fails, the item must stay an error instead of composing an
         # old scene and showing a misleading "Лицо наложено" success.
@@ -9044,7 +9094,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         except _BRIDGE_OPERATION_ERRORS as exc:
             detail = _cover_provider_error_message(exc)
             if values:
-                detail = f"{detail}. Получено вариантов: {len(values)} из {len(prompt_options) * settings.cover_variant_count}"
+                detail = f"{detail}. Получено вариантов: {len(values)} из {len(final_prompt_options) * settings.cover_variant_count}"
                 item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
                             selected_base_path=values[0], prompt_image_paths=prompt_image_paths)
             accepted_generation_id = _cover_accepted_generation_id(exc)
@@ -9207,6 +9257,41 @@ def _advance_cover_revision(item: dict) -> None:
     item["updatedAt"] = current
 
 
+def _cover_saved_provider_prompts(item: dict) -> list[str]:
+    """Return the exact provider prompts previously sent for this row."""
+    saved: list[str] = []
+    values = item.get("final_provider_prompt_options")
+    if isinstance(values, list):
+        saved.extend(str(value) for value in values if str(value).strip())
+    if not saved:
+        value = str(item.get("final_provider_prompt", "") or "")
+        if value.strip():
+            saved.append(value)
+    if not saved:
+        for record in item.get("prompt_image_paths", []):
+            if not isinstance(record, dict):
+                continue
+            value = str(record.get("prompt", "") or "")
+            if value.strip():
+                saved.append(value)
+    return list(dict.fromkeys(saved))
+
+
+def _cover_saved_provider_references(item: dict) -> list[str]:
+    """Return exact local reference paths used by the previous provider call."""
+    values = item.get("final_provider_reference_paths")
+    if isinstance(values, list):
+        return list(dict.fromkeys(str(value) for value in values if str(value).strip()))
+    try:
+        face_count = int(item.get("face_reference_count", 0) or 0)
+    except (TypeError, ValueError):
+        face_count = 0
+    face_path = str(item.get("face_reference_path", "") or "")
+    if face_count > 0 and face_path.strip():
+        return [face_path]
+    return []
+
+
 def _clear_cover_render_state(item: dict, *, status: str) -> None:
     """Clear only render-derived state while preserving the topic and prompts."""
     item.update(
@@ -9341,6 +9426,32 @@ def regenerate_covers(payload: dict) -> dict:
     requested = {index for index, _identity in selected_pairs}
     if not selected_pairs:
         raise ValueError("Выберите тему для перегенерации обложки")
+    if payload.get("currentProfile"):
+        missing_prompts: list[str] = []
+        missing_references: list[str] = []
+        for index in sorted(requested):
+            item = settings.cover_queue[index]
+            saved_prompts = _cover_saved_provider_prompts(item)
+            if not saved_prompts:
+                missing_prompts.append(str(item.get("title", "") or index + 1))
+                continue
+            # Upgrade rows that only have prompt_image_paths from an older build.
+            item["final_provider_prompt_options"] = list(saved_prompts)
+            item["final_provider_prompt"] = saved_prompts[0]
+            for reference in _cover_saved_provider_references(item):
+                if not Path(reference).expanduser().is_file():
+                    missing_references.append(reference)
+        if missing_prompts:
+            raise ValueError(
+                "Нет сохранённого Final FastGen prompt для: "
+                + ", ".join(missing_prompts)
+                + ". Используйте «Создать новые промпты»."
+            )
+        if missing_references:
+            raise ValueError(
+                "Сохранённый FastGen reference недоступен: "
+                + ", ".join(dict.fromkeys(missing_references))
+            )
     output = Path(settings.cover_output_folder)
     for index, item in enumerate(settings.cover_queue):
         if index not in requested:
@@ -9372,6 +9483,7 @@ def regenerate_covers(payload: dict) -> dict:
                 "indices": indices, "buildMode": build_mode, "faceMode": face_mode,
                 "productionItemIds": production_item_ids, "textMode": text_mode,
                 "localFaceOnly": local_face_only, "operation": operation,
+                "repeatCurrentContract": True,
             })
         return result
     # Explicit non-current rerender requests keep the route supplied by the
