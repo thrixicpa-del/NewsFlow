@@ -149,6 +149,36 @@ class ResultsBatchExportTests(unittest.TestCase):
             self.assertEqual(result["operationResult"]["missingMp4Ordinals"], [1])
             self.assertEqual(partial_video.read_bytes(), b"not-a-valid-mp4")
 
+    def test_does_not_backfill_matching_legacy_row_without_a_valid_completed_render(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "destination"
+            destination.mkdir()
+            invalid_video = root / "invalid.mp4"
+            invalid_video.write_bytes(b"invalid")
+            title = "Совпадающая тема без готового ролика"
+            settings = Settings(
+                results_output_folder=str(destination),
+                montage_task_statuses={
+                    "0": {
+                        "scenarioIndex": 0,
+                        "title": title,
+                        "status": "В очереди",
+                        "outputPath": str(invalid_video),
+                    },
+                },
+            )
+            job = Job(ScenarioRequest(0, title, "", "current-production-id"), RunState.DONE, "Сценарий")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=([title], [job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "_is_valid_montage_output", return_value=False), \
+                 patch.object(bridge, "snapshot", return_value={"results": {}}):
+                result = bridge.export_results_batch({})
+
+            self.assertEqual(settings.montage_task_statuses["0"].get("production_item_id", ""), "")
+            self.assertEqual(result["operationResult"]["missingMp4Ordinals"], [1])
+
     def test_backfills_a_legacy_ready_mp4_only_when_current_title_and_index_match(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
