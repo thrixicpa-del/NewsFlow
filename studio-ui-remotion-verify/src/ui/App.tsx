@@ -4641,6 +4641,11 @@ export function Covers({
     textMode: "fastgen",
     localFaceOnly: false,
   });
+  const repeatCurrent = () =>
+    void command("regenerate-covers", {
+      ...coverSelectionPayload(),
+      currentProfile: true,
+    });
   const regenerate = () =>
     void command("regenerate-covers", {
       ...coverSelectionPayload(),
@@ -6650,7 +6655,9 @@ export function Covers({
             )}
           </select>
           <small>
-            Эта модель будет использована для повтора текущих и новых промптов.
+            Эта модель используется для новых промптов и «Повторить с новыми».
+            «Повторить текущие» всегда использует модель и provider-контракт,
+            сохранённые у самой обложки.
           </small>
         </label>
         <div className="toolbar compact">
@@ -6664,7 +6671,7 @@ export function Covers({
           <Button
             onClick={
               selectedTopicCount && promptsReady && !selectedHasActiveRender
-                ? regenerate
+                ? repeatCurrent
                 : undefined
             }
           >
