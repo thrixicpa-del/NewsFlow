@@ -1141,6 +1141,41 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertEqual(abstract["reason_code"], "MISSING_NAMED_ANCHOR")
         self.assertTrue(concrete["valid"], concrete)
 
+    def test_named_anchor_guard_supports_arbitrary_structured_entity_without_vocabulary(self):
+        item = {
+            "title": "Компания меняет поставки после нового решения",
+            "primary_entities": ["lumira"],
+        }
+
+        abstract = _validate_cover_word("headline", "Поставки меняют рынок", item)
+        concrete = _validate_cover_word("headline", "Lumira меняет поставки", item)
+
+        self.assertFalse(abstract["valid"], abstract)
+        self.assertEqual(abstract["reason_code"], "MISSING_NAMED_ANCHOR")
+        self.assertTrue(concrete["valid"], concrete)
+
+    def test_foreign_entity_guard_rejects_arbitrary_new_name_not_in_source(self):
+        item = {
+            "title": "Компания Lumira меняет поставки",
+            "primary_entities": ["lumira"],
+        }
+
+        validation = _validate_cover_word("headline", "Компания Norvel меняет поставки", item)
+
+        self.assertFalse(validation["valid"], validation)
+        self.assertEqual(validation["reason_code"], "MISSING_NAMED_ANCHOR")
+
+    def test_cover_word_runtime_has_no_fixed_known_entity_vocabulary(self):
+        from scriptor import bridge
+
+        source = Path(bridge.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("_COVER_WORD_FOREIGN_ENTITIES", source)
+        semantic = source.split("def _cover_word_semantic_plan", 1)[1].split(
+            "def _cover_word_semantic_groups", 1
+        )[0].casefold()
+        for forbidden in ("трамп", "путин", "зеленск", "нато", "иран", "украин"):
+            self.assertNotIn(forbidden, semantic)
+
     def test_headline_guard_rejects_stronger_challenge_or_ultimatum_than_the_source(self):
         item = {
             "title": "Зеленский не уступает Трампу",
