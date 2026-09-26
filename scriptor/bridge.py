@@ -8868,16 +8868,26 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 prompt_item.pop(key, None)
             if face_label:
                 prompt_item["selected_people"] = face_label
-        final_prompt_options = [
-            build_final_provider_prompt(
-                visual_prompt, prompt_item,
-                identity_notes=" ".join(note for note in identity_notes if note),
-                reference_notes=" ".join(note for note in reference_notes if note),
-                composition_notes=" ".join(note for note in composition_notes if note),
-                text_mode=text_mode,
-            )
-            for visual_prompt in prompt_options
-        ]
+        try:
+            final_prompt_options = [
+                build_final_provider_prompt(
+                    visual_prompt, prompt_item,
+                    identity_notes=" ".join(note for note in identity_notes if note),
+                    reference_notes=" ".join(note for note in reference_notes if note),
+                    composition_notes=" ".join(note for note in composition_notes if note),
+                    text_mode=text_mode,
+                )
+                for visual_prompt in prompt_options
+            ]
+        except ValueError as exc:
+            detail = str(exc)
+            _cover_step(item, "Ошибка промпта", 100, detail)
+            item["error"] = detail
+            item["prompt_sources"] = prompt_sources_debug()
+            item["final_provider_prompt_options"] = []
+            item["final_provider_prompt"] = ""
+            _save_cover_state(settings)
+            continue
         item["final_provider_prompt_options"] = final_prompt_options
         item["final_provider_prompt"] = final_prompt_options[0]
         item["prompt_sources"] = prompt_sources_debug()
