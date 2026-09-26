@@ -28,6 +28,11 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python -m ruff check scriptor/bridge.py scriptor/publication_v2.py tests/test_publication_v2.py tests/test_youtube_publisher.py --select E9,F63,F7,F82
+      - run: git diff --check origin/main...HEAD
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
