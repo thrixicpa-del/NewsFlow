@@ -443,6 +443,50 @@ class ScenarioGenerationTests(unittest.TestCase):
 
 
 class ScenarioDeletionRecoveryTests(unittest.TestCase):
+    def test_explicit_idea_readd_after_delete_mints_current_identity_for_covers(self):
+        """A deliberate same-title hand-off must not revive the deleted identity."""
+        title = "Тема для повторного переноса в обложки"
+        deleted_id = "pi-deleted"
+        original = {
+            "id": deleted_id,
+            "title": title,
+            "status": "READY",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {
+                    "NEWSFLOW_TEST_MODE": "1",
+                    "NEWSFLOW_TEST_ROOT": directory,
+                    "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(directory) / "production"),
+                    "LOCALAPPDATA": directory,
+                }), \
+                patch("scriptor.config._newsflow_auth_library_candidates", return_value=[]), \
+                patch("scriptor.config.storyflow_documents_root", return_value=Path(directory) / "media"):
+            save_settings(Settings(
+                idea_results=[title],
+                idea_production_items=[original],
+                idea_scenario_context={title: dict(original)},
+            ))
+            save_session([title], [
+                Job(ScenarioRequest(0, title, "", deleted_id), RunState.DONE, "Старый текст", ""),
+            ])
+
+            bridge.remove_scenarios_command({"indices": [0]})
+            result = bridge.transfer_ideas({"ideas": [title], "target": "covers"})
+            titles, jobs = load_session()
+            settings = load_settings()
+
+        self.assertEqual(titles, [title])
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].state, RunState.WAITING)
+        current_id = settings.idea_scenario_context[title]["id"]
+        self.assertNotEqual(current_id, deleted_id)
+        self.assertNotIn(current_id, settings.deleted_scenario_production_ids)
+        self.assertEqual(jobs[0].request.production_item_id, current_id)
+        self.assertEqual(len(settings.cover_queue), 1)
+        self.assertEqual(settings.cover_queue[0]["production_item_id"], current_id)
+        self.assertEqual(result["operationResult"]["kind"], "ideas-transfer")
+
     def test_stale_settings_save_retains_deleted_script_production_id(self):
         """A competing worker cannot erase the tombstone that guards backup recovery."""
         with tempfile.TemporaryDirectory() as directory, \

@@ -68,6 +68,27 @@ describe("Scenarios and scripts Light views", () => {
     });
   });
 
+  it("rewrites only selected ready scenarios through the force command", () => {
+    const command = vi.fn();
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 0, title: "Переписать", state: "Готово", result: "Старый текст", error: "" },
+        { index: 1, title: "Не трогать", state: "Готово", result: "Другой текст", error: "" },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Переписать" }));
+    fireEvent.click(screen.getByRole("button", { name: "Переписать выбранные" }));
+
+    expect(command).toHaveBeenCalledWith("generate-scenarios", {
+      indices: [0],
+      provider: "agent",
+      force: true,
+    });
+  });
+
   it("writes every unfinished scenario through the current batch command without resubmitting ready rows", () => {
     const command = vi.fn();
     const data = {
