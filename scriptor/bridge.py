@@ -14024,7 +14024,11 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         _montage_task_update(settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
                              detail="Сценарий и MP3 готовы", error="", title=titles[index],
                              voicePath=settings.voice_scenario_outputs.get(str(index + 1), ""), outputPath=retained_output,
-                             queuePid=os.getpid())
+                             queuePid=os.getpid(),
+                             production_item_id=str(
+                                 getattr(getattr(jobs_by_index.get(index), "request", None),
+                                         "production_item_id", "") or ""
+                             ).strip())
     save_settings(settings)
     download_semaphore = threading.BoundedSemaphore(settings.montage_download_workers)
     # Shared only by this queue invocation.  It reserves footage as soon as a
@@ -14353,12 +14357,18 @@ def _results_export_legacy_index(rows: list[dict], key: str) -> dict[str, dict]:
     return {title: values[0] for title, values in grouped.items() if len(values) == 1}
 
 
-def _results_export_task(settings: Settings, scenario_index: int, production_item_id: str) -> dict:
-    """Resolve one task by stable scenario position and verify its identity."""
-    candidates: list[dict] = []
+def _results_export_task(settings: Settings, scenario_index: int, production_item_id: str,
+                         title: str) -> dict:
+    """Resolve one montage task without ever borrowing another topic's MP4.
+
+    Older completed renders did not retain their ProductionItem ID. They are
+    recoverable only when both their saved queue position and title agree;
+    after that recovery the current ID is persisted for later exports.
+    """
+    candidates: list[tuple[int, dict]] = []
     direct = settings.montage_task_statuses.get(str(scenario_index))
     if isinstance(direct, dict):
-        candidates.append(direct)
+        candidates.append((scenario_index, direct))
     for raw_key, raw_task in settings.montage_task_statuses.items():
         if not isinstance(raw_task, dict) or raw_task is direct:
             continue
@@ -14367,13 +14377,17 @@ def _results_export_task(settings: Settings, scenario_index: int, production_ite
         except (TypeError, ValueError):
             continue
         if task_index == scenario_index:
-            candidates.append(raw_task)
-    for task in candidates:
+            candidates.append((task_index, raw_task))
+    expected_title = " ".join(str(title).split()).casefold()
+    for task_index, task in candidates:
         task_id = str(task.get("production_item_id") or task.get("productionItemId") or "").strip()
-        # A current ProductionItem is never allowed to borrow a legacy
-        # blank-ID task.  That task may be an interrupted run from before
-        # durable ownership existed and can point at another video's MP4.
-        if production_item_id and task_id != production_item_id:
+        if production_item_id:
+            if task_id == production_item_id:
+                return task
+            legacy_title = " ".join(str(task.get("title") or "").split()).casefold()
+            if not task_id and task_index == scenario_index and legacy_title == expected_title:
+                task["production_item_id"] = production_item_id
+                return task
             continue
         return task
     return {}
@@ -14444,19 +14458,16 @@ def export_results_batch(payload: dict) -> dict:
         cover = covers_by_id.get(production_item_id, {}) if production_item_id else legacy_covers.get(title.casefold(), {})
         seo_ready = str(seo.get("status", "")) == "Готово"
         tags_ready = str(seo.get("tags_status", "")) == "Готово"
-        seo_title = (str(seo.get("title", "") or "").strip() if seo_ready else "") or title
         description = str(seo.get("description", "") or "").strip() if seo_ready else ""
         hashtags = _seo_hashtags(seo) if seo_ready else []
         hashtag_text = " ".join(hashtags)
         tags = seo.get("tags", []) if tags_ready and isinstance(seo.get("tags", []), list) else []
         tag_text = ", ".join(str(value).strip() for value in tags if str(value).strip())
         headings.append(f"{ordinal:03d}. {title}")
-        descriptions.append("\n".join([
-            f"{ordinal:03d}. Заголовок: {seo_title}",
-            f"SEO-описание: {description}",
-            f"Хештеги: {hashtag_text}",
-        ]))
-        tags_section.append(f"{ordinal:03d}. Теги: {tag_text}")
+        descriptions.append("\n".join(
+            part for part in (f"{ordinal:03d}. {description}", hashtag_text) if part
+        ))
+        tags_section.append(f"{ordinal:03d}. {tag_text}")
         if not description:
             missing_description.append(ordinal)
         if not tag_text:
@@ -14471,7 +14482,7 @@ def export_results_batch(payload: dict) -> dict:
                 missing_cover.append(ordinal)
         else:
             missing_cover.append(ordinal)
-        task = _results_export_task(settings, scenario_index, production_item_id)
+        task = _results_export_task(settings, scenario_index, production_item_id, title)
         video_path = Path(str(task.get("outputPath", "") or ""))
         if str(task.get("status", "")) == "Готово" and _is_valid_montage_output(video_path):
             try:
