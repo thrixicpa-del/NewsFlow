@@ -125,13 +125,20 @@ class StoryWriterContextTests(unittest.TestCase):
     def test_middle_writer_receives_bounded_seam_plus_semantic_past_and_future_memory(self):
         first_part = ("Ранний материал, который не должен целиком попадать в следующий запрос. " * 120).strip()
         prompt = build_story_writer_prompt(
-            ScenarioRequest(0, "Тема", "OPERATOR CONTRACT MUST STAY INTACT"),
+            ScenarioRequest(
+                0, "Тема",
+                "OPERATOR CONTRACT MUST STAY INTACT. OVERALL TARGET 15000. RETURN THE COMPLETE FINISHED SCENARIO.",
+            ),
             self._plan(),
             [{"part_id": "P1", "text": first_part, "content_ids": ["C001"]}],
             1,
         )
 
         self.assertIn("OPERATOR CONTRACT MUST STAY INTACT", prompt)
+        self.assertIn("OVERALL TARGET 15000", prompt)
+        self.assertIn("CURRENT TARGET: approximately 5000 characters", prompt)
+        self.assertIn("not the overall scenario target", prompt)
+        self.assertIn("FINAL ASSEMBLED STORY", prompt)
         self.assertIn("CURRENT PART: P2", prompt)
         self.assertIn("USED CONTENT (do not repeat): C001: Начальное событие уже раскрыто", prompt)
         self.assertIn("P3/M2: Завершить историю", prompt)
