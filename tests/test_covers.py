@@ -1820,6 +1820,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
         settings = Settings()
         settings.cover_queue = [{
             "title": "Ормуз", "image_prompt": "scene",
+            "final_provider_prompt": "SAVED FINAL PROMPT",
+            "final_provider_prompt_options": ["SAVED FINAL PROMPT"],
             "render_profile": {
                 "build_mode": "fastgen-full-my-face", "face_mode": "auto",
                 "text_mode": "fastgen", "local_face_only": False,
