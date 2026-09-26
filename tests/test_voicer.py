@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
@@ -110,6 +111,72 @@ class VoicerTests(unittest.TestCase):
 
     def test_voice_concurrency_does_not_exceed_wproject_stream_capacity(self):
         self._assert_wproject_concurrency(jobs_count=6, streams=3, expected_active=3)
+
+    def test_template_save_survives_an_independent_running_voice_job(self):
+        """A live voice worker must not restore its stale template snapshot."""
+        class BlockingVoiceGen:
+            reached = threading.Event()
+            release = threading.Event()
+
+            def __init__(self, _key):
+                pass
+
+            def synthesize(self, _text, _filename, _profile, *, threads, progress=None):
+                if progress:
+                    progress("VoiceGen: выполняется", 55)
+                self.__class__.reached.set()
+                if not self.__class__.release.wait(3):
+                    raise TimeoutError("test voice provider was not released")
+                return b"MP3"
+
+        with tempfile.TemporaryDirectory() as output:
+            initial = Settings(
+                template="Старый шаблон {title}",
+                voice_provider="voicegen",
+                voicer_output_folder=output,
+                voice_queue_concurrency=1,
+                voicegen_api_keys=[VoiceGenKey("VoiceGen", "test-key", streams=1)],
+                voice_profiles=[{"id": "voice", "name": "VoiceGen", "provider": "voicegen", "voice_id": "voice-id"}],
+                voice_default_profile_id="voice",
+                voice_scenario_outputs={"1": ""},
+            )
+            persisted = {"settings": deepcopy(initial)}
+            job = Job(ScenarioRequest(0, "Тема", "", "production-1"), RunState.DONE, "Текст сценария")
+            failures: list[Exception] = []
+
+            def load_current_settings():
+                return deepcopy(persisted["settings"])
+
+            def save_current_settings(settings):
+                persisted["settings"] = deepcopy(settings)
+
+            def run_voice():
+                try:
+                    bridge.generate_voice({"indices": [0]})
+                except Exception as error:  # noqa: BLE001 - worker error is asserted after join
+                    failures.append(error)
+
+            with patch.object(bridge, "load_settings", side_effect=load_current_settings), \
+                 patch.object(bridge, "save_settings", side_effect=save_current_settings), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", BlockingVoiceGen), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0):
+                worker = threading.Thread(target=run_voice)
+                worker.start()
+                self.assertTrue(BlockingVoiceGen.reached.wait(2), "voice provider did not start")
+
+                bridge.save_template({"template": "Новый шаблон {title}"})
+                self.assertTrue(worker.is_alive(), "saving a template must not wait for voice synthesis")
+                self.assertEqual(persisted["settings"].template, "Новый шаблон {title}")
+
+                BlockingVoiceGen.release.set()
+                worker.join(5)
+
+        self.assertFalse(worker.is_alive(), "voice generation thread did not finish")
+        self.assertEqual(failures, [])
+        self.assertEqual(persisted["settings"].template, "Новый шаблон {title}")
+        self.assertEqual(persisted["settings"].voice_task_statuses["1"]["label"], "Готово")
 
     def test_voice_queue_submits_only_current_ready_scenarios_and_marks_unfinished_rows_skipped(self):
         settings = Settings()
