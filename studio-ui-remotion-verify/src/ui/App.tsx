@@ -6939,9 +6939,13 @@ export function Covers({
                     <dd>{cover.render_profile?.build_mode || "Ещё не запускался"}</dd>
                   </div>
                   <div>
-                    <dt>PNG в FastGen</dt>
+                    <dt>PNG лица в FastGen</dt>
                     <dd>
-                      {cover.faceSelectionMode === "prepared-reference"
+                      {(cover as typeof cover & { face_reference_count?: number }).face_reference_count === 0
+                        ? `0 · ${cover.faceSelectionReason || "релевантный PNG не найден; генерация продолжена без референса"}`
+                        : (cover as typeof cover & { face_reference_count?: number }).face_reference_count === 1
+                          ? `1 · ${cover.face_reference_path || cover.face_reference_label || "подготовленный портрет"}`
+                          : cover.faceSelectionMode === "prepared-reference"
                         ? `1 · ${cover.face_reference_path || cover.face_reference_label || "подготовленный портрет"}`
                         : cover.faceSelectionMode === "semantic-only"
                           ? "0 · лицо задано семантически"

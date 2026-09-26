@@ -8835,9 +8835,11 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item.pop("semantic_face_label", None)
                 item.pop("semantic_face_source", None)
                 item["faceSelectionMode"] = "prepared-reference"
+                item["face_reference_count"] = 1 if face_label else 0
                 item["faceSelectionReason"] = (
                     "topic-relevant prepared face-tree match"
-                    if face_label else "no confident prepared face-tree match"
+                    if face_label
+                    else "no confident prepared face-tree match; continued without PNG"
                 )
             else:
                 # All-FastGen has no local image input at all.  It still uses
@@ -8846,6 +8848,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 references = []
                 face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
                 item["faceSelectionMode"] = "semantic-only"
+                item["face_reference_count"] = 0
                 item["faceSelectionReason"] = (
                     "topic-relevant face-tree metadata match"
                     if face_label else "no confident face-tree match"
@@ -8855,10 +8858,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 else:
                     item.pop("semantic_face_label", None)
                     item.pop("semantic_face_source", None)
-            # A full-FastGen face cover is accepted only when the provider can
-            # receive the selected portrait. Falling back to a name-only prompt
-            # would silently produce a different person and cannot count as the
-            # requested scene + face + text workflow.
+            # A matched prepared portrait requires a reference-capable
+            # operation.  When there is no relevant portrait, the my-faces
+            # route deliberately continues with zero PNGs instead of choosing
+            # a random identity or stopping the whole generation batch.
             if use_my_face and face_label and operation_reference_limit is None:
                 detail = (
                     "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
@@ -8887,11 +8890,6 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             _save_cover_state(settings)
             continue
         message = _cover_face_requirement_message(face_mode, face_label)
-        if use_my_face and not face_label:
-            message = (
-                "Для режима «FastGen всё + мои лица» не найден релевантный подготовленный PNG. "
-                "Проверьте папку лиц, подготовьте PNG и обновите библиотеку; NewsFlow не переключает режим и не выбирает случайное лицо."
-            )
         if message:
             _cover_step(item, "Нет подходящего лица", 100, message)
             item["error"] = message

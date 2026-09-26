@@ -489,6 +489,28 @@ describe("Covers Light view", () => {
     expect(screen.getByText("FINAL PROMPT MARKER")).toBeTruthy();
   });
 
+  it("shows the non-blocking zero-PNG fallback for my-faces generation", () => {
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "item-no-face",
+        title: "Переговоры без подходящего портрета",
+        image_prompt: "Negotiation scene",
+        faceSelectionMode: "prepared-reference" as const,
+        faceSelectionReason: "no confident prepared face-tree match; continued without PNG",
+        face_reference_count: 0,
+        render_profile: { build_mode: "fastgen-full-my-face", text_mode: "fastgen" },
+        paths: [],
+      }],
+    };
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+
+    fireEvent.keyDown(screen.getAllByRole("row")[1], { key: "Enter" });
+    expect(screen.getByText("PNG лица в FastGen")).toBeTruthy();
+    expect(screen.getByText("0 · no confident prepared face-tree match; continued without PNG")).toBeTruthy();
+    expect(screen.getByText("fastgen-full-my-face")).toBeTruthy();
+  });
+
   it("keeps advanced FastGen configuration out of the primary production queue", () => {
     render(<Covers data={fallback} command={vi.fn(async () => undefined)} />);
 

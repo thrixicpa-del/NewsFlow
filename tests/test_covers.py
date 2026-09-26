@@ -1416,8 +1416,10 @@ class CoverFaceLibraryTests(unittest.TestCase):
         self.assertEqual(calls, [(), (str(prepared),)])
         self.assertEqual(settings.cover_queue[0]["render_profile"]["build_mode"], "fastgen-full")
         self.assertEqual(settings.cover_queue[1]["render_profile"]["build_mode"], "fastgen-full-my-face")
+        self.assertEqual(settings.cover_queue[0]["face_reference_count"], 0)
+        self.assertEqual(settings.cover_queue[1]["face_reference_count"], 1)
 
-    def test_my_faces_mode_fails_clearly_without_a_prepared_topic_match(self):
+    def test_my_faces_mode_continues_without_reference_when_no_prepared_topic_match(self):
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
@@ -1439,12 +1441,19 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 "production_item_id": "production:1", "image_prompt": "Negotiation scene",
                 "cover_headline": "ПЕРЕГОВОРЫ", "paths": [],
             }]
+            calls: list[tuple[str, ...]] = []
+
+            def render(_prompt, output, _stem, _operation, _ratio, **kwargs):
+                calls.append(tuple(str(path) for path in kwargs.get("references") or []))
+                generated = output / "fallback-without-face.png"
+                generated.write_bytes(b"generated")
+                return [generated]
 
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "_hydrate_cover_library", return_value=False), \
                  patch.object(bridge, "_save_cover_state"), \
                  patch.object(bridge, "snapshot", return_value={}), \
-                 patch.object(bridge.FastGenPool, "generate_media") as render:
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
                 bridge.generate_covers({
                     "indices": [0], "productionItemIds": ["production:1"],
                     "_parallel_cover_worker": True, "buildMode": "fastgen-full-my-face",
@@ -1452,9 +1461,11 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     "operation": "reference_image_edit",
                 })
 
-        render.assert_not_called()
-        self.assertEqual(settings.cover_queue[0]["status"], "Нет подходящего лица")
-        self.assertIn("подготовленный PNG", settings.cover_queue[0]["error"])
+        self.assertEqual(calls, [()])
+        self.assertEqual(settings.cover_queue[0]["status"], "Готово")
+        self.assertEqual(settings.cover_queue[0]["face_reference_count"], 0)
+        self.assertIn("continued without PNG", settings.cover_queue[0]["faceSelectionReason"])
+        self.assertNotIn("face_reference_path", settings.cover_queue[0])
 
     def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
         with TemporaryDirectory() as directory:
