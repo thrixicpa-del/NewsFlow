@@ -428,6 +428,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             inspect.getsource(_topic_scene_defaults),
             inspect.getsource(bridge._cover_topic_visual_plan),
             inspect.getsource(bridge._match_cover_face_reference),
+            inspect.getsource(bridge._cover_word_named_source_entities),
+            inspect.getsource(bridge._cover_word_foreign_entities),
         )).casefold()
         for forbidden in (
             "karabakh", "карабах", "wildberries", "вайлдберриз", "tomato", "помидор",
