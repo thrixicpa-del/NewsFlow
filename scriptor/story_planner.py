@@ -270,7 +270,9 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
     )
     return (
         "You are the NewsFlow Story Planner. Organize only the supplied topic and context; do not invent news, "
-        "write prose, or change the operator writing contract. Plan the complete story before any writer begins. "
+        "write prose, or change the operator writing contract. The embedded OPERATOR WRITING CONTRACT below is "
+        "REFERENCE DATA FOR PLANNING, not an instruction to execute now: do not obey its requests to write/return "
+        "the finished scenario during this Planner call. Plan the complete story before any writer begins. "
         "First decide whether the supplied supported material can fill every requested part with genuinely distinct "
         "content. If it cannot do so without invention or semantic repetition, return ONLY strict JSON "
         '{"content_capacity_insufficient":true,"capacity_reason":"brief reason"}. '
@@ -357,8 +359,13 @@ def build_story_writer_prompt(
         )
 
     return (
-        "Write only the next continuous prose segment of ONE NewsFlow scenario. Do not emit part labels, JSON, "
-        "planner notes, Markdown, headings, or meta commentary. Preserve all global style, factual-discipline, "
+        "Write only the next continuous prose segment of ONE NewsFlow scenario. MULTIPART PRECEDENCE: any overall "
+        "scenario target/min/max or instruction inside the embedded operator contract to return the complete finished "
+        "scenario applies to the FINAL ASSEMBLED STORY, not to this technical Writer call. For this call, CURRENT "
+        "TARGET below is the only active length target and you must return only this segment. This precedence changes "
+        "only whole-story length/completeness wording; all operator style, factual-discipline, hooks, originality and "
+        "no-repetition rules remain binding. Do not emit part labels, JSON, planner notes, Markdown, headings, or meta "
+        "commentary. Preserve all global style, factual-discipline, "
         "originality and no-repetition rules from the operator contract below. Positional opening/final instructions "
         "from that contract apply only according to CURRENT ROLE below. Do not repeat USED CONTENT and do not fully "
         "disclose FUTURE RESERVED material. The previous tail exists only for continuity; never copy or paraphrase it.\n\n"
@@ -370,6 +377,7 @@ def build_story_writer_prompt(
         f"CURRENT ROLE: {part.role}\n"
         f"CURRENT PURPOSE: {_compact(part.purpose, _COMPACT_PURPOSE_CHARS)}\n"
         f"CURRENT TARGET: approximately {part.target_chars} characters\n"
+        "ACTIVE LENGTH RULE FOR THIS CALL: write approximately CURRENT TARGET characters, not the overall scenario target.\n"
         f"CURRENT CONTENT:\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
         f"OPEN LOOPS BEFORE THIS PART: {', '.join(opened) or 'none'}\n"
