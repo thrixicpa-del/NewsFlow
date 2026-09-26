@@ -3,6 +3,7 @@ import unittest
 
 from scriptor.core import ScenarioRequest
 from scriptor.story_planner import (
+    StoryPlanCapacityInsufficient,
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
@@ -31,8 +32,10 @@ class StoryPlanValidationTests(unittest.TestCase):
                 {"id": "C002", "summary": "Второй факт", "owner_part_id": "P1"},
             ],
             "parts": [
-                {"id": "P1", "role": "OPENING", "purpose": "Вход", "content_ids": ["C001", "C002"]},
-                {"id": "P2", "role": "FINAL", "purpose": "Финал", "content_ids": ["C002"]},
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1",
+                 "content_ids": ["C001", "C002"]},
+                {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1",
+                 "content_ids": ["C002"]},
             ],
         }, ensure_ascii=False)
 
@@ -49,37 +52,77 @@ class StoryPlanValidationTests(unittest.TestCase):
                 {"id": "C003", "summary": "Финал", "owner_part_id": "P3"},
             ],
             "parts": [
-                {"id": "P1", "role": "OPENING", "purpose": "Вход", "content_ids": ["C001"]},
-                {"id": "P2", "role": "FINAL", "purpose": "Середина", "content_ids": ["C002"]},
-                {"id": "P3", "role": "FINAL", "purpose": "Финал", "content_ids": ["C003"]},
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1",
+                 "content_ids": ["C001"]},
+                {"id": "P2", "role": "FINAL", "purpose": "Середина", "macro_id": "M1",
+                 "content_ids": ["C002"]},
+                {"id": "P3", "role": "FINAL", "purpose": "Финал", "macro_id": "M1",
+                 "content_ids": ["C003"]},
             ],
         }, ensure_ascii=False)
 
         with self.assertRaisesRegex(ValueError, "role"):
             parse_story_plan_response(response, (5000, 5000, 5000))
 
+    def test_parser_requires_each_part_to_belong_to_a_real_macro_block(self):
+        response = json.dumps({
+            "thesis": "Одна история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Вход"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Факт", "owner_part_id": "P1"},
+                {"id": "C002", "summary": "Финал", "owner_part_id": "P2"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1",
+                 "content_ids": ["C001"]},
+                {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M404",
+                 "content_ids": ["C002"]},
+            ],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "unknown macro"):
+            parse_story_plan_response(response, (5000, 5000))
+
+    def test_capacity_insufficient_is_an_explicit_planner_signal(self):
+        response = json.dumps({
+            "content_capacity_insufficient": True,
+            "capacity_reason": "Доступный контекст не даёт десять разных смысловых блоков без повторов.",
+        }, ensure_ascii=False)
+
+        with self.assertRaises(StoryPlanCapacityInsufficient) as raised:
+            parse_story_plan_response(response, (5000,) * 10)
+
+        self.assertIn("без повторов", raised.exception.reason)
+
 
 class StoryWriterContextTests(unittest.TestCase):
     def _plan(self):
         return parse_story_plan_response(json.dumps({
+            "content_capacity_insufficient": False,
             "thesis": "История развивается один раз и приходит к одному финалу.",
             "macro_blocks": [
                 {"id": "M1", "purpose": "Событие и развитие"},
                 {"id": "M2", "purpose": "Последствия и финал"},
             ],
             "content_atoms": [
-                {"id": "C001", "summary": "Начальное событие", "owner_part_id": "P1"},
-                {"id": "C002", "summary": "Новый механизм", "owner_part_id": "P2"},
-                {"id": "C003", "summary": "Последствие", "owner_part_id": "P3"},
+                {"id": "C001", "summary": "Начальное событие уже раскрыто", "owner_part_id": "P1"},
+                {"id": "C002", "summary": "Новый механизм для текущей части", "owner_part_id": "P2"},
+                {"id": "C003", "summary": "Будущее последствие, которое ещё нельзя раскрывать", "owner_part_id": "P3"},
             ],
             "parts": [
-                {"id": "P1", "role": "OPENING", "purpose": "Открыть историю", "content_ids": ["C001"]},
-                {"id": "P2", "role": "MIDDLE", "purpose": "Углубить механизм", "content_ids": ["C002"]},
-                {"id": "P3", "role": "FINAL", "purpose": "Завершить историю", "content_ids": ["C003"]},
+                {"id": "P1", "role": "OPENING", "purpose": "Открыть историю", "macro_id": "M1",
+                 "content_ids": ["C001"], "opens": ["L1"], "closes": [],
+                 "transition_direction": "к механизму"},
+                {"id": "P2", "role": "MIDDLE", "purpose": "Углубить механизм", "macro_id": "M1",
+                 "content_ids": ["C002"], "opens": [], "closes": [],
+                 "transition_direction": "к последствиям"},
+                {"id": "P3", "role": "FINAL", "purpose": "Завершить историю", "macro_id": "M2",
+                 "content_ids": ["C003"], "opens": [], "closes": ["L1"],
+                 "transition_direction": "финал"},
             ],
         }, ensure_ascii=False), (5000, 5000, 5000))
 
-    def test_middle_writer_receives_only_bounded_previous_seam_and_future_index(self):
+    def test_middle_writer_receives_bounded_seam_plus_semantic_past_and_future_memory(self):
         first_part = ("Ранний материал, который не должен целиком попадать в следующий запрос. " * 120).strip()
         prompt = build_story_writer_prompt(
             ScenarioRequest(0, "Тема", "OPERATOR CONTRACT MUST STAY INTACT"),
@@ -90,11 +133,16 @@ class StoryWriterContextTests(unittest.TestCase):
 
         self.assertIn("OPERATOR CONTRACT MUST STAY INTACT", prompt)
         self.assertIn("CURRENT PART: P2", prompt)
-        self.assertIn("FUTURE RESERVED: P3", prompt)
+        self.assertIn("USED CONTENT (do not repeat): C001: Начальное событие уже раскрыто", prompt)
+        self.assertIn("P3/M2: Завершить историю", prompt)
+        self.assertIn("C003: Будущее последствие, которое ещё нельзя раскрывать", prompt)
+        self.assertIn("OPEN LOOPS BEFORE THIS PART: L1", prompt)
+        self.assertIn("CURRENT MACRO: M1: Событие и развитие", prompt)
         self.assertNotIn(first_part, prompt)
         self.assertIn(seam_tail(first_part), prompt)
         self.assertLessEqual(len(seam_tail(first_part)), 500)
         self.assertIn("NO GLOBAL FINAL", prompt)
+        self.assertIn("first 30 seconds", prompt)
 
 
 if __name__ == "__main__":
