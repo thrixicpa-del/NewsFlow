@@ -39,7 +39,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             "parts": [
                 {
                     "id": f"P{index}", "role": roles[index - 1],
-                    "purpose": f"Смысловой блок {index}", "content_ids": [f"C{index:03d}"],
+                    "purpose": f"Смысловой блок {index}", "macro_id": "M1",
+                    "content_ids": [f"C{index:03d}"], "opens": [], "closes": [],
+                    "transition_direction": f"к блоку {index + 1}" if index < part_count else "финал",
                 }
                 for index in range(1, part_count + 1)
             ],
@@ -130,11 +132,39 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(len(client.prompts), 31)
         part_17_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P17" in prompt)
-        self.assertIn("FUTURE RESERVED: P18", part_17_prompt)
+        self.assertIn("P18/M1: Смысловой блок 18", part_17_prompt)
+        self.assertIn("C018: Новый материал 18", part_17_prompt)
+        self.assertIn("USED CONTENT (do not repeat): C001: Новый материал 1", part_17_prompt)
         self.assertIn("PREVIOUS SEAM TAIL", part_17_prompt)
         self.assertNotIn(chr(0x0401) * 5000, part_17_prompt)
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(len(jobs[0].accepted_story_parts), 30)
+
+    async def test_capacity_insufficient_pauses_before_any_writer_call(self):
+        class CapacityClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" not in prompt:
+                    raise AssertionError("writer must not start after capacity failure")
+                return json.dumps({
+                    "content_capacity_insufficient": True,
+                    "capacity_reason": "Недостаточно разных подтверждённых смыслов без повторов.",
+                }, ensure_ascii=False)
+
+        client = CapacityClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "OPERATOR CONTRACT", target_chars=50000,
+                            allowed_min=48000, allowed_max=52000),
+        ])
+
+        self.assertEqual(len(client.prompts), 1)
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].story_planner_status, "CAPACITY_INSUFFICIENT")
+        self.assertEqual(jobs[0].accepted_story_parts, [])
+        self.assertIn("Недостаточно", jobs[0].error)
 
     async def test_resume_uses_persisted_plan_and_starts_at_first_unfinished_part(self):
         from scriptor.story_planner import parse_story_plan_response
