@@ -201,6 +201,28 @@ class ParallelRunner:
     def _story_target_chars(request: ScenarioRequest) -> int:
         return max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
 
+    def _next_story_part_target(
+        self, job: Job, plan: StoryPlan, part_index: int,
+    ) -> int:
+        """Rebalance only the remaining character budget; never rewrite accepted prose."""
+        part = plan.parts[part_index]
+        if not job.accepted_story_parts:
+            return max(1, int(part.target_chars or 1))
+        overall_target = self._story_target_chars(job.request)
+        if not overall_target:
+            return max(1, int(part.target_chars or 1))
+        accepted_text = self._assembled_story(plan, job.accepted_story_parts)
+        remaining_parts = len(plan.parts) - part_index
+        # Each future accepted part adds one deterministic "\n\n" separator
+        # to the already assembled prefix.
+        remaining_separators = 2 * remaining_parts
+        remaining_prose = max(
+            remaining_parts,
+            overall_target - len(accepted_text) - remaining_separators,
+        )
+        quotient, remainder = divmod(remaining_prose, remaining_parts)
+        return max(1, quotient + (1 if remainder else 0))
+
     @staticmethod
     def _assembled_story(plan: StoryPlan, accepted_parts: list[dict[str, Any]]) -> str:
         expected_ids = [part.id for part in plan.parts]
@@ -279,11 +301,12 @@ class ParallelRunner:
         for part_index, part in enumerate(plan.parts):
             if part_index < len(job.accepted_story_parts):
                 continue
+            active_target = self._next_story_part_target(job, plan, part_index)
             writer_prompt = build_story_writer_prompt(
-                job.request, plan, job.accepted_story_parts, part_index,
+                job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
             writer_result = await self._generate_for_request(
-                self.client.generate, writer_prompt, job.request, part.target_chars,
+                self.client.generate, writer_prompt, job.request, active_target,
             )
             if (looks_like_action_required(writer_result) or not writer_result.strip()
                     or self._writer_output_is_structural(writer_result)):
@@ -297,7 +320,7 @@ class ParallelRunner:
                 "part_id": part.id,
                 "text": writer_result.strip(),
                 "content_ids": list(part.content_ids),
-                "target_chars": part.target_chars,
+                "target_chars": active_target,
             })
             job.result = self._assembled_story(plan, job.accepted_story_parts)
             job.actual_chars = len(job.result)
