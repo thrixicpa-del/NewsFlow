@@ -703,35 +703,6 @@ def _api_key_id(kind: str, index: int = 0) -> str:
 def _api_key_fingerprint(secret: str) -> str:
     """A stable identifier that cannot be used as an API credential."""
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:10] if secret else "—"
-# A small alias bridge makes a library named in English still useful with
-# Russian news topics.  Exact folder/file name matches remain the priority.
-_COVER_FACE_ALIASES = (
-    {"трамп", "trump"}, {"зеленский", "zelensky", "zelenskyy"}, {"путин", "putin"},
-    {"алиев", "aliyev"}, {"пашинян", "pashinyan"}, {"нетаньяху", "netanyahu"},
-    {"макрон", "macron"}, {"эрдоган", "erdogan"}, {"хаменеи", "khamenei"},
-)
-# Country and place names often occur in a headline without the leader's
-# surname.  These hints let a correctly named portrait folder still be used,
-# but only for the country/region it actually belongs to.  They deliberately
-# do *not* turn every news topic into a generic politician collage.
-_COVER_FACE_TOPIC_HINTS = (
-    # The user deliberately uses the Ormuz/US pressure angle.  Give this
-    # matching rule priority over the general Iran hint when both folders are
-    # available, while still falling back to an Iranian leader if Trump is not
-    # present in the local library.
-    ({"ормуз", "ормузский"}, {"трамп", "trump"}, 12),
-    ({"иран", "ирана", "ираном", "тегеран"}, {"хамене", "khamenei", "пезешки", "pezeshk"}, 5),
-    ({"россия", "россии", "россий", "кремль", "москва", "рф"}, {"путин", "putin"}, 6),
-    ({"украина", "украины", "украин", "киев"}, {"зеленск", "zelensk"}, 6),
-    ({"азербайджан", "азербайджана", "баку"}, {"алиев", "aliyev"}, 6),
-    ({"армения", "армении", "ереван"}, {"пашинян", "pashinyan"}, 6),
-    ({"израиль", "израиля", "тель", "авив"}, {"нетанья", "netanyahu"}, 6),
-    ({"сша", "вашингтон", "америк", "трамп"}, {"трамп", "trump"}, 6),
-    ({"турция", "турции", "анкара"}, {"эрдоган", "erdogan"}, 6),
-    ({"франция", "франции", "париж"}, {"макрон", "macron"}, 6),
-)
-
-
 def _cover_face_folder_value(value: object) -> str:
     """Return a safe stored library path; a legacy '.' must never mean the app folder."""
     raw = str(value or "").strip().strip('"')
@@ -917,13 +888,18 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    # A long script can mention unrelated countries, people or markets.  Face
-    # selection must follow the title/topic which the operator actually chose,
-    # never an incidental word from the body text.
-    title_tokens = _cover_face_tokens(" ".join((
-        str(item.get("title", "")), str(item.get("topic", "")),
-    )))
-    topic_tokens = set(title_tokens)
+    # Match only identities explicitly present in current structured metadata
+    # or the chosen title/topic.  There is deliberately no country→leader or
+    # pre-known-politician table: arbitrary face folders work the same way.
+    identity_context = " ".join((
+        str(item.get("title", "")),
+        str(item.get("topic", "")),
+        _cover_context_values(item.get("selected_people")),
+        _cover_context_values(item.get("primary_entities")),
+        _cover_context_values(item.get("primary_entity")),
+        _cover_context_values(item.get("entities")),
+    ))
+    topic_tokens = _cover_face_tokens(identity_context)
     best_score = 0
     candidates: list[Path] = []
     prepared_folder = _cover_prepared_face_folder(settings, folder)
@@ -936,16 +912,17 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         except ValueError:
             relative = Path(source.name)
         candidate_tokens = _cover_face_tokens(" ".join(relative.parts))
-        score = len(topic_tokens & candidate_tokens) * 5
-        for aliases in _COVER_FACE_ALIASES:
-            if _cover_tokens_match(topic_tokens, aliases) and _cover_tokens_match(candidate_tokens, aliases):
-                score += 6
-        # A named leader always wins.  Place-to-leader matching is deliberately
-        # weaker, so a headline that explicitly mentions another person cannot
-        # accidentally get an unrelated regional leader.
-        for topic_markers, identities, bonus in _COVER_FACE_TOPIC_HINTS:
-            if _cover_tokens_match(title_tokens, topic_markers) and _cover_tokens_match(candidate_tokens, identities):
-                score += bonus
+        exact_overlap = len(topic_tokens & candidate_tokens)
+        fuzzy_overlap = sum(
+            1 for topic_token in topic_tokens
+            if any(
+                topic_token == candidate
+                or (len(topic_token) >= 4 and len(candidate) >= 4
+                    and (topic_token.startswith(candidate) or candidate.startswith(topic_token)))
+                for candidate in candidate_tokens
+            )
+        )
+        score = exact_overlap * 8 + max(0, fuzzy_overlap - exact_overlap) * 3
         if score > best_score:
             best_score = score
             candidates = [source]
