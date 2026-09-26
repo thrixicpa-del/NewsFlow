@@ -402,10 +402,21 @@ describe("Covers Light view", () => {
     expect(screen.getByText("Инспектор обложки")).toBeTruthy();
   });
 
-  it("opens a cover inspector with the table keyboard workflow", () => {
+  it("opens a cover inspector with FastGen prompt provenance", () => {
     const data = {
       ...fallback,
-      covers: [{ production_item_id: "item-ormuz", title: "Ормуз", image_prompt: "Танкер в Ормузе", prompt_provider: "agent", paths: [] }],
+      covers: [{
+        production_item_id: "item-ormuz",
+        title: "Ормуз",
+        image_prompt: "Танкер в Ормузе",
+        prompt_provider: "agent",
+        prompt_sources: { SCENE: "Topic Planner" },
+        faceSelectionMode: "semantic-only" as const,
+        faceSelectionReason: "topic-relevant face-tree metadata match",
+        semantic_face_label: "Трамп",
+        final_provider_prompt: "FINAL PROMPT MARKER",
+        paths: [],
+      }],
     };
     render(<Covers data={data} command={vi.fn(async () => undefined)} />);
 
@@ -414,6 +425,10 @@ describe("Covers Light view", () => {
     expect(screen.getByText("ProductionItem ID")).toBeTruthy();
     expect(screen.getByText("item-ormuz")).toBeTruthy();
     expect(screen.getByText("agent")).toBeTruthy();
+    expect(screen.getByText("Topic Planner")).toBeTruthy();
+    expect(screen.getByText(/semantic-only · Трамп/)).toBeTruthy();
+    expect(screen.getByText("Final FastGen prompt")).toBeTruthy();
+    expect(screen.getByText("FINAL PROMPT MARKER")).toBeTruthy();
   });
 
   it("keeps advanced FastGen configuration out of the primary production queue", () => {
