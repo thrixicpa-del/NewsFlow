@@ -370,6 +370,8 @@ describe("Covers Light view", () => {
     render(<Covers data={data} command={command} />);
     fireEvent.click(screen.getByRole("button", { name: "Выбрать: Current" }));
     fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    expect(screen.getByText(/«Повторить текущие» всегда использует модель/)).toBeTruthy();
+    expect(screen.getByText(/сохранённые у самой обложки/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Повторить текущие выбранных" }));
 
     expect(command).toHaveBeenCalledWith("regenerate-covers", {
