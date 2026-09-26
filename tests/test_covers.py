@@ -419,83 +419,46 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", prompt)
         self.assertNotIn("Energy traders react to changing oil prices", prompt)
 
-    def test_topic_fallbacks_do_not_turn_generic_market_words_into_oil_traders(self):
-        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+    def test_universal_fallback_uses_current_topic_without_named_runtime_routes(self):
+        import inspect
+        from scriptor.thumbnail_prompt_v2 import _topic_scene_defaults, build_final_provider_prompt
+
+        runtime_source = inspect.getsource(_topic_scene_defaults).casefold()
+        for forbidden in (
+            "karabakh", "карабах", "wildberries", "вайлдберриз", "tomato", "помидор",
+            "trump", "трамп", "putin", "путин", "hormuz", "ормуз", "nato", "нато",
+        ):
+            self.assertNotIn(forbidden, runtime_source)
 
         fixtures = [
-            (
-                {"title": "Армения и Азербайджан обсуждают Карабах", "script": "Рынок и цены упомянуты лишь фоном."},
-                "Real diplomatic negotiation room in the South Caucasus",
-            ),
-            (
-                {"title": "Трамп и Путин возобновили контакты", "script": "Обсуждаются поставки и цены, но это политическая встреча."},
-                "Real presidential meeting or diplomatic contact setting",
-            ),
-            (
-                {"title": "Wildberries: инцидент на складе", "script": "Рынок, цены и поставки меняются после сбоя."},
-                "Real e-commerce warehouse and logistics loading area",
-            ),
-            (
-                {"title": "Поставки томатов и рост цен", "script": "Рынок обсуждает поставки и цены на овощи."},
-                "Real produce market, greenhouse or wholesale distribution setting",
-            ),
+            {"title": "Компания Север закрывает фабрику после аварии"},
+            {"title": "Город Альта открывает новый мост через реку"},
+            {"title": "Учёные представили новый способ хранения энергии"},
+            {"title": "Сеть магазинов меняет поставки свежих овощей"},
         ]
-
-        for item, expected_environment in fixtures:
+        for item in fixtures:
             with self.subTest(title=item["title"]):
                 prompt = build_final_provider_prompt("", item)
-                self.assertIn(expected_environment, prompt)
+                self.assertIn(item["title"], prompt)
+                self.assertIn("directly tied to", prompt)
                 self.assertNotIn("Energy traders react to changing oil prices", prompt)
-                self.assertNotIn("Energy-market trading floor", prompt)
+                self.assertNotIn("Karabakh", prompt)
+                self.assertNotIn("Wildberries", prompt)
 
-    def test_final_prompt_rejects_known_oil_market_collision_for_non_energy_topic(self):
+    def test_named_fixture_works_through_structured_scene_not_special_runtime_case(self):
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
 
-        with self.assertRaisesRegex(ValueError, "oil-market scene contradicts"):
-            build_final_provider_prompt(
-                "STORY CONTEXT:\nArmenia and Azerbaijan negotiate over Karabakh.",
-                {
-                    "title": "Армения и Азербайджан обсуждают Карабах",
-                    "visible_action": "Energy traders react to changing oil prices on live market boards",
-                    "environment": "Energy-market trading floor with oil logistics context",
-                },
-            )
-
-    def test_provider_is_not_called_when_final_prompt_has_a_topic_collision(self):
-        from scriptor import bridge
-
-        with TemporaryDirectory() as directory:
-            settings = Settings(cover_output_folder=directory, cover_variant_count=1)
-            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
-            settings.cover_queue = [{
-                "title": "Армения и Азербайджан обсуждают Карабах",
-                "topic": "Карабахский мирный процесс",
-                "production_item_id": "production:collision",
-                "image_prompt_options": ["Documentary diplomatic meeting"],
-                "visible_action": "Energy traders react to changing oil prices on live market boards",
-                "environment": "Energy-market trading floor with oil logistics context",
-                "cover_headline": "ПЕРЕГОВОРЫ",
-                "paths": [],
-            }]
-
-            with patch.object(bridge, "load_settings", return_value=settings), \
-                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
-                 patch.object(bridge, "_save_cover_state"), \
-                 patch.object(bridge, "snapshot", return_value={}), \
-                 patch.object(bridge.FastGenPool, "generate_media") as render:
-                bridge.generate_covers({
-                    "indices": [0],
-                    "productionItemIds": ["production:collision"],
-                    "_parallel_cover_worker": True,
-                    "buildMode": "fastgen-full",
-                    "faceMode": "without",
-                    "textMode": "fastgen",
-                })
-
-        render.assert_not_called()
-        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка промпта")
-        self.assertIn("oil-market scene contradicts", settings.cover_queue[0]["error"])
-        self.assertEqual(settings.cover_queue[0]["final_provider_prompt_options"], [])
+        scene = (
+            "STORY CONTEXT:\nA fictional summit over the North Valley agreement.\n\n"
+            "MAIN SUBJECT:\nDelegations from Ardin and Belor\n\n"
+            "VISIBLE ACTION:\nDelegates exchange signed papers across the table\n\n"
+            "VISUAL EVIDENCE:\nMarked regional map, documents and microphones\n\n"
+            "ENVIRONMENT:\nReal diplomatic negotiation room\n\n"
+            "EMOTION:\nTense bargaining"
+        )
+        prompt = build_final_provider_prompt(scene, {"title": "Ardin и Belor обсуждают соглашение"})
+        self.assertIn("Delegates exchange signed papers across the table", prompt)
+        self.assertIn("Real diplomatic negotiation room", prompt)
 
     def test_fastgen_payload_keeps_multiline_scene_slots_from_the_saved_prompt(self):
         """The bridge must not flatten the planner draft before the provider boundary."""
@@ -1060,7 +1023,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
     def test_rejects_weak_headlines_that_drop_named_people_from_the_topic(self):
         item = {
             "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
-            "topic": "Трамп-Зеленский — давление и переговоры",
+            "topic": "Промышленный проект — переговоры и давление",
         }
         for weak in ("Новые условия", "Не уступает"):
             validation = _validate_cover_word("headline", weak, item)
@@ -1070,15 +1033,15 @@ class CoverHeadlineGuardTests(unittest.TestCase):
     def test_accepts_a_standalone_headline_with_a_named_topic_anchor(self):
         item = {
             "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
-            "topic": "Трамп-Зеленский — давление и переговоры",
+            "topic": "Промышленный проект — переговоры и давление",
         }
-        validation = _validate_cover_word("headline", "Зеленский держит курс", item)
+        validation = _validate_cover_word("headline", "Марина Соколова держит курс", item)
         self.assertTrue(validation["valid"], validation)
 
     def test_accepts_a_natural_headline_with_subject_action_and_object(self):
         item = {
             "title": "ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО — переговоры по Украине меняют тон — Киеву ставят новые условия",
-            "topic": "Трамп-Зеленский — давление и переговоры",
+            "topic": "Промышленный проект — переговоры и давление",
         }
         validation = _validate_cover_word("headline", "Трамп давит на Киев", item)
         self.assertTrue(validation["valid"], validation)
@@ -1094,7 +1057,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
     def test_provider_prompt_for_named_topics_forbids_bare_actions_and_abstract_hooks(self):
         item = {
             "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
-            "topic": "Трамп-Зеленский — давление и переговоры",
+            "topic": "Промышленный проект — переговоры и давление",
         }
         prompt = _cover_word_provider_prompt(
             "headline", "", item, _cover_word_structure_pair(item),
@@ -1132,11 +1095,11 @@ class CoverHeadlineGuardTests(unittest.TestCase):
 
     def test_headline_guard_rejects_stronger_challenge_or_ultimatum_than_the_source(self):
         item = {
-            "title": "Зеленский не уступает Трампу",
-            "topic": "Трамп-Зеленский — давление и переговоры",
+            "title": "Марина Соколова не уступает Трампу",
+            "topic": "Промышленный проект — переговоры и давление",
         }
 
-        for value in ("Зеленский бросил вызов", "Трамп выдвинул ультиматум"):
+        for value in ("Марина Соколова бросил вызов", "Трамп выдвинул ультиматум"):
             with self.subTest(value=value):
                 validation = _validate_cover_word("headline", value, item)
                 self.assertFalse(validation["valid"], validation)
@@ -1145,7 +1108,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
     def test_headline_guard_allows_strong_wording_when_the_source_contains_it(self):
         item = {
             "title": "Трамп выдвинул ультиматум Зеленскому",
-            "topic": "Трамп-Зеленский — ультиматум на переговорах",
+            "topic": "Трамп-Марина Соколова — ультиматум на переговорах",
         }
 
         validation = _validate_cover_word("headline", "Трамп выдвинул ультиматум", item)
@@ -1198,8 +1161,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
             root = Path(directory)
             sources = root / "Лица"
             prepared_root = root / "Готовые PNG"
-            source = sources / "Зеленский" / "portrait.jpg"
-            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source = sources / "Марина Соколова" / "portrait.jpg"
+            prepared = prepared_root / "Марина Соколова" / "portrait.png"
             source.parent.mkdir(parents=True)
             prepared.parent.mkdir(parents=True)
             source.write_bytes(b"source-jpg")
@@ -1212,13 +1175,13 @@ class CoverFaceLibraryTests(unittest.TestCase):
             )
 
             path, label, source_kind = _match_cover_face_reference(
-                {"title": "Зеленский обсуждает переговоры"},
+                {"title": "Марина Соколова обсуждает переговоры"},
                 settings,
                 prepared_only=True,
             )
 
         self.assertEqual(Path(path), prepared)
-        self.assertEqual(label, "Зеленский")
+        self.assertEqual(label, "Марина Соколова")
         self.assertEqual(source_kind, "auto")
         self.assertEqual(Path(path).suffix.casefold(), ".png")
 
@@ -1226,7 +1189,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             sources = root / "Лица"
-            source = sources / "Зеленский" / "portrait.jpg"
+            source = sources / "Марина Соколова" / "portrait.jpg"
             source.parent.mkdir(parents=True)
             source.write_bytes(b"source-jpg")
             settings = Settings(
@@ -1236,7 +1199,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
             )
 
             result = _match_cover_face_reference(
-                {"title": "Зеленский обсуждает переговоры"},
+                {"title": "Марина Соколова обсуждает переговоры"},
                 settings,
                 prepared_only=True,
             )
@@ -1250,8 +1213,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
             root = Path(directory)
             sources = root / "Лица"
             prepared_root = root / "Готовые PNG"
-            source = sources / "Зеленский" / "portrait.jpg"
-            prepared = prepared_root / "Зеленский" / "portrait.png"
+            source = sources / "Марина Соколова" / "portrait.jpg"
+            prepared = prepared_root / "Марина Соколова" / "portrait.png"
             source.parent.mkdir(parents=True)
             prepared.parent.mkdir(parents=True)
             source.write_bytes(b"source-jpg")
@@ -1272,12 +1235,12 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
                 }]}
                 settings.cover_queue = [{
-                    "title": "Зеленский обсуждает переговоры",
-                    "topic": "Трамп-Зеленский — давление и переговоры",
+                    "title": "Марина Соколова обсуждает переговоры",
+                    "topic": "Промышленный проект — переговоры и давление",
                     "production_item_id": "production:0",
                     "image_prompt": "Topic-accurate editorial news scene",
                     "cover_headline": "ЗЕЛЕНСКИЙ НА ПЕРЕГОВОРАХ",
-                    "cover_subheadline": "ДАВЛЕНИЕ НА КИЕВ РАСТЁТ",
+                    "cover_subheadline": "РЕШЕНИЕ ЕЩЁ НЕ ПРИНЯТО",
                     "paths": [],
                 }]
                 return settings
@@ -1317,37 +1280,42 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "prepared-reference")
                     self.assertIn("prepared face-tree match", settings.cover_queue[0]["faceSelectionReason"])
                 else:
-                    self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Зеленский")
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Марина Соколова")
                     self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "tree")
                     self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "semantic-only")
                     self.assertIn("face-tree metadata match", settings.cover_queue[0]["faceSelectionReason"])
-                    self.assertIn("recognisable editorial portrait of Зеленский", settings.cover_queue[0]["final_provider_prompt"])
+                    self.assertIn("recognisable editorial portrait of Марина Соколова", settings.cover_queue[0]["final_provider_prompt"])
                     self.assertNotIn(str(prepared), settings.cover_queue[0]["final_provider_prompt"])
 
-    def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
+    def test_face_tree_matches_arbitrary_person_from_structured_metadata(self):
         with TemporaryDirectory() as directory:
             folder = Path(directory)
-            portrait = folder / "Хаменеи" / "portrait.jpg"
+            portrait = folder / "Марина Соколова" / "portrait.jpg"
             portrait.parent.mkdir()
             portrait.write_bytes(b"test")
             settings = Settings(cover_face_library_folder=str(folder), cover_face_library_enabled=True)
-            path, label, source = _match_cover_face_reference({"title": "Тегеран усиливает давление"}, settings)
+
+            path, label, source = _match_cover_face_reference({
+                "title": "Новые переговоры по промышленному проекту",
+                "selected_people": ["Марина Соколова"],
+            }, settings)
+
             self.assertEqual(Path(path), portrait)
-            self.assertEqual(label, "Хаменеи")
+            self.assertEqual(label, "Марина Соколова")
             self.assertEqual(source, "auto")
 
-    def test_ormuz_prefers_trump_when_both_topic_appropriate_folders_exist(self):
+    def test_face_tree_does_not_infer_a_person_from_country_or_place_only(self):
         with TemporaryDirectory() as directory:
             folder = Path(directory)
-            trump = folder / "Трамп" / "portrait.jpg"
-            khamenei = folder / "Хаменеи" / "portrait.jpg"
-            trump.parent.mkdir(); khamenei.parent.mkdir()
-            trump.write_bytes(b"trump"); khamenei.write_bytes(b"khamenei")
+            portrait = folder / "Марина Соколова" / "portrait.jpg"
+            portrait.parent.mkdir()
+            portrait.write_bytes(b"test")
             settings = Settings(cover_face_library_folder=str(folder), cover_face_library_enabled=True)
-            path, label, source = _match_cover_face_reference({"title": "Иран — кризис на Ормузе"}, settings)
-            self.assertEqual(Path(path), trump)
-            self.assertEqual(label, "Трамп")
-            self.assertEqual(source, "auto")
+
+            self.assertEqual(
+                _match_cover_face_reference({"title": "Альта обсуждает новый закон"}, settings),
+                ("", "", ""),
+            )
 
     def test_remembers_composition_profile_for_the_same_face(self):
         settings = Settings()
@@ -3087,7 +3055,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                 "cover_headline": "ЗЕЛЕНСКИЙ НЕ СДАЁТСЯ",
                 "cover_subheadline": "ПОМОЩЬ США ПОД ВОПРОСОМ",
                 "build_mode": "fastgen-full-my-face",
-                "face_label": "Владимир Зеленский",
+                "face_label": "Владимир Марина Соколова",
                 "expect_reference": True,
             },
         )
