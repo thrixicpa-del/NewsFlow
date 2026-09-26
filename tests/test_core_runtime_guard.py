@@ -21,6 +21,7 @@ REQUIRED_SOURCES = (
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
+    "scriptor/story_planner.py",
     "scriptor/openai_client.py",
     "scriptor/timeline.py",
     "scriptor/thumbnail_prompt_v2.py",
@@ -168,7 +169,7 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             self.assertIn("актуально по содержимому", result.stdout)
 
     def test_guard_rejects_changed_scenario_runtime_support_content(self):
-        for relative in ("scriptor/config.py", "scriptor/runner.py"):
+        for relative in ("scriptor/config.py", "scriptor/runner.py", "scriptor/story_planner.py"):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
                 fixture_root, fixture_app, _ = self._fixture(temporary)
                 (fixture_root / relative).write_text("# changed scenario runtime support\n", encoding="utf-8")
