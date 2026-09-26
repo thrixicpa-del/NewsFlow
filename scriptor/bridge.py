@@ -703,35 +703,6 @@ def _api_key_id(kind: str, index: int = 0) -> str:
 def _api_key_fingerprint(secret: str) -> str:
     """A stable identifier that cannot be used as an API credential."""
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:10] if secret else "—"
-# A small alias bridge makes a library named in English still useful with
-# Russian news topics.  Exact folder/file name matches remain the priority.
-_COVER_FACE_ALIASES = (
-    {"трамп", "trump"}, {"зеленский", "zelensky", "zelenskyy"}, {"путин", "putin"},
-    {"алиев", "aliyev"}, {"пашинян", "pashinyan"}, {"нетаньяху", "netanyahu"},
-    {"макрон", "macron"}, {"эрдоган", "erdogan"}, {"хаменеи", "khamenei"},
-)
-# Country and place names often occur in a headline without the leader's
-# surname.  These hints let a correctly named portrait folder still be used,
-# but only for the country/region it actually belongs to.  They deliberately
-# do *not* turn every news topic into a generic politician collage.
-_COVER_FACE_TOPIC_HINTS = (
-    # The user deliberately uses the Ormuz/US pressure angle.  Give this
-    # matching rule priority over the general Iran hint when both folders are
-    # available, while still falling back to an Iranian leader if Trump is not
-    # present in the local library.
-    ({"ормуз", "ормузский"}, {"трамп", "trump"}, 12),
-    ({"иран", "ирана", "ираном", "тегеран"}, {"хамене", "khamenei", "пезешки", "pezeshk"}, 5),
-    ({"россия", "россии", "россий", "кремль", "москва", "рф"}, {"путин", "putin"}, 6),
-    ({"украина", "украины", "украин", "киев"}, {"зеленск", "zelensk"}, 6),
-    ({"азербайджан", "азербайджана", "баку"}, {"алиев", "aliyev"}, 6),
-    ({"армения", "армении", "ереван"}, {"пашинян", "pashinyan"}, 6),
-    ({"израиль", "израиля", "тель", "авив"}, {"нетанья", "netanyahu"}, 6),
-    ({"сша", "вашингтон", "америк", "трамп"}, {"трамп", "trump"}, 6),
-    ({"турция", "турции", "анкара"}, {"эрдоган", "erdogan"}, 6),
-    ({"франция", "франции", "париж"}, {"макрон", "macron"}, 6),
-)
-
-
 def _cover_face_folder_value(value: object) -> str:
     """Return a safe stored library path; a legacy '.' must never mean the app folder."""
     raw = str(value or "").strip().strip('"')
@@ -743,6 +714,44 @@ def _cover_face_tokens(value: object) -> set[str]:
         token.casefold() for token in re.findall(r"[A-Za-zА-Яа-яЁё0-9]{3,}", str(value or ""))
         if token.casefold() not in _COVER_FACE_IGNORE_TOKENS
     }
+
+
+_COVER_CYRILLIC_TO_LATIN = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+})
+
+
+def _cover_identity_token_forms(tokens: set[str]) -> set[str]:
+    """Return generic cross-script token forms without person-specific aliases."""
+    forms = set(tokens)
+    forms.update(token.translate(_COVER_CYRILLIC_TO_LATIN) for token in tokens)
+    return {token for token in forms if len(token) >= 3}
+
+
+def _cover_face_match_score(topic_tokens: set[str], candidate_tokens: set[str]) -> int:
+    """Score arbitrary identity metadata; no country→leader knowledge lives here."""
+    topics = _cover_identity_token_forms(topic_tokens)
+    candidates = _cover_identity_token_forms(candidate_tokens)
+    best = 0
+    for topic in topics:
+        for candidate in candidates:
+            if topic == candidate:
+                best = max(best, 100)
+                continue
+            if len(topic) >= 4 and len(candidate) >= 4 and (
+                topic.startswith(candidate) or candidate.startswith(topic)
+            ):
+                best = max(best, 90)
+                continue
+            if len(topic) >= 5 and len(candidate) >= 5:
+                ratio = difflib.SequenceMatcher(None, topic, candidate).ratio()
+                if ratio >= 0.78:
+                    best = max(best, int(ratio * 100))
+    return best
 
 
 def _cover_tokens_match(values: set[str], expected: set[str]) -> bool:
@@ -917,13 +926,17 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    # A long script can mention unrelated countries, people or markets.  Face
-    # selection must follow the title/topic which the operator actually chose,
-    # never an incidental word from the body text.
-    title_tokens = _cover_face_tokens(" ".join((
-        str(item.get("title", "")), str(item.get("topic", "")),
-    )))
-    topic_tokens = set(title_tokens)
+    # Only current identity metadata may select a face.  Arbitrary person
+    # folders work without a pre-known politician/country table.
+    identity_context = " ".join((
+        str(item.get("title", "")),
+        str(item.get("topic", "")),
+        _cover_context_values(item.get("selected_people")),
+        _cover_context_values(item.get("primary_entities")),
+        _cover_context_values(item.get("primary_entity")),
+        _cover_context_values(item.get("entities")),
+    ))
+    topic_tokens = _cover_face_tokens(identity_context)
     best_score = 0
     candidates: list[Path] = []
     prepared_folder = _cover_prepared_face_folder(settings, folder)
@@ -936,20 +949,13 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         except ValueError:
             relative = Path(source.name)
         candidate_tokens = _cover_face_tokens(" ".join(relative.parts))
-        score = len(topic_tokens & candidate_tokens) * 5
-        for aliases in _COVER_FACE_ALIASES:
-            if _cover_tokens_match(topic_tokens, aliases) and _cover_tokens_match(candidate_tokens, aliases):
-                score += 6
-        # A named leader always wins.  Place-to-leader matching is deliberately
-        # weaker, so a headline that explicitly mentions another person cannot
-        # accidentally get an unrelated regional leader.
-        for topic_markers, identities, bonus in _COVER_FACE_TOPIC_HINTS:
-            if _cover_tokens_match(title_tokens, topic_markers) and _cover_tokens_match(candidate_tokens, identities):
-                score += bonus
+        score = _cover_face_match_score(topic_tokens, candidate_tokens)
+        if score < 78:
+            continue
         if score > best_score:
             best_score = score
             candidates = [source]
-        elif score and score == best_score:
+        elif score == best_score:
             candidates.append(source)
     if not candidates:
         return "", "", ""
@@ -1040,47 +1046,50 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
     return unique[:limit], face_label
 
 
+def _cover_face_side(item: dict) -> str:
+    """Choose a stable side per production item so portraits never float centrally."""
+    identity = " ".join(str(item.get(key, "") or "") for key in (
+        "production_item_id", "title", "topic",
+    )).strip() or "cover"
+    digest = hashlib.sha256(identity.casefold().encode("utf-8")).digest()[0]
+    return "LEFT" if digest % 2 == 0 else "RIGHT"
+
+
 def _cover_face_layout(item: dict, settings: Settings, face_path: str, face_label: str) -> str:
-    """Choose a reusable composition profile; FastGen receives its exact framing brief."""
+    """Place a matched portrait on a stable side and protect the opposite text area."""
     if not face_path:
         return ""
-    key = str(Path(face_path).expanduser()).casefold()
+    side = _cover_face_side(item)
+    opposite = "RIGHT" if side == "LEFT" else "LEFT"
+    key = f"{str(Path(face_path).expanduser()).casefold()}::{side.casefold()}"
     saved = settings.cover_face_layout_memory.get(key)
     if isinstance(saved, dict) and saved.get("instruction"):
         instruction = str(saved["instruction"])
+        mode = str(saved.get("mode", "крупный боковой портрет"))
     else:
-        title_tokens = _cover_face_tokens(item.get("title", ""))
-        identity_tokens = _cover_face_tokens(face_label)
-        if title_tokens & identity_tokens:
-            instruction = (
-                "Frame the supplied identity as a large, immediately recognisable head-and-shoulders hero anchored from the BOTTOM edge, "
-                "occupying roughly 56–68% of image height on the RIGHT. Keep the eyes, full head and outer silhouette clear; "
-                "the portrait may extend slightly beyond the lower edge, but must never float in the centre like a sticker. "
-                "Keep the panoramic event context visible behind and beside them."
-            )
-            mode = "крупный план героя"
-        else:
-            instruction = (
-                "Frame the supplied identity as a strong lower-right head-and-shoulders portrait occupying roughly 42–54% of image height; "
-                "anchor it from the bottom edge, keep the full head visible and let the panoramic event context remain the dominant explanation."
-            )
-            mode = "средний план + панорама"
+        instruction = (
+            f"Frame the supplied identity as a large, immediately recognisable head-and-shoulders portrait anchored from the BOTTOM "
+            f"edge on the {side}. Occupy roughly 48–66% of image height. Keep the eyes, full head and outer silhouette clear; "
+            "never float the face in the centre like a sticker. Preserve a wide, meaningful view of the actual story beside it."
+        )
+        mode = "крупный боковой портрет"
         settings.cover_face_layout_memory[key] = {
-            "mode": mode, "instruction": instruction, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": mode,
+            "instruction": instruction,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-    # FastGen renders the lettering itself. It therefore needs an explicit
-    # protected lower-left zone before it composes the portrait.
     text_safe_zone = bool(str(item.get("cover_headline", "")).strip()) or (
         settings.cover_auto_overlay_text and settings.cover_text_mode == "overlay"
     )
     if text_safe_zone:
         instruction += (
-            " Position the portrait on the RIGHT side, anchored flush to the LOWER edge of the frame, and keep the lower-left "
-            "52% of the image clean, dark enough and free of faces, hands, important objects "
-            "or detail: this is a protected headline area."
+            f" Keep the opposite {opposite} lower 50% clean enough for the headline: no face, hands or critical evidence underneath "
+            "the text panel. The portrait remains flush to its side and bottom edge."
         )
-    mode = str(settings.cover_face_layout_memory.get(key, {}).get("mode", "сохранённый профиль"))
-    item["face_layout"] = f"{mode} · справа, зона текста свободна" if text_safe_zone else mode
+    item["face_layout"] = (
+        f"{mode} · {side.casefold()} · текст на {opposite.casefold()}"
+        if text_safe_zone else f"{mode} · {side.casefold()}"
+    )
     return instruction
 
 
@@ -6891,80 +6900,35 @@ def _cover_structured_context(item: dict) -> str:
 
 
 def _cover_topic_visual_plan(item: dict) -> str:
-    """Give the prompt writer a concrete scene grammar for recurring news topics.
+    """Give the agent a universal, topic-owned scene contract.
 
-    General words such as “war” or “tension” otherwise produce a generic
-    soldier/map thumbnail.  The plan remains an editorial visualisation, not
-    a claim that a photographed incident really occurred.
+    Runtime does not classify the story into diplomacy/economy/war/etc. and
+    contains no named-topic scene recipes.  The agent decides the strongest
+    concrete visual from the current production context.
     """
-    factual_context = " ".join(_cover_context_values(item.get(key)) for key in (
-        "direction", "topic", "angle", "event_context", "supporting_context", "primary_entities",
-        "primary_entity", "entities", "geography", "conflict", "main_consequence", "consequence",
+    context = " ".join(_cover_context_values(item.get(key)) for key in (
+        "direction", "topic", "angle", "event_context", "supporting_context",
+        "selected_people", "primary_entities", "primary_entity", "entities",
+        "geography", "conflict", "main_consequence", "consequence",
     ))
-    text = " ".join((str(item.get("title", "")), str(item.get("script", "")), factual_context)).casefold()
-    has = lambda *terms: any(term in text for term in terms)
-    if has("ормуз", "ormuz", "hormuz"):
-        return (
-            "ОРМУЗСКИЙ ВИЗУАЛЬНЫЙ ПЛАН: широкий реальный вид Ормузского пролива — танкер на переднем плане, "
-            "портовые краны/терминал и другие суда на глубине, тревожные моряки, спасатели или береговая охрана. "
-            "Для атмосферы угрозы допустимы дым, аварийные огни или горящий танкер ТОЛЬКО как редакционная визуализация, "
-            "не как заявление о конкретном подтверждённом взрыве. Оставь правую треть под локально наложенный портрет Трампа "
-            "если он найден в библиотеке, левую нижнюю часть — под крупный заголовок. Не ставь случайного военного у карты."
-        )
-    if has("нато") and has("росси", "кремл", "рф"):
-        return (
-            "ПЛАН НАТО—РОССИЯ: фотореалистичный телевизионный репортаж о конкретной политической или военной теме, а не выдуманная кино-сцена. "
-            "Основой кадра сделай реальный саммит НАТО, официальный вход штаба, пресс-зону или зал консультаций; обязательно покажи официальные флаги НАТО и ЕС "
-            "как узнаваемые тканевые флаги без читаемых надписей. Добавь журналистов с камерами, вспышки, охрану и только тех официальных лиц или объекты, "
-            "которые прямо связаны с заголовком. В каждом варианте обязателен один видимый и строго тематический маркер эскалации: ракетный пуск, удар, "
-            "работа ПВО или последствия атаки у названного в теме объекта; в кадре должны быть люди, пресса и реакция на конфликт. На втором плане покажи "
-            "фактический предмет риска из темы: карту региона, военную технику, аэродром, корабли, границу, санкционные документы или экстренные службы — "
-            "но только если это логично для текста. Дым, пожарные, спасатели и эвакуация должны быть частью новостной визуализации конкретного конфликта. "
-            "Не рисуй выдуманного седого генерала, безымянного героя, фантазийный бункер, одинокого солдата у декоративной карты или странный секретный штаб. "
-            "Не показывай бункер и не смешивай случайных лидеров, страны или флаги, которых нет в теме."
-        )
-    if has("кремл", "переговор", "ультиматум", "торг"):
-        return (
-            "ПЛАН ПЕРЕГОВОРОВ: широкая фотореалистичная сцена политического саммита — длинный стол, несколько лидеров и "
-            "дипломатов, журналисты, телекамеры, папки и флаги, напряжённые лица и вспышки камер. Если найден Путин, "
-            "локально помести его крупным портретом справа; фон должен оставаться панорамой переговоров, не одинокий политик у карты."
-        )
-    if has("удар", "взрыв", "пожар", "атак"):
-        return (
-            "ПЛАН ИНЦИДЕНТА: правдоподобная широкая сцена последствий — спасатели, пожарные, очевидцы на безопасной дистанции, "
-            "дым и аварийный свет, техника или объект строго по теме. Не создавай несуществующие доказательства конкретного удара; "
-            "это атмосферная редакционная визуализация события."
-        )
-    if has("военн", "армия", "фронт", "наступлен"):
-        return (
-            "ПЛАН ВОЕННОЙ ТЕМЫ: военнослужащие заняты понятным действием (патруль, эвакуация, логистика, штаб или техника), "
-            "реальная среда и люди на разных планах. Никакой одинокой фигуры с декоративной картой без связи с темой."
-        )
     return (
-        "ПЛАН ПО УМОЛЧАНИЮ: не придумывай отдельное событие, аварию, удар или разрушение. Используй только конкретные объекты, "
-        "имена, места и действия, названные в теме или сценарии; покажи их в реалистичной редакционной среде с естественными людьми "
-        "(журналисты, участники, специалисты или очевидцы) только если они логично следуют из текста. Если физический объект не назван, "
-        "используй правдоподобную пресс-сцену или сдержанную инфографику с пустой зоной для заголовка. Никаких фантазийных происшествий, "
-        "гигантских объектов, случайных флагов, оружия, знаменитостей, разрушений и несовместимых стран."
+        "УНИВЕРСАЛЬНЫЙ ВИЗУАЛЬНЫЙ КОНТРАКТ: самостоятельно выбери самую сильную, мгновенно понятную и кликабельную "
+        "реалистичную сцену строго из текущей темы, сценария и структурированного контекста. Не применяй готовый шаблон по категории "
+        "новости и не подменяй тему знакомым сюжетом. Сам реши, какие люди, эмоции, объекты, фон, масштаб события и видимое действие "
+        "лучше всего передают именно эту историю. Усиливай драму, напряжение, страх, последствия, толпу, технику, разрушения или другие "
+        "сильные элементы только если они логично следуют из текущего содержания. Если таких оснований нет — добивайся кликабельности "
+        "композицией, выражением лиц, масштабом, контрастом, ракурсом и визуальным конфликтом, а не выдуманным происшествием. "
+        f"ДОСТУПНЫЙ СТРУКТУРИРОВАННЫЙ КОНТЕКСТ: {context or 'только текущая тема и сценарий'}."
     )
 
 
 def _cover_news_conflict_requirement(item: dict) -> str:
-    """Return the non-negotiable news-conflict brief for prompt and render paths."""
-    text = " ".join((str(item.get("title", "")), str(item.get("script", "")))).casefold()
-    military_markers = (
-        "ракет", "удар", "атак", "взрыв", "пво", "дрон", "беспилот", "нато", "войн", "фронт",
-        "наступлен", "армия", "военн", "эскалац", "обстрел", "бомб",
-    )
-    if any(marker in text for marker in military_markers):
-        return (
-            "ОБЯЗАТЕЛЬНЫЙ НОВОСТНОЙ КОНФЛИКТ: в каждом промпте прямо укажи ракеты, пуск, удар или последствия атаки, "
-            "строго связанные с темой и названным объектом/местом. Покажи реакцию людей, прессу и камеры в правдоподобной "
-            "широкой новостной сцене; это не декоративный фон и не случайная атака из другой страны. "
-        )
+    """Require a visible story stake without imposing a pre-classified scene."""
+    del item
     return (
-        "ОБЯЗАТЕЛЬНЫЙ НОВОСТНОЙ КОНФЛИКТ: в каждом промпте прямо укажи конкретное противостояние или последствие, "
-        "которое следует из темы, и покажи людей, прессу и камеры в правдоподобной широкой новостной сцене. "
+        "ОБЯЗАТЕЛЬНЫЙ ВИЗУАЛЬНЫЙ КОНФЛИКТ: сам найди в текущей теме главный конфликт, риск, изменение, реакцию или последствие "
+        "и вырази его одним ясным визуальным столкновением. Не добавляй заранее заданные ракеты, разрушения, биржу, политиков, "
+        "толпу или другой тип сцены только из-за категории новости; каждый такой элемент должен следовать из текущего контекста. "
     )
 
 
@@ -8910,7 +8874,17 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 "The supplied user reference sets hierarchy and framing; create a new topic-accurate scene."
             )
         if face_label:
-            face_layout = _cover_face_layout(item, settings, str(item.get("face_reference_path", "")), face_label) if use_my_face else ""
+            if use_my_face:
+                face_layout = _cover_face_layout(
+                    item, settings, str(item.get("face_reference_path", "")), face_label,
+                )
+            else:
+                side = _cover_face_side(item)
+                opposite = "RIGHT" if side == "LEFT" else "LEFT"
+                face_layout = (
+                    f"Place the recognisable portrait of {face_label} as a large side portrait on the {side}, anchored to the bottom "
+                    f"edge; keep the opposite {opposite} side available for headline hierarchy and story evidence. Never centre the face."
+                )
             if local_face_only:
                 identity_notes.append(
                     f"A matching portrait of {face_label} will be composited locally after rendering; leave that zone uncluttered."
