@@ -7277,7 +7277,6 @@ _COVER_WORD_PAIRING = {
     "H17": ("S02", "S07", "S08", "S15"), "H18": ("S02", "S04", "S03", "S10"),
 }
 _COVER_WORD_GENERIC_STEMS = {"важн", "главн", "новост", "сегодн", "ситуац", "событ", "проблем", "изменен", "вопрос", "сценар", "последств", "шок", "срочно"}
-_COVER_WORD_FOREIGN_ENTITIES = {"трамп", "путин", "зеленск", "макрон", "али", "эрдоган", "нетан", "китай", "росси", "украин", "европ", "нато", "сша", "иран", "израил"}
 _COVER_WORD_GENERIC_ENTITY_TOKENS = {
     "стороны", "сторона", "участники", "участник", "чиновники", "чиновник",
     "власти", "люди", "рынок", "переговоры", "кризис", "ситуация",
@@ -7346,15 +7345,21 @@ def _cover_word_semantic_plan(item: dict) -> dict[str, list[str]]:
         "security", "cost", "breakdown",
     )}
     lower = source.casefold()
+    named_source_entities = _cover_word_named_source_entities(item)
     for word in values:
         if re.fullmatch(r"\d+(?:[.,]\d+)?%?", word):
             slots["number"].append(word)
-        if word[:4] in _COVER_WORD_FOREIGN_ENTITIES:
+        if word[:4] in named_source_entities:
             slots["subject"].append(word)
+    geography_tokens = [
+        word.casefold() for word in re.findall(
+            r"[A-Za-zА-Яа-яЁё]{3,}", _cover_context_values(item.get("geography"))
+        )
+    ]
+    slots["location"] = list(dict.fromkeys(geography_tokens))
     markers = {
         "action": ("заяв", "введ", "повыс", "закро", "перекр", "постав", "ответ", "переговор"),
         "object": ("нефт", "газ", "тариф", "экспорт", "порт", "термин", "постав", "санкц"),
-        "location": ("ормуз", "европ", "росси", "украин", "сша", "кита", "иран", "израил"),
         "cause": ("из-за", "потому", "после", "вследств"),
         "conflict": ("конфликт", "давлен", "санкц", "против", "спор", "эскалац"),
         "consequence": ("сократ", "рост", "паден", "риск", "потер", "дефиц"),
@@ -7392,22 +7397,35 @@ def _cover_word_pattern_signature(value: str) -> str:
 
 
 def _cover_word_foreign_entities(value: str, item: dict) -> set[str]:
-    source_tokens = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", _cover_word_source_text(item).casefold())}
-    phrase_tokens = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", str(value).casefold())}
-    # Match standalone words/stems, not a substring: «али» inside
-    # «обвалиться» must never be treated as the unrelated leader Алиев.
-    return {entity for entity in _COVER_WORD_FOREIGN_ENTITIES
-            if entity[:4] in phrase_tokens and entity[:4] not in source_tokens}
+    """Reject newly introduced proper names without any fixed name vocabulary."""
+    source_tokens = {
+        word.casefold()
+        for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", _cover_word_source_text(item))
+    }
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", str(value))
+    phrase_is_all_caps = bool(words) and all(word.isupper() for word in words)
+    foreign: set[str] = set()
+    for index, word in enumerate(words):
+        lowered = word.casefold()
+        if lowered in _COVER_WORD_GENERIC_ENTITY_TOKENS:
+            continue
+        looks_named = (not phrase_is_all_caps and index > 0 and word[:1].isupper())
+        if not looks_named:
+            continue
+        if not any(
+            lowered == source
+            or (
+                len(lowered) >= 4 and len(source) >= 4
+                and (lowered.startswith(source) or source.startswith(lowered))
+            )
+            for source in source_tokens
+        ):
+            foreign.add(lowered)
+    return foreign
 
 
 def _cover_word_named_source_entities(item: dict) -> set[str]:
-    """Return concrete topic anchors without learning names from a long script.
-
-    Prefer structured ProductionItem entities. For direction strings such as
-    Armenia-Azerbaijan followed by a direction separator, the named left side
-    is also an explicit anchor. The legacy known-entity vocabulary remains a
-    compatibility fallback for title/topic rows without structured fields.
-    """
+    """Return concrete entity anchors from the current ProductionItem only."""
     anchors: set[str] = set()
 
     def add_words(value: object, *, trust_structure: bool = False) -> None:
@@ -7419,11 +7437,11 @@ def _cover_word_named_source_entities(item: dict) -> set[str]:
             if trust_structure or word.isupper() or word[:1].isupper():
                 anchors.add(lowered[:4])
 
-    for field in ("primary_entities", "primary_entity", "entities", "geography"):
+    for field in ("primary_entities", "primary_entity", "entities", "geography", "selected_people"):
         if item.get(field):
             add_words(item.get(field), trust_structure=True)
 
-    for field in ("direction", "topic"):
+    for field in ("direction", "topic", "title"):
         value = _cover_context_values(item.get(field))
         if not value:
             continue
@@ -7436,22 +7454,6 @@ def _cover_word_named_source_entities(item: dict) -> set[str]:
             if words and all(word.isupper() or word[:1].isupper() for word in words):
                 add_words(part)
 
-    topic_fields = (
-        "title", "topic", "direction", "angle", "event_context",
-        "primary_entities", "primary_entity", "entities", "geography",
-        "conflict", "framing",
-    )
-    topic_text = " ".join(
-        _cover_context_values(item.get(field)) for field in topic_fields if item.get(field)
-    )
-    source_tokens = {
-        word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", topic_text.casefold())
-    }
-    anchors.update(
-        entity[:4]
-        for entity in _COVER_WORD_FOREIGN_ENTITIES
-        if entity[:4] in source_tokens
-    )
     return anchors
 
 
