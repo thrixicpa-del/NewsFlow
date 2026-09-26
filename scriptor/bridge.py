@@ -8704,32 +8704,57 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         _run_parallel_cover_workers(sorted(requested), run_topic)
         return snapshot()
     refine_with_face = bool(payload.get("refineWithFace"))
-    # Both supported routes are final FastGen renders.  The optional portrait
-    # route transports one prepared reference but never performs local face
-    # compositing after the provider response.
-    local_face_only = False
-    face_mode = str(payload.get("faceMode", "auto")).casefold()
-    # A one-off FastGen text render must not overwrite the user's usual
-    # local-overlay preference for future covers.
-    text_mode = str(payload.get("textMode", settings.cover_text_mode)).casefold()
-    if text_mode not in {"overlay", "fastgen"}:
-        text_mode = settings.cover_text_mode
-    if face_mode not in {"auto", "with", "without"}:
-        face_mode = "auto"
     requested_index = min(requested)
-    requested_mode = str(payload.get("buildMode", settings.cover_build_mode))
-    build_mode = (
-        _cover_build_mode_for_item(
-            settings.cover_queue[requested_index], requested_index, settings,
-            default_mode=requested_mode,
-        )
-        if payload.get("useBuildModeRanges")
-        else requested_mode.casefold()
+    saved_profile = (
+        settings.cover_queue[requested_index].get("render_profile")
+        if repeat_current_contract else None
     )
-    if build_mode not in {"fastgen-full", "fastgen-full-my-face"}:
-        build_mode = "fastgen-full-my-face"
+    if repeat_current_contract and not isinstance(saved_profile, dict):
+        raise ValueError(
+            "Для «Повторить текущие» у обложки отсутствует сохранённый render profile. "
+            "Используйте «Создать новые промпты»."
+        )
+    # Exact repeat owns its saved route. Caller/UI defaults are intentionally
+    # ignored so a later settings change cannot silently change the old cover.
+    if repeat_current_contract:
+        profile = saved_profile or {}
+        build_mode = str(profile.get("build_mode", "")).casefold()
+        face_mode = str(profile.get("face_mode", "auto")).casefold()
+        text_mode = str(profile.get("text_mode", "fastgen")).casefold()
+        local_face_only = bool(profile.get("local_face_only", False))
+        operation = str(profile.get("operation", "")).strip()
+        if build_mode not in {"fastgen-full", "fastgen-full-my-face"}:
+            raise ValueError("Сохранённый render profile содержит неподдерживаемый режим обложки")
+        if face_mode not in {"auto", "with", "without"}:
+            raise ValueError("Сохранённый render profile содержит неподдерживаемый режим лица")
+        if text_mode not in {"overlay", "fastgen"}:
+            raise ValueError("Сохранённый render profile содержит неподдерживаемый режим текста")
+        if not operation:
+            raise ValueError("Сохранённый render profile не содержит FastGen operation")
+    else:
+        # Both supported routes are final FastGen renders. The optional
+        # portrait route transports one prepared reference but never performs
+        # local face compositing after the provider response.
+        local_face_only = False
+        face_mode = str(payload.get("faceMode", "auto")).casefold()
+        text_mode = str(payload.get("textMode", settings.cover_text_mode)).casefold()
+        if text_mode not in {"overlay", "fastgen"}:
+            text_mode = settings.cover_text_mode
+        if face_mode not in {"auto", "with", "without"}:
+            face_mode = "auto"
+        requested_mode = str(payload.get("buildMode", settings.cover_build_mode))
+        build_mode = (
+            _cover_build_mode_for_item(
+                settings.cover_queue[requested_index], requested_index, settings,
+                default_mode=requested_mode,
+            )
+            if payload.get("useBuildModeRanges")
+            else requested_mode.casefold()
+        )
+        if build_mode not in {"fastgen-full", "fastgen-full-my-face"}:
+            build_mode = "fastgen-full-my-face"
+        operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
     use_my_face = build_mode == "fastgen-full-my-face"
-    operation = str(payload.get("operation", settings.cover_operation)).strip() or settings.cover_operation
     operation_reference_limit = _cover_operation_reference_limit(settings, operation)
     operation_accepts_references = _cover_operation_accepts_references(settings, operation)
     render_profile = {
@@ -8868,7 +8893,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             # operation.  When there is no relevant portrait, the my-faces
             # route deliberately continues with zero PNGs instead of choosing
             # a random identity or stopping the whole generation batch.
-            if use_my_face and face_label and operation_reference_limit is None:
+            if not repeat_current_contract and use_my_face and face_label and operation_reference_limit is None:
                 detail = (
                     "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
                     "обновите список моделей или выберите reference-capable operation."
@@ -8877,7 +8902,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item["error"] = detail
                 _save_cover_state(settings)
                 continue
-            if use_my_face and face_label and not operation_accepts_references:
+            if not repeat_current_contract and use_my_face and face_label and not operation_accepts_references:
                 detail = (
                     f"Операция FastGen {operation} не поддерживает image/reference input; "
                     "выберите reference-capable operation для режима «FastGen всё + мои лица»."
@@ -8888,7 +8913,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 continue
             # Text-only generation endpoints must not receive files in the
             # remaining scene-only and diagnostic routes.
-            if not operation_accepts_references:
+            if not repeat_current_contract and not operation_accepts_references:
                 references = []
         except ValueError as exc:
             _cover_step(item, "Ошибка подготовки лица", 100, str(exc))
@@ -9428,18 +9453,29 @@ def regenerate_covers(payload: dict) -> dict:
         raise ValueError("Выберите тему для перегенерации обложки")
     if payload.get("currentProfile"):
         missing_prompts: list[str] = []
+        missing_profiles: list[str] = []
         missing_references: list[str] = []
         for index in sorted(requested):
             item = settings.cover_queue[index]
+            label = str(item.get("title", "") or index + 1)
+            profile = item.get("render_profile")
+            if not isinstance(profile, dict):
+                missing_profiles.append(label)
             saved_prompts = _cover_saved_provider_prompts(item)
             if not saved_prompts:
-                missing_prompts.append(str(item.get("title", "") or index + 1))
+                missing_prompts.append(label)
                 continue
             item["final_provider_prompt_options"] = list(saved_prompts)
             item["final_provider_prompt"] = saved_prompts[0]
             for reference in _cover_saved_provider_references(item):
                 if not Path(reference).expanduser().is_file():
                     missing_references.append(reference)
+        if missing_profiles:
+            raise ValueError(
+                "Нет сохранённого render profile для: "
+                + ", ".join(missing_profiles)
+                + ". Используйте «Создать новые промпты»."
+            )
         if missing_prompts:
             raise ValueError(
                 "Нет сохранённого Final FastGen prompt для: "
@@ -9471,7 +9507,9 @@ def regenerate_covers(payload: dict) -> dict:
             face_mode = str(profile.get("face_mode", "auto")).casefold()
             text_mode = str(profile.get("text_mode", settings.cover_text_mode)).casefold()
             local_face_only = bool(profile.get("local_face_only", build_mode != "fastgen-full"))
-            operation = str(payload.get("operation") or profile.get("operation") or settings.cover_operation).strip()
+            operation = str(profile.get("operation") or "").strip()
+            if not operation:
+                raise ValueError("Сохранённый render profile не содержит FastGen operation")
             key = (build_mode, face_mode, text_mode, local_face_only, operation)
             groups.setdefault(key, []).append((index, str(item.get("production_item_id", "")).strip()))
         result = snapshot()
