@@ -347,6 +347,38 @@ describe("Covers Light view", () => {
     expect(command).not.toHaveBeenCalledWith("generate-covers", expect.anything());
   });
 
+  it("repeats current selected covers with their saved render contract", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:current",
+        title: "Current",
+        image_prompt: "saved semantic prompt",
+        final_provider_prompt: "SAVED FINAL PROMPT",
+        final_provider_prompt_options: ["SAVED FINAL PROMPT"],
+        render_profile: {
+          build_mode: "fastgen-full-my-face" as const,
+          face_mode: "auto",
+          text_mode: "fastgen" as const,
+          local_face_only: false,
+          operation: "saved_reference_operation",
+        },
+        paths: ["current.png"],
+      }],
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Current" }));
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    fireEvent.click(screen.getByRole("button", { name: "Повторить текущие выбранных" }));
+
+    expect(command).toHaveBeenCalledWith("regenerate-covers", {
+      indices: [0],
+      productionItemIds: ["production:current"],
+      currentProfile: true,
+    });
+  });
+
   it("shows selected new-prompt readiness and blocks bulk render until all selected rows are ready", () => {
     const command = vi.fn(async () => undefined);
     const baseCovers = [
