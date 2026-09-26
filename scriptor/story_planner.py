@@ -301,11 +301,13 @@ def build_story_writer_prompt(
     plan: StoryPlan,
     accepted_parts: list[dict[str, Any]],
     part_index: int,
+    current_target_chars: int | None = None,
 ) -> str:
     """Give one writer compact semantic memory without leaking old full prose."""
     if not 0 <= part_index < len(plan.parts):
         raise ValueError("story writer part index is outside the validated plan")
     part = plan.parts[part_index]
+    active_target = max(1, int(current_target_chars or part.target_chars or 1))
     atoms = {atom.id: atom for atom in plan.content_atoms}
     blocks = {block["id"]: block["purpose"] for block in plan.macro_blocks}
 
@@ -381,7 +383,7 @@ def build_story_writer_prompt(
         f"CURRENT PART: {part.id}\n"
         f"CURRENT ROLE: {part.role}\n"
         f"CURRENT PURPOSE: {_compact(part.purpose, _COMPACT_PURPOSE_CHARS)}\n"
-        f"CURRENT TARGET: approximately {part.target_chars} characters\n"
+        f"CURRENT TARGET: approximately {active_target} characters\n"
         "ACTIVE LENGTH RULE FOR THIS CALL: write approximately CURRENT TARGET characters, not the overall scenario target.\n"
         f"CURRENT CONTENT:\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
