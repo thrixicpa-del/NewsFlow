@@ -1,19 +1,19 @@
 {
   "format": 1,
   "appVersion": "2.1.152",
-  "coreRevision": "core-bin-2.1.152-observability-r17",
-  "coreExeSha256": "ef505e0693745a7904ccfb503d733eba41288a9cb2dee55679ab7f6bb1b14bb9",
-  "coreExeSize": 34240724,
-  "builtFromGitSha": "d0fd69f3b93e8a47fbaa4421bb664be0ce76b370",
+  "coreRevision": "core-bin-2.1.152-observability-r18",
+  "coreExeSha256": "3e565e979df504a4c853224a2c9bfdadefc4a77f3a3ea0aa3aa2baad8c2ce8f1",
+  "coreExeSize": 34252899,
+  "builtFromGitSha": "67a1423c57dd70820033ca520800bb85a3a5eb24",
   "sourceGitBlobs": {
-    "scriptor/bridge.py": "cca7dba5c9d9ec14cb4ffd32495acc0f2df29b3f",
+    "scriptor/bridge.py": "26651cb5c8648e51db1707e0d27846c560d76959",
     "scriptor/ai_index.py": "c9da2a83ea5724eaa28ee8401b1eb303e597cd1f",
-    "scriptor/config.py": "f479087eeaa1b9106250e827da8056d79d620b11",
+    "scriptor/config.py": "0be27c05436fe7949736b5ef183e7b0d4b6cd953",
     "scriptor/timeline.py": "d2eec941cda44972256fb7f1020b930dec95c0e9",
     "scriptor/core.py": "bba3e8e4cfcb690db47eff8baf3222c425283f4a",
-    "scriptor/runner.py": "0f6a83d375ccaef1fc4c1b5b7e02a30cd76597d8",
+    "scriptor/runner.py": "48502c616ed1bb7761ab609d5058e37a09a55e07",
     "scriptor/openai_client.py": "eb1d167f4ccd3369441dab5532e5dc1440cb4bcd",
-    "scriptor/thumbnail_prompt_v2.py": "36afbb3f135857b8cb2f68774620f90f07ca5865",
+    "scriptor/thumbnail_prompt_v2.py": "ed00b534683901a9d96016197d4fa7bd0ef0b2fc",
     "scriptor/observability.py": "cd4524d258b41f3b659395d3772561a24632e3bd",
     "bridge_main.py": "abb479996f873ca96d8f9efc6805608cb4a4dd7b"
   }

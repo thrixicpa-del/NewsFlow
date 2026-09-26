@@ -120,15 +120,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r17")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r18")
         self.assertEqual(
             lock["coreExeSha256"],
-            "ef505e0693745a7904ccfb503d733eba41288a9cb2dee55679ab7f6bb1b14bb9",
+            "3e565e979df504a4c853224a2c9bfdadefc4a77f3a3ea0aa3aa2baad8c2ce8f1",
         )
-        self.assertEqual(lock["coreExeSize"], 34240724)
+        self.assertEqual(lock["coreExeSize"], 34252899)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "d0fd69f3b93e8a47fbaa4421bb664be0ce76b370",
+            "67a1423c57dd70820033ca520800bb85a3a5eb24",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),
