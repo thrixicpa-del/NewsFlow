@@ -703,35 +703,6 @@ def _api_key_id(kind: str, index: int = 0) -> str:
 def _api_key_fingerprint(secret: str) -> str:
     """A stable identifier that cannot be used as an API credential."""
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:10] if secret else "—"
-# A small alias bridge makes a library named in English still useful with
-# Russian news topics.  Exact folder/file name matches remain the priority.
-_COVER_FACE_ALIASES = (
-    {"трамп", "trump"}, {"зеленский", "zelensky", "zelenskyy"}, {"путин", "putin"},
-    {"алиев", "aliyev"}, {"пашинян", "pashinyan"}, {"нетаньяху", "netanyahu"},
-    {"макрон", "macron"}, {"эрдоган", "erdogan"}, {"хаменеи", "khamenei"},
-)
-# Country and place names often occur in a headline without the leader's
-# surname.  These hints let a correctly named portrait folder still be used,
-# but only for the country/region it actually belongs to.  They deliberately
-# do *not* turn every news topic into a generic politician collage.
-_COVER_FACE_TOPIC_HINTS = (
-    # The user deliberately uses the Ormuz/US pressure angle.  Give this
-    # matching rule priority over the general Iran hint when both folders are
-    # available, while still falling back to an Iranian leader if Trump is not
-    # present in the local library.
-    ({"ормуз", "ормузский"}, {"трамп", "trump"}, 12),
-    ({"иран", "ирана", "ираном", "тегеран"}, {"хамене", "khamenei", "пезешки", "pezeshk"}, 5),
-    ({"россия", "россии", "россий", "кремль", "москва", "рф"}, {"путин", "putin"}, 6),
-    ({"украина", "украины", "украин", "киев"}, {"зеленск", "zelensk"}, 6),
-    ({"азербайджан", "азербайджана", "баку"}, {"алиев", "aliyev"}, 6),
-    ({"армения", "армении", "ереван"}, {"пашинян", "pashinyan"}, 6),
-    ({"израиль", "израиля", "тель", "авив"}, {"нетанья", "netanyahu"}, 6),
-    ({"сша", "вашингтон", "америк", "трамп"}, {"трамп", "trump"}, 6),
-    ({"турция", "турции", "анкара"}, {"эрдоган", "erdogan"}, 6),
-    ({"франция", "франции", "париж"}, {"макрон", "macron"}, 6),
-)
-
-
 def _cover_face_folder_value(value: object) -> str:
     """Return a safe stored library path; a legacy '.' must never mean the app folder."""
     raw = str(value or "").strip().strip('"')
@@ -917,13 +888,18 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    # A long script can mention unrelated countries, people or markets.  Face
-    # selection must follow the title/topic which the operator actually chose,
-    # never an incidental word from the body text.
-    title_tokens = _cover_face_tokens(" ".join((
-        str(item.get("title", "")), str(item.get("topic", "")),
-    )))
-    topic_tokens = set(title_tokens)
+    # Match only identities explicitly present in current structured metadata
+    # or the chosen title/topic.  There is deliberately no country→leader or
+    # pre-known-politician table: arbitrary face folders work the same way.
+    identity_context = " ".join((
+        str(item.get("title", "")),
+        str(item.get("topic", "")),
+        _cover_context_values(item.get("selected_people")),
+        _cover_context_values(item.get("primary_entities")),
+        _cover_context_values(item.get("primary_entity")),
+        _cover_context_values(item.get("entities")),
+    ))
+    topic_tokens = _cover_face_tokens(identity_context)
     best_score = 0
     candidates: list[Path] = []
     prepared_folder = _cover_prepared_face_folder(settings, folder)
@@ -936,16 +912,17 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         except ValueError:
             relative = Path(source.name)
         candidate_tokens = _cover_face_tokens(" ".join(relative.parts))
-        score = len(topic_tokens & candidate_tokens) * 5
-        for aliases in _COVER_FACE_ALIASES:
-            if _cover_tokens_match(topic_tokens, aliases) and _cover_tokens_match(candidate_tokens, aliases):
-                score += 6
-        # A named leader always wins.  Place-to-leader matching is deliberately
-        # weaker, so a headline that explicitly mentions another person cannot
-        # accidentally get an unrelated regional leader.
-        for topic_markers, identities, bonus in _COVER_FACE_TOPIC_HINTS:
-            if _cover_tokens_match(title_tokens, topic_markers) and _cover_tokens_match(candidate_tokens, identities):
-                score += bonus
+        exact_overlap = len(topic_tokens & candidate_tokens)
+        fuzzy_overlap = sum(
+            1 for topic_token in topic_tokens
+            if any(
+                topic_token == candidate
+                or (len(topic_token) >= 4 and len(candidate) >= 4
+                    and (topic_token.startswith(candidate) or candidate.startswith(topic_token)))
+                for candidate in candidate_tokens
+            )
+        )
+        score = exact_overlap * 8 + max(0, fuzzy_overlap - exact_overlap) * 3
         if score > best_score:
             best_score = score
             candidates = [source]
@@ -6844,61 +6821,20 @@ def _cover_structured_context(item: dict) -> str:
 
 
 def _cover_topic_visual_plan(item: dict) -> str:
-    """Give the prompt writer a concrete scene grammar for recurring news topics.
+    """Universal planner brief for arbitrary news topics.
 
-    General words such as “war” or “tension” otherwise produce a generic
-    soldier/map thumbnail.  The plan remains an editorial visualisation, not
-    a claim that a photographed incident really occurred.
+    The prompt writer receives the current production metadata separately via
+    _cover_structured_context. This helper must never route named people,
+    countries, companies or recurring stories to prewritten scenes.
     """
-    factual_context = " ".join(_cover_context_values(item.get(key)) for key in (
-        "direction", "topic", "angle", "event_context", "supporting_context", "primary_entities",
-        "primary_entity", "entities", "geography", "conflict", "main_consequence", "consequence",
-    ))
-    text = " ".join((str(item.get("title", "")), str(item.get("script", "")), factual_context)).casefold()
-    has = lambda *terms: any(term in text for term in terms)
-    if has("ормуз", "ormuz", "hormuz"):
-        return (
-            "ОРМУЗСКИЙ ВИЗУАЛЬНЫЙ ПЛАН: широкий реальный вид Ормузского пролива — танкер на переднем плане, "
-            "портовые краны/терминал и другие суда на глубине, тревожные моряки, спасатели или береговая охрана. "
-            "Для атмосферы угрозы допустимы дым, аварийные огни или горящий танкер ТОЛЬКО как редакционная визуализация, "
-            "не как заявление о конкретном подтверждённом взрыве. Оставь правую треть под локально наложенный портрет Трампа "
-            "если он найден в библиотеке, левую нижнюю часть — под крупный заголовок. Не ставь случайного военного у карты."
-        )
-    if has("нато") and has("росси", "кремл", "рф"):
-        return (
-            "ПЛАН НАТО—РОССИЯ: фотореалистичный телевизионный репортаж о конкретной политической или военной теме, а не выдуманная кино-сцена. "
-            "Основой кадра сделай реальный саммит НАТО, официальный вход штаба, пресс-зону или зал консультаций; обязательно покажи официальные флаги НАТО и ЕС "
-            "как узнаваемые тканевые флаги без читаемых надписей. Добавь журналистов с камерами, вспышки, охрану и только тех официальных лиц или объекты, "
-            "которые прямо связаны с заголовком. В каждом варианте обязателен один видимый и строго тематический маркер эскалации: ракетный пуск, удар, "
-            "работа ПВО или последствия атаки у названного в теме объекта; в кадре должны быть люди, пресса и реакция на конфликт. На втором плане покажи "
-            "фактический предмет риска из темы: карту региона, военную технику, аэродром, корабли, границу, санкционные документы или экстренные службы — "
-            "но только если это логично для текста. Дым, пожарные, спасатели и эвакуация должны быть частью новостной визуализации конкретного конфликта. "
-            "Не рисуй выдуманного седого генерала, безымянного героя, фантазийный бункер, одинокого солдата у декоративной карты или странный секретный штаб. "
-            "Не показывай бункер и не смешивай случайных лидеров, страны или флаги, которых нет в теме."
-        )
-    if has("кремл", "переговор", "ультиматум", "торг"):
-        return (
-            "ПЛАН ПЕРЕГОВОРОВ: широкая фотореалистичная сцена политического саммита — длинный стол, несколько лидеров и "
-            "дипломатов, журналисты, телекамеры, папки и флаги, напряжённые лица и вспышки камер. Если найден Путин, "
-            "локально помести его крупным портретом справа; фон должен оставаться панорамой переговоров, не одинокий политик у карты."
-        )
-    if has("удар", "взрыв", "пожар", "атак"):
-        return (
-            "ПЛАН ИНЦИДЕНТА: правдоподобная широкая сцена последствий — спасатели, пожарные, очевидцы на безопасной дистанции, "
-            "дым и аварийный свет, техника или объект строго по теме. Не создавай несуществующие доказательства конкретного удара; "
-            "это атмосферная редакционная визуализация события."
-        )
-    if has("военн", "армия", "фронт", "наступлен"):
-        return (
-            "ПЛАН ВОЕННОЙ ТЕМЫ: военнослужащие заняты понятным действием (патруль, эвакуация, логистика, штаб или техника), "
-            "реальная среда и люди на разных планах. Никакой одинокой фигуры с декоративной картой без связи с темой."
-        )
+    del item
     return (
-        "ПЛАН ПО УМОЛЧАНИЮ: не придумывай отдельное событие, аварию, удар или разрушение. Используй только конкретные объекты, "
-        "имена, места и действия, названные в теме или сценарии; покажи их в реалистичной редакционной среде с естественными людьми "
-        "(журналисты, участники, специалисты или очевидцы) только если они логично следуют из текста. Если физический объект не назван, "
-        "используй правдоподобную пресс-сцену или сдержанную инфографику с пустой зоной для заголовка. Никаких фантазийных происшествий, "
-        "гигантских объектов, случайных флагов, оружия, знаменитостей, разрушений и несовместимых стран."
+        "УНИВЕРСАЛЬНЫЙ ВИЗУАЛЬНЫЙ ПЛАН: сначала определи из ТЕМА и структурированного контекста "
+        "конкретный субъект, видимое действие, материальное доказательство и реальную среду. "
+        "Используй только сущности, места, объекты и последствия, которые присутствуют в текущем контексте. "
+        "Если конкретное действие или место не подтверждено, не выдумывай его: выбери нейтральную документальную "
+        "сцену, напрямую связанную с текущим субъектом. Не подменяй тему знакомым политиком, страной, отраслью, "
+        "рынком, военным конфликтом или другой ранее встречавшейся новостью. Каждый новый topic рассматривай независимо."
     )
 
 
@@ -7263,7 +7199,6 @@ _COVER_WORD_PAIRING = {
     "H17": ("S02", "S07", "S08", "S15"), "H18": ("S02", "S04", "S03", "S10"),
 }
 _COVER_WORD_GENERIC_STEMS = {"важн", "главн", "новост", "сегодн", "ситуац", "событ", "проблем", "изменен", "вопрос", "сценар", "последств", "шок", "срочно"}
-_COVER_WORD_FOREIGN_ENTITIES = {"трамп", "путин", "зеленск", "макрон", "али", "эрдоган", "нетан", "китай", "росси", "украин", "европ", "нато", "сша", "иран", "израил"}
 _COVER_WORD_GENERIC_ENTITY_TOKENS = {
     "стороны", "сторона", "участники", "участник", "чиновники", "чиновник",
     "власти", "люди", "рынок", "переговоры", "кризис", "ситуация",
@@ -7332,10 +7267,11 @@ def _cover_word_semantic_plan(item: dict) -> dict[str, list[str]]:
         "security", "cost", "breakdown",
     )}
     lower = source.casefold()
+    named_source_entities = _cover_word_named_source_entities(item)
     for word in values:
         if re.fullmatch(r"\d+(?:[.,]\d+)?%?", word):
             slots["number"].append(word)
-        if word[:4] in _COVER_WORD_FOREIGN_ENTITIES:
+        if word[:4] in named_source_entities:
             slots["subject"].append(word)
     markers = {
         "action": ("заяв", "введ", "повыс", "закро", "перекр", "постав", "ответ", "переговор"),
@@ -7378,12 +7314,28 @@ def _cover_word_pattern_signature(value: str) -> str:
 
 
 def _cover_word_foreign_entities(value: str, item: dict) -> set[str]:
-    source_tokens = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", _cover_word_source_text(item).casefold())}
-    phrase_tokens = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", str(value).casefold())}
-    # Match standalone words/stems, not a substring: «али» inside
-    # «обвалиться» must never be treated as the unrelated leader Алиев.
-    return {entity for entity in _COVER_WORD_FOREIGN_ENTITIES
-            if entity[:4] in phrase_tokens and entity[:4] not in source_tokens}
+    """Reject obvious newly introduced proper names without a fixed name list."""
+    source_tokens = {
+        word.casefold()
+        for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", _cover_word_source_text(item))
+    }
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", str(value))
+    foreign: set[str] = set()
+    for index, word in enumerate(words):
+        lowered = word.casefold()
+        if lowered in _COVER_WORD_GENERIC_ENTITY_TOKENS:
+            continue
+        looks_named = word.isupper() or (index > 0 and word[:1].isupper())
+        if not looks_named:
+            continue
+        if not any(
+            lowered == source
+            or (len(lowered) >= 4 and len(source) >= 4
+                and (lowered.startswith(source) or source.startswith(lowered)))
+            for source in source_tokens
+        ):
+            foreign.add(lowered)
+    return foreign
 
 
 def _cover_word_named_source_entities(item: dict) -> set[str]:
@@ -7422,22 +7374,6 @@ def _cover_word_named_source_entities(item: dict) -> set[str]:
             if words and all(word.isupper() or word[:1].isupper() for word in words):
                 add_words(part)
 
-    topic_fields = (
-        "title", "topic", "direction", "angle", "event_context",
-        "primary_entities", "primary_entity", "entities", "geography",
-        "conflict", "framing",
-    )
-    topic_text = " ".join(
-        _cover_context_values(item.get(field)) for field in topic_fields if item.get(field)
-    )
-    source_tokens = {
-        word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", topic_text.casefold())
-    }
-    anchors.update(
-        entity[:4]
-        for entity in _COVER_WORD_FOREIGN_ENTITIES
-        if entity[:4] in source_tokens
-    )
     return anchors
 
 
