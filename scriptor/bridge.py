@@ -103,6 +103,7 @@ from .publication_v2 import (
     confirm_publication_snapshots,
     fail_publication_stage,
     frozen_artifact_matches,
+    ensure_refreshed_channel_publication_rule,
     mark_publication_stage_not_required,
     migrate_legacy_publication_data,
     normalize_channel_publication_rule,
@@ -5561,16 +5562,11 @@ def refresh_analytics(payload: dict) -> dict:
                 "monetary_access": monetized,
                 "status": "Аналитика обновлена",
             })
-            if monetized and profile_id not in (settings.youtube_channel_publication_rules or {}):
-                rules = dict(settings.youtube_channel_publication_rules or {})
-                rules[profile_id] = normalize_channel_publication_rule({
-                    "channelId": profile_id,
-                    "enabled": True,
-                    "quota": 0,
-                    "monetized": True,
-                    "channelPriority": 10,
-                })
-                settings.youtube_channel_publication_rules = rules
+            ensure_refreshed_channel_publication_rule(
+                settings,
+                profile_id,
+                monetized=monetized,
+            )
             if report.get("errors"):
                 channel["analytics_note"] = "Часть метрик пока недоступна: " + str(report["errors"][0])
             else:
