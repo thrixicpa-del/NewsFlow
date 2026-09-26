@@ -1842,6 +1842,70 @@ class CoverLocalCompositorTests(unittest.TestCase):
         self.assertEqual(len(payload["productionItemIds"]), 1)
         self.assertTrue(payload["productionItemIds"][0].startswith("production:manual:"))
 
+    def test_repeat_current_contract_reuses_saved_prompt_and_reference_without_reselection(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            reference = Path(temporary) / "saved-face.png"
+            reference.write_bytes(b"saved-face")
+            saved_prompt = "SAVED FINAL FASTGEN PROMPT\nBYTE FOR BYTE"
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+            }]}
+            settings.cover_queue = [{
+                "production_item_id": "production:repeat",
+                "title": "Repeat",
+                "image_prompt": "semantic prompt that must not be rebuilt",
+                "final_provider_prompt": saved_prompt,
+                "final_provider_prompt_options": [saved_prompt],
+                "final_provider_reference_paths": [str(reference)],
+                "final_provider_face_label": "Saved Person",
+                "final_provider_face_reference_count": 1,
+                "face_reference_path": str(reference),
+                "face_reference_label": "Saved Person",
+                "face_reference_source": "auto",
+                "face_reference_count": 1,
+                "render_profile": {
+                    "build_mode": "fastgen-full-my-face", "face_mode": "auto",
+                    "text_mode": "fastgen", "local_face_only": False,
+                    "operation": "reference_image_edit",
+                },
+                "paths": [],
+            }]
+            calls = []
+
+            def render(prompt, _output, _title, _operation, _ratio, **kwargs):
+                calls.append((prompt, tuple(kwargs.get("references", []))))
+                return [Path(temporary) / "repeat.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "build_final_provider_prompt", side_effect=AssertionError("prompt rebuilt")), \
+                 patch.object(bridge, "_match_cover_face_reference", side_effect=AssertionError("face reselected")), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:repeat"],
+                    "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full-my-face",
+                    "faceMode": "auto",
+                    "textMode": "fastgen",
+                    "operation": "reference_image_edit",
+                    "repeatCurrentContract": True,
+                })
+
+            self.assertEqual(calls, [(saved_prompt, (str(reference),))])
+            self.assertEqual(settings.cover_queue[0]["final_provider_prompt"], saved_prompt)
+            self.assertEqual(settings.cover_queue[0]["face_reference_count"], 1)
+
     def test_repeat_current_rejects_legacy_row_before_deleting_existing_image(self):
         """Without a saved provider prompt, Repeat Current must not destroy the current image."""
         from scriptor import bridge
