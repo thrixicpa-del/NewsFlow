@@ -422,83 +422,84 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", prompt)
         self.assertNotIn("Energy traders react to changing oil prices", prompt)
 
-    def test_topic_fallbacks_do_not_turn_generic_market_words_into_oil_traders(self):
+
+    def test_unstructured_fallback_is_universal_for_arbitrary_topics(self):
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
 
-        fixtures = [
-            (
-                {"title": "Армения и Азербайджан обсуждают Карабах", "script": "Рынок и цены упомянуты лишь фоном."},
-                "Real diplomatic negotiation room in the South Caucasus",
-            ),
-            (
-                {"title": "Трамп и Путин возобновили контакты", "script": "Обсуждаются поставки и цены, но это политическая встреча."},
-                "Real presidential meeting or diplomatic contact setting",
-            ),
-            (
-                {"title": "Wildberries: инцидент на складе", "script": "Рынок, цены и поставки меняются после сбоя."},
-                "Real e-commerce warehouse and logistics loading area",
-            ),
-            (
-                {"title": "Поставки томатов и рост цен", "script": "Рынок обсуждает поставки и цены на овощи."},
-                "Real produce market, greenhouse or wholesale distribution setting",
-            ),
+        titles = [
+            "Красные овощи исчезают из магазинов после сбоя поставок",
+            "Северный Маяк меняет правила доставки в регионы",
+            "Учёные представили новый способ очистки воды",
+            "Город меняет схему движения общественного транспорта",
         ]
 
-        for item, expected_environment in fixtures:
-            with self.subTest(title=item["title"]):
-                prompt = build_final_provider_prompt("", item)
-                self.assertIn(expected_environment, prompt)
-                self.assertNotIn("Energy traders react to changing oil prices", prompt)
+        for title in titles:
+            with self.subTest(title=title):
+                prompt = build_final_provider_prompt("", {"title": title, "script": "Дополнительный контекст без готовой сцены."})
+                self.assertIn(f"MAIN SUBJECT:\n{title}", prompt)
+                self.assertIn("current topic/context", prompt)
                 self.assertNotIn("Energy-market trading floor", prompt)
+                self.assertNotIn("NATO summit", prompt)
+                self.assertNotIn("Karabakh", prompt)
 
-    def test_final_prompt_rejects_known_oil_market_collision_for_non_energy_topic(self):
+
+    def test_structured_scene_fields_are_authoritative_without_category_router(self):
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
 
-        with self.assertRaisesRegex(ValueError, "oil-market scene contradicts"):
-            build_final_provider_prompt(
-                "STORY CONTEXT:\nArmenia and Azerbaijan negotiate over Karabakh.",
-                {
-                    "title": "Армения и Азербайджан обсуждают Карабах",
-                    "visible_action": "Energy traders react to changing oil prices on live market boards",
-                    "environment": "Energy-market trading floor with oil logistics context",
-                },
-            )
+        scene = (
+            "STORY CONTEXT:\nCurrent synthetic story context.\n\n"
+            "MAIN SUBJECT:\nResearchers testing a new water filter\n\n"
+            "VISIBLE ACTION:\nEngineers inspect clear water leaving the prototype\n\n"
+            "VISUAL EVIDENCE:\nTransparent pipes, filter cartridge and measurement instruments\n\n"
+            "ENVIRONMENT:\nReal laboratory test bench\n\n"
+            "EMOTION:\nFocused scientific urgency"
+        )
+        prompt = build_final_provider_prompt(
+            scene,
+            {"title": "Новый фильтр меняет очистку воды", "script": "В другом абзаце упомянуты цены на нефть."},
+        )
 
-    def test_provider_is_not_called_when_final_prompt_has_a_topic_collision(self):
+        self.assertIn("Researchers testing a new water filter", prompt)
+        self.assertIn("Engineers inspect clear water leaving the prototype", prompt)
+        self.assertIn("Real laboratory test bench", prompt)
+        self.assertNotIn("Energy-market trading floor", prompt)
+
+
+    def test_provider_receives_arbitrary_current_scene_without_named_topic_router(self):
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
             settings = Settings(cover_output_folder=directory, cover_variant_count=1)
             settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
             settings.cover_queue = [{
-                "title": "Армения и Азербайджан обсуждают Карабах",
-                "topic": "Карабахский мирный процесс",
-                "production_item_id": "production:collision",
-                "image_prompt_options": ["Documentary diplomatic meeting"],
-                "visible_action": "Energy traders react to changing oil prices on live market boards",
-                "environment": "Energy-market trading floor with oil logistics context",
-                "cover_headline": "ПЕРЕГОВОРЫ",
+                "title": "Новый фильтр меняет очистку воды",
+                "topic": "Испытания новой технологии очистки",
+                "production_item_id": "production:synthetic",
+                "image_prompt_options": ["Engineers inspect a transparent water-filtration prototype in a real laboratory."],
+                "cover_headline": "ВОДА СТАЛА ЧИЩЕ",
                 "paths": [],
             }]
+            payloads = []
 
-            with patch.object(bridge, "load_settings", return_value=settings), \
-                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
-                 patch.object(bridge, "_save_cover_state"), \
-                 patch.object(bridge, "snapshot", return_value={}), \
-                 patch.object(bridge.FastGenPool, "generate_media") as render:
+            def render(prompt, output, *_args, **_kwargs):
+                payloads.append(prompt)
+                result = output / "synthetic.png"
+                result.write_bytes(b"cover")
+                return [result]
+
+            with patch.object(bridge, "load_settings", return_value=settings),                  patch.object(bridge, "_hydrate_cover_library", return_value=False),                  patch.object(bridge, "_save_cover_state"),                  patch.object(bridge, "snapshot", return_value={}),                  patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
                 bridge.generate_covers({
                     "indices": [0],
-                    "productionItemIds": ["production:collision"],
+                    "productionItemIds": ["production:synthetic"],
                     "_parallel_cover_worker": True,
                     "buildMode": "fastgen-full",
-                    "faceMode": "without",
+                    "faceMode": "auto",
                     "textMode": "fastgen",
                 })
 
-        render.assert_not_called()
-        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка промпта")
-        self.assertIn("oil-market scene contradicts", settings.cover_queue[0]["error"])
-        self.assertEqual(settings.cover_queue[0]["final_provider_prompt_options"], [])
+        self.assertEqual(len(payloads), 1)
+        self.assertIn("water-filtration prototype", payloads[0])
+        self.assertIn("professional YouTube thumbnail designer and art director", payloads[0])
 
     def test_fastgen_payload_keeps_multiline_scene_slots_from_the_saved_prompt(self):
         """The bridge must not flatten the planner draft before the provider boundary."""
@@ -612,24 +613,26 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("Do not add punctuation", headline)
         self.assertIn("Do not add punctuation", subheadline)
 
-    def test_final_prompt_prioritises_title_scene_and_requires_a_high_contrast_red_yellow_treatment(self):
+
+    def test_final_prompt_keeps_current_scene_and_design_contract_without_category_substitution(self):
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
 
+        scene = "Warehouse staff inspect damaged conveyor equipment after a logistics failure."
         prompt = build_final_provider_prompt(
-            "Energy traders react to changing oil prices on live market boards.",
+            scene,
             {
-                "title": "Порт Одессы под ударом — инфраструктура и отгрузка под угрозой",
-                "script": "Длинный сценарий вскользь упоминает нефтяной рынок и цены на энергию.",
-                "cover_headline": "ПОРТ ПОД УДАРОМ",
+                "title": "Склад остановил отправки после сбоя конвейера",
+                "script": "В справочном абзаце упомянуты цены на топливо.",
+                "cover_headline": "ОТПРАВКИ ВСТАЛИ",
             },
         )
 
         body = prompt.casefold()
-        self.assertIn("port operations", body)
-        self.assertIn("container", body)
+        self.assertIn("warehouse staff inspect damaged conveyor equipment", body)
         self.assertNotIn("energy-market trading floor", body)
+        self.assertIn("create a realistic, highly clickable, photorealistic youtube news thumbnail image", body)
+        self.assertIn("professional youtube thumbnail designer and art director", body)
         self.assertIn("straight vivid red frame", body)
-        self.assertIn("all four edges", body)
         self.assertIn("yellow or light lettering on a red panel", body)
 
     def test_final_fastgen_prompt_enforces_square_frame_and_palette_policy(self):
@@ -647,6 +650,10 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         )
 
         for prompt in (fixed, varied):
+            self.assertTrue(prompt.startswith(
+                "CORE STYLE:\nCreate a realistic, highly clickable, photorealistic YouTube news thumbnail image. "
+                "You are a professional YouTube thumbnail designer and art director."
+            ))
             self.assertIn("professional YouTube thumbnail designer and art director", prompt)
             self.assertIn("straight vivid red frame", prompt)
             self.assertIn("square corners", prompt)
@@ -655,44 +662,23 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("yellow or light lettering on a red panel", fixed.casefold())
         self.assertIn("choose a different contrasting text and panel colour pair", varied.casefold())
 
-    def test_semantic_scene_planner_resolves_concrete_values_for_supported_news_topics(self):
-        """V2 receives scene facts, never planner instructions or generic placeholders."""
+
+    def test_unstructured_scene_planner_remains_title_grounded_for_unseen_topics(self):
         from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
 
         samples = (
-            {
-                "title": "Цены на нефть растут после сокращения поставок",
-                "expected": ("oil price movement", "trading screens", "energy-market"),
-            },
-            {
-                "title": "Президент заявил о новых переговорах с Европой",
-                "expected": ("president", "speaks", "press"),
-            },
-            {
-                "title": "Порт Новороссийска приостановил отгрузку контейнеров",
-                "expected": ("port", "container", "terminal"),
-            },
-            {
-                "title": "ЕС обсуждает новые санкции против Ирана",
-                "expected": ("eu", "officials", "consultation"),
-            },
-            {
-                "title": "Мэр объявил о ремонте повреждённого моста",
-                "expected": ("mayor", "briefing", "bridge"),
-            },
+            "Новый материал снижает шум поездов",
+            "Система полива экономит воду в теплицах",
+            "Портативный прибор ускоряет анализ крови",
+            "Компания меняет логистику холодных продуктов",
         )
-        blocked = (
-            "a concrete topic-grounded", "a coherent real-world", "relevant evidence",
-            "suitable environment", "dynamic action", "implied by the topic",
-            "clear urgency and high stakes",
-        )
+        forbidden = ("NATO summit", "Energy-market trading floor", "Karabakh", "Donald Trump", "Vladimir Putin")
 
-        for sample in samples:
-            with self.subTest(title=sample["title"]):
-                prompt = build_final_provider_prompt("", {"title": sample["title"]})
-                body = prompt.casefold()
-                self.assertTrue(all(term in body for term in sample["expected"]), prompt)
-                self.assertTrue(all(term not in body for term in blocked), prompt)
+        for title in samples:
+            with self.subTest(title=title):
+                prompt = build_final_provider_prompt("", {"title": title})
+                self.assertIn(f"MAIN SUBJECT:\n{title}", prompt)
+                self.assertTrue(all(term not in prompt for term in forbidden), prompt)
 
     def test_word_engine_v2_persists_validated_pairs_before_visual_prompt_generation(self):
         """The public UI commands use V2 structures, provider parsing and persistence end-to-end."""
@@ -1467,46 +1453,59 @@ class CoverFaceLibraryTests(unittest.TestCase):
         self.assertIn("continued without PNG", settings.cover_queue[0]["faceSelectionReason"])
         self.assertNotIn("face_reference_path", settings.cover_queue[0])
 
-    def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
+
+    def test_face_match_does_not_infer_a_person_from_place_only(self):
         with TemporaryDirectory() as directory:
             folder = Path(directory)
-            portrait = folder / "Хаменеи" / "portrait.jpg"
+            portrait = folder / "Марина Орлова" / "portrait.jpg"
             portrait.parent.mkdir()
             portrait.write_bytes(b"test")
             settings = Settings(cover_face_library_folder=str(folder), cover_face_library_enabled=True)
-            path, label, source = _match_cover_face_reference({"title": "Тегеран усиливает давление"}, settings)
-            self.assertEqual(Path(path), portrait)
-            self.assertEqual(label, "Хаменеи")
-            self.assertEqual(source, "auto")
 
-    def test_ormuz_prefers_trump_when_both_topic_appropriate_folders_exist(self):
+            self.assertEqual(
+                _match_cover_face_reference({"title": "Город Северный меняет правила парковки"}, settings),
+                ("", "", ""),
+            )
+
+
+    def test_face_match_uses_arbitrary_identity_metadata_and_generic_transliteration(self):
         with TemporaryDirectory() as directory:
             folder = Path(directory)
-            trump = folder / "Трамп" / "portrait.jpg"
-            khamenei = folder / "Хаменеи" / "portrait.jpg"
-            trump.parent.mkdir(); khamenei.parent.mkdir()
-            trump.write_bytes(b"trump"); khamenei.write_bytes(b"khamenei")
+            matching = folder / "Marina Orlova" / "portrait.jpg"
+            unrelated = folder / "Anton Reed" / "portrait.jpg"
+            matching.parent.mkdir()
+            unrelated.parent.mkdir()
+            matching.write_bytes(b"match")
+            unrelated.write_bytes(b"other")
             settings = Settings(cover_face_library_folder=str(folder), cover_face_library_enabled=True)
-            path, label, source = _match_cover_face_reference({"title": "Иран — кризис на Ормузе"}, settings)
-            self.assertEqual(Path(path), trump)
-            self.assertEqual(label, "Трамп")
+
+            path, label, source = _match_cover_face_reference(
+                {"title": "Новый проект", "selected_people": ["Марина Орлова"]},
+                settings,
+            )
+
+            self.assertEqual(Path(path), matching)
+            self.assertEqual(label, "Marina Orlova")
             self.assertEqual(source, "auto")
 
-    def test_remembers_composition_profile_for_the_same_face(self):
-        settings = Settings()
-        item = {"title": "Путин сделал заявление"}
-        first = _cover_face_layout(item, settings, "C:/faces/Путин/portrait.png", "Путин")
-        second = _cover_face_layout(item, settings, "C:/faces/Путин/portrait.png", "Путин")
-        self.assertEqual(first, second)
-        self.assertTrue(item["face_layout"].startswith("крупный план героя"))
 
-    def test_reserves_a_text_safe_zone_when_overlay_is_enabled(self):
+    def test_remembers_side_portrait_composition_profile_for_same_item(self):
+        settings = Settings()
+        item = {"production_item_id": "synthetic:1", "title": "Марина Орлова представляет проект"}
+        first = _cover_face_layout(item, settings, "C:/faces/Marina Orlova/portrait.png", "Marina Orlova")
+        second = _cover_face_layout(item, settings, "C:/faces/Marina Orlova/portrait.png", "Marina Orlova")
+        self.assertEqual(first, second)
+        self.assertTrue(item["face_layout"].startswith("крупный боковой портрет"))
+        self.assertTrue("left" in first.casefold() or "right" in first.casefold())
+
+
+    def test_side_portrait_reserves_opposite_text_safe_zone(self):
         settings = Settings(cover_auto_overlay_text=True, cover_text_mode="overlay")
-        item = {"title": "Путин сделал заявление"}
-        instruction = _cover_face_layout(item, settings, "C:/faces/Путин/portrait.png", "Путин")
-        self.assertIn("RIGHT side", instruction)
-        self.assertIn("lower-left 52%", instruction)
-        self.assertIn("зона текста свободна", item["face_layout"])
+        item = {"production_item_id": "synthetic:2", "title": "Марина Орлова представляет проект"}
+        instruction = _cover_face_layout(item, settings, "C:/faces/Marina Orlova/portrait.png", "Marina Orlova")
+        self.assertIn("opposite", instruction.casefold())
+        self.assertIn("headline", instruction.casefold())
+        self.assertIn("текст на", item["face_layout"])
 
     def test_randomly_chooses_between_matching_portraits_but_keeps_manual_choice(self):
         with TemporaryDirectory() as directory:
@@ -1730,24 +1729,36 @@ class CoverVisualInstructionTests(unittest.TestCase):
         self.assertIn("CORE STYLE:\nNEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.", prompt)
         self.assertIn("Official NATO and EU fabric flags", prompt)
 
-    def test_topic_plan_uses_ormuz_specific_scene_not_a_generic_soldier_map(self):
-        plan = _cover_topic_visual_plan({"title": "Иран — кризис на Ормузе (нефть и танкеры)"})
-        self.assertIn("танкер", plan)
-        self.assertIn("Трампа", plan)
-        self.assertIn("случайного военного у карты", plan)
 
-    def test_default_topic_plan_does_not_invent_a_generic_event(self):
+    def test_topic_plan_is_universal_and_agent_owned(self):
+        plan = _cover_topic_visual_plan({
+            "title": "Редкий минерал меняет производство аккумуляторов",
+            "topic": "Новая производственная технология",
+            "primary_entities": ["Компания Север", "лаборатория"],
+        })
+        lowered = plan.casefold()
+        self.assertIn("самостоятельно выбери", lowered)
+        self.assertIn("не применяй готовый шаблон", lowered)
+        self.assertIn("компания север", lowered)
+        self.assertNotIn("ормузский визуальный план", lowered)
+        self.assertNotIn("план нато", lowered)
+
+
+    def test_default_topic_plan_does_not_invent_a_preclassified_event(self):
         plan = _cover_topic_visual_plan({"title": "Новые изменения в правилах"})
-        self.assertIn("не придумывай отдельное событие", plan.casefold())
-        self.assertIn("только конкретные объекты", plan.casefold())
+        lowered = plan.casefold()
+        self.assertIn("строго из текущей темы", lowered)
+        self.assertIn("не подменяй тему знакомым сюжетом", lowered)
+        self.assertIn("не выдуманным происшествием", lowered)
 
-    def test_nato_russia_plan_requires_real_symbols_not_an_invented_ai_war_room(self):
+
+    def test_named_fixture_does_not_activate_named_runtime_recipe(self):
         plan = _cover_topic_visual_plan({"title": "НАТО и Россия — риск новой эскалации"})
-        self.assertIn("официальные флаги НАТО и ЕС", plan)
-        self.assertIn("саммит", plan)
-        self.assertIn("ракетный пуск", plan)
-        self.assertIn("не рисуй выдуманного седого генерала", plan.casefold())
-        self.assertIn("не показывай бункер", plan.casefold())
+        lowered = plan.casefold()
+        self.assertIn("универсальный визуальный контракт", lowered)
+        self.assertNotIn("план нато—россия", lowered)
+        self.assertNotIn("обязательно покажи официальные флаги", lowered)
+        self.assertNotIn("ракетный пуск", lowered)
 
 
 class CoverLocalCompositorTests(unittest.TestCase):
