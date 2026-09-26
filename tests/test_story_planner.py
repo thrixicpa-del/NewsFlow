@@ -14,12 +14,17 @@ from scriptor.story_planner import (
 class StoryPartSizingTests(unittest.TestCase):
     def test_part_targets_scale_evenly_around_five_thousand_characters(self):
         self.assertEqual(calculate_story_part_targets(5000), (5000,))
-        self.assertEqual(calculate_story_part_targets(15000), (5000, 5000, 5000))
+        self.assertEqual(calculate_story_part_targets(15000), (4999, 4999, 4998))
         self.assertEqual(len(calculate_story_part_targets(50000)), 10)
         self.assertEqual(len(calculate_story_part_targets(150000)), 30)
         targets = calculate_story_part_targets(15123)
-        self.assertEqual(sum(targets), 15123)
+        self.assertEqual(sum(targets) + 2 * (len(targets) - 1), 15123)
         self.assertLessEqual(max(targets) - min(targets), 1)
+
+    def test_exact_overall_target_includes_deterministic_assembly_separators(self):
+        targets = calculate_story_part_targets(10000)
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(sum(targets) + 2, 10000)
 
 
 class StoryPlanValidationTests(unittest.TestCase):
