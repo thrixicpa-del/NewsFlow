@@ -588,7 +588,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                     patch("scriptor.bridge.FastGenPool.generate_media", side_effect=render):
                 bridge.generate_covers({"indices": [0], "textMode": "fastgen"})
 
-            self.assertEqual(payloads, [bridge._normalize_cover_photo_prompt(item["image_prompt"], item)])
+            self.assertEqual(payloads, [settings.cover_queue[0]["final_provider_prompt"]])
             self.assertIn(
                 "MAIN SUBJECT:\nEngineers testing a transparent water-filtration prototype",
                 payloads[0],
