@@ -28,6 +28,14 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_bridge_payload_transport tests.test_observability -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_voicer.VoicerTests.test_template_save_survives_an_independent_running_voice_job tests.test_voicer.VoicerTests.test_global_voice_concurrency_reaches_ten_when_wproject_has_ten_streams -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python -m ruff check scriptor/bridge.py tests/test_bridge_payload_transport.py tests/test_voicer.py --select E9,F63,F7,F82
+      - run: git diff --check origin/main...HEAD
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
