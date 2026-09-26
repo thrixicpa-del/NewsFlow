@@ -90,6 +90,69 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].actual_chars, 15004)
 
+    async def test_part_counts_one_through_seven_use_the_same_story_orchestration(self):
+        for part_count in range(1, 8):
+            with self.subTest(part_count=part_count):
+                target_chars = part_count * 5000
+
+                class RangeClient:
+                    def __init__(self, expected_parts, target):
+                        self.expected_parts = expected_parts
+                        self.target = target
+                        self.prompts = []
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        self.prompts.append(prompt)
+                        if "NewsFlow Story Planner" in prompt:
+                            return ParallelRunnerTests._story_plan_json(self.expected_parts)
+                        if self.expected_parts == 1:
+                            return "А" * self.target
+                        match = __import__("re").search(
+                            r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                        )
+                        if not match:
+                            raise AssertionError("multipart writer must receive an active part target")
+                        part_match = __import__("re").search(r"CURRENT PART: P(\d+)", prompt)
+                        if not part_match:
+                            raise AssertionError("multipart writer must identify its planned part")
+                        char = chr(0x0410 + int(part_match.group(1)))
+                        return char * int(match.group(1))
+
+                    async def generate_fresh(self, *_args, **_kwargs):
+                        raise AssertionError("normal planned flow must not use generic continuation")
+
+                client = RangeClient(part_count, target_chars)
+                jobs = await ParallelRunner(client, 1).run([
+                    ScenarioRequest(
+                        0, f"Тема {part_count}", "OPERATOR CONTRACT",
+                        target_chars=target_chars,
+                        allowed_min=target_chars,
+                        allowed_max=target_chars,
+                    ),
+                ])
+
+                job = jobs[0]
+                self.assertEqual(job.state, RunState.DONE)
+                self.assertEqual(job.length_status, "READY")
+                self.assertEqual(job.actual_chars, target_chars)
+                self.assertTrue(all("ПРОДОЛЖИ" not in prompt for prompt in client.prompts))
+
+                if part_count == 1:
+                    self.assertEqual(len(client.prompts), 1)
+                    self.assertNotIn("NewsFlow Story Planner", client.prompts[0])
+                    self.assertEqual(job.accepted_story_parts, [])
+                    continue
+
+                self.assertEqual(len(client.prompts), part_count + 1)
+                self.assertIn("NewsFlow Story Planner", client.prompts[0])
+                writer_prompts = client.prompts[1:]
+                self.assertEqual(len(job.accepted_story_parts), part_count)
+                self.assertIn("CURRENT ROLE: OPENING", writer_prompts[0])
+                self.assertIn("CURRENT ROLE: FINAL", writer_prompts[-1])
+                for middle_prompt in writer_prompts[1:-1]:
+                    self.assertIn("CURRENT ROLE: MIDDLE", middle_prompt)
+                    self.assertIn("NO GLOBAL FINAL", middle_prompt)
+
     async def test_remaining_part_targets_rebalance_after_a_shorter_accepted_part(self):
         class RebalanceClient:
             def __init__(self):
