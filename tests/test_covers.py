@@ -419,6 +419,48 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", prompt)
         self.assertNotIn("Energy traders react to changing oil prices", prompt)
 
+    def test_topic_fallbacks_do_not_turn_generic_market_words_into_oil_traders(self):
+        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+        fixtures = [
+            (
+                {"title": "Армения и Азербайджан обсуждают Карабах", "script": "Рынок и цены упомянуты лишь фоном."},
+                "Real diplomatic negotiation room in the South Caucasus",
+            ),
+            (
+                {"title": "Трамп и Путин возобновили контакты", "script": "Обсуждаются поставки и цены, но это политическая встреча."},
+                "Real presidential meeting or diplomatic contact setting",
+            ),
+            (
+                {"title": "Wildberries: инцидент на складе", "script": "Рынок, цены и поставки меняются после сбоя."},
+                "Real e-commerce warehouse and logistics loading area",
+            ),
+            (
+                {"title": "Поставки томатов и рост цен", "script": "Рынок обсуждает поставки и цены на овощи."},
+                "Real produce market, greenhouse or wholesale distribution setting",
+            ),
+        ]
+
+        for item, expected_environment in fixtures:
+            with self.subTest(title=item["title"]):
+                prompt = build_final_provider_prompt("", item)
+                self.assertIn(expected_environment, prompt)
+                self.assertNotIn("Energy traders react to changing oil prices", prompt)
+                self.assertNotIn("Energy-market trading floor", prompt)
+
+    def test_final_prompt_rejects_known_oil_market_collision_for_non_energy_topic(self):
+        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+        with self.assertRaisesRegex(ValueError, "oil-market scene contradicts"):
+            build_final_provider_prompt(
+                "STORY CONTEXT:\nArmenia and Azerbaijan negotiate over Karabakh.",
+                {
+                    "title": "Армения и Азербайджан обсуждают Карабах",
+                    "visible_action": "Energy traders react to changing oil prices on live market boards",
+                    "environment": "Energy-market trading floor with oil logistics context",
+                },
+            )
+
     def test_fastgen_payload_keeps_multiline_scene_slots_from_the_saved_prompt(self):
         """The bridge must not flatten the planner draft before the provider boundary."""
         from scriptor import bridge
@@ -1236,9 +1278,13 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 if build_mode == "fastgen-full-my-face":
                     self.assertEqual(settings.cover_queue[0]["face_reference_path"], str(prepared))
                     self.assertEqual(settings.cover_queue[0]["face_reference_source"], "auto")
+                    self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "prepared-reference")
+                    self.assertIn("prepared face-tree match", settings.cover_queue[0]["faceSelectionReason"])
                 else:
                     self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Зеленский")
                     self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "tree")
+                    self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "semantic-only")
+                    self.assertIn("face-tree metadata match", settings.cover_queue[0]["faceSelectionReason"])
                     self.assertIn("recognisable editorial portrait of Зеленский", settings.cover_queue[0]["final_provider_prompt"])
                     self.assertNotIn(str(prepared), settings.cover_queue[0]["final_provider_prompt"])
 
