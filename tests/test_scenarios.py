@@ -23,7 +23,9 @@ def _story_plan(part_count: int = 2) -> str:
             for index in range(1, part_count + 1)
         ],
         "parts": [
-            {"id": f"P{index}", "role": roles[index - 1], "purpose": f"Блок {index}", "content_ids": [f"C{index:03d}"]}
+            {"id": f"P{index}", "role": roles[index - 1], "purpose": f"Блок {index}",
+             "macro_id": "M1", "content_ids": [f"C{index:03d}"], "opens": [], "closes": [],
+             "transition_direction": f"к блоку {index + 1}" if index < part_count else "финал"}
             for index in range(1, part_count + 1)
         ],
     }, ensure_ascii=False)
