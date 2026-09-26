@@ -1641,6 +1641,9 @@ def snapshot() -> dict:
             "actualChars": (job.actual_chars or computed_actual_chars) if job else 0,
             "lengthStatus": (job.length_status or computed_length_status) if job else "",
             "lengthRepairAttempts": job.length_repair_attempts if job else 0,
+            "storyPartCount": len(job.story_plan.get("parts", [])) if job and isinstance(job.story_plan, dict) else 0,
+            "completedStoryParts": len(job.accepted_story_parts) if job else 0,
+            "storyPlannerStatus": job.story_planner_status if job else "",
         })
     cover_rows = [
         {**item, "galleryPaths": cover_gallery_paths(item)}
@@ -5772,8 +5775,19 @@ def generate_scenarios(payload: dict) -> dict:
 
     # Persist the planned batch before the first API request. Snapshot calls
     # run in a separate process, so the UI can now display each queue item.
+    # A valid saved story map is a resumable work artifact, not an old answer:
+    # ordinary retry resumes its accepted prefix; force deliberately restarts.
+    resume_jobs = {}
     for request in selected:
-        current[request.index] = Job(request)
+        previous = current.get(request.index)
+        if not force and previous and isinstance(previous.story_plan, dict):
+            previous.request = request
+            previous.state = RunState.WAITING
+            previous.error = ""
+            current[request.index] = previous
+            resume_jobs[request.index] = previous
+        else:
+            current[request.index] = Job(request)
     save_session(titles, list(current.values()))
 
     def save_job(job):
@@ -5781,7 +5795,7 @@ def generate_scenarios(payload: dict) -> dict:
         save_session(titles, list(current.values()))
 
     workers = pool.concurrency
-    finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected))
+    finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected, resume_jobs=resume_jobs))
     current.update({job.request.index: job for job in finished})
     save_session(titles, list(current.values()))
     save_settings(settings)

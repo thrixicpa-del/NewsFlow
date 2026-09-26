@@ -51,6 +51,28 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(restored[0].state, RunState.DONE)
             self.assertEqual(restored[1].error, "Ошибка сети")
 
+    def test_story_plan_and_accepted_prefix_survive_restart_and_rename(self):
+        plan = {
+            "thesis": "Одна история",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{"id": "C001", "summary": "Факт", "owner_part_id": "P1"}],
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "История", "content_ids": ["C001"], "target_chars": 5000}],
+        }
+        job = Job(
+            ScenarioRequest(0, "Первая", "P", target_chars=5000), RunState.PAUSED,
+            "Принятая часть", "", story_plan=plan,
+            accepted_story_parts=[{"part_id": "P1", "text": "Принятая часть", "content_ids": ["C001"], "target_chars": 5000}],
+            story_planner_status="READY",
+        )
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_session(["Первая"], [job])
+            titles, restored = load_session()
+            titles, renamed = rename_scenario(titles, restored, 0, "Переименованная")
+            self.assertEqual(titles, ["Переименованная"])
+            self.assertEqual(renamed[0].story_plan, plan)
+            self.assertEqual(renamed[0].accepted_story_parts, job.accepted_story_parts)
+            self.assertEqual(renamed[0].story_planner_status, "READY")
+
     def test_invalid_session_is_ignored(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
             path = os.path.join(folder, "NewsFlow")
