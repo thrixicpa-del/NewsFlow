@@ -8753,12 +8753,22 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 )
                 item.pop("semantic_face_label", None)
                 item.pop("semantic_face_source", None)
+                item["faceSelectionMode"] = "prepared-reference"
+                item["faceSelectionReason"] = (
+                    "topic-relevant prepared face-tree match"
+                    if face_label else "no confident prepared face-tree match"
+                )
             else:
                 # All-FastGen has no local image input at all.  It still uses
                 # the topical face tree to name the most relevant public
                 # figure in the prompt, then lets FastGen draw that person.
                 references = []
                 face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
+                item["faceSelectionMode"] = "semantic-only"
+                item["faceSelectionReason"] = (
+                    "topic-relevant face-tree metadata match"
+                    if face_label else "no confident face-tree match"
+                )
                 if face_label:
                     item.update(semantic_face_label=face_label, semantic_face_source="tree")
                 else:
