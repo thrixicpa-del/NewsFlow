@@ -101,9 +101,9 @@ from .publication_v2 import (
     complete_publication_stage,
     complete_upload_attempt,
     confirm_publication_snapshots,
+    ensure_refreshed_channel_publication_rule,
     fail_publication_stage,
     frozen_artifact_matches,
-    ensure_refreshed_channel_publication_rule,
     mark_publication_stage_not_required,
     migrate_legacy_publication_data,
     normalize_channel_publication_rule,
@@ -17146,12 +17146,27 @@ def open_chrome_session(payload: dict) -> dict:
     return snapshot()
 
 
+def _bridge_payload_from_cli() -> object:
+    """Read Electron's short file transport or the legacy direct CLI JSON payload."""
+    payload_path = os.environ.get("NEWSFLOW_BRIDGE_PAYLOAD_FILE", "").strip()
+    if payload_path:
+        path = Path(payload_path)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError("Не удалось прочитать payload команды NewsFlow") from exc
+        if len(raw.encode("utf-8")) > 8 * 1024 * 1024:
+            raise ValueError("Payload команды NewsFlow больше 8 МБ")
+        return json.loads(raw)
+    return json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+
+
 def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "snapshot"
     trace = None
     payload = {}
     try:
-        payload = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+        payload = _bridge_payload_from_cli()
         trace = start_action_trace(command, payload)
         if command in COMMAND_CONTRACT:
             validate_command_request(command, payload)

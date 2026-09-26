@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron';
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureTclRuntime } from './core-runtime.js';
@@ -89,17 +90,37 @@ function actionTracePayload(payload: unknown) {
   return { ...payload as Record<string, unknown>, _actionTrace: { id: crypto.randomUUID() } };
 }
 
+type CorePayloadTransport = { path: string; dispose: () => void };
+
+function createCorePayloadTransport(payload: unknown): CorePayloadTransport {
+  const directory = mkdtempSync(path.join(tmpdir(), 'newsflow-core-payload-'));
+  const payloadPath = path.join(directory, 'payload.json');
+  writeFileSync(payloadPath, JSON.stringify(payload ?? {}), { encoding: 'utf8', mode: 0o600 });
+  return {
+    path: payloadPath,
+    dispose: () => rmSync(directory, { recursive: true, force: true, maxRetries: 2 }),
+  };
+}
+
 function callCore(command: string, payload: unknown = {}) {
   return new Promise<unknown>((resolve, reject) => {
     const executable = pythonExecutable();
     const bundled = app.isPackaged && executable.toLowerCase().endsWith('.exe') && executable.includes('core-bin');
     const tracedPayload = actionTracePayload(payload);
-    const args = bundled ? [command, JSON.stringify(tracedPayload)] : ['-m', 'scriptor.bridge', command, JSON.stringify(tracedPayload)];
+    const args = bundled ? [command] : ['-m', 'scriptor.bridge', command];
+    let transport: CorePayloadTransport;
+    try {
+      transport = createCorePayloadTransport(tracedPayload);
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
     // The dedicated Chrome profile inherits the parent process' show state on
     // Windows. Do not hide the short-lived core process that starts OAuth, or
     // Chrome can exit without creating its visible authorization window.
     const windowsHide = command !== 'start-youtube-channel-handoff';
-    execFile(executable, args,
+    try {
+      execFile(executable, args,
       {
         windowsHide,
         cwd: coreRoot,
@@ -113,8 +134,10 @@ function callCore(command: string, payload: unknown = {}) {
           NEWSFLOW_REMOTION_NODE: process.execPath,
           NEWSFLOW_REMOTION_RUNNER: remotionRunner,
           NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2',
+          NEWSFLOW_BRIDGE_PAYLOAD_FILE: transport.path,
         },
       }, (error, stdout, stderr) => {
+        transport.dispose();
         if (error) {
           try {
             const response = JSON.parse(stdout);
@@ -128,6 +151,10 @@ function callCore(command: string, payload: unknown = {}) {
           resolve(response);
         } catch { reject(new Error(`Некорректный ответ ядра: ${stdout || stderr}`)); }
       });
+    } catch (error) {
+      transport.dispose();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -150,6 +151,28 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             self.assertTrue(generated["ideas"], generated)
             self.assertTrue(all(len(idea.split(" — ")) == 3 for idea in generated["ideas"]), generated)
             browser.close()
+
+    def test_preload_persists_a_large_template_without_using_the_command_line(self):
+        """Long template text crosses Electron → Core through the short payload transport."""
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        template = "E2E large template {title}. " + ("Keep this exact editorial context. " * 4_000)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            response = page.evaluate(
+                """async (template) => window.newsflowDesktop.command("save-template", { template })""",
+                template,
+            )
+            self.assertIsInstance(response, dict)
+            browser.close()
+
+        settings = self.test_root / "NewsFlow" / "settings.json"
+        persisted = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertEqual(template.strip(), persisted["template"])
 
     def test_screen_text_maintenance_round_trip_does_not_require_footage_roots(self):
         """The existing-vector maintenance action remains safe for an empty library."""
