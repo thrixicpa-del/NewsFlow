@@ -71,21 +71,15 @@ class ResultsBatchExportTests(unittest.TestCase):
             )
             self.assertEqual(
                 (exported / "02-SEO-и-хештеги.txt").read_text(encoding="utf-8"),
-                "001. Заголовок: SEO первая\n"
-                "SEO-описание: Строка один\nСтрока два\n"
-                "Хештеги: #первая\n\n"
-                "002. Заголовок: Средняя тема\n"
-                "SEO-описание: \n"
-                "Хештеги: \n\n"
-                "003. Заголовок: Третья тема\n"
-                "SEO-описание: \n"
-                "Хештеги: \n",
+                "001. Строка один\nСтрока два\n#первая\n\n"
+                "002. \n\n"
+                "003. \n",
             )
             self.assertEqual(
                 (exported / "03-теги.txt").read_text(encoding="utf-8"),
-                "001. Теги: тег один, тег два\n"
-                "002. Теги: \n"
-                "003. Теги: тег три\n",
+                "001. тег один, тег два\n"
+                "002. \n"
+                "003. тег три\n",
             )
             self.assertEqual(sorted(path.name for path in (exported / "MP4").iterdir()), [
                 "001 — Первая тема.mp4", "003 — Третья тема.mp4",
@@ -154,3 +148,71 @@ class ResultsBatchExportTests(unittest.TestCase):
             self.assertEqual(list((exported / "MP4").iterdir()), [])
             self.assertEqual(result["operationResult"]["missingMp4Ordinals"], [1])
             self.assertEqual(partial_video.read_bytes(), b"not-a-valid-mp4")
+
+    def test_does_not_backfill_matching_legacy_row_without_a_valid_completed_render(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "destination"
+            destination.mkdir()
+            invalid_video = root / "invalid.mp4"
+            invalid_video.write_bytes(b"invalid")
+            title = "Совпадающая тема без готового ролика"
+            settings = Settings(
+                results_output_folder=str(destination),
+                montage_task_statuses={
+                    "0": {
+                        "scenarioIndex": 0,
+                        "title": title,
+                        "status": "В очереди",
+                        "outputPath": str(invalid_video),
+                    },
+                },
+            )
+            job = Job(ScenarioRequest(0, title, "", "current-production-id"), RunState.DONE, "Сценарий")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=([title], [job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "_is_valid_montage_output", return_value=False), \
+                 patch.object(bridge, "snapshot", return_value={"results": {}}):
+                result = bridge.export_results_batch({})
+
+            self.assertEqual(settings.montage_task_statuses["0"].get("production_item_id", ""), "")
+            self.assertEqual(result["operationResult"]["missingMp4Ordinals"], [1])
+
+    def test_backfills_a_legacy_ready_mp4_only_when_current_title_and_index_match(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "destination"
+            destination.mkdir()
+            ready_video = root / "ready.mp4"
+            ready_video.write_bytes(b"valid-current-video")
+            title = "Тема с готовым старым MP4"
+            settings = Settings(
+                results_output_folder=str(destination),
+                montage_task_statuses={
+                    "0": {
+                        "scenarioIndex": 0,
+                        "title": title,
+                        "status": "Готово",
+                        "outputPath": str(ready_video),
+                    },
+                },
+            )
+            job = Job(ScenarioRequest(0, title, "", "current-production-id"), RunState.DONE, "Сценарий")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=([title], [job])), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "_is_valid_montage_output", return_value=True), \
+                 patch.object(bridge, "snapshot", return_value={"results": {}}):
+                result = bridge.export_results_batch({})
+
+            exported = Path(settings.results_last_export_folder)
+            self.assertEqual(
+                sorted(path.name for path in (exported / "MP4").iterdir()),
+                ["001 — Тема с готовым старым MP4.mp4"],
+            )
+            self.assertEqual(
+                settings.montage_task_statuses["0"]["production_item_id"],
+                "current-production-id",
+            )
+            self.assertEqual(result["operationResult"]["missingMp4Ordinals"], [])
