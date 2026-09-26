@@ -4641,6 +4641,11 @@ export function Covers({
     textMode: "fastgen",
     localFaceOnly: false,
   });
+  const repeatCurrent = () =>
+    void command("regenerate-covers", {
+      ...coverSelectionPayload(),
+      currentProfile: true,
+    });
   const regenerate = () =>
     void command("regenerate-covers", {
       ...coverSelectionPayload(),
@@ -6664,7 +6669,7 @@ export function Covers({
           <Button
             onClick={
               selectedTopicCount && promptsReady && !selectedHasActiveRender
-                ? regenerate
+                ? repeatCurrent
                 : undefined
             }
           >
