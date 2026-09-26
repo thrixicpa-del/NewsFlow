@@ -90,6 +90,37 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].actual_chars, 15004)
 
+    async def test_remaining_part_targets_rebalance_after_a_shorter_accepted_part(self):
+        class RebalanceClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(3)
+                match = __import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                )
+                target = int(match.group(1))
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 4000
+                return "Б" * target if "CURRENT PART: P2" in prompt else "В" * target
+
+        client = RebalanceClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "OPERATOR CONTRACT", target_chars=15000,
+                            allowed_min=15000, allowed_max=15000),
+        ])
+
+        p2_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P2" in prompt)
+        p3_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P3" in prompt)
+        self.assertIn("CURRENT TARGET: approximately 5498 characters", p2_prompt)
+        self.assertIn("CURRENT TARGET: approximately 5498 characters", p3_prompt)
+        self.assertEqual(jobs[0].actual_chars, 15000)
+        self.assertEqual(jobs[0].length_status, "READY")
+        self.assertEqual(jobs[0].state, RunState.DONE)
+
     async def test_fifty_thousand_story_uses_ten_owned_parts(self):
         class TenPartClient:
             def __init__(self):
