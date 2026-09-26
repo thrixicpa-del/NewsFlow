@@ -660,7 +660,7 @@ def _open_video_editor(page, video_id: str) -> None:
     if _editor_access_denied(visible_text):
         raise StudioAutomationError("У текущего аккаунта YouTube Studio нет доступа к разделу «Редактор».")
     clicked = bool(page.locator("body").evaluate("""(videoId) => {
-      const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
       const visible = (node) => Boolean(node) && node.getClientRects().length > 0;
       const exactFragment = '/video/' + videoId + '/editor';
       const candidates = Array.from(document.querySelectorAll(
