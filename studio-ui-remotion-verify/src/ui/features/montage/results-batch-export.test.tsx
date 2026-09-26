@@ -1,3 +1,4 @@
+import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Outputs, fallback } from "../../App";
@@ -42,5 +43,17 @@ describe("Results batch export", () => {
     fireEvent.click(screen.getByRole("button", { name: "Открыть папку" }));
 
     expect(openPath).toHaveBeenCalledWith("D:/Exports/NewsFlow Results — 2026-09-23 11-30-00");
+  });
+
+  it("keeps manual export in one batch instead of offering per-video publication packages", () => {
+    const data = {
+      ...fallback,
+      results: { outputFolder: "D:/Exports", lastExportFolder: "" },
+    } as NewsFlowSnapshot;
+
+    render(<Outputs data={data} command={vi.fn()} />);
+
+    expect(screen.getByText("Три согласованных TXT, выбранные обложки и готовые MP4 без изменения Publication-пакетов.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Собрать пакеты для публикации" })).not.toBeInTheDocument();
   });
 });

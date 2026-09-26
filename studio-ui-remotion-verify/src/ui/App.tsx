@@ -10911,7 +10911,6 @@ export function Outputs({
   command: Command;
 }) {
   const [busy, setBusy] = useState(false);
-  const packageAll = () => void command("package-outputs");
   const chooseResultsFolder = async () => {
     if (busy) return;
     const folder = await window.newsflowDesktop?.chooseFolder();
@@ -10933,11 +10932,6 @@ export function Outputs({
     }
   };
   const resultsOpenTarget = data.results.lastExportFolder || data.results.outputFolder;
-  const outputColumns: ColumnDef<NewsFlowSnapshot["outputs"][number]>[] = [
-    { id: "package", header: "Пакет", cell: ({ row }) => <b>{row.original.folder.split(/[\\/]/).pop()}</b> },
-    { accessorKey: "video", header: "MP4" },
-    { id: "action", header: "Действие", cell: ({ row }) => <Button onClick={() => void window.newsflowDesktop?.openPath(row.original.folder)}><FolderOpen size={16} />Открыть пакет</Button> },
-  ];
   return (
     <div className="nf-outputs" aria-label="Output Artifact Index">
       <section className="panel outputs-list" aria-label="Пакетные результаты">
@@ -10961,41 +10955,6 @@ export function Outputs({
         {data.operationResult?.kind === "results-batch" ? (
           <small>Тем: {data.operationResult.topicsTotal ?? data.operationResult.count}; MP4: {(data.operationResult.mp4Linked || 0) + (data.operationResult.mp4Copied || 0)}; обложки: {data.operationResult.coversCopied || 0}; нет MP4: {(data.operationResult.missingMp4Ordinals || []).join(", ") || "—"}; нет обложек: {(data.operationResult.missingCoverOrdinals || []).join(", ") || "—"}.</small>
         ) : null}
-      </section>
-      <div className="toolbar">
-        <Button kind="success" onClick={packageAll}>
-          <FolderOpen size={17} />
-          Собрать пакеты для публикации
-        </Button>
-        <Button
-          onClick={() =>
-            void window.newsflowDesktop?.openPath(
-              data.montageSettings.outputFolder,
-            )
-          }
-        >
-          Открыть папку MP4
-        </Button>
-      </div>
-      <section className="panel outputs-list">
-        <div className="panel-title">
-          <div>
-            <b>Внутренние пакеты для публикации</b>
-            <small>
-              Технические per-video пакеты для Publication: MP4, сценарий, SEO,
-              теги, хэштеги и выбранная обложка. Пользовательский batch-export
-              находится выше.
-            </small>
-          </div>
-        </div>
-        {data.outputs.length ? (
-          <DataTable ariaLabel="Готовые пакеты роликов" data={data.outputs} columns={outputColumns} />
-        ) : (
-          <Empty
-            title="Пока нет пакетов для публикации"
-            text="Если они нужны Publication, нажмите «Собрать пакеты для публикации»."
-          />
-        )}
       </section>
     </div>
   );
