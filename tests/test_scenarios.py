@@ -423,6 +423,41 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertTrue(all((job.request.target_chars, job.request.allowed_min, job.request.allowed_max) == (12500, 10000, 15000)
                             for job in [*all_jobs, *selected_jobs]))
 
+    def test_force_rewrite_updates_only_selected_ready_scenario_and_preserves_identities(self):
+        titles = ["Переписать", "Не трогать"]
+        settings = Settings(
+            scenario_provider="agent",
+            idea_production_items=[
+                {"id": "pi-rewrite", "title": titles[0]},
+                {"id": "pi-keep", "title": titles[1]},
+            ],
+        )
+        existing = [
+            Job(ScenarioRequest(0, titles[0], "", "pi-rewrite"), RunState.DONE, "Старый текст A", ""),
+            Job(ScenarioRequest(1, titles[1], "", "pi-keep"), RunState.DONE, "Старый текст B", ""),
+        ]
+        saved_batches = []
+
+        class FakePool:
+            concurrency = 1
+
+            async def generate(self, _prompt):
+                return "Новый текст A"
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=(titles, existing)), \
+             patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved_batches.append(list(jobs))), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=FakePool()):
+            bridge.generate_scenarios({"provider": "agent", "indices": [0], "force": True})
+
+        final = {job.request.index: job for job in saved_batches[-1]}
+        self.assertEqual(final[0].result, "Новый текст A")
+        self.assertEqual(final[0].request.production_item_id, "pi-rewrite")
+        self.assertEqual(final[1].result, "Старый текст B")
+        self.assertEqual(final[1].request.production_item_id, "pi-keep")
+
     def test_normal_batch_skips_ready_scenarios_without_constructing_an_api_pool(self):
         """A click on the normal batch action must never overwrite completed scripts."""
         settings = Settings(scenario_provider="agent")
