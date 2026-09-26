@@ -13,6 +13,7 @@ from typing import Any
 from .core import ScenarioRequest
 from .story_planner import (
     StoryPlan,
+    StoryPlanCapacityInsufficient,
     build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
@@ -258,7 +259,16 @@ class ParallelRunner:
                 job.state = RunState.PAUSED
                 job.error = "Планировщик сценария не вернул рабочий план"
                 return False
-            plan = parse_story_plan_response(planner_response, part_targets)
+            try:
+                plan = parse_story_plan_response(planner_response, part_targets)
+            except StoryPlanCapacityInsufficient as exc:
+                job.story_planner_status = "CAPACITY_INSUFFICIENT"
+                job.state = RunState.PAUSED
+                job.error = f"Недостаточно различающегося материала для выбранной длины: {exc.reason}"
+                job.result = ""
+                job.actual_chars = 0
+                job.length_status = "SHORT" if job.request.allowed_min else "CAPACITY"
+                return False
             job.story_plan = plan.to_dict()
             job.accepted_story_parts = []
             job.story_planner_status = "READY"
