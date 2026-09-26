@@ -1196,7 +1196,8 @@ class PublicationJobTests(unittest.TestCase):
         self.assertTrue(new_rule["enabled"])
         self.assertTrue(new_rule["monetized"])
         self.assertEqual(new_rule["channelPriority"], 10)
-        self.assertEqual(new_rule["quota"], 0)
+        self.assertEqual(new_rule["quota"], 1)
+        self.assertEqual(new_rule["distributionStrategy"], "balanced")
 
         saved_rule = settings.youtube_channel_publication_rules["profile-saved"]
         self.assertFalse(saved_rule["monetized"])
