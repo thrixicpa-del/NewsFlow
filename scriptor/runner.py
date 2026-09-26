@@ -5,9 +5,9 @@ import inspect
 import math
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
 
 from .core import ScenarioRequest
 
@@ -144,6 +144,14 @@ def scenario_length_continuation_instruction(request: ScenarioRequest, actual_ch
 
 def continuation_repeats_draft(draft: str, continuation: str) -> bool:
     """Reject an attempted restart before it can be appended to one scenario."""
+    normalized_draft = str(draft or "").strip().casefold()
+    normalized_continuation = str(continuation or "").strip().casefold()
+    # The n-gram heuristic below intentionally needs enough words to make a
+    # meaningful semantic comparison.  An exact short retry (for example a
+    # provider repeatedly returning one sentence) is nevertheless certainly
+    # not a continuation and must never be concatenated into the scenario.
+    if normalized_draft and normalized_draft == normalized_continuation:
+        return True
     draft_words = re.findall(r"[^\W\d_]+", str(draft or "").casefold(), flags=re.UNICODE)
     continuation_words = re.findall(r"[^\W\d_]+", str(continuation or "").casefold(), flags=re.UNICODE)
     if len(draft_words) < 5 or len(continuation_words) < 5:
@@ -348,7 +356,10 @@ class ParallelRunner:
                     if await self._repair_length_if_needed(job):
                         job.state = RunState.DONE
                         job.error = ""
-            except Exception as exc:
+            # This is the runner's deliberately broad provider boundary: it
+            # converts any adapter failure into durable per-job state instead
+            # of leaving a background worker unobserved.
+            except Exception as exc:  # noqa: BLE001
                 job.state = RunState.ERROR
                 job.error = str(exc)
                 job.result = getattr(exc, "response", job.result)
