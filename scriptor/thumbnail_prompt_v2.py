@@ -29,119 +29,33 @@ def _context(item: Mapping[str, object], *names: str) -> str:
     return ""
 
 
-def _topic_scene_defaults(title: str, source: str) -> dict[str, str]:
-    """Return a concrete, neutral scene plan when structured facts are absent.
+def _topic_scene_defaults(title: str, _source: str) -> dict[str, str]:
+    """Universal fallback used only when the planner has no structured scene.
 
-    This is a semantic fallback, not a second prompt builder: each string is a
-    renderable subject, action, evidence, setting or emotional read.  It keeps
-    a provider from receiving the former meta-instructions such as "choose a
-    concrete action" when a newly created topic has not yet been enriched.
+    Runtime deliberately contains no named news story, politician, country,
+    company, product, industry or event routing.  The current topic/context is
+    the authority; the agent chooses the concrete visual interpretation.
     """
-    fallback = {
-        "main_subject": title,
-        "visible_action": f"The central people and objects named in “{title}” are shown in an immediate visible response.",
-        "visual_evidence": f"The frame visibly anchors the development named in “{title}” with its named people, object or location.",
-        "environment": f"The real-world location directly connected to “{title}”.",
-        "emotion": "Focused news tension tied to the visible development.",
+    subject = _clean(title, "current news topic")
+    return {
+        "main_subject": subject,
+        "visible_action": (
+            f"A concrete real-world action, reaction or immediate consequence that follows directly from “{subject}”. "
+            "Choose it from the current topic/context; do not substitute a memorised news template."
+        ),
+        "visual_evidence": (
+            f"The strongest visible evidence supported by “{subject}” and the current production context: relevant people, "
+            "objects, documents, locations or consequences only."
+        ),
+        "environment": (
+            f"The real-world setting supported by “{subject}” and its context. If no specific location is known, choose a "
+            "neutral documentary environment that fits the actual subject instead of inventing a different event."
+        ),
+        "emotion": (
+            "Choose the strongest truthful emotional tone implied by the current story—tension, urgency, shock, concern, "
+            "conflict or restraint—without inventing unsupported violence, destruction or panic."
+        ),
     }
-    if any(term in source for term in ("карабах", "karabakh", "армени", "armenia", "азербайдж", "azerbaijan")):
-        return {
-            "main_subject": "Armenian and Azerbaijani officials in the Karabakh peace process",
-            "visible_action": "Delegations study documents and a regional map during direct negotiations",
-            "visual_evidence": "Karabakh map, negotiation papers, microphones and Armenian/Azerbaijani flags",
-            "environment": "Real diplomatic negotiation room in the South Caucasus",
-            "emotion": "Tense consequential bargaining",
-        }
-    if any(term in source for term in ("трамп", "trump")) and any(term in source for term in ("путин", "putin")):
-        return {
-            "main_subject": "Donald Trump and Vladimir Putin in high-level political contact",
-            "visible_action": "The two leaders speak or confer while aides and press observe",
-            "visual_evidence": "Trump, Putin, official flags, briefing papers and press cameras",
-            "environment": "Real presidential meeting or diplomatic contact setting",
-            "emotion": "High-stakes geopolitical tension",
-        }
-    if any(term in source for term in ("wildberries", "вайлдберриз", "warehouse", "склад")):
-        return {
-            "main_subject": "The Wildberries warehouse incident and its immediate operational impact",
-            "visible_action": "Warehouse staff and emergency responders work around the affected logistics site",
-            "visual_evidence": "Warehouse racks, parcels, loading bays, staff and emergency response details",
-            "environment": "Real e-commerce warehouse and logistics loading area",
-            "emotion": "Operational urgency and disruption",
-        }
-    if any(term in source for term in ("томат", "помидор", "tomato")):
-        return {
-            "main_subject": "Tomato supply and the produce market affected by the reported change",
-            "visible_action": "Growers, wholesalers or shoppers inspect tomato crates as supply changes become visible",
-            "visual_evidence": "Tomato crates, produce labels, wholesale pallets and market counters",
-            "environment": "Real produce market, greenhouse or wholesale distribution setting",
-            "emotion": "Visible concern about food supply and prices",
-        }
-    if any(term in source for term in ("ормуз", "hormuz", "ormuz")):
-        return {
-            "main_subject": "Iranian pressure on oil shipping routes",
-            "visible_action": "Oil tankers affected near Strait of Hormuz",
-            "visual_evidence": "Tankers, maritime tension, naval presence, crisis atmosphere",
-            "environment": "Strait of Hormuz shipping lane and nearby port infrastructure",
-            "emotion": "Urgent maritime tension and market shock",
-        }
-    if any(term in source for term in ("нато", "nato")):
-        return {
-            "main_subject": "NATO and EU consultation on escalation risk",
-            "visible_action": "Officials and journalists reacting during a NATO or EU consultation",
-            "visual_evidence": "Official NATO and EU fabric flags, press cameras, security and briefing documents",
-            "environment": "NATO summit, headquarters press zone or consultation room",
-            "emotion": "Visible diplomatic tension and urgent public scrutiny",
-        }
-    if any(term in source for term in ("евросоюз", "европа", "eu ", " eu", "санкц")):
-        return {
-            "main_subject": "EU or NATO consultation on an international decision",
-            "visible_action": "EU or NATO officials consult around briefing documents while press cameras record the meeting",
-            "visual_evidence": "EU and NATO flags, officials, consultation papers and press cameras",
-            "environment": "EU or NATO consultation room and press zone",
-            "emotion": "Visible diplomatic pressure during a decision meeting",
-        }
-    if (any(term in source for term in ("порт", "port", "контейнер", "container", "мост", "bridge", "трубопровод", "pipeline", "газ", "gas", "завод", "plant", "электростанц", "power station"))
-            and not any(term in source for term in ("мэр", "mayor", "президент", "president", "заяв", "said", "объяв", "announce"))):
-        subject = "Port operations and container traffic" if any(term in source for term in ("порт", "port", "контейнер", "container")) else "The infrastructure site named in the topic"
-        evidence = "Container stacks, cargo cranes and a terminal operations board" if any(term in source for term in ("порт", "port", "контейнер", "container")) else "The named infrastructure, work crews, safety equipment and a visible operations detail"
-        environment = "Working port terminal and container loading zone" if any(term in source for term in ("порт", "port", "контейнер", "container")) else "The real infrastructure location named in the topic"
-        return {
-            "main_subject": subject,
-            "visible_action": "Operations pause or crews respond at the affected site while the consequence remains visible",
-            "visual_evidence": evidence,
-            "environment": environment,
-            "emotion": "Operational urgency around a disrupted essential service",
-        }
-    if any(term in source for term in (
-        "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
-        "энергорын", "energy market",
-    )):
-        return {
-            "main_subject": "Oil price movement and the supply decision behind it",
-            "visible_action": "Energy traders react to changing oil prices on live market boards",
-            "visual_evidence": "Oil price charts, trading screens, supply-route map and tanker or barrel details",
-            "environment": "Energy-market trading floor with oil logistics context",
-            "emotion": "Immediate market alarm as prices and supply expectations move",
-        }
-    if any(term in source for term in ("мэр", "mayor", "президент", "president", "заяв", "said", "объяв", "announce", "переговор", "negotiat", "правительств", "government")):
-        person = "mayor" if any(term in source for term in ("мэр", "mayor")) else "president" if any(term in source for term in ("президент", "president")) else "official"
-        object_detail = "bridge repair plans" if any(term in source for term in ("мост", "bridge", "ремонт", "repair")) else "official briefing documents"
-        return {
-            "main_subject": f"The {person}'s public announcement",
-            "visible_action": f"The {person} speaks at a live press briefing while reporters record the announcement",
-            "visual_evidence": f"Press microphones, cameras, reporters and {object_detail}",
-            "environment": "Official press briefing room with a visible public-information backdrop",
-            "emotion": "Concentrated public attention during a consequential statement",
-        }
-    if any(term in source for term in ("конфликт", "conflict", "эскалац", "escalat", "военн", "military", "границ", "border")):
-        return {
-            "main_subject": "The named international confrontation and its affected participants",
-            "visible_action": "Officials, security personnel and civilians respond to the visible situation at the named location",
-            "visual_evidence": "The named border, official vehicles, security presence and on-the-ground reporting equipment",
-            "environment": "The real border or diplomatic location named in the topic",
-            "emotion": "Tense uncertainty around a visible international confrontation",
-        }
-    return fallback
 
 
 def visual_brief(item: Mapping[str, object] | None = None) -> dict[str, str]:
@@ -256,11 +170,24 @@ def build_final_provider_prompt(
     reference_notes: str = "",
     composition_notes: str = "",
     text_mode: str = "fastgen",
+    allow_varied_text_palette: bool = False,
 ) -> str:
     """Build the one immutable FastGen payload from semantic values and V2 rules."""
     scene_values = _structured_scene_values(scene_prompt)
     brief = visual_brief({**dict(item or {}), **scene_values})
     scene = _semantic_scene(scene_prompt, brief["title"])
+    # Structured planner fields are authoritative for every topic.  This is
+    # intentionally generic: no named story/category correction table exists
+    # in runtime.  When slots are present, rebuild STORY CONTEXT from those
+    # current values so a stale raw draft cannot override the current topic.
+    if scene_values:
+        scene = "; ".join(
+            value for key in (
+                "main_subject", "selected_people", "visible_action",
+                "visual_evidence", "environment", "emotion",
+            )
+            if (value := scene_values.get(key))
+        )
     identity = "; ".join(part for part in (identity_notes, reference_notes) if part.strip()) or "No additional identity or reference instruction."
     composition = "; ".join(part for part in (brief["layout"], composition_notes) if part.strip())
     if brief["headline"] and text_mode == "fastgen":
@@ -275,19 +202,26 @@ def build_final_provider_prompt(
             "Do not add punctuation, translate, rewrite or add words."
             if brief["subheadline"] else "None supplied."
         )
+        palette = (
+            "You may choose a different contrasting text and panel colour pair when it fits the scene better; "
+            "keep deliberate red/yellow accents and preserve the mandatory red outer frame."
+            if allow_varied_text_palette else
+            "Use yellow or light lettering on a red panel with deliberate red/yellow accents."
+        )
         typography = (
-            "Act as the thumbnail art director: choose the strongest readable composition for this exact photograph, "
-            "never thin, horror-style, low-contrast or decorative lettering. Use ultra-heavy condensed Cyrillic, "
-            "large at phone size, with a thick black outer stroke and hard dark shadow. Prefer yellow lettering on a red panel; "
-            "when it creates stronger separation from the scene, use red lettering on a yellow panel instead. "
-            "The panel must sit behind every headline word, keep the lettering within its bounds, and leave most of the photograph visible."
+            "Act as a professional YouTube thumbnail designer and art director. Choose varied, expressive, immediately readable "
+            "typography and the strongest hierarchy for this exact photograph; vary font treatment, panel shape and text placement "
+            "to suit this topic rather than repeating one template. Never use thin, horror-style, low-contrast or decorative lettering. "
+            "Use an ultra-heavy Cyrillic display face, large at phone size, with a thick dark outer stroke or hard shadow where needed. "
+            f"{palette} The contrasting solid panel must sit behind every headline word, keep the lettering within its bounds, "
+            "and leave the central evidence and recognisable faces visible."
         )
     else:
         headline = "None supplied; do not generate words."
         subheadline = "None supplied; do not generate words."
         typography = "Reserve a clean high-contrast area for supplied overlay text; do not generate words."
     blocks = (
-        ("CORE STYLE", "NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2. CLICKABILITY = HIGH. DRAMA = HIGH. ACTION = HIGH. EMOTION = HIGH. PHOTOREALISM = MAXIMUM. Produce one coherent, high-impact editorial thumbnail as a professional real-world camera photograph with natural optics, anatomy, scale, materials, depth and topic-grounded light."),
+        ("CORE STYLE", "Create a realistic, highly clickable, photorealistic YouTube news thumbnail image. You are a professional YouTube thumbnail designer and art director. NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2. CLICKABILITY = HIGH. DRAMA = HIGH. ACTION = HIGH. EMOTION = HIGH. PHOTOREALISM = MAXIMUM. Produce one coherent, high-impact editorial thumbnail as a professional real-world camera photograph with natural optics, anatomy, scale, materials, depth and topic-grounded light. Every visible story element must be traceable to the current topic, structured scene or supplied context; never replace the subject with a memorised category scene."),
         ("STORY CONTEXT", scene),
         ("MAIN SUBJECT", brief["main_subject"]),
         ("SELECTED PEOPLE", brief["selected_people"]),
@@ -300,28 +234,10 @@ def build_final_provider_prompt(
         ("HEADLINE", headline),
         ("SUBHEADLINE", subheadline),
         ("TYPOGRAPHY", typography),
-        ("RED EDGE ACCENTS", "Use one bold vivid red curved-corner frame with no words around all four outer edges of the image: continuous perimeter treatment, flush to the boundary, zero inset and zero empty margin. It must read as a deliberate red arc/frame, never as two thin side stripes."),
-        ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
+        ("RED EDGE ACCENTS", "Always draw one straight vivid red frame around the complete outer perimeter: equal thickness on all four edges, square corners, flush to the image boundary, zero inset and zero empty margin. It must be a clean rectangular border, never arcs, side stripes or decorative corner marks."),
+        ("FINAL NEGATIVE RULES", "Do not invent an ungrounded specific attack at an identifiable landmark. Use crowds, soldiers, fear, damage or destruction only when the title or scenario supports them. No circles, ovals, circular frames or rings. No meaningless icons. No artwork, illustration, painting, concept art, poster art, surreal art, fantasy, sci-fi, CGI, 3D render, cartoon, anime, collage, logos or watermarks."),
     )
     final_prompt = "\n\n".join(f"{name}:\n{content}" for name, content in blocks)
-    # Only the source topic may authorise an oil-market scene.  The script
-    # may mention prices/supply incidentally, and a broken scene prompt must
-    # never be allowed to justify its own contradiction.
-    topic_source = " ".join((
-        str((item or {}).get("title", "")),
-        str((item or {}).get("topic", "")),
-    )).casefold()
-    explicit_energy = any(term in topic_source for term in (
-        "нефт", "oil", "баррел", "barrel", "opec", "опек", "топлив", "fuel",
-        "энергорын", "energy market",
-    ))
-    final_lower = final_prompt.casefold()
-    oil_collision = (
-        "energy traders react to changing oil prices" in final_lower
-        or "energy-market trading floor" in final_lower
-    )
-    if oil_collision and not explicit_energy:
-        raise ValueError("FastGen prompt conflict: oil-market scene contradicts the current topic")
     return final_prompt
 
 
