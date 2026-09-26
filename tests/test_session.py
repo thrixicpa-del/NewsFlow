@@ -56,7 +56,9 @@ class SessionTests(unittest.TestCase):
             "thesis": "Одна история",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
             "content_atoms": [{"id": "C001", "summary": "Факт", "owner_part_id": "P1"}],
-            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "История", "content_ids": ["C001"], "target_chars": 5000}],
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "История", "macro_id": "M1",
+                       "content_ids": ["C001"], "target_chars": 5000, "opens": [], "closes": [],
+                       "transition_direction": "финал"}],
         }
         job = Job(
             ScenarioRequest(0, "Первая", "P", target_chars=5000), RunState.PAUSED,
