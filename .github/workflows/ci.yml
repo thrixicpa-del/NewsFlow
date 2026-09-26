@@ -28,6 +28,13 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python tests/run_isolated.py tests.test_covers.CoverGalleryFileStateTests.test_unstructured_fallback_is_universal_for_arbitrary_topics tests.test_covers.CoverGalleryFileStateTests.test_structured_scene_fields_are_authoritative_without_category_router tests.test_covers.CoverGalleryFileStateTests.test_provider_receives_arbitrary_current_scene_without_named_topic_router tests.test_covers.CoverGalleryFileStateTests.test_final_prompt_keeps_current_scene_and_design_contract_without_category_substitution tests.test_covers.CoverGalleryFileStateTests.test_unstructured_scene_planner_remains_title_grounded_for_unseen_topics tests.test_covers.CoverGalleryFileStateTests.test_final_fastgen_prompt_enforces_square_frame_and_palette_policy tests.test_covers.CoverVisualInstructionTests.test_runtime_cover_routing_has_no_named_fixture_tables tests.test_covers.CoverVisualInstructionTests.test_topic_plan_is_universal_and_agent_owned tests.test_covers.CoverVisualInstructionTests.test_default_topic_plan_does_not_invent_a_preclassified_event tests.test_covers.CoverVisualInstructionTests.test_named_fixture_does_not_activate_named_runtime_recipe tests.test_covers.CoverFaceLibraryTests.test_face_match_does_not_infer_a_person_from_place_only tests.test_covers.CoverFaceLibraryTests.test_face_match_uses_arbitrary_identity_metadata_and_generic_transliteration tests.test_covers.CoverFaceLibraryTests.test_remembers_side_portrait_composition_profile_for_same_item tests.test_covers.CoverFaceLibraryTests.test_side_portrait_reserves_opposite_text_safe_zone tests.test_covers.CoverFaceLibraryTests.test_my_faces_route_uses_prepared_auto_png_and_fastgen_only_route_sends_no_user_face -v
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: python -m ruff check scriptor/bridge.py scriptor/thumbnail_prompt_v2.py tests/test_covers.py --select E9,F63,F7,F82
+      - run: git diff --check origin/main...HEAD
+      - run: pnpm exec vitest run src/ui/features/covers/covers-view.test.tsx
+        working-directory: studio-ui-remotion-verify
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
