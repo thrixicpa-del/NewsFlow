@@ -14385,7 +14385,13 @@ def _results_export_task(settings: Settings, scenario_index: int, production_ite
             if task_id == production_item_id:
                 return task
             legacy_title = " ".join(str(task.get("title") or "").split()).casefold()
-            if not task_id and task_index == scenario_index and legacy_title == expected_title:
+            if (
+                not task_id
+                and task_index == scenario_index
+                and legacy_title == expected_title
+                and str(task.get("status", "")) == "Готово"
+                and _is_valid_montage_output(Path(str(task.get("outputPath", "") or "")))
+            ):
                 task["production_item_id"] = production_item_id
                 return task
             continue
