@@ -967,6 +967,24 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
     return str(chosen), label, "auto"
 
 
+def _cover_semantic_face_label(item: dict, settings: Settings, *, face_mode: str) -> str:
+    """Choose a topical person from the face tree without uploading any portrait.
+
+    The ``fastgen-full`` route uses the tree only as semantic editorial
+    knowledge: FastGen must render the selected person itself, never receive a
+    local file or inherit a manually selected portrait from the other route.
+    """
+    if face_mode == "without" or item.get("face_reference_disabled"):
+        return ""
+    semantic_item = dict(item)
+    for key in ("face_reference_path", "face_reference_label", "face_reference_source"):
+        semantic_item.pop(key, None)
+    _path, label, _source = _match_cover_face_reference(
+        semantic_item, settings, force=face_mode == "with", prepared_only=False,
+    )
+    return label
+
+
 def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool = False,
                                face_mode: str = "auto", position: int = 0,
                                max_references: int = 10,
@@ -8699,7 +8717,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         # the current screen defaults.
         item["render_profile"] = dict(render_profile)
         excerpt = " ".join(str(item.get("script", "")).split())[:1800]
-        prompt_options = [" ".join(str(value).split()) for value in (item.get("image_prompt_options") or [])]
+        # Structured planner prompts carry labelled scene slots on separate
+        # lines.  Flattening them here made FastGen see generic prose and let
+        # a keyword fallback overwrite the actual action/location.
+        prompt_options = [str(value).strip() for value in (item.get("image_prompt_options") or [])]
         prompt_options = list(dict.fromkeys(value for value in prompt_options if value))
         if not prompt_options:
             prompt = str(item.get("image_prompt", "")).strip()
@@ -8724,13 +8745,25 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             _save_cover_state(settings)
             continue
         try:
-            references, face_label = _cover_references_for_item(
-                item, settings, refine=refine_with_face,
-                face_mode=face_mode if use_my_face else "without", position=index,
-                max_references=operation_reference_limit if operation_reference_limit is not None else 10,
-                preserve_face_selection=not use_my_face,
-                prepared_auto_face=use_my_face,
-            )
+            if use_my_face:
+                references, face_label = _cover_references_for_item(
+                    item, settings, refine=refine_with_face, face_mode=face_mode, position=index,
+                    max_references=operation_reference_limit if operation_reference_limit is not None else 10,
+                    prepared_auto_face=True,
+                )
+                item.pop("semantic_face_label", None)
+                item.pop("semantic_face_source", None)
+            else:
+                # All-FastGen has no local image input at all.  It still uses
+                # the topical face tree to name the most relevant public
+                # figure in the prompt, then lets FastGen draw that person.
+                references = []
+                face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
+                if face_label:
+                    item.update(semantic_face_label=face_label, semantic_face_source="tree")
+                else:
+                    item.pop("semantic_face_label", None)
+                    item.pop("semantic_face_source", None)
             # A full-FastGen face cover is accepted only when the provider can
             # receive the selected portrait. Falling back to a name-only prompt
             # would silently produce a different person and cannot count as the
@@ -8771,7 +8804,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         identity_notes: list[str] = []
         reference_notes: list[str] = []
         composition_notes: list[str] = []
-        face_requirement = _cover_face_visual_requirement(face_mode if use_my_face else "auto", face_label)
+        face_requirement = _cover_face_visual_requirement(face_mode, face_label)
         if face_requirement:
             identity_notes.append(face_requirement)
         if references:
@@ -8783,7 +8816,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 "The supplied user reference sets hierarchy and framing; create a new topic-accurate scene."
             )
         if face_label:
-            face_layout = _cover_face_layout(item, settings, str(item.get("face_reference_path", "")), face_label)
+            face_layout = _cover_face_layout(item, settings, str(item.get("face_reference_path", "")), face_label) if use_my_face else ""
             if local_face_only:
                 identity_notes.append(
                     f"A matching portrait of {face_label} will be composited locally after rendering; leave that zone uncluttered."
@@ -8804,6 +8837,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             prompt_item = dict(item)
             for key in ("face_reference_path", "face_reference_label", "face_reference_source"):
                 prompt_item.pop(key, None)
+            if face_label:
+                prompt_item["selected_people"] = face_label
         final_prompt_options = [
             build_final_provider_prompt(
                 visual_prompt, prompt_item,

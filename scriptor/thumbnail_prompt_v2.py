@@ -171,6 +171,37 @@ def _semantic_scene(value: object, fallback: str) -> str:
     return _clean(". ".join(semantic), fallback)
 
 
+_STRUCTURED_SCENE_FIELDS = (
+    ("MAIN SUBJECT", "main_subject"),
+    ("SELECTED PEOPLE", "selected_people"),
+    ("VISIBLE ACTION", "visible_action"),
+    ("VISUAL EVIDENCE", "visual_evidence"),
+    ("ENVIRONMENT", "environment"),
+    ("EMOTION", "emotion"),
+)
+_STRUCTURED_PROMPT_LABELS = (
+    "CORE STYLE", "STORY CONTEXT", *[name for name, _key in _STRUCTURED_SCENE_FIELDS],
+    "SELECTED COMPOSITION", "IDENTITY / REFERENCES", "HEADLINE", "SUBHEADLINE",
+    "TYPOGRAPHY", "RED EDGE ACCENTS", "FINAL NEGATIVE RULES",
+)
+
+
+def _structured_scene_values(value: object) -> dict[str, str]:
+    """Read planner scene slots from a multiline V2 draft without style leakage."""
+    raw = str(value or "")
+    if not re.search(r"(?im)^\s*STORY CONTEXT:\s*", raw):
+        return {}
+    next_label = "|".join(re.escape(label) for label in _STRUCTURED_PROMPT_LABELS)
+    values: dict[str, str] = {}
+    for label, key in _STRUCTURED_SCENE_FIELDS:
+        match = re.search(
+            rf"(?ims)^\s*{re.escape(label)}:\s*(.*?)(?=^\s*(?:{next_label}):|\Z)", raw,
+        )
+        if match and (text := " ".join(match.group(1).split())):
+            values[key] = text
+    return values
+
+
 def prompt_sources_debug() -> dict[str, str]:
     """Human-readable provenance stored with a render, outside the provider prompt."""
     return {
@@ -192,7 +223,8 @@ def build_final_provider_prompt(
     text_mode: str = "fastgen",
 ) -> str:
     """Build the one immutable FastGen payload from semantic values and V2 rules."""
-    brief = visual_brief(item)
+    scene_values = _structured_scene_values(scene_prompt)
+    brief = visual_brief({**dict(item or {}), **scene_values})
     scene = _semantic_scene(scene_prompt, brief["title"])
     identity = "; ".join(part for part in (identity_notes, reference_notes) if part.strip()) or "No additional identity or reference instruction."
     composition = "; ".join(part for part in (brief["layout"], composition_notes) if part.strip())

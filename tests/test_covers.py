@@ -392,6 +392,80 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertNotIn("CORE STYLE", scene)
         self.assertEqual(prompt.count("CORE STYLE:"), 1)
 
+    def test_final_prompt_preserves_structured_scene_fields_over_generic_script_fallback(self):
+        """The planner's concrete scene must win over incidental script keywords."""
+        from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+        scene = (
+            "STORY CONTEXT:\nArmenia and Azerbaijan negotiate the Karabakh settlement under visible pressure.\n\n"
+            "MAIN SUBJECT:\nArmenian and Azerbaijani negotiators at a Karabakh peace meeting\n\n"
+            "VISIBLE ACTION:\nDelegations study a marked map and exchange documents across the table\n\n"
+            "VISUAL EVIDENCE:\nKarabakh map, signed papers, microphones and both national flags\n\n"
+            "ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus\n\n"
+            "EMOTION:\nTense, consequential bargaining"
+        )
+
+        prompt = build_final_provider_prompt(
+            scene,
+            {
+                "title": "Армения и Азербайджан: почему буксует мирный процесс по Карабаху",
+                "script": "В тексте вскользь упоминаются рынок, цены и поставки, но они не являются сценой.",
+            },
+        )
+
+        self.assertIn("MAIN SUBJECT:\nArmenian and Azerbaijani negotiators at a Karabakh peace meeting", prompt)
+        self.assertIn("VISIBLE ACTION:\nDelegations study a marked map and exchange documents across the table", prompt)
+        self.assertIn("VISUAL EVIDENCE:\nKarabakh map, signed papers, microphones and both national flags", prompt)
+        self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", prompt)
+        self.assertNotIn("Energy traders react to changing oil prices", prompt)
+
+    def test_fastgen_payload_keeps_multiline_scene_slots_from_the_saved_prompt(self):
+        """The bridge must not flatten the planner draft before the provider boundary."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(cover_output_folder=directory, cover_variant_count=1)
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            scene = (
+                "STORY CONTEXT:\nArmenia and Azerbaijan negotiate the Karabakh settlement.\n\n"
+                "MAIN SUBJECT:\nArmenian and Azerbaijani negotiators at a Karabakh peace meeting\n\n"
+                "VISIBLE ACTION:\nDelegations exchange documents over a Karabakh map\n\n"
+                "VISUAL EVIDENCE:\nKarabakh map, signed papers and both national flags\n\n"
+                "ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus\n\n"
+                "EMOTION:\nTense bargaining"
+            )
+            settings.cover_queue = [{
+                "title": "Армения и Азербайджан: почему буксует мирный процесс по Карабаху",
+                "script": "Есть случайное упоминание рынка и цен.",
+                "production_item_id": "production:karabakh",
+                "image_prompt_options": [scene],
+                "cover_headline": "ПЕРЕГОВОРЫ БУКСУЮТ",
+                "paths": [],
+            }]
+            payloads: list[str] = []
+
+            def render(prompt, output, *_args, **_kwargs):
+                payloads.append(prompt)
+                result = output / "karabakh.png"
+                result.write_bytes(b"cover")
+                return [result]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:karabakh"],
+                    "_parallel_cover_worker": True, "buildMode": "fastgen-full",
+                    "faceMode": "auto", "textMode": "fastgen",
+                })
+
+        self.assertEqual(len(payloads), 1)
+        self.assertIn("VISIBLE ACTION:\nDelegations exchange documents over a Karabakh map", payloads[0])
+        self.assertIn("ENVIRONMENT:\nReal diplomatic negotiation room in the South Caucasus", payloads[0])
+        self.assertNotIn("Energy traders react to changing oil prices", payloads[0])
+
     def test_provider_payload_equals_final_prompt(self):
         """No adapter, retry or render guard is allowed to append provider text."""
         from scriptor import bridge
@@ -1163,7 +1237,10 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     self.assertEqual(settings.cover_queue[0]["face_reference_path"], str(prepared))
                     self.assertEqual(settings.cover_queue[0]["face_reference_source"], "auto")
                 else:
-                    self.assertNotIn("face_reference_label", settings.cover_queue[0])
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Зеленский")
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "tree")
+                    self.assertIn("recognisable editorial portrait of Зеленский", settings.cover_queue[0]["final_provider_prompt"])
+                    self.assertNotIn(str(prepared), settings.cover_queue[0]["final_provider_prompt"])
 
     def test_matches_regional_leader_when_the_topic_names_country_but_not_person(self):
         with TemporaryDirectory() as directory:
