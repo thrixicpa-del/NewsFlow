@@ -138,6 +138,15 @@ class StoryPlanValidationTests(unittest.TestCase):
         restored = story_plan_from_dict(legacy)
         self.assertEqual(restored.to_dict()["content_atoms"][0].get("content_kind"), "SUPPORTED")
 
+    def test_capacity_failure_payload_is_no_longer_a_supported_plan_contract(self):
+        response = json.dumps({
+            "content_capacity_insufficient": True,
+            "capacity_reason": "Старый capacity-сигнал.",
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "thesis"):
+            parse_story_plan_response(response, (5000,))
+
 
 class StoryPlannerPromptTests(unittest.TestCase):
     def test_operator_style_rules_are_reference_constraints_not_content_atoms(self):
@@ -157,6 +166,12 @@ class StoryPlannerPromptTests(unittest.TestCase):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 
         self.assertIn("For one part, use P1 as COMPLETE", prompt)
+
+    def test_single_part_planner_without_length_uses_natural_complete_length(self):
+        prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (0,))
+
+        self.assertIn("P1=natural complete length", prompt)
+        self.assertNotIn("P1≈0 chars", prompt)
 
 
 class StoryWriterContextTests(unittest.TestCase):
@@ -251,6 +266,42 @@ class StoryWriterContextTests(unittest.TestCase):
         opening = build_story_writer_prompt(ScenarioRequest(0, "Тема", "CONTRACT"), plan, [], 0)
 
         self.assertNotIn("DRAMATIZED OPENING DISCLOSURE", opening)
+
+    def test_complete_writer_owns_opening_final_and_unbounded_length_rules(self):
+        plan = parse_story_plan_response(json.dumps({
+            "thesis": "Одна полная история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Вся история"}],
+            "content_atoms": [{
+                "id": "C001",
+                "summary": "Драматизированное развитие",
+                "owner_part_id": "P1",
+                "content_kind": "DRAMATIZED",
+            }],
+            "parts": [{
+                "id": "P1",
+                "role": "COMPLETE",
+                "purpose": "Открыть, развить и завершить",
+                "macro_id": "M1",
+                "content_ids": ["C001"],
+            }],
+        }, ensure_ascii=False), (0,))
+
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "CONTRACT"),
+            plan,
+            [],
+            0,
+            current_target_chars=0,
+        )
+
+        self.assertIn("CURRENT TARGET: no explicit character target", prompt)
+        self.assertNotIn("approximately 1 characters", prompt)
+        self.assertIn("first-30-seconds", prompt)
+        self.assertIn("final-section rules once", prompt)
+        self.assertIn("Apply operator factual-discipline to SUPPORTED atoms", prompt)
+        self.assertIn("for DRAMATIZED atoms use the explicit NewsFlow", prompt)
+        self.assertNotIn("Preserve all global style, factual-discipline", prompt)
+        self.assertEqual(prompt.count("DRAMATIZED OPENING DISCLOSURE"), 1)
 
 
 if __name__ == "__main__":
