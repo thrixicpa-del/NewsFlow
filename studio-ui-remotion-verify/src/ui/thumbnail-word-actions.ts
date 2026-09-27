@@ -8,6 +8,7 @@ export type CoverWordGenerationInput = {
   avoidRepeats: boolean;
   force?: boolean;
   replaceManual?: boolean;
+  tabloidMode?: boolean;
 };
 
 export function coverWordGenerationPayload(input: CoverWordGenerationInput) {
@@ -21,6 +22,7 @@ export function coverWordGenerationPayload(input: CoverWordGenerationInput) {
     ...(input.useDefault ? { useDefault: true } : {}),
     useStructure: input.useStructure,
     avoidRepeats: input.avoidRepeats,
+    ...(input.tabloidMode ? { tabloidMode: true } : {}),
     ...(input.force || input.replaceManual ? { force: true, regenerate: true } : {}),
     ...(input.replaceManual ? { replaceManual: true } : {}),
   };
@@ -38,6 +40,7 @@ export function coverWordPairGenerationPayload(
     useDefault: true,
     useStructure: input.useStructure,
     avoidRepeats: input.avoidRepeats,
+    ...(input.tabloidMode ? { tabloidMode: true } : {}),
     ...(input.force || input.replaceManual ? { force: true, regenerate: true } : {}),
     ...(input.replaceManual ? { replaceManual: true } : {}),
   };

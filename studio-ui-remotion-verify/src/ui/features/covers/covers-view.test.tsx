@@ -70,6 +70,26 @@ describe("Covers Light view", () => {
     })));
   });
 
+  it("keeps explicit FastGen visual references in step 02 and persists their mode contract", async () => {
+    const command = vi.fn(async () => undefined);
+    render(<Covers data={fallback} command={command} />);
+
+    const toggle = screen.getByLabelText("Использовать референсы FastGen");
+    expect(toggle.closest("article")?.textContent).toContain("Выберите движок текста и лица");
+    fireEvent.click(toggle);
+    expect(screen.getByText("Стиль")).toBeTruthy();
+    expect(screen.getByText("Композиция")).toBeTruthy();
+    expect(screen.getByText("Атмосфера / цвет / свет")).toBeTruthy();
+    expect(screen.getByText("Авто")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить референсы FastGen" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-cover-settings", expect.objectContaining({
+      useReferences: true,
+      referenceImagePaths: [],
+      referenceModeAuto: false,
+    })));
+  });
+
   it("does not submit the cover-start sequence twice while the current command is pending", async () => {
     let releaseCurrentCommand: (() => void) | undefined;
     const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {

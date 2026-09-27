@@ -1254,6 +1254,46 @@ class FastGenClientTests(unittest.TestCase):
 
 
 class CoverHeadlineGuardTests(unittest.TestCase):
+    def test_naturalness_gate_rejects_editorially_awkward_but_grounded_hooks(self):
+        cases = (
+            ("Европа поджимает помидоры", "Европа обсуждает поставки помидоров после нового решения"),
+            ("Сделка трещит по швам", "Сделка по поставкам помидоров оказалась под угрозой"),
+        )
+        for value, title in cases:
+            with self.subTest(value=value):
+                item = {"title": title, "topic": title}
+                validation = _validate_cover_word("headline", value, item)
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "UNNATURAL_LANGUAGE")
+
+    def test_candidate_prompt_requests_multiple_editorial_options_not_a_hash_template(self):
+        item = {"production_item_id": "production:tomatoes", "title": "Европа обсуждает поставки помидоров"}
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item), tabloid_mode=True,
+        )
+        self.assertIn("4–6", prompt)
+        self.assertIn("TABLOID", prompt)
+        self.assertIn('"candidates"', prompt)
+        self.assertIn("не является обязательным шаблоном", prompt)
+
+    def test_candidate_pipeline_selects_natural_grounded_option_after_quality_gate(self):
+        from scriptor import bridge
+
+        item = {"title": "Европа меняет поставки помидоров после нового решения"}
+
+        async def generate(_prompt, **_kwargs):
+            return json.dumps({"candidates": [
+                "Европа поджимает помидоры", "Европа меняет поставки",
+            ]}, ensure_ascii=False)
+
+        value, validation, attempts = asyncio.run(bridge._generate_cover_word_v2(
+            SimpleNamespace(generate=generate), "headline", item, "", _cover_word_structure_pair(item),
+        ))
+        self.assertEqual(value, "Европа меняет поставки")
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["candidate_count"], 2)
+        self.assertEqual(attempts[0]["validation"]["reason_code"], "UNNATURAL_LANGUAGE")
+
     def test_headline_is_limited_to_five_words(self):
         self.assertEqual(
             _clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС НОЧЬЮ"),
@@ -1956,6 +1996,72 @@ class CoverFaceLibraryTests(unittest.TestCase):
 
 
 class CoverVisualInstructionTests(unittest.TestCase):
+    def test_new_fastgen_reference_settings_persist_and_keep_missing_paths_visible(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        with TemporaryDirectory() as directory:
+            available = Path(directory) / "style.png"
+            missing = Path(directory) / "removed.webp"
+            folder = Path(directory) / "reference-pack"
+            folder.mkdir()
+            from_folder = folder / "mood.jpeg"
+            ignored = folder / "notes.txt"
+            available.write_bytes(b"style")
+            from_folder.write_bytes(b"jpeg")
+            ignored.write_text("not an image", encoding="utf-8")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                save_cover_settings({
+                    "useReferences": True,
+                    "referenceImagePaths": [str(available), str(missing)],
+                    "referenceModeStyle": True,
+                    "referenceModeComposition": True,
+                    "referenceModeMoodLighting": False,
+                    "referenceModeAuto": False,
+                    "referenceImageFolders": [str(folder)],
+                })
+            selection = bridge._cover_fastgen_visual_reference_selection(settings, max_references=8)
+            self.assertEqual(selection["paths"], [str(available), str(from_folder)])
+            self.assertEqual(selection["missing"], [str(missing)])
+        self.assertTrue(settings.cover_fastgen_use_references)
+        self.assertEqual(settings.cover_fastgen_reference_paths, [str(available), str(missing), str(from_folder)])
+        self.assertTrue(settings.cover_fastgen_reference_mode_style)
+        self.assertTrue(settings.cover_fastgen_reference_mode_composition)
+        self.assertFalse(settings.cover_fastgen_reference_mode_auto)
+
+    def test_new_fastgen_references_are_visual_only_and_portrait_slot_has_priority(self):
+        from PIL import Image
+
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            portrait = root / "portrait.png"
+            style_a = root / "style-a.png"
+            style_b = root / "style-b.png"
+            for path in (portrait, style_a, style_b):
+                Image.new("RGB", (640, 360), (20, 60, 90)).save(path)
+            settings = Settings(
+                cover_fastgen_use_references=True,
+                cover_fastgen_reference_paths=[str(style_a), str(style_b)],
+                cover_fastgen_reference_mode_style=True,
+                cover_fastgen_reference_mode_composition=True,
+            )
+            selection = bridge._cover_fastgen_visual_reference_selection(settings, max_references=1)
+            self.assertEqual(selection["paths"], [str(style_a)])
+            self.assertIn("visual guidance only", bridge._cover_fastgen_reference_instruction(settings).casefold())
+            self.assertIn("productionitem", bridge._cover_fastgen_reference_instruction(settings).casefold())
+            references, _label = _cover_references_for_item(
+                {"face_reference_path": str(portrait), "face_reference_label": "Current Person", "face_reference_source": "manual"},
+                settings,
+                face_mode="with",
+                prepared_auto_face=True,
+                max_references=2,
+            )
+        self.assertEqual(references[-1], str(portrait))
+        self.assertEqual(len(references), 2)
     def test_scenario_cover_inherits_saved_production_context(self):
         from scriptor.bridge import _sync_scenario_to_covers
 
@@ -3895,6 +4001,56 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
             self.assertEqual(settings.cover_queue[index]["status"], "Готово")
         compose.assert_not_called()
         overlay.assert_not_called()
+
+    def test_fastgen_full_transports_explicit_visual_references_and_keeps_them_content_only_guidance(self):
+        from PIL import Image
+
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "style.png"
+            Image.new("RGB", (640, 360), (20, 60, 90)).save(reference)
+            settings = Settings(
+                cover_output_folder=temporary,
+                cover_auto_overlay_text=False,
+                cover_variant_count=1,
+                cover_operation="reference_image_edit",
+                cover_fastgen_use_references=True,
+                cover_fastgen_reference_paths=[str(reference)],
+                cover_fastgen_reference_mode_style=True,
+                cover_fastgen_reference_mode_composition=True,
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+            }]}
+            settings.cover_queue = [self._row(
+                0, title="Переговоры в парламенте", image_prompt="Parliament negotiation scene",
+                cover_headline="ПЕРЕГОВОРЫ ПОД УГРОЗОЙ", cover_subheadline="Стороны ждут решения",
+            )]
+            calls = []
+
+            def render(prompt, _output, _stem, _operation, _ratio, **kwargs):
+                calls.append((prompt, tuple(str(path) for path in kwargs.get("references") or [])))
+                return [root / "provider.png"]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_prepare_cover_visual_reference", side_effect=lambda path: path), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:0"], "_parallel_cover_worker": True,
+                    "buildMode": "fastgen-full", "faceMode": "without", "textMode": "fastgen",
+                    "localFaceOnly": False, "operation": "reference_image_edit",
+                })
+
+        self.assertEqual(calls[0][1], (str(reference),))
+        self.assertIn("REFERENCE = VISUAL GUIDANCE ONLY", calls[0][0])
+        self.assertIn("PRODUCTIONITEM = SOURCE OF TRUTH FOR CONTENT", calls[0][0])
+        self.assertEqual(settings.cover_queue[0]["reference_final_provider_count"], 1)
 
     def test_two_fastgen_routes_keep_trump_zelensky_cover_words_and_only_my_faces_uploads_portrait(self):
         """The visible routes differ only by one explicit remote face reference."""

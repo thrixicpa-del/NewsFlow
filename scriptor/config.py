@@ -716,6 +716,16 @@ class Settings:
     # The prompt agent can study a reference without automatically sending it
     # to FastGen. This explicit switch makes the extra API input a user choice.
     cover_ai_reference_to_fastgen: bool = False
+    # Explicit visual guidance for final FastGen renders.  This is distinct
+    # from the older channel/agent reference packs: it is off by default and
+    # never changes the current ProductionItem's factual scene.
+    cover_fastgen_use_references: bool = False
+    cover_fastgen_reference_paths: list[str] = field(default_factory=list)
+    cover_fastgen_reference_mode_style: bool = False
+    cover_fastgen_reference_mode_composition: bool = False
+    cover_fastgen_reference_mode_mood_lighting: bool = False
+    cover_fastgen_reference_mode_auto: bool = False
+    cover_tabloid_mode: bool = False
     # A local portrait library is separate from generic visual references.  Its
     # folder/file names are matched against the topic before a person is ever
     # sent to FastGen, preventing a random face from leaking into a cover.
@@ -1299,6 +1309,15 @@ def load_settings() -> Settings:
             cover_ai_reference_paths=[str(value) for value in data.get("cover_ai_reference_paths", []) if str(value).strip()],
             cover_ai_reference_ranges=[item for item in data.get("cover_ai_reference_ranges", []) if isinstance(item, dict)],
             cover_ai_reference_to_fastgen=bool(data.get("cover_ai_reference_to_fastgen", False)),
+            cover_fastgen_use_references=bool(data.get("cover_fastgen_use_references", False)),
+            # Keep unavailable paths. The Covers UI must tell the operator
+            # about a missing selected file instead of silently losing it.
+            cover_fastgen_reference_paths=[str(value) for value in data.get("cover_fastgen_reference_paths", []) if str(value).strip()],
+            cover_fastgen_reference_mode_style=bool(data.get("cover_fastgen_reference_mode_style", False)),
+            cover_fastgen_reference_mode_composition=bool(data.get("cover_fastgen_reference_mode_composition", False)),
+            cover_fastgen_reference_mode_mood_lighting=bool(data.get("cover_fastgen_reference_mode_mood_lighting", False)),
+            cover_fastgen_reference_mode_auto=bool(data.get("cover_fastgen_reference_mode_auto", False)),
+            cover_tabloid_mode=bool(data.get("cover_tabloid_mode", False)),
             cover_face_library_folder=str(data.get("cover_face_library_folder", "") or ""),
             cover_face_prepared_folder=str(data.get("cover_face_prepared_folder", "") or ""),
             cover_face_library_enabled=bool(data.get("cover_face_library_enabled", False)),
@@ -1755,6 +1774,13 @@ def save_settings(settings: Settings):
         "cover_ai_reference_paths": settings.cover_ai_reference_paths,
         "cover_ai_reference_ranges": settings.cover_ai_reference_ranges,
         "cover_ai_reference_to_fastgen": settings.cover_ai_reference_to_fastgen,
+        "cover_fastgen_use_references": settings.cover_fastgen_use_references,
+        "cover_fastgen_reference_paths": settings.cover_fastgen_reference_paths,
+        "cover_fastgen_reference_mode_style": settings.cover_fastgen_reference_mode_style,
+        "cover_fastgen_reference_mode_composition": settings.cover_fastgen_reference_mode_composition,
+        "cover_fastgen_reference_mode_mood_lighting": settings.cover_fastgen_reference_mode_mood_lighting,
+        "cover_fastgen_reference_mode_auto": settings.cover_fastgen_reference_mode_auto,
+        "cover_tabloid_mode": settings.cover_tabloid_mode,
         "cover_face_library_folder": settings.cover_face_library_folder,
         "cover_face_prepared_folder": settings.cover_face_prepared_folder,
         "cover_face_library_enabled": settings.cover_face_library_enabled,
