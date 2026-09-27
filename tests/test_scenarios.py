@@ -10,7 +10,10 @@ from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import load_session, save_session, session_path
-from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
+from scriptor.story_planner import (
+    calculate_story_part_targets,
+    parse_story_plan_response,
+)
 
 
 def _story_plan(part_count: int = 2) -> str:
@@ -19,7 +22,8 @@ def _story_plan(part_count: int = 2) -> str:
         "thesis": "Одна история",
         "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
         "content_atoms": [
-            {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}"}
+            {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}",
+             "content_kind": "SUPPORTED"}
             for index in range(1, part_count + 1)
         ],
         "parts": [
@@ -112,6 +116,8 @@ class ScenarioGenerationTests(unittest.TestCase):
 
             async def generate(self, prompt):
                 self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
                 return "Готовый сценарий по проверочной теме."
 
         pool = FakePool()
@@ -512,7 +518,9 @@ class ScenarioGenerationTests(unittest.TestCase):
         class FakePool:
             concurrency = 1
 
-            async def generate(self, _prompt):
+            async def generate(self, prompt):
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
                 return "Новый текст A"
 
         with patch.object(bridge, "load_settings", return_value=settings), \

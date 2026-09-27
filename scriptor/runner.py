@@ -13,7 +13,6 @@ from typing import Any
 from .core import ScenarioRequest
 from .story_planner import (
     StoryPlan,
-    StoryPlanCapacityInsufficient,
     build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
@@ -252,19 +251,6 @@ class ParallelRunner:
         """Plan long work once, then accept and persist a contiguous writer prefix."""
         target = self._story_target_chars(job.request)
         part_targets = calculate_story_part_targets(target)
-        if len(part_targets) == 1:
-            job.result = await self._generate_usable(job.request.prompt, job.request)
-            if looks_like_action_required(job.result):
-                job.state = RunState.PAUSED
-                job.error = "Текстовый агент и доступные ключи ChatGPT API не вернули готовый сценарий"
-                job.actual_chars = len(job.result.strip())
-                job.length_status = "FAILED"
-                return False
-            job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
-            if job.length_status == "LONG":
-                job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
-                job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
-            return job.length_status not in {"SHORT", "LONG"}
 
         if job.story_plan:
             plan = story_plan_from_dict(job.story_plan)
@@ -281,16 +267,7 @@ class ParallelRunner:
                 job.state = RunState.PAUSED
                 job.error = "Планировщик сценария не вернул рабочий план"
                 return False
-            try:
-                plan = parse_story_plan_response(planner_response, part_targets)
-            except StoryPlanCapacityInsufficient as exc:
-                job.story_planner_status = "CAPACITY_INSUFFICIENT"
-                job.state = RunState.PAUSED
-                job.error = f"Недостаточно различающегося материала для выбранной длины: {exc.reason}"
-                job.result = ""
-                job.actual_chars = 0
-                job.length_status = "SHORT" if job.request.allowed_min else "CAPACITY"
-                return False
+            plan = parse_story_plan_response(planner_response, part_targets)
             job.story_plan = plan.to_dict()
             job.accepted_story_parts = []
             job.story_planner_status = "READY"
@@ -305,9 +282,14 @@ class ParallelRunner:
             writer_prompt = build_story_writer_prompt(
                 job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
-            writer_result = await self._generate_for_request(
-                self.client.generate, writer_prompt, job.request, active_target,
-            )
+            if len(plan.parts) == 1:
+                writer_result = await self._generate_usable(
+                    writer_prompt, job.request, active_target,
+                )
+            else:
+                writer_result = await self._generate_for_request(
+                    self.client.generate, writer_prompt, job.request, active_target,
+                )
             if (looks_like_action_required(writer_result) or not writer_result.strip()
                     or self._writer_output_is_structural(writer_result)):
                 job.state = RunState.PAUSED
@@ -329,6 +311,9 @@ class ParallelRunner:
             self._notify(job)
 
         job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
+        if len(plan.parts) == 1 and job.length_status == "LONG":
+            job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
+            job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
         job.length_repair_attempts = 0
         return job.length_status not in {"SHORT", "LONG"}
 

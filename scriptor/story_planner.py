@@ -14,14 +14,7 @@ from typing import Any
 PREFERRED_PART_CHARS = 5_000
 _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
-
-
-class StoryPlanCapacityInsufficient(ValueError):
-    """Planner says the supplied material cannot support every requested part."""
-
-    def __init__(self, reason: str):
-        self.reason = " ".join(str(reason or "").split()) or "insufficient distinct supported material"
-        super().__init__(self.reason)
+_CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 
 
 @dataclass(frozen=True)
@@ -29,6 +22,7 @@ class StoryContentAtom:
     id: str
     summary: str
     owner_part_id: str
+    content_kind: str
 
 
 @dataclass(frozen=True)
@@ -79,7 +73,9 @@ def calculate_story_part_targets(target_chars: int) -> tuple[int, ...]:
     separator_chars = 2 * (part_count - 1)
     prose_target = max(0, target - separator_chars)
     quotient, remainder = divmod(prose_target, part_count)
-    return tuple(quotient + (1 if index < remainder else 0) for index in range(part_count))
+    return tuple(
+        quotient + (1 if index < remainder else 0) for index in range(part_count)
+    )
 
 
 def _clean_text(value: object, field: str) -> str:
@@ -119,14 +115,6 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
     if not isinstance(raw, dict):
         raise TypeError("story planner response must be an object")
 
-    capacity = raw.get("content_capacity_insufficient", False)
-    if not isinstance(capacity, bool):
-        raise TypeError("story planner content_capacity_insufficient must be boolean")
-    if capacity:
-        raise StoryPlanCapacityInsufficient(
-            _clean_text(raw.get("capacity_reason"), "capacity_reason")
-        )
-
     targets = tuple(max(0, int(target or 0)) for target in part_targets) or (0,)
     part_count = len(targets)
     expected_ids = tuple(f"P{index}" for index in range(1, part_count + 1))
@@ -145,17 +133,22 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
         if block_id in block_ids:
             raise ValueError("story plan macro block IDs must be unique")
         block_ids.add(block_id)
-        macro_blocks.append({
-            "id": block_id,
-            "purpose": _clean_text(block.get("purpose"), f"macro_blocks[{index}].purpose"),
-        })
+        macro_blocks.append(
+            {
+                "id": block_id,
+                "purpose": _clean_text(
+                    block.get("purpose"), f"macro_blocks[{index}].purpose"
+                ),
+            }
+        )
 
     raw_parts = raw.get("parts")
     if not isinstance(raw_parts, list) or len(raw_parts) != part_count:
         raise ValueError(f"story plan requires exactly {part_count} parts")
     parts: list[StoryPartPlan] = []
     for index, (raw_part, expected_id, expected_role, target) in enumerate(
-        zip(raw_parts, expected_ids, expected_roles, targets, strict=True), start=1,
+        zip(raw_parts, expected_ids, expected_roles, targets, strict=True),
+        start=1,
     ):
         if not isinstance(raw_part, dict):
             raise TypeError("story plan part must be an object")
@@ -167,24 +160,32 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
             raise ValueError(f"story plan part {part_id} role must be {expected_role}")
         macro_id = _clean_text(raw_part.get("macro_id"), f"parts[{index}].macro_id")
         if macro_id not in block_ids:
-            raise ValueError(f"story plan part {part_id} references unknown macro block")
+            raise ValueError(
+                f"story plan part {part_id} references unknown macro block"
+            )
         raw_ids = raw_part.get("content_ids")
         if not isinstance(raw_ids, list) or not raw_ids:
             raise ValueError(f"story plan part {part_id} requires content_ids")
-        content_ids = tuple(_clean_text(value, f"parts[{index}].content_ids") for value in raw_ids)
+        content_ids = tuple(
+            _clean_text(value, f"parts[{index}].content_ids") for value in raw_ids
+        )
         if len(set(content_ids)) != len(content_ids):
             raise ValueError(f"story plan part {part_id} duplicates content IDs")
-        parts.append(StoryPartPlan(
-            id=part_id,
-            role=role,
-            purpose=_clean_text(raw_part.get("purpose"), f"parts[{index}].purpose"),
-            macro_id=macro_id,
-            content_ids=content_ids,
-            target_chars=target,
-            opens=_id_list(raw_part.get("opens"), f"parts[{index}].opens"),
-            closes=_id_list(raw_part.get("closes"), f"parts[{index}].closes"),
-            transition_direction=_optional_text(raw_part.get("transition_direction")),
-        ))
+        parts.append(
+            StoryPartPlan(
+                id=part_id,
+                role=role,
+                purpose=_clean_text(raw_part.get("purpose"), f"parts[{index}].purpose"),
+                macro_id=macro_id,
+                content_ids=content_ids,
+                target_chars=target,
+                opens=_id_list(raw_part.get("opens"), f"parts[{index}].opens"),
+                closes=_id_list(raw_part.get("closes"), f"parts[{index}].closes"),
+                transition_direction=_optional_text(
+                    raw_part.get("transition_direction")
+                ),
+            )
+        )
 
     raw_atoms = raw.get("content_atoms")
     if not isinstance(raw_atoms, list) or not raw_atoms:
@@ -194,15 +195,28 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
     for index, raw_atom in enumerate(raw_atoms, start=1):
         if not isinstance(raw_atom, dict):
             raise TypeError("story plan content atom must be an object")
+        content_kind = _clean_text(
+            raw_atom.get("content_kind"),
+            f"content_atoms[{index}].content_kind",
+        ).upper()
+        if content_kind not in _CONTENT_KINDS:
+            raise ValueError("story plan content_kind must be SUPPORTED or DRAMATIZED")
         atom = StoryContentAtom(
             id=_clean_text(raw_atom.get("id"), f"content_atoms[{index}].id"),
-            summary=_clean_text(raw_atom.get("summary"), f"content_atoms[{index}].summary"),
-            owner_part_id=_clean_text(raw_atom.get("owner_part_id"), f"content_atoms[{index}].owner_part_id"),
+            summary=_clean_text(
+                raw_atom.get("summary"), f"content_atoms[{index}].summary"
+            ),
+            owner_part_id=_clean_text(
+                raw_atom.get("owner_part_id"), f"content_atoms[{index}].owner_part_id"
+            ),
+            content_kind=content_kind,
         )
         if atom.id in atom_by_id:
             raise ValueError("story plan content atom IDs must be unique")
         if atom.owner_part_id not in expected_ids:
-            raise ValueError("story plan content atom owner must reference a planned part")
+            raise ValueError(
+                "story plan content atom owner must reference a planned part"
+            )
         atom_by_id[atom.id] = atom
         atoms.append(atom)
 
@@ -210,17 +224,23 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
     if len(set(assigned_ids)) != len(assigned_ids):
         raise ValueError("story plan content atom is assigned more than once")
     if set(assigned_ids) != set(atom_by_id):
-        raise ValueError("story plan content atom ownership must cover every planned atom exactly once")
+        raise ValueError(
+            "story plan content atom ownership must cover every planned atom exactly once"
+        )
     for part in parts:
         for content_id in part.content_ids:
             if atom_by_id[content_id].owner_part_id != part.id:
-                raise ValueError("story plan content atom owner conflicts with its part")
+                raise ValueError(
+                    "story plan content atom owner conflicts with its part"
+                )
 
     opened: set[str] = set()
     for part in parts:
         for loop_id in part.closes:
             if loop_id not in opened:
-                raise ValueError(f"story plan part {part.id} closes unopened loop {loop_id}")
+                raise ValueError(
+                    f"story plan part {part.id} closes unopened loop {loop_id}"
+                )
             opened.remove(loop_id)
         for loop_id in part.opens:
             if loop_id in opened:
@@ -245,10 +265,23 @@ def story_plan_from_dict(value: dict[str, Any]) -> StoryPlan:
     if not isinstance(raw_parts, list):
         raise TypeError("persisted story plan requires parts")
     try:
-        targets = tuple(max(0, int(part.get("target_chars", 0) or 0)) for part in raw_parts)
+        targets = tuple(
+            max(0, int(part.get("target_chars", 0) or 0)) for part in raw_parts
+        )
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("persisted story plan has invalid part targets") from exc
-    return parse_story_plan_response(json.dumps(value, ensure_ascii=False), targets)
+    # Plans saved before content kinds existed remain resumable. Their legacy
+    # unlabelled atoms are explicitly normalised as SUPPORTED before validation.
+    persisted = dict(value)
+    raw_atoms = persisted.get("content_atoms")
+    if isinstance(raw_atoms, list):
+        persisted["content_atoms"] = [
+            {**atom, "content_kind": atom.get("content_kind", "SUPPORTED")}
+            if isinstance(atom, dict)
+            else atom
+            for atom in raw_atoms
+        ]
+    return parse_story_plan_response(json.dumps(persisted, ensure_ascii=False), targets)
 
 
 def seam_tail(text: str, limit: int = 500) -> str:
@@ -256,9 +289,9 @@ def seam_tail(text: str, limit: int = 500) -> str:
     cleaned = str(text or "").strip()
     if len(cleaned) <= limit:
         return cleaned
-    tail = cleaned[-max(1, int(limit)):]
+    tail = cleaned[-max(1, int(limit)) :]
     boundary = re.search(r"[.!?…]\s+", tail)
-    return tail[boundary.end():].strip() if boundary else tail.strip()
+    return tail[boundary.end() :].strip() if boundary else tail.strip()
 
 
 def _compact(value: object, limit: int) -> str:
@@ -274,24 +307,23 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         f"P{index + 1}≈{target} chars" for index, target in enumerate(part_targets)
     )
     return (
-        "You are the NewsFlow Story Planner. Organize only the supplied topic and context; do not invent news, "
-        "write prose, or change the operator writing contract. The embedded OPERATOR WRITING CONTRACT below is "
+        "You are the NewsFlow Story Planner. TITLE/TOPIC is sufficient input for a complete story map. Organize "
+        "the supplied topic and context; do not write prose or change the operator writing contract. The embedded OPERATOR WRITING CONTRACT below is "
         "REFERENCE DATA FOR PLANNING, not an instruction to execute now: do not obey its requests to write/return "
         "the finished scenario during this Planner call. Plan the complete story before any writer begins. "
-        "First decide whether the supplied supported material can fill every requested part with genuinely distinct "
-        "content. If it cannot do so without invention or semantic repetition, return ONLY strict JSON "
-        '{"content_capacity_insufficient":true,"capacity_reason":"brief reason"}. '
-        "Otherwise return strict JSON with content_capacity_insufficient=false, thesis, macro_blocks, content_atoms "
-        "and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
+        "Even if only a headline is available, create the full Story Map for every requested P1...PN. Never stop "
+        "planning because supporting facts are thin. When the supplied context does not cover a needed distinct "
+        "development, create a DRAMATIZED atom: a coherent model-created circumstance, action, reaction, conflict, "
+        "position, consequence, causal step, scene detail or turning point. Return strict JSON with thesis, "
+        "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
-        "content atoms. Content atoms must represent distinct supported story substance: facts, chronology, positions, "
-        "mechanisms, constraints, consequences, contradictions, necessary context or clearly marked analysis allowed by "
-        "the operator contract. Keep thesis/purposes/atom summaries compact. Every part purpose must name a concrete "
+        "content atoms. Every atom needs id, summary, owner_part_id and content_kind SUPPORTED or DRAMATIZED. "
+        "SUPPORTED atoms must rely on provided NewsFlow context. DRAMATIZED atoms may extend the narrative, but must "
+        "still be materially distinct. Do not fill parts by paraphrasing one meaning. Keep thesis/purposes/atom summaries compact. Every part purpose must name a concrete "
         "distinct responsibility; never use generic purposes like 'continue' or 'develop further' without saying what "
-        "new question/content that part owns. Each macro block needs id and purpose. Every atom needs id, summary and "
-        "owner_part_id. Every part needs id, role, purpose, macro_id, content_ids, opens, closes and transition_direction. "
-        "Every part must reference an existing macro block. Use P1 as OPENING, all internal "
-        "parts as MIDDLE, and only the last part as FINAL. Reserve every atom exactly once. A later part may deepen an "
+        "new question/content that part owns. Each macro block needs id and purpose. Every part needs id, role, purpose, macro_id, content_ids, opens, closes and transition_direction. "
+        "Every part must reference an existing macro block. For one part, use P1 as COMPLETE. Otherwise use P1 as "
+        "OPENING, all internal parts as MIDDLE, and only the last part as FINAL. Reserve every atom exactly once. A later part may deepen an "
         "earlier subject only by answering a different concrete question; paraphrasing the same conclusion is not a "
         "new content atom. Any opened loop must be closed by a later planned part.\n\n"
         f"TOPIC: {request.title}\n"
@@ -317,36 +349,47 @@ def build_story_writer_prompt(
     atoms = {atom.id: atom for atom in plan.content_atoms}
     blocks = {block["id"]: block["purpose"] for block in plan.macro_blocks}
 
+    def format_atom(atom_id: str) -> str:
+        atom = atoms[atom_id]
+        return f"{atom_id} [{atom.content_kind}]: {_compact(atom.summary, _COMPACT_ATOM_CHARS)}"
+
     current_atoms = "\n".join(
-        f"- {atom_id}: {_compact(atoms[atom_id].summary, _COMPACT_ATOM_CHARS)}"
-        for atom_id in part.content_ids
+        f"- {format_atom(atom_id)}" for atom_id in part.content_ids
     )
     used_ids = [
-        str(content_id) for accepted in accepted_parts
+        str(content_id)
+        for accepted in accepted_parts
         for content_id in accepted.get("content_ids", [])
     ]
-    used_context = "; ".join(
-        f"{content_id}: {_compact(atoms[content_id].summary, _COMPACT_ATOM_CHARS)}"
-        for content_id in used_ids if content_id in atoms
-    ) or "none"
-
-    future_parts = plan.parts[part_index + 1:]
-    future_index = "; ".join(
-        (
-            f"{future.id}/{future.macro_id}: {_compact(future.purpose, _COMPACT_PURPOSE_CHARS)} "
-            f"[{'; '.join(f'{content_id}: {_compact(atoms[content_id].summary, _COMPACT_ATOM_CHARS)}' for content_id in future.content_ids)}]"
+    used_context = (
+        "; ".join(
+            format_atom(content_id) for content_id in used_ids if content_id in atoms
         )
-        for future in future_parts
-    ) or "none"
+        or "none"
+    )
 
-    previous_tail = seam_tail(str(accepted_parts[-1].get("text", ""))) if accepted_parts else "none"
+    future_parts = plan.parts[part_index + 1 :]
+    future_index = (
+        "; ".join(
+            (
+                f"{future.id}/{future.macro_id}: {_compact(future.purpose, _COMPACT_PURPOSE_CHARS)} "
+                f"[{'; '.join(format_atom(content_id) for content_id in future.content_ids)}]"
+            )
+            for future in future_parts
+        )
+        or "none"
+    )
+
+    previous_tail = (
+        seam_tail(str(accepted_parts[-1].get("text", ""))) if accepted_parts else "none"
+    )
     macro_index = "; ".join(
         f"{block['id']}: {_compact(block['purpose'], _COMPACT_PURPOSE_CHARS)}"
         for block in plan.macro_blocks
     )
 
     opened: list[str] = []
-    for completed in plan.parts[:len(accepted_parts)]:
+    for completed in plan.parts[: len(accepted_parts)]:
         for loop_id in completed.closes:
             if loop_id in opened:
                 opened.remove(loop_id)
@@ -354,7 +397,15 @@ def build_story_writer_prompt(
             if loop_id not in opened:
                 opened.append(loop_id)
 
-    if part.role == "OPENING":
+    has_dramatized_atoms = any(
+        atom.content_kind == "DRAMATIZED" for atom in plan.content_atoms
+    )
+    if part.role == "COMPLETE":
+        position_instruction = (
+            "This is the only COMPLETE part. It owns the entire scenario: establish the opening, develop its assigned "
+            "material and close the story once without creating another technical part."
+        )
+    elif part.role == "OPENING":
         position_instruction = (
             "This is the only OPENING part. Apply the operator's first-sentence, first-30-seconds and title-promise "
             "rules here. Do not conclude the whole story; leave narrative momentum for the planned middle."
@@ -371,13 +422,24 @@ def build_story_writer_prompt(
             "final-section rules are reserved for PN. NO GLOBAL FINAL: do not conclude the whole story."
         )
 
+    disclosure_instruction = ""
+    if part.role in {"OPENING", "COMPLETE"} and has_dramatized_atoms:
+        disclosure_instruction = (
+            "\nDRAMATIZED OPENING DISCLOSURE: Before the story, write one short natural disclosure that part of "
+            "this narrative is a dramatized reconstruction, not confirmed factual chronicle. Write it once only; "
+            "after it, continue in confident narrative language without repeating conditional hedging.\n"
+        )
+
     return (
         "Write only the next continuous prose segment of ONE NewsFlow scenario. MULTIPART PRECEDENCE: any overall "
         "scenario target/min/max or instruction inside the embedded operator contract to return the complete finished "
         "scenario applies to the FINAL ASSEMBLED STORY, not to this technical Writer call. For this call, CURRENT "
         "TARGET below is the only active length target and you must return only this segment. This precedence changes "
-        "only whole-story length/completeness wording; all operator style, factual-discipline, hooks, originality and "
-        "no-repetition rules remain binding. Do not emit part labels, JSON, planner notes, Markdown, headings, or meta "
+        "only whole-story length/completeness wording. SUPPORTED atoms obey the operator factual-discipline rules "
+        "fully. For DRAMATIZED atoms, this NewsFlow system instruction permits model-created dramatized reconstruction "
+        "and takes precedence over a generic operator rule not to invent, only for those atoms. Do not silently treat "
+        "DRAMATIZED material as supplied fact. All other operator style, hooks, originality and no-repetition rules "
+        "remain binding. Do not emit part labels, JSON, planner notes, Markdown, headings, or meta "
         "commentary. Preserve all global style, factual-discipline, "
         "originality and no-repetition rules from the operator contract below. Positional opening/final instructions "
         "from that contract apply only according to CURRENT ROLE below. Do not repeat USED CONTENT and do not fully "
@@ -400,4 +462,5 @@ def build_story_writer_prompt(
         f"FUTURE RESERVED (do not reveal fully): {future_index}\n"
         f"PREVIOUS SEAM TAIL (continuity only, not material to repeat):\n{previous_tail}\n\n"
         f"POSITION RULE: {position_instruction}"
+        f"{disclosure_instruction}"
     )

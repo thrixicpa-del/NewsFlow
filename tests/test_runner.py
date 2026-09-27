@@ -22,7 +22,9 @@ class FakeClient:
         self.peak = max(self.peak, self.active)
         await asyncio.sleep(0.01)
         self.active -= 1
-        return "result:" + prompt
+        if "NewsFlow Story Planner" in prompt:
+            return ParallelRunnerTests._story_plan_json(1)
+        return "result"
 
 
 class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -33,7 +35,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             "thesis": "Одна последовательная история без второго смыслового круга.",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
-                {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}"}
+                {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}",
+                 "content_kind": "SUPPORTED" if index == 1 else "DRAMATIZED"}
                 for index in range(1, part_count + 1)
             ],
             "parts": [
@@ -105,8 +108,6 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                         self.prompts.append(prompt)
                         if "NewsFlow Story Planner" in prompt:
                             return ParallelRunnerTests._story_plan_json(self.expected_parts)
-                        if self.expected_parts == 1:
-                            return "А" * self.target
                         match = __import__("re").search(
                             r"CURRENT TARGET: approximately (\d+) characters", prompt,
                         )
@@ -138,9 +139,11 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all("ПРОДОЛЖИ" not in prompt for prompt in client.prompts))
 
                 if part_count == 1:
-                    self.assertEqual(len(client.prompts), 1)
-                    self.assertNotIn("NewsFlow Story Planner", client.prompts[0])
-                    self.assertEqual(job.accepted_story_parts, [])
+                    self.assertEqual(len(client.prompts), 2)
+                    self.assertIn("NewsFlow Story Planner", client.prompts[0])
+                    self.assertIn("CURRENT PART: P1", client.prompts[1])
+                    self.assertIn("CURRENT ROLE: COMPLETE", client.prompts[1])
+                    self.assertEqual(len(job.accepted_story_parts), 1)
                     continue
 
                 self.assertEqual(len(client.prompts), part_count + 1)
@@ -227,41 +230,76 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.prompts), 31)
         part_17_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P17" in prompt)
         self.assertIn("P18/M1: Смысловой блок 18", part_17_prompt)
-        self.assertIn("C018: Новый материал 18", part_17_prompt)
-        self.assertIn("USED CONTENT (do not repeat): C001: Новый материал 1", part_17_prompt)
+        self.assertIn("C018 [DRAMATIZED]: Новый материал 18", part_17_prompt)
+        self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Новый материал 1", part_17_prompt)
         self.assertIn("PREVIOUS SEAM TAIL", part_17_prompt)
         self.assertNotIn(chr(0x0401) * 5000, part_17_prompt)
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(len(jobs[0].accepted_story_parts), 30)
 
-    async def test_capacity_insufficient_pauses_before_any_writer_call(self):
-        class CapacityClient:
+    async def test_headline_only_multipart_story_completes_without_capacity_pause(self):
+        class HeadlineOnlyClient:
             def __init__(self):
                 self.prompts = []
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 self.prompts.append(prompt)
-                if "NewsFlow Story Planner" not in prompt:
-                    raise AssertionError("writer must not start after capacity failure")
-                return json.dumps({
-                    "content_capacity_insufficient": True,
-                    "capacity_reason": "Недостаточно разных подтверждённых смыслов без повторов.",
-                }, ensure_ascii=False)
+                if "NewsFlow Story Planner" in prompt:
+                    if "Even if only a headline is available" not in prompt:
+                        raise AssertionError("headline-only planner rule is missing")
+                    return ParallelRunnerTests._story_plan_json(2)
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 4999
+                if "CURRENT PART: P2" in prompt:
+                    return "Б" * 4999
+                raise AssertionError("writer must receive one owned planned part")
 
-        client = CapacityClient()
+        client = HeadlineOnlyClient()
         jobs = await ParallelRunner(client, 1).run([
-            ScenarioRequest(0, "Тема", "OPERATOR CONTRACT", target_chars=50000,
-                            allowed_min=48000, allowed_max=52000),
+            ScenarioRequest(0, "Headline only", "", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
         ])
 
-        self.assertEqual(len(client.prompts), 1)
-        self.assertEqual(jobs[0].state, RunState.PAUSED)
-        self.assertEqual(jobs[0].story_planner_status, "CAPACITY_INSUFFICIENT")
-        self.assertEqual(jobs[0].accepted_story_parts, [])
-        self.assertIn("Недостаточно", jobs[0].error)
+        self.assertEqual(len(client.prompts), 3)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].story_planner_status, "READY")
+        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
+
+    async def test_headline_only_targets_finish_at_two_three_and_six_parts(self):
+        for target_chars, expected_parts in ((10000, 2), (15000, 3), (30000, 6)):
+            with self.subTest(target_chars=target_chars):
+                class HeadlineOnlyClient:
+                    def __init__(self, current_parts=expected_parts):
+                        self.expected_parts = current_parts
+                        self.prompts = []
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        self.prompts.append(prompt)
+                        if "NewsFlow Story Planner" in prompt:
+                            return ParallelRunnerTests._story_plan_json(self.expected_parts)
+                        part = __import__("re").search(r"CURRENT PART: P(\d+)", prompt)
+                        target = __import__("re").search(
+                            r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                        )
+                        if not part or not target:
+                            raise AssertionError("headline-only writer requires one planned part and target")
+                        return chr(0x0410 + int(part.group(1))) * int(target.group(1))
+
+                client = HeadlineOnlyClient()
+                jobs = await ParallelRunner(client, 1).run([
+                    ScenarioRequest(0, "Headline only", "", target_chars=target_chars,
+                                    allowed_min=target_chars - 100, allowed_max=target_chars + 100),
+                ])
+
+                self.assertEqual(jobs[0].state, RunState.DONE)
+                self.assertEqual(jobs[0].story_planner_status, "READY")
+                self.assertEqual(len(jobs[0].accepted_story_parts), expected_parts)
 
     async def test_resume_uses_persisted_plan_and_starts_at_first_unfinished_part(self):
-        from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
+        from scriptor.story_planner import (
+            calculate_story_part_targets,
+            parse_story_plan_response,
+        )
 
         class ResumeClient:
             def __init__(self):
@@ -333,6 +371,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         class RetryClient:
             fresh_calls = 0
             async def generate(self, prompt, on_progress=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "К сожалению, я не могу написать такой сценарий. Измените тему."
             async def generate_fresh(self, prompt, on_progress=None):
                 self.fresh_calls += 1
@@ -343,28 +383,144 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.fresh_calls, 1)
         self.assertEqual(jobs[0].state, RunState.DONE)
 
-    async def test_five_thousand_target_is_one_writer_without_a_planner(self):
+    async def test_single_part_targets_use_one_planner_and_one_complete_writer(self):
+        for target_chars in (5000, 6000, 7000):
+            with self.subTest(target_chars=target_chars):
+                class SinglePartClient:
+                    def __init__(self):
+                        self.prompts = []
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        self.prompts.append(prompt)
+                        if "NewsFlow Story Planner" in prompt:
+                            return ParallelRunnerTests._story_plan_json(1)
+                        if "CURRENT PART: P1" not in prompt or "CURRENT ROLE: COMPLETE" not in prompt:
+                            raise AssertionError("single writer must receive the persisted COMPLETE part")
+                        target = int(__import__("re").search(
+                            r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                        ).group(1))
+                        return "а" * target
+
+                client = SinglePartClient()
+                jobs = await ParallelRunner(client, 1).run([
+                    ScenarioRequest(0, "S", "ORIGINAL WRITING CONTRACT", target_chars=target_chars,
+                                    allowed_min=target_chars - 100, allowed_max=target_chars + 100),
+                ])
+                self.assertEqual(len(client.prompts), 2)
+                self.assertIn("NewsFlow Story Planner", client.prompts[0])
+                self.assertEqual(jobs[0].state, RunState.DONE)
+                self.assertEqual(len(jobs[0].accepted_story_parts), 1)
+
+    async def test_single_part_plan_is_persisted_before_the_writer_starts(self):
+        changes = []
+
         class SingleWriterClient:
+            def __init__(self):
+                self.prompts = []
+
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
-                self.prompt = prompt
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
+                if not changes[-1].story_plan:
+                    raise AssertionError("writer started before the story map was persisted")
                 return "а" * 5000
 
         client = SingleWriterClient()
-        jobs = await ParallelRunner(client, 1).run([
+        jobs = await ParallelRunner(client, 1, on_change=changes.append).run([
             ScenarioRequest(0, "S", "ORIGINAL WRITING CONTRACT", target_chars=5000,
                             allowed_min=4500, allowed_max=5500),
         ])
-        self.assertNotIn("NewsFlow Story Planner", client.prompt)
+        self.assertEqual(len(client.prompts), 2)
+        self.assertTrue(jobs[0].story_plan)
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].actual_chars, 5000)
 
-    async def test_short_single_writer_pauses_without_appending_a_generic_continuation(self):
+    async def test_headline_only_single_complete_writer_uses_dramatized_disclosure(self):
+        class SingleWriterClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    if "Even if only a headline is available" not in prompt:
+                        raise AssertionError("headline-only planner rule is missing")
+                    return ParallelRunnerTests._story_plan_json(1).replace("\"SUPPORTED\"", "\"DRAMATIZED\"")
+                if "CURRENT ROLE: COMPLETE" not in prompt:
+                    raise AssertionError("single writer must use COMPLETE role")
+                if "DRAMATIZED OPENING DISCLOSURE" not in prompt:
+                    raise AssertionError("single-part disclosure rule is missing")
+                return "а" * 6000
+
+        client = SingleWriterClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Headline only", "", target_chars=6000,
+                            allowed_min=5000, allowed_max=7000),
+        ])
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+
+    async def test_supported_single_complete_writer_has_no_dramatized_disclosure(self):
+        class SupportedClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
+                if "CURRENT CONTENT:\n- C001 [SUPPORTED]" not in prompt:
+                    raise AssertionError("single Writer must receive SUPPORTED content kind")
+                if "DRAMATIZED OPENING DISCLOSURE" in prompt:
+                    raise AssertionError("supported-only story must not disclose dramatization")
+                return "а" * 5000
+
+        jobs = await ParallelRunner(SupportedClient(), 1).run([
+            ScenarioRequest(0, "Supported", "CONTRACT", target_chars=5000,
+                            allowed_min=4500, allowed_max=5500),
+        ])
+        self.assertEqual(jobs[0].state, RunState.DONE)
+
+    async def test_single_part_resume_uses_persisted_complete_plan_without_regeneration(self):
+        from scriptor.runner import Job
+        from scriptor.story_planner import (
+            calculate_story_part_targets,
+            parse_story_plan_response,
+        )
+
+        request = ScenarioRequest(0, "Resume", "CONTRACT", target_chars=5000,
+                                  allowed_min=4500, allowed_max=5500)
+        plan = parse_story_plan_response(
+            ParallelRunnerTests._story_plan_json(1), calculate_story_part_targets(5000),
+        )
+
+        class ResumeClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    raise AssertionError("single-part resume must not regenerate a persisted plan")
+                if "CURRENT PART: P1" not in prompt:
+                    raise AssertionError("single-part resume must use the persisted COMPLETE map")
+                return "а" * 5000
+
+        client = ResumeClient()
+        jobs = await ParallelRunner(client, 1).run(
+            [request], resume_jobs={0: Job(request=request, story_plan=plan.to_dict())},
+        )
+        self.assertEqual(len(client.prompts), 1)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 1)
+
+    async def test_short_single_complete_writer_pauses_without_appending_a_generic_continuation(self):
         class ShortClient:
             def __init__(self):
                 self.calls = 0
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 self.calls += 1
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "мало"
 
             async def generate_fresh(self, *_args, **_kwargs):
@@ -374,7 +530,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "S", "P", target_chars=120, allowed_min=100, allowed_max=140),
         ])
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         self.assertEqual(jobs[0].state, RunState.PAUSED)
         self.assertEqual(jobs[0].result, "мало")
         self.assertEqual(jobs[0].length_status, "SHORT")
@@ -382,6 +538,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_sided_maximum_is_trimmed_without_a_rewrite(self):
         class MaximumClient:
             async def generate(self, prompt, on_progress=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "а" * 12000
 
             async def generate_fresh(self, *_args, **_kwargs):
@@ -398,6 +556,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             fresh_calls = 0
 
             async def generate(self, prompt, on_progress=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "готовый текст"
 
             async def generate_fresh(self, prompt, on_progress=None):
@@ -420,6 +580,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         class RetryTwiceClient:
             fresh_calls = 0
             async def generate(self, prompt, on_progress=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "Я не могу выполнить этот запрос."
             async def generate_fresh(self, prompt, on_progress=None):
                 self.fresh_calls += 1
@@ -437,6 +599,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             fresh_calls = 0
             openai_calls = 0
             async def generate(self, prompt, on_progress=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "Я не могу выполнить этот запрос."
             async def generate_fresh(self, prompt, on_progress=None):
                 self.fresh_calls += 1
@@ -466,6 +630,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.calls += 1
                 if self.calls == 1:
                     raise RuntimeError("temporary")
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "ok"
 
         runner = ParallelRunner(FlakyClient(), max_concurrency=1)
@@ -490,6 +656,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             async def generate(self, prompt, on_progress=None):
                 self.started.set()
                 await asyncio.to_thread(self.release.wait)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "ok"
 
         client = BlockingClient()
@@ -513,6 +681,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 if self.calls == 1:
                     self.first_started.set()
                     await asyncio.to_thread(self.release_first.wait)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
                 return "ok"
 
         client = GateClient()
@@ -522,7 +692,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         runner.pause()
         client.release_first.set()
         await asyncio.sleep(0.05)
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 2)
         runner.resume()
         jobs = await task
         self.assertTrue(all(job.state == RunState.DONE for job in jobs))
