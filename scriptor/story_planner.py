@@ -304,7 +304,12 @@ def _compact(value: object, limit: int) -> str:
 def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> str:
     """Build one strict-JSON organizer request without replacing the writing contract."""
     part_rows = ", ".join(
-        f"P{index + 1}≈{target} chars" for index, target in enumerate(part_targets)
+        (
+            f"P{index + 1}≈{target} chars"
+            if target
+            else f"P{index + 1}=natural complete length"
+        )
+        for index, target in enumerate(part_targets)
     )
     return (
         "You are the NewsFlow Story Planner. TITLE/TOPIC is sufficient input for a complete story map. Organize "
@@ -345,7 +350,10 @@ def build_story_writer_prompt(
     if not 0 <= part_index < len(plan.parts):
         raise ValueError("story writer part index is outside the validated plan")
     part = plan.parts[part_index]
-    active_target = max(1, int(current_target_chars or part.target_chars or 1))
+    raw_active_target = (
+        part.target_chars if current_target_chars is None else current_target_chars
+    )
+    active_target = max(0, int(raw_active_target or 0))
     atoms = {atom.id: atom for atom in plan.content_atoms}
     blocks = {block["id"]: block["purpose"] for block in plan.macro_blocks}
 
@@ -402,8 +410,10 @@ def build_story_writer_prompt(
     )
     if part.role == "COMPLETE":
         position_instruction = (
-            "This is the only COMPLETE part. It owns the entire scenario: establish the opening, develop its assigned "
-            "material and close the story once without creating another technical part."
+            "This is the only COMPLETE part. It owns the entire scenario. Apply the operator's first-sentence, "
+            "first-30-seconds and title-promise opening rules at the start, develop the assigned material, then apply "
+            "the operator's final-section rules once at the end. Close the story once without creating another "
+            "technical part."
         )
     elif part.role == "OPENING":
         position_instruction = (
@@ -421,6 +431,20 @@ def build_story_writer_prompt(
             "30 seconds and title-promise opening were already satisfied by P1; do not restart them here. Operator "
             "final-section rules are reserved for PN. NO GLOBAL FINAL: do not conclude the whole story."
         )
+
+    length_instruction = (
+        (
+            f"CURRENT TARGET: approximately {active_target} characters\n"
+            "ACTIVE LENGTH RULE FOR THIS CALL: write approximately CURRENT TARGET characters, not the overall "
+            "scenario target.\n"
+        )
+        if active_target
+        else (
+            "CURRENT TARGET: no explicit character target\n"
+            "ACTIVE LENGTH RULE FOR THIS CALL: no separate character target is configured; follow the operator "
+            "contract and write the complete assigned story material at a natural useful length.\n"
+        )
+    )
 
     disclosure_instruction = ""
     if part.role in {"OPENING", "COMPLETE"} and has_dramatized_atoms:
@@ -440,8 +464,9 @@ def build_story_writer_prompt(
         "and takes precedence over a generic operator rule not to invent, only for those atoms. Do not silently treat "
         "DRAMATIZED material as supplied fact. All other operator style, hooks, originality and no-repetition rules "
         "remain binding. Do not emit part labels, JSON, planner notes, Markdown, headings, or meta "
-        "commentary. Preserve all global style, factual-discipline, "
-        "originality and no-repetition rules from the operator contract below. Positional opening/final instructions "
+        "commentary. Preserve all global style, originality and no-repetition rules from the operator contract below. "
+        "Apply operator factual-discipline to SUPPORTED atoms; for DRAMATIZED atoms use the explicit NewsFlow "
+        "precedence above. Positional opening/final instructions "
         "from that contract apply only according to CURRENT ROLE below. Do not repeat USED CONTENT and do not fully "
         "disclose FUTURE RESERVED material. The previous tail exists only for continuity; never copy or paraphrase it.\n\n"
         f"OPERATOR WRITING CONTRACT:\n{request.prompt}\n\n"
@@ -451,8 +476,7 @@ def build_story_writer_prompt(
         f"CURRENT PART: {part.id}\n"
         f"CURRENT ROLE: {part.role}\n"
         f"CURRENT PURPOSE: {_compact(part.purpose, _COMPACT_PURPOSE_CHARS)}\n"
-        f"CURRENT TARGET: approximately {active_target} characters\n"
-        "ACTIVE LENGTH RULE FOR THIS CALL: write approximately CURRENT TARGET characters, not the overall scenario target.\n"
+        f"{length_instruction}"
         f"CURRENT CONTENT:\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
         f"OPEN LOOPS BEFORE THIS PART: {', '.join(opened) or 'none'}\n"
