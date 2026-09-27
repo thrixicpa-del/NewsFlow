@@ -29,6 +29,70 @@ class StoryPartSizingTests(unittest.TestCase):
 
 
 class StoryPlanValidationTests(unittest.TestCase):
+    def test_parser_persists_ranked_cover_people_and_primary_person(self):
+        response = json.dumps({
+            "thesis": "История с проверяемым главным действующим лицом.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
+                               "content_kind": "SUPPORTED"}],
+            "cover_face_required": True,
+            "cover_people_candidates": [
+                {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                 "relation_to_story": "выступил по центральному вопросу", "source": "selected_people",
+                 "confidence": 0.94},
+                {"name": "Амина Диалло", "entity_type": "person", "role_in_story": "министр",
+                 "relation_to_story": "участвует в переговорах", "source": "entities", "confidence": 0.71},
+            ],
+            "cover_primary_person": {"name": "Марек Новак", "entity_type": "public_figure",
+                                     "role_in_story": "президент", "relation_to_story": "выступил по центральному вопросу",
+                                     "source": "selected_people", "confidence": 0.94},
+            "cover_face_resolution_status": "RESOLVED",
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
+                       "content_ids": ["C001"]}],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000,))
+        persisted = plan.to_dict()
+
+        self.assertTrue(persisted["cover_face_required"])
+        self.assertEqual(persisted["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual([row["name"] for row in persisted["cover_people_candidates"]], ["Марек Новак", "Амина Диалло"])
+        self.assertEqual(persisted["cover_face_resolution_status"], "RESOLVED")
+
+    def test_parser_rejects_non_person_primary_cover_entity(self):
+        response = json.dumps({
+            "thesis": "История.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
+                               "content_kind": "SUPPORTED"}],
+            "cover_face_required": True,
+            "cover_people_candidates": [{"name": "Европейский Союз", "entity_type": "organization",
+                                         "role_in_story": "сторона", "relation_to_story": "контекст",
+                                         "source": "entities", "confidence": 0.9}],
+            "cover_primary_person": {"name": "Европейский Союз", "entity_type": "organization",
+                                     "role_in_story": "сторона", "relation_to_story": "контекст",
+                                     "source": "entities", "confidence": 0.9},
+            "cover_face_resolution_status": "RESOLVED",
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
+                       "content_ids": ["C001"]}],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "cover person"):
+            parse_story_plan_response(response, (5000,))
+
+    def test_legacy_persisted_plan_defaults_cover_resolution_to_needs_review(self):
+        legacy = {
+            "thesis": "Старая история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1"}],
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
+                       "content_ids": ["C001"], "target_chars": 5000}],
+        }
+
+        persisted = story_plan_from_dict(legacy).to_dict()
+
+        self.assertTrue(persisted["cover_face_required"])
+        self.assertEqual(persisted["cover_people_candidates"], [])
+        self.assertIsNone(persisted["cover_primary_person"])
+        self.assertEqual(persisted["cover_face_resolution_status"], "NEEDS_REVIEW")
     def test_parser_requires_every_planned_part_and_unique_content_ownership(self):
         response = json.dumps({
             "thesis": "Одна история без второго круга.",
@@ -161,6 +225,14 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertNotIn("content_capacity_insufficient", prompt)
         self.assertIn("Even if only a headline is available", prompt)
         self.assertIn("DRAMATIZED", prompt)
+
+    def test_planner_prompt_requires_ranked_public_figure_resolution_for_covers(self):
+        prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
+
+        self.assertIn("cover_people_candidates", prompt)
+        self.assertIn("cover_primary_person", prompt)
+        self.assertIn("NEEDS_REVIEW", prompt)
+        self.assertIn("Never infer a person from geography", prompt)
 
     def test_single_part_planner_prompt_requires_one_complete_part(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))

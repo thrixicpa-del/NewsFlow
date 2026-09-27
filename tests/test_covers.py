@@ -58,9 +58,81 @@ from scriptor.covers import (
     FastGenPool,
     reference_mime_type,
 )
+from scriptor.runner import RunState
 
 
 class CoverGalleryFileStateTests(unittest.TestCase):
+    def test_story_planner_context_includes_selected_and_typed_people(self):
+        from scriptor import bridge
+
+        prompt = bridge.production_item_prompt({
+            "selected_people": ["Марек Новак"],
+            "entities": [{"name": "Амина Диалло", "type": "person"}],
+        })
+
+        self.assertIn("Марек Новак", prompt)
+        self.assertIn("Амина Диалло", prompt)
+
+    def test_story_planner_primary_person_wins_over_face_tree_and_is_persisted_to_cover(self):
+        from scriptor import bridge
+
+        title = "Переговоры о соглашении"
+        primary = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+            "relation_to_story": "возглавил переговоры", "source": "story-planner", "confidence": 0.94,
+        }
+        settings = Settings(
+            idea_production_items=[{"id": "production:planner", "title": title}],
+            idea_scenario_context={title: {"id": "production:planner", "title": title}},
+            cover_queue=[],
+        )
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:planner"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_face_required": True, "cover_people_candidates": [primary],
+                        "cover_primary_person": primary, "cover_face_resolution_status": "RESOLVED"},
+        )
+
+        self.assertTrue(bridge._project_story_plan_face_resolution(settings, title, job))
+        self.assertTrue(bridge._sync_scenario_to_covers(settings, 0, title, job))
+        resolved = bridge._resolve_cover_portrait(settings.cover_queue[0], settings, face_mode="auto", allow_manual_reference=False)
+
+        self.assertEqual(resolved["portrait_subject"], "Марек Новак")
+        self.assertEqual(resolved["portrait_source"], "story-planner")
+        self.assertEqual(settings.cover_queue[0]["cover_primary_person"]["name"], "Марек Новак")
+
+    def test_org_or_place_never_become_primary_portrait_and_no_subject_needs_review(self):
+        from scriptor import bridge
+
+        for item in (
+            {"title": "Европейский Союз обсуждает санкции", "entities": [{"name": "Европейский Союз", "type": "organization"}]},
+            {"title": "Митинг в Киеве", "primary_entities": [{"name": "Киев", "type": "place"}]},
+        ):
+            with self.subTest(title=item["title"]):
+                item.update(cover_face_required=True, cover_face_resolution_status="NEEDS_REVIEW")
+                resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
+                self.assertEqual(resolved["portrait_subject"], "")
+                self.assertEqual(item["cover_face_resolution_status"], "NEEDS_REVIEW")
+
+    def test_every_unresolved_item_stops_before_fastgen_not_only_political_items(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [{
+            "production_item_id": "production:unresolved", "title": "Городской транспорт меняет маршрут",
+            "image_prompt": "Городская сцена", "status": "Ожидает", "cover_face_required": True,
+            "cover_face_resolution_status": "NEEDS_REVIEW",
+        }]
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.FastGenPool, "generate_media") as create:
+            bridge.generate_covers({"indices": [0], "productionItemIds": ["production:unresolved"],
+                                    "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True})
+
+        create.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить лицо для обложки")
     def test_cover_text_generation_projects_a_current_context_row_before_provider_call(self):
         """A durable current scenario must not need a prior manual Covers transfer."""
         from scriptor import bridge
@@ -1593,6 +1665,55 @@ class CoverHeadlineGuardTests(unittest.TestCase):
 
 
 class CoverFaceLibraryTests(unittest.TestCase):
+    def test_face_tree_matches_only_story_planner_primary_not_another_visual_person(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            primary = root / "Марек Новак" / "portrait.jpg"
+            other = root / "Амина Диалло" / "portrait.jpg"
+            primary.parent.mkdir(parents=True)
+            other.parent.mkdir(parents=True)
+            primary.write_bytes(b"primary")
+            other.write_bytes(b"other")
+            settings = Settings(cover_face_library_folder=str(root), cover_face_library_enabled=True)
+            item = {
+                "title": "Амина Диалло на встрече с Мареком Новаком",
+                "cover_face_required": True,
+                "cover_face_resolution_status": "RESOLVED",
+                "cover_primary_person": {
+                    "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                    "relation_to_story": "принял решение", "source": "story-planner", "confidence": 0.94,
+                },
+                "visual_reference_path": str(other),
+            }
+
+            resolved = bridge._resolve_cover_portrait(item, settings, face_mode="auto", allow_manual_reference=False)
+            path, label, source = _match_cover_face_reference(item, settings)
+
+        self.assertEqual(resolved["portrait_subject"], "Марек Новак")
+        self.assertEqual(Path(path), primary)
+        self.assertEqual(label, "Марек Новак")
+        self.assertEqual(source, "auto")
+
+    def test_missing_planner_person_png_keeps_same_subject_with_zero_reference(self):
+        from scriptor import bridge
+
+        item = {
+            "title": "Марек Новак выступил", "cover_face_required": True,
+            "cover_face_resolution_status": "RESOLVED",
+            "cover_primary_person": {
+                "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                "relation_to_story": "выступил", "source": "story-planner", "confidence": 0.94,
+            },
+        }
+        settings = Settings(cover_face_library_enabled=True, cover_face_library_folder="missing-face-tree")
+
+        resolved = bridge._resolve_cover_portrait(item, settings, face_mode="auto", allow_manual_reference=False)
+        match = _match_cover_face_reference(item, settings, prepared_only=True)
+
+        self.assertEqual(resolved["portrait_subject"], "Марек Новак")
+        self.assertEqual(match, ("", "", ""))
     def test_does_not_treat_a_dot_as_a_face_library(self):
         files, truncated = _cover_face_files(".")
         self.assertEqual(files, [])

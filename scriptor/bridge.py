@@ -879,9 +879,28 @@ def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _cover_story_planner_candidate(item: dict) -> tuple[str, str, str, float]:
+    """Return the persisted Planner choice only when it remains a person."""
+    if str(item.get("cover_face_resolution_status", "")).strip().upper() != "RESOLVED":
+        return "", "", "", 0.0
+    candidate = item.get("cover_primary_person")
+    if not _cover_entity_is_explicit_person(candidate):
+        return "", "", "", 0.0
+    name = _cover_person_name(candidate)
+    if not name:
+        return "", "", "", 0.0
+    try:
+        confidence = float(candidate.get("confidence", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        confidence = 0.0
+    relation = " ".join(str(candidate.get("relation_to_story", "") or "").split())
+    source = " ".join(str(candidate.get("source", "story-planner") or "story-planner").split())
+    return name, "story-planner", relation or f"planner-selected person from {source}", max(0.0, min(1.0, confidence))
+
+
 def _resolve_cover_portrait(
     item: dict, settings: Settings, *, face_mode: str, allow_manual_reference: bool,
-) -> dict[str, str]:
+) -> dict[str, object]:
     """Persist the named political portrait contract before the provider prompt.
 
     A prepared PNG may be unavailable and is never required for this decision.
@@ -892,27 +911,38 @@ def _resolve_cover_portrait(
         resolved = {
             "portrait_subject": "", "portrait_side": "", "portrait_source": "disabled",
             "portrait_resolver_reason": "operator explicitly selected without faces",
+            "portrait_confidence": 0,
         }
     else:
         manual_label = " ".join(str(item.get("face_reference_label", "")).split())
-        manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
-        if (allow_manual_reference and item.get("face_reference_source") == "manual"
-                and manual_label and manual_path.is_file()):
-            subject, source, reason = manual_label, "manual", "operator selected a portrait for this topic"
+        if item.get("face_reference_source") == "manual" and manual_label:
+            subject, source, reason, confidence = manual_label, "manual", "operator selected a portrait for this topic", 1.0
         else:
-            subject, source, reason = _cover_explicit_portrait_candidate(item)
+            subject, source, reason, confidence = _cover_story_planner_candidate(item)
             if not subject:
+                subject, source, reason = _cover_explicit_portrait_candidate(item)
+                confidence = 0.8 if subject else 0.0
+            if not subject:
+                # The tree can verify a subject only after structured/context
+                # evidence has named one. It never becomes a random identity
+                # selector merely because a PNG folder is present.
                 _path, tree_label, tree_source = _match_cover_face_reference(item, settings)
                 if tree_label:
                     subject = tree_label
                     source = f"face-tree-{tree_source or 'match'}"
                     reason = "explicit person matched in the configured face tree"
+                    confidence = 0.6
         resolved = {
             "portrait_subject": subject,
             "portrait_side": _cover_face_side(item) if subject else "",
             "portrait_source": source or "none",
-            "portrait_resolver_reason": reason or "no political portrait subject resolved from current topic",
+            "portrait_resolver_reason": reason or "no resolved public figure from current ProductionItem evidence",
+            "portrait_confidence": confidence if subject else 0,
         }
+        if subject:
+            item["cover_face_resolution_status"] = "RESOLVED"
+        elif item.get("cover_face_required"):
+            item["cover_face_resolution_status"] = "NEEDS_REVIEW"
     item.update(resolved)
     return resolved
 
@@ -1091,7 +1121,7 @@ def _cover_face_catalog(settings: Settings) -> list[dict]:
 
 def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False,
                                 prepared_only: bool = False) -> tuple[str, str, str]:
-    """Find a portrait only where the identity is explicitly present in the topic."""
+    """Find a PNG only for the already resolved, never substituted person."""
     if item.get("face_reference_disabled"):
         return "", "", ""
     # A manually picked reference must remain fixed.  An automatically picked
@@ -1104,16 +1134,22 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    # Only current identity metadata may select a face.  Arbitrary person
-    # folders work without a pre-known politician/country table.
-    identity_context = " ".join((
-        str(item.get("title", "")),
-        str(item.get("topic", "")),
-        _cover_context_values(item.get("selected_people")),
-        _cover_context_values(item.get("primary_entities")),
-        _cover_context_values(item.get("primary_entity")),
-        _cover_context_values(item.get("entities")),
-    ))
+    # A planner/manual/structured choice takes absolute identity priority. A
+    # visual reference is deliberately absent here, so Person Y in a style
+    # image can never replace the resolved Person X.
+    planner_subject, _source, _reason, _confidence = _cover_story_planner_candidate(item)
+    explicit_subject, _explicit_source, _explicit_reason = _cover_explicit_portrait_candidate(item)
+    identity_context = str(item.get("portrait_subject") or planner_subject or explicit_subject or "").strip()
+    if not identity_context:
+        # Legacy imported rows predate the ProductionItem face contract. Keep
+        # direct title-to-tree matching only for those rows; a current explicit
+        # NEEDS_REVIEW item must never get a random identity from a folder.
+        if not bool(item.get("cover_face_required")):
+            identity_context = " ".join(str(item.get(key, "")) for key in ("title", "topic", "script"))
+        else:
+            identity_context = _cover_context_values(item.get("selected_people"))
+    if not identity_context:
+        return "", "", ""
     topic_tokens = _cover_face_tokens(identity_context)
     best_score = 0
     candidates: list[Path] = []
@@ -3009,6 +3045,9 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
     generation never treats it as a validated contemporary item.
     """
     changed = ensure_production_item_ids(getattr(settings, "idea_production_items", []))
+    for item in getattr(settings, "idea_production_items", []):
+        if isinstance(item, dict):
+            changed = _ensure_cover_face_resolution_item(item) or changed
     existing = {str(item.get("title", "")).casefold() for item in getattr(settings, "idea_production_items", [])
                 if isinstance(item, dict)}
     for raw_title in getattr(settings, "idea_results", []):
@@ -3092,6 +3131,7 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
         if detail and str(detail.get("review_status", "")).strip():
             item["status"] = str(detail["review_status"]).strip().upper()
         ensure_production_item_ids([item])
+        _ensure_cover_face_resolution_item(item)
         settings.idea_production_items.append(item)
         existing.add(title.casefold())
         changed = True
@@ -5875,6 +5915,20 @@ def production_item_prompt(item: dict) -> str:
         blocks.append(f"Что обязан раскрыть сценарий: {item['promised_question']}")
     if requirements:
         blocks.append("Обязательные пункты: " + "; ".join(requirements))
+    selected_people = _cover_context_values(item.get("selected_people"))
+    if selected_people:
+        blocks.append("Выбранные оператором реальные люди: " + selected_people)
+    typed_entities = []
+    for key in ("primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        for value in values:
+            if _cover_entity_is_explicit_person(value):
+                name = _cover_person_name(value)
+                if name:
+                    typed_entities.append(name)
+    if typed_entities:
+        blocks.append("Типизированные люди ProductionItem: " + "; ".join(dict.fromkeys(typed_entities)))
     framing = str(item.get("framing_type", "EDITORIAL")).strip().upper()
     if framing == "HYPOTHETICAL":
         blocks.extend([
@@ -5893,6 +5947,77 @@ def production_item_prompt(item: dict) -> str:
         blocks.append("Режим подачи: FACTUAL — все основные утверждения должны следовать из опорного контекста.")
     blocks.append("Не добавляй как факт то, чего нет в опорном контексте.")
     return "\n".join(blocks)
+
+
+def _ensure_cover_face_resolution_item(item: dict) -> bool:
+    """Give every durable ProductionItem an explicit safe Cover-face state.
+
+    Legacy items are deliberately *not* guessed from country/place labels. A
+    future planner run can promote this state to RESOLVED using evidence; until
+    then the item is visibly reviewable and cannot reach FastGen anonymously.
+    """
+    if not isinstance(item, dict):
+        return False
+    before = dict(item)
+    item.setdefault("cover_face_required", True)
+    candidates = item.get("cover_people_candidates")
+    item["cover_people_candidates"] = list(candidates) if isinstance(candidates, list) else []
+    primary = item.get("cover_primary_person")
+    item["cover_primary_person"] = dict(primary) if isinstance(primary, dict) else None
+    status = str(item.get("cover_face_resolution_status", "")).strip().upper()
+    if status not in {"RESOLVED", "NEEDS_REVIEW"}:
+        status = "RESOLVED" if item["cover_primary_person"] else "NEEDS_REVIEW"
+    if not item["cover_primary_person"]:
+        status = "NEEDS_REVIEW"
+    item["cover_face_resolution_status"] = status
+    return item != before
+
+
+def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job | None) -> bool:
+    """Persist Story Planner's semantic choice before Covers sees the scenario.
+
+    The Story Map is the primary resolver. This projector copies only its
+    compact identity record into the durable ProductionItem/context; Covers
+    later verifies an optional PNG and never silently replaces the person.
+    """
+    plan = getattr(job, "story_plan", None)
+    if not isinstance(plan, dict):
+        return False
+    record = {
+        "cover_face_required": bool(plan.get("cover_face_required", True)),
+        "cover_people_candidates": [dict(row) for row in plan.get("cover_people_candidates", []) if isinstance(row, dict)],
+        "cover_primary_person": (
+            dict(plan["cover_primary_person"])
+            if isinstance(plan.get("cover_primary_person"), dict) else None
+        ),
+        "cover_face_resolution_status": str(plan.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper(),
+    }
+    if record["cover_face_resolution_status"] not in {"RESOLVED", "NEEDS_REVIEW"}:
+        record["cover_face_resolution_status"] = "NEEDS_REVIEW"
+    if not record["cover_primary_person"]:
+        record["cover_face_resolution_status"] = "NEEDS_REVIEW"
+    production_id = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
+    changed = False
+    for item in getattr(settings, "idea_production_items", []):
+        if not isinstance(item, dict):
+            continue
+        if (production_id and str(item.get("id", "")).strip() == production_id) or (
+            not production_id and str(item.get("title", "")).casefold() == str(title).casefold()
+        ):
+            if any(item.get(key) != value for key, value in record.items()):
+                item.update(record)
+                changed = True
+            _ensure_cover_face_resolution_item(item)
+            break
+    context = getattr(settings, "idea_scenario_context", {}).get(title)
+    if isinstance(context, dict) and (
+        not production_id or str(context.get("id", "")).strip() == production_id
+    ):
+        if any(context.get(key) != value for key, value in record.items()):
+            context.update(record)
+            changed = True
+        _ensure_cover_face_resolution_item(context)
+    return changed
 
 
 def generate_scenarios(payload: dict) -> dict:
@@ -5998,10 +6123,17 @@ def generate_scenarios(payload: dict) -> dict:
     def save_job(job):
         current[job.request.index] = job
         save_session(titles, list(current.values()))
+        # The runner notifies immediately after it has persisted a validated
+        # Story Map and before its first Writer call. Keep the semantic Cover
+        # person on the durable ProductionItem at that same checkpoint.
+        if _project_story_plan_face_resolution(settings, job.request.title, job):
+            save_settings(settings)
 
     workers = pool.concurrency
     finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected, resume_jobs=resume_jobs))
     current.update({job.request.index: job for job in finished})
+    for job in finished:
+        _project_story_plan_face_resolution(settings, job.request.title, job)
     save_session(titles, list(current.values()))
     save_settings(settings)
     return snapshot()
@@ -6301,9 +6433,20 @@ def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bo
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
     """Keep a single automatic cover entry for every current scenario identity."""
     production_item = dict(getattr(settings, "idea_scenario_context", {}).get(title, {}) or {})
-    script = job.result if job and job.state == RunState.DONE else str(production_item.get("script", "") or "")
     job_identity = str(job.request.production_item_id if job else "").strip()
     production_item_id = job_identity or str(production_item.get("id", "")).strip()
+    canonical_item = next((item for item in getattr(settings, "idea_production_items", [])
+                           if isinstance(item, dict) and production_item_id
+                           and str(item.get("id", "")).strip() == production_item_id), None)
+    if canonical_item:
+        # Current context owns scenario-specific text, while the durable item
+        # owns semantic planning data such as the mandatory face resolution.
+        production_item = {**dict(canonical_item), **production_item}
+        for key in ("cover_face_required", "cover_people_candidates", "cover_primary_person",
+                    "cover_face_resolution_status"):
+            production_item[key] = canonical_item.get(key)
+    _ensure_cover_face_resolution_item(production_item)
+    script = job.result if job and job.state == RunState.DONE else str(production_item.get("script", "") or "")
     existing = next((item for item in settings.cover_queue
                      if (production_item_id and str(item.get("production_item_id", "")).strip() == production_item_id)
                      or (not str(item.get("production_item_id", "")).strip()
@@ -6313,6 +6456,8 @@ def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Jo
         "direction", "topic", "angle", "event_ids", "event_context", "supporting_context",
         "primary_entities", "primary_entity", "entities", "geography", "conflict",
         "main_consequence", "consequence", "framing", "framing_type", "selected_people",
+        "cover_face_required", "cover_people_candidates", "cover_primary_person",
+        "cover_face_resolution_status",
     )
     context = {key: production_item[key] for key in context_keys if production_item.get(key) not in (None, "", [], {})}
     if existing is None:
@@ -9364,22 +9509,31 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 "portrait_side": str(item.get("portrait_side", "") or ""),
                 "portrait_source": str(item.get("portrait_source", "saved") or "saved"),
                 "portrait_resolver_reason": str(item.get("portrait_resolver_reason", "saved render contract") or "saved render contract"),
+                "portrait_confidence": item.get("portrait_confidence", 0),
             }
             if repeat_current_contract else
             _resolve_cover_portrait(item, settings, face_mode=face_mode, allow_manual_reference=use_my_face)
         )
-        # A political thumbnail needs an accountable editorial subject.  Do
-        # not guess one from a country or organisation: persist the resolver
-        # evidence and let the operator add an explicit person instead.  The
-        # only exemption is the explicit no-faces mode.
-        if (face_mode != "without" and _cover_requires_political_portrait(item)
-                and not portrait["portrait_subject"]):
-            detail = (
-                "Для политической темы не найден явно указанный человек для портрета. "
-                "Добавьте человека в контекст/сценарий или выберите режим «без лиц»."
-            )
-            _cover_step(item, "Нужно определить политического субъекта", 100, detail)
+        # Every real ProductionItem needs an accountable public figure before
+        # FastGen. Do not guess a leader from geography/organisation and do
+        # not let an arbitrary visual-reference PNG choose the identity.
+        face_required = bool(item.get("cover_face_required")) or _cover_requires_political_portrait(item)
+        if face_mode != "without" and face_required and not portrait["portrait_subject"]:
+            if item.get("cover_face_required"):
+                detail = (
+                    "Нужно определить лицо для обложки: добавьте реальную публичную фигуру в ProductionItem "
+                    "или выберите её вручную; FastGen не будет подставлять случайного человека."
+                )
+                status = "Нужно определить лицо для обложки"
+            else:
+                detail = (
+                    "Для политической темы не найден явно указанный человек для портрета. "
+                    "Добавьте человека в контекст/сценарий или выберите режим «без лиц»."
+                )
+                status = "Нужно определить политического субъекта"
+            _cover_step(item, status, 100, detail)
             item["error"] = detail
+            item["cover_face_resolution_status"] = "NEEDS_REVIEW"
             _save_cover_state(settings)
             continue
         has_portrait_reference = False

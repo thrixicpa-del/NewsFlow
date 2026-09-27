@@ -7157,14 +7157,18 @@ export function Covers({
                     </dd>
                   </div>
                   <div>
-                    <dt>Политический портрет</dt>
+                    <dt>Лицо для обложки</dt>
                     <dd>
                       {cover.portrait_subject
-                        ? `${cover.portrait_subject} · ${cover.portrait_side || "side not set"} · ${cover.portrait_source || "source unavailable"} · ${cover.portrait_resolver_reason || "reason unavailable"}`
+                        ? `${cover.portrait_subject} · ${cover.portrait_side || "side not set"} · ${cover.portrait_source || "source unavailable"} · ${cover.portrait_resolver_reason || "reason unavailable"} · confidence ${cover.portrait_confidence ?? cover.cover_primary_person?.confidence ?? "n/a"}`
                         : cover.portrait_source === "disabled"
                           ? "Отключён пользователем для этой темы"
-                          : "Для этой темы политический портрет не выбран"}
+                          : "Нужно определить лицо для обложки"}
                     </dd>
+                  </div>
+                  <div>
+                    <dt>Alternatives</dt>
+                    <dd>{cover.cover_people_candidates?.slice(1).map((person) => person.name).join(", ") || "Нет"}</dd>
                   </div>
                   <div>
                     <dt>Режим FastGen</dt>
