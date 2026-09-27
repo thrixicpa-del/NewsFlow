@@ -339,7 +339,7 @@ class ParallelRunner:
                     job.request, job.result,
                 )
                 job.accepted_story_parts[0]["text"] = job.result
-            elif job.length_status == "SHORT":
+            if job.length_status == "SHORT":
                 # A short COMPLETE part is not accepted: retry must be able to
                 # regenerate P1 from the already persisted Story Map.
                 job.accepted_story_parts = []
