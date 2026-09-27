@@ -3840,6 +3840,7 @@ export function Covers({
       referenceMissingPaths: rawData.coverSettings?.referenceMissingPaths || [],
       referenceProviderLimit: rawData.coverSettings?.referenceProviderLimit || 10,
       referenceWillSendCount: rawData.coverSettings?.referenceWillSendCount || 0,
+      referenceWillSendCountMyFaces: rawData.coverSettings?.referenceWillSendCountMyFaces || 0,
       tabloidMode: Boolean(rawData.coverSettings?.tabloidMode),
       faceLibrary: {
         ...fallback.coverSettings.faceLibrary,
@@ -5102,7 +5103,9 @@ export function Covers({
                       </label>
                     </div>
                     <small>
-                      Загружено {fastgenReferencePaths.length} / будет отправлено {data.coverSettings.referenceWillSendCount} (лимит {data.coverSettings.referenceProviderLimit}).
+                      Загружено {fastgenReferencePaths.length} / будет отправлено до {coverBuildMode === "fastgen-full"
+                        ? data.coverSettings.referenceWillSendCount
+                        : data.coverSettings.referenceWillSendCountMyFaces} визуальных референсов (лимит {data.coverSettings.referenceProviderLimit}; в режиме «мои лица» один слот может занять портрет).
                       {data.coverSettings.referenceMissingPaths.length
                         ? ` Недоступно: ${data.coverSettings.referenceMissingPaths.length}.`
                         : ""}

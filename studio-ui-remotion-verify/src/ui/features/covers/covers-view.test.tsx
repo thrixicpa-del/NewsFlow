@@ -90,6 +90,24 @@ describe("Covers Light view", () => {
     })));
   });
 
+  it("never promises more visual references than the active FastGen route can send", () => {
+    const data = {
+      ...fallback,
+      coverSettings: {
+        ...fallback.coverSettings,
+        referenceProviderLimit: 4,
+        referenceWillSendCount: 4,
+        referenceWillSendCountMyFaces: 3,
+      },
+    };
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+
+    fireEvent.click(screen.getByLabelText("Использовать референсы FastGen"));
+    expect(screen.getByText(/будет отправлено до 4 визуальных референсов/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "FastGen всё + мои лица" }));
+    expect(screen.getByText(/будет отправлено до 3 визуальных референсов/)).toBeTruthy();
+  });
+
   it("does not submit the cover-start sequence twice while the current command is pending", async () => {
     let releaseCurrentCommand: (() => void) | undefined;
     const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {

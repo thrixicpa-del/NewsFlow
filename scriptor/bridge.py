@@ -783,11 +783,57 @@ def _cover_portrait_context(item: dict) -> str:
     ) if item.get(key) not in (None, "", [], {}))
 
 
-_COVER_POLITICAL_MARKERS = ("президент", "премьер", "министр", "парламент", "правительств", "переговор", "санкц", "посол", "выбор")
+_COVER_POLITICAL_MARKERS = (
+    "президент", "премьер", "министр", "парламент", "правительств", "переговор",
+    "санкц", "посол", "выбор", "тариф", "пошлин", "дипломат", "саммит", "кремл",
+    "белый дом", "внешн", "международн",
+)
+_COVER_PERSON_ENTITY_TYPES = {"person", "human", "public_figure", "politician", "individual"}
+
+
+def _cover_entity_is_explicit_person(value: object) -> bool:
+    """Accept structured entities only when their person type is explicit."""
+    if not isinstance(value, dict):
+        return False
+    classifications = {
+        str(value.get(key, "") or "").strip().casefold()
+        for key in ("type", "entity_type", "kind", "classification")
+    }
+    return bool(classifications & _COVER_PERSON_ENTITY_TYPES) or bool(value.get("is_person") is True)
+
+
+def _cover_has_role_qualified_person(item: dict) -> bool:
+    return any(re.search(
+        r"\b(?:президент|премьер(?:-министр)?|министр|лидер|глава|канцлер|посол)\s+"
+        r"(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)(?:\s+(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)){1,2}",
+        " ".join(str(item.get(key, "")).split()), flags=re.IGNORECASE,
+    ) for key in ("title", "topic", "script", "supporting_context", "event_context"))
 
 
 def _cover_requires_political_portrait(item: dict) -> bool:
-    """Identify a political cover without guessing which person represents it."""
+    """Identify a political/public-figure cover without guessing an identity.
+
+    This is intentionally not just a marker-list decision: explicit people,
+    typed person entities and role-qualified factual context are independent
+    evidence.  A public-affairs classifier also catches stories such as tariff
+    policy, where the current topic contains no legacy office marker.
+    """
+    selected_people = item.get("selected_people")
+    selected_people = selected_people if isinstance(selected_people, list) else [selected_people]
+    if any(_cover_person_name(value) for value in selected_people):
+        return True
+    for key in ("primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        if any(_cover_entity_is_explicit_person(value) for value in values):
+            return True
+    if _cover_has_role_qualified_person(item):
+        return True
+    classification = " ".join(_cover_context_values(item.get(key)) for key in (
+        "topic_classification", "category", "categories", "topic_type",
+    )).casefold()
+    if any(term in classification for term in ("polit", "public figure", "government", "geopolit")):
+        return True
     context = _cover_portrait_context(item).casefold()
     return any(marker in context for marker in _COVER_POLITICAL_MARKERS)
 
@@ -806,10 +852,15 @@ def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
     entities win; otherwise a role-qualified full name in the script/context
     is a deterministic safe candidate.
     """
+    # selected_people is the operator-owned person-only source.  Generic
+    # entities are deliberately *not* inferred from capitalised words: an
+    # organisation or place must carry an explicit person classification.
     for key in ("selected_people", "primary_entities", "primary_entity", "entities"):
         values = item.get(key)
         values = values if isinstance(values, list) else [values]
         for value in values:
+            if key != "selected_people" and not _cover_entity_is_explicit_person(value):
+                continue
             name = _cover_person_name(value)
             if name:
                 return name, f"structured-{key}", f"explicit person from {key}"
@@ -2107,9 +2158,16 @@ def snapshot() -> dict:
             "referenceMissingPaths": [path for path in settings.cover_fastgen_reference_paths
                                       if not Path(path).expanduser().is_file()],
             "referenceProviderLimit": _cover_operation_reference_limit(settings, settings.cover_operation) or 10,
+            # FastGen full sends visual references only.  The my-faces route
+            # can reserve one provider slot for a topic-relevant portrait, so
+            # the UI must advertise that conservative visual-reference cap.
             "referenceWillSendCount": len(_cover_fastgen_visual_reference_selection(
                 settings,
                 max_references=_cover_operation_reference_limit(settings, settings.cover_operation) or 10,
+            )["paths"]),
+            "referenceWillSendCountMyFaces": len(_cover_fastgen_visual_reference_selection(
+                settings,
+                max_references=max(0, (_cover_operation_reference_limit(settings, settings.cover_operation) or 10) - 1),
             )["paths"]),
             "tabloidMode": settings.cover_tabloid_mode,
             "faceLibraryFolder": _cover_face_folder_value(settings.cover_face_library_folder),
@@ -7549,7 +7607,7 @@ _COVER_WORD_RISK_TERMS = ("может", "могут", "риск", "вероят"
 _COVER_WORD_ASSERTIVE_TERMS = ("взлетел", "рухнул", "обвалил", "закрыл", "остановил", "сорвал")
 _COVER_WORD_UNNATURAL_PATTERNS = (
     "на нерве", "поджимает помидор", "трещит по швам", "раскачивает ситуацию",
-    "градус раст", "входит в штопор", "нагнетает",
+    "градус раст", "входит в штопор",
 )
 _COVER_WORD_SEMANTIC_GROUPS = {
     "collapse": ("рух", "обвал", "сократ", "паден", "провал"),
@@ -7738,6 +7796,92 @@ def _cover_word_strengthens_source(value: str, item: dict) -> bool:
     return False
 
 
+def _cover_word_editorial_evaluation(
+    value: str, item: dict, *, factual_pass: bool, grounding_pass: bool, duplicate_pass: bool,
+) -> dict[str, object]:
+    """Bounded local editorial rubric for one factual-safe thumbnail candidate.
+
+    This is purposefully not a phrase blacklist.  It evaluates a candidate's
+    relation to the current ProductionItem: content words must form a clear,
+    source-grounded statement, and a novel invented verb/object pairing cannot
+    become READY merely because the candidate mentions the right country.
+    The persisted result is compact audit evidence, not model reasoning.
+    """
+    text = " ".join(str(value or "").casefold().split())
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
+    stems = _cover_meaningful_word_stems(text)
+    source_stems = _cover_meaningful_word_stems(_cover_word_source_text(item))
+    source_matches = {stem for stem in stems if stem in source_stems}
+    unknown_stems = stems - source_stems
+    # Finite verbs invented by the model are a reliable, context-independent
+    # signal of an unsupported and often nonsensical subject/action pairing.
+    # These are normal literal newsroom actions, not a negative phrase list.
+    # When a source uses a close verb form (or an editor uses a literal verb
+    # such as "держит курс"), that alone is not an artificial metaphor.
+    neutral_action_stems = {
+        "держ", "меня", "обсуж", "повыш", "усил", "дави", "давл", "отвеч", "заяв", "ввод",
+        "реша", "соглас", "отказ", "треб", "сниж", "раст", "рван", "постав", "закры",
+    }
+    unknown_action = any(
+        word[:4] in unknown_stems
+        and not any(word.startswith(stem) for stem in neutral_action_stems)
+        and re.search(r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али)$", word)
+        for word in words
+    )
+    bare_abstract_state = (
+        len(words) <= 3
+        and "на" in text.split()
+        and len(source_matches) < max(2, len(stems))
+    )
+    negative_example_signal = any(pattern in text for pattern in _COVER_WORD_UNNATURAL_PATTERNS)
+    # These quantities are deliberately finite and explainable rather than a
+    # hidden chain of reasoning.  The known historical examples merely add a
+    # weak signal; they cannot independently reject a phrase.
+    semantic_coherence_pass = not unknown_action and not bare_abstract_state
+    literal_clarity_pass = not bare_abstract_state and bool(source_matches)
+    naturalness_pass = semantic_coherence_pass and literal_clarity_pass
+    cliche_penalty = int(negative_example_signal) + int(
+        len(stems) > 0 and all(any(stem.startswith(generic) for generic in _COVER_WORD_GENERIC_STEMS)
+                               for stem in stems)
+    )
+    named_anchors = _cover_word_named_source_entities(item)
+    specificity_score = min(5, len(source_matches) + int(bool(stems & named_anchors)) + int(len(stems) >= 3))
+    hook_markers = (
+        "давл", "спор", "конфликт", "тариф", "санкц", "угроз", "рост", "паден", "усил",
+        "закро", "переговор", "решен", "ответ",
+    )
+    hook_score = min(5, sum(any(stem.startswith(marker) or marker.startswith(stem)
+                                for marker in hook_markers) for stem in stems))
+    # Historical negative examples raise an audit signal, but never form a
+    # standalone rejection path.  The contextual coherence/clarity checks
+    # above must independently explain why a phrase is unsuitable.
+    editorial_plausibility_pass = naturalness_pass
+    reasons: list[str] = []
+    if unknown_action:
+        reasons.append("unsourced_action_pairing")
+    if bare_abstract_state:
+        reasons.append("unclear_abstract_state")
+    if negative_example_signal:
+        reasons.append("historical_negative_example_signal")
+    if cliche_penalty and not negative_example_signal:
+        reasons.append("generic_clickbait")
+    if not naturalness_pass:
+        reasons.append("naturalness_or_clarity_failed")
+    return {
+        "naturalness_pass": naturalness_pass,
+        "semantic_coherence_pass": semantic_coherence_pass,
+        "literal_clarity_pass": literal_clarity_pass,
+        "cliche_penalty": cliche_penalty,
+        "editorial_plausibility_pass": editorial_plausibility_pass,
+        "specificity_score": specificity_score,
+        "hook_score": hook_score,
+        "factual_pass": factual_pass,
+        "grounding_pass": grounding_pass,
+        "duplicate_pass": duplicate_pass,
+        "quality_reasons": reasons,
+    }
+
+
 def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "",
                          structure: dict | None = None, recent: list[dict] | None = None) -> dict[str, object]:
     """Return explicit validation/reason codes; never silently truncate into READY."""
@@ -7759,13 +7903,6 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         return result
     if "!" in raw or (kind == "subheadline" and raw.isupper()):
         result.update(reason_code="STYLE_VIOLATION", reason_detail="Стиль строки не допускает это оформление")
-        return result
-    naturalness = " ".join(raw.casefold().split())
-    if any(pattern in naturalness for pattern in _COVER_WORD_UNNATURAL_PATTERNS):
-        result.update(
-            reason_code="UNNATURAL_LANGUAGE",
-            reason_detail="Фраза звучит как искусственный газетный штамп или неестественное словосочетание",
-        )
         return result
     stems = _cover_meaningful_word_stems(raw)
     topic_stems = _cover_topic_terms(str(item.get("title", "")), _cover_word_source_text(item))
@@ -7827,6 +7964,17 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         if sum(1 for saved_signature in recent_signatures if saved_signature == signature) >= 3:
             result.update(reason_code="RECENT_PATTERN_REPEAT", reason_detail="Недавний паттерн использован слишком часто")
             return result
+    evaluation = _cover_word_editorial_evaluation(
+        raw, item, factual_pass=True, grounding_pass=True, duplicate_pass=True,
+    )
+    result["editorial_evaluation"] = evaluation
+    if not (evaluation["naturalness_pass"] and evaluation["semantic_coherence_pass"]
+            and evaluation["literal_clarity_pass"] and evaluation["editorial_plausibility_pass"]):
+        result.update(
+            reason_code="EDITORIAL_QUALITY_FAILED",
+            reason_detail="Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+        )
+        return result
     result.update(valid=True, semantic_slots=list((structure or {}).get("semantic_slots", [])))
     return result
 
@@ -8014,7 +8162,6 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
     )
     if kind == "headline":
         task += (
-            "Внутренне сравни минимум пять разных подходов и верни один лучший. "
             "Headline обязан быть самодостаточным: без полного названия ролика зритель сразу должен понимать, "
             "кто или что находится в центре конфликта. Если в теме назван человек, страна, город или организация, "
             "включи хотя бы одну такую конкретную сущность в headline. Запрещены голые действия и абстрактные "
@@ -8072,11 +8219,28 @@ def _cover_word_candidates(raw: str, kind: str) -> list[str]:
 
 
 def _cover_word_candidate_score(value: str, item: dict) -> tuple[int, int, int]:
-    """Deterministic quality tie-break after factual/naturalness validation."""
+    """Compatibility wrapper for callers that only need a stable source score."""
     source = _cover_word_source_text(item).casefold()
     anchors = _cover_word_named_source_entities(item)
     terms = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", value.casefold())}
     return (int(bool(terms & anchors)), sum(term in source for term in terms), -len(value))
+
+
+def _cover_word_editorial_selection_score(
+    value: str, validation: dict[str, object], *, tabloid_mode: bool,
+) -> tuple[int, int, int, int, int]:
+    """Select only from validated candidates using persisted editorial evidence."""
+    evaluation = validation.get("editorial_evaluation")
+    if not isinstance(evaluation, dict):
+        return (0, 0, 0, 0, -len(value))
+    natural = int(bool(evaluation.get("naturalness_pass")))
+    factual = int(bool(evaluation.get("factual_pass")))
+    specificity = int(evaluation.get("specificity_score", 0) or 0)
+    hook = int(evaluation.get("hook_score", 0) or 0)
+    # Standard favours compact concrete news wording; Tabloid uses the same
+    # factual/natural gate but deliberately promotes a stronger supported hook.
+    return ((natural, factual, hook, specificity, -len(value)) if tabloid_mode
+            else (natural, factual, -len(value), specificity, hook))
 
 
 async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, template: str,
@@ -8098,10 +8262,26 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
             if validation["valid"]:
                 accepted.append((candidate, validation))
         if accepted:
-            value, validation = max(accepted, key=lambda pair: _cover_word_candidate_score(pair[0], item))
+            value, validation = max(
+                accepted,
+                key=lambda pair: _cover_word_editorial_selection_score(
+                    pair[0], pair[1], tabloid_mode=tabloid_mode,
+                ),
+            )
             validation = dict(validation)
-            validation.update(candidate_count=len(_cover_word_candidates(raw, kind)),
-                              selection_reason="best factual-safe natural candidate")
+            evidence = dict(validation.get("editorial_evaluation", {}))
+            validation.update(
+                candidate_count=len(_cover_word_candidates(raw, kind)),
+                selection_reason=("best supported tabloid hook after editorial quality evaluation"
+                                  if tabloid_mode else "best compact standard candidate after editorial quality evaluation"),
+                selection_evidence={
+                    "style": "TABLOID" if tabloid_mode else "STANDARD",
+                    "naturalness_pass": bool(evidence.get("naturalness_pass")),
+                    "specificity_score": int(evidence.get("specificity_score", 0) or 0),
+                    "hook_score": int(evidence.get("hook_score", 0) or 0),
+                    "factual_pass": bool(evidence.get("factual_pass")),
+                },
+            )
             return value, validation, attempts
         if repair_index == 2:
             break
@@ -8283,6 +8463,8 @@ def generate_cover_headlines(payload: dict) -> dict:
                            text_style="TABLOID" if settings.cover_tabloid_mode else "STANDARD",
                            headline_candidate_count=int(validation.get("candidate_count", 1) or 1),
                            headline_selection_reason=str(validation.get("selection_reason", "validated candidate")),
+                           headline_editorial_evaluation=dict(validation.get("editorial_evaluation", {})),
+                           headline_selection_evidence=dict(validation.get("selection_evidence", {})),
                            headline_generation_timestamp=datetime.now().astimezone().isoformat(timespec="seconds"))
             _mark_cover_prompt_stale_for_current_text(current)
             current["headline_provider_attempt_count"] = provider_call.attempts
@@ -8394,6 +8576,8 @@ def generate_cover_subheadlines(payload: dict) -> dict:
                            text_style="TABLOID" if settings.cover_tabloid_mode else "STANDARD",
                            subheadline_candidate_count=int(validation.get("candidate_count", 1) or 1),
                            subheadline_selection_reason=str(validation.get("selection_reason", "validated candidate")),
+                           subheadline_editorial_evaluation=dict(validation.get("editorial_evaluation", {})),
+                           subheadline_selection_evidence=dict(validation.get("selection_evidence", {})),
                            subheadline_generation_timestamp=datetime.now().astimezone().isoformat(timespec="seconds"))
             _mark_cover_prompt_stale_for_current_text(current)
             current["subheadline_provider_attempt_count"] = provider_call.attempts

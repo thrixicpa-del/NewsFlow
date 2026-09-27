@@ -104,14 +104,48 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn(resolved["portrait_side"], {"LEFT", "RIGHT"})
         self.assertNotEqual(resolved["portrait_source"], "none")
 
-    def test_portrait_resolver_accepts_an_arbitrary_latin_named_entity_from_current_context(self):
+    def test_portrait_resolver_accepts_an_arbitrary_typed_person_entity_from_current_context(self):
         from scriptor import bridge
 
-        item = {"title": "Переговоры о торговле", "entities": [{"name": "Amina Diallo"}]}
+        item = {"title": "Переговоры о торговле", "entities": [{"name": "Amina Diallo", "type": "person"}]}
         resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
 
         self.assertEqual(resolved["portrait_subject"], "Amina Diallo")
         self.assertEqual(resolved["portrait_source"], "structured-entities")
+
+    def test_portrait_resolver_never_treats_typed_organisation_as_a_person(self):
+        from scriptor import bridge
+
+        for name in ("Европейский Союз", "Белый Дом"):
+            with self.subTest(name=name):
+                item = {"title": "Переговоры о торговле", "entities": [{"name": name, "type": "organization"}]}
+                resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
+
+                self.assertEqual(resolved["portrait_subject"], "")
+                self.assertEqual(resolved["portrait_source"], "none")
+
+    def test_named_political_subject_without_legacy_marker_stops_before_fastgen(self):
+        """Political/public-figure detection cannot depend on a marker dictionary."""
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [{
+            "production_item_id": "production:tariffs", "title": "Трамп повысил тарифы для Китая",
+            "image_prompt": "Торговая сцена", "status": "Ожидает",
+        }]
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.FastGenPool, "generate_media") as create:
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:tariffs"],
+                "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True,
+            })
+
+        create.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить политического субъекта")
 
     def test_political_topic_without_explicit_person_stays_recoverable_before_provider_call(self):
         """Generic politics cannot silently reach FastGen with an empty portrait subject."""
@@ -941,6 +975,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertTrue(all(3 <= len(row["cover_subheadline"].split()) <= 7 for row in settings.cover_queue))
         self.assertTrue(all(not _cover_lines_repeat_meaningful_words(row["cover_headline"], row["cover_subheadline"])
                             for row in settings.cover_queue))
+        self.assertTrue(all(row["headline_editorial_evaluation"]["naturalness_pass"]
+                            and row["headline_selection_evidence"]["factual_pass"]
+                            for row in settings.cover_queue))
 
     def test_word_engine_repairs_an_overlong_headline_instead_of_silently_truncating_it(self):
         """A valid READY line must be authored, not the first three words of a bad response."""
@@ -1254,6 +1291,60 @@ class FastGenClientTests(unittest.TestCase):
 
 
 class CoverHeadlineGuardTests(unittest.TestCase):
+    def test_editorial_quality_rejects_novel_awkward_phrase_outside_legacy_patterns(self):
+        """A source anchor alone must not turn a nonsensical hook into READY."""
+        from scriptor import bridge
+
+        item = {"title": "Европа обсуждает поставки помидоров после нового решения"}
+
+        self.assertNotIn("перекручивает помидоры", bridge._COVER_WORD_UNNATURAL_PATTERNS)
+
+        validation = _validate_cover_word("headline", "Европа перекручивает помидоры", item)
+
+        self.assertFalse(validation["valid"], validation)
+        self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
+        self.assertFalse(validation["editorial_evaluation"]["semantic_coherence_pass"])
+
+    def test_editorial_quality_does_not_reject_natural_contextual_word_by_legacy_substring(self):
+        item = {"title": "Россия нагнетает давление в переговорах"}
+
+        validation = _validate_cover_word("headline", "Россия нагнетает давление", item)
+
+        self.assertTrue(validation["valid"], validation)
+        self.assertTrue(validation["editorial_evaluation"]["naturalness_pass"])
+
+    def test_editorial_evaluation_is_compact_and_structured(self):
+        item = {"title": "Трамп повысил тарифы для Китая"}
+
+        validation = _validate_cover_word("headline", "Трамп повысил тарифы", item)
+
+        self.assertTrue(validation["valid"], validation)
+        evidence = validation["editorial_evaluation"]
+        self.assertEqual(set(evidence), {
+            "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "cliche_penalty",
+            "editorial_plausibility_pass", "specificity_score", "hook_score", "factual_pass",
+            "grounding_pass", "duplicate_pass", "quality_reasons",
+        })
+
+    def test_editorial_quality_selects_strong_natural_candidate_from_safe_batch(self):
+        from scriptor import bridge
+
+        item = {"title": "Трамп повысил тарифы для Китая: торговый спор усилился"}
+
+        async def generate(_prompt, **_kwargs):
+            return json.dumps({"candidates": [
+                "Трамп перекручивает тарифы", "Важные новости", "Трамп усилил торговый спор",
+            ]}, ensure_ascii=False)
+
+        value, validation, attempts = asyncio.run(bridge._generate_cover_word_v2(
+            SimpleNamespace(generate=generate), "headline", item, "", _cover_word_structure_pair(item),
+        ))
+
+        self.assertEqual(value, "Трамп усилил торговый спор")
+        self.assertTrue(validation["editorial_evaluation"]["naturalness_pass"])
+        self.assertFalse(attempts[0]["validation"]["valid"])
+        self.assertFalse(attempts[1]["validation"]["valid"])
+
     def test_naturalness_gate_rejects_editorially_awkward_but_grounded_hooks(self):
         cases = (
             ("Европа поджимает помидоры", "Европа обсуждает поставки помидоров после нового решения"),
@@ -1264,7 +1355,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
                 item = {"title": title, "topic": title}
                 validation = _validate_cover_word("headline", value, item)
                 self.assertFalse(validation["valid"], validation)
-                self.assertEqual(validation["reason_code"], "UNNATURAL_LANGUAGE")
+                self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
 
     def test_candidate_prompt_requests_multiple_editorial_options_not_a_hash_template(self):
         item = {"production_item_id": "production:tomatoes", "title": "Европа обсуждает поставки помидоров"}
@@ -1292,7 +1383,33 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertEqual(value, "Европа меняет поставки")
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["candidate_count"], 2)
-        self.assertEqual(attempts[0]["validation"]["reason_code"], "UNNATURAL_LANGUAGE")
+        self.assertEqual(attempts[0]["validation"]["reason_code"], "EDITORIAL_QUALITY_FAILED")
+
+    def test_standard_and_tabloid_select_different_safe_editorial_strength(self):
+        from scriptor import bridge
+
+        item = {"title": "Трамп повысил тарифы для Китая: торговый спор усилился"}
+
+        async def generate(_prompt, **_kwargs):
+            return json.dumps({"candidates": [
+                "Трамп повысил тарифы", "Трамп усилил торговый спор",
+            ]}, ensure_ascii=False)
+
+        standard, standard_evidence, _ = asyncio.run(bridge._generate_cover_word_v2(
+            SimpleNamespace(generate=generate), "headline", item, "", _cover_word_structure_pair(item),
+            tabloid_mode=False,
+        ))
+        tabloid, tabloid_evidence, _ = asyncio.run(bridge._generate_cover_word_v2(
+            SimpleNamespace(generate=generate), "headline", item, "", _cover_word_structure_pair(item),
+            tabloid_mode=True,
+        ))
+
+        self.assertEqual(standard, "Трамп повысил тарифы")
+        self.assertEqual(tabloid, "Трамп усилил торговый спор")
+        self.assertLess(
+            standard_evidence["editorial_evaluation"]["hook_score"],
+            tabloid_evidence["editorial_evaluation"]["hook_score"],
+        )
 
     def test_headline_is_limited_to_five_words(self):
         self.assertEqual(
