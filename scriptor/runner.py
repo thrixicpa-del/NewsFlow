@@ -206,10 +206,10 @@ class ParallelRunner:
         """Rebalance only the remaining character budget; never rewrite accepted prose."""
         part = plan.parts[part_index]
         if not job.accepted_story_parts:
-            return max(1, int(part.target_chars or 1))
+            return max(0, int(part.target_chars or 0))
         overall_target = self._story_target_chars(job.request)
         if not overall_target:
-            return max(1, int(part.target_chars or 1))
+            return max(0, int(part.target_chars or 0))
         accepted_text = self._assembled_story(plan, job.accepted_story_parts)
         remaining_parts = len(plan.parts) - part_index
         # Each future accepted part adds one deterministic "\n\n" separator
@@ -298,9 +298,26 @@ class ParallelRunner:
                 job.actual_chars = len(job.result)
                 job.length_status = f"PART {part_index + 1}/{len(plan.parts)}"
                 return False
+
+            accepted_text = writer_result.strip()
+            if len(plan.parts) == 1:
+                single_status, single_chars = scenario_length_status(job.request, accepted_text)
+                if single_status == "LONG":
+                    accepted_text = trim_text_to_sentence_boundary(
+                        accepted_text, job.request.allowed_max,
+                    )
+                    single_status, single_chars = scenario_length_status(
+                        job.request, accepted_text,
+                    )
+                if single_status == "SHORT":
+                    job.result = accepted_text
+                    job.actual_chars = single_chars
+                    job.length_status = "SHORT"
+                    return False
+
             job.accepted_story_parts.append({
                 "part_id": part.id,
-                "text": writer_result.strip(),
+                "text": accepted_text,
                 "content_ids": list(part.content_ids),
                 "target_chars": active_target,
             })
@@ -311,9 +328,21 @@ class ParallelRunner:
             self._notify(job)
 
         job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
-        if len(plan.parts) == 1 and job.length_status == "LONG":
-            job.result = trim_text_to_sentence_boundary(job.result, job.request.allowed_max)
-            job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
+        if len(plan.parts) == 1 and job.accepted_story_parts:
+            # Heal any persisted single-part prefix created by an older draft:
+            # accepted prose must match the final visible result after trimming.
+            if job.length_status == "LONG":
+                job.result = trim_text_to_sentence_boundary(
+                    job.result, job.request.allowed_max,
+                )
+                job.length_status, job.actual_chars = scenario_length_status(
+                    job.request, job.result,
+                )
+                job.accepted_story_parts[0]["text"] = job.result
+            elif job.length_status == "SHORT":
+                # A short COMPLETE part is not accepted: retry must be able to
+                # regenerate P1 from the already persisted Story Map.
+                job.accepted_story_parts = []
         job.length_repair_attempts = 0
         return job.length_status not in {"SHORT", "LONG"}
 
