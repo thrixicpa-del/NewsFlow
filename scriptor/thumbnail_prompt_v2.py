@@ -176,18 +176,11 @@ def build_final_provider_prompt(
     scene_values = _structured_scene_values(scene_prompt)
     brief = visual_brief({**dict(item or {}), **scene_values})
     scene = _semantic_scene(scene_prompt, brief["title"])
-    # Structured planner fields are authoritative for every topic.  This is
-    # intentionally generic: no named story/category correction table exists
-    # in runtime.  When slots are present, rebuild STORY CONTEXT from those
-    # current values so a stale raw draft cannot override the current topic.
-    if scene_values:
-        scene = "; ".join(
-            value for key in (
-                "main_subject", "selected_people", "visible_action",
-                "visual_evidence", "environment", "emotion",
-            )
-            if (value := scene_values.get(key))
-        )
+    # ``_semantic_scene`` has already extracted only the old draft's STORY
+    # CONTEXT.  Keep that concise scene narrative intact; the structured slots
+    # below remain authoritative for their own labelled fields.  Rebuilding
+    # STORY CONTEXT from all slots made the final provider payload needlessly
+    # repetitive and could turn an old V2 prompt into a different scene.
     identity = "; ".join(part for part in (identity_notes, reference_notes) if part.strip()) or "No additional identity or reference instruction."
     composition = "; ".join(part for part in (brief["layout"], composition_notes) if part.strip())
     if brief["headline"] and text_mode == "fastgen":

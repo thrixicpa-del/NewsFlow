@@ -70,6 +70,44 @@ describe("Covers Light view", () => {
     })));
   });
 
+  it("keeps explicit FastGen visual references in step 02 and persists their mode contract", async () => {
+    const command = vi.fn(async () => undefined);
+    render(<Covers data={fallback} command={command} />);
+
+    const toggle = screen.getByLabelText("Использовать референсы FastGen");
+    expect(toggle.closest("article")?.textContent).toContain("Выберите движок текста и лица");
+    fireEvent.click(toggle);
+    expect(screen.getByText("Стиль")).toBeTruthy();
+    expect(screen.getByText("Композиция")).toBeTruthy();
+    expect(screen.getByText("Атмосфера / цвет / свет")).toBeTruthy();
+    expect(screen.getByText("Авто")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить референсы FastGen" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-cover-settings", expect.objectContaining({
+      useReferences: true,
+      referenceImagePaths: [],
+      referenceModeAuto: false,
+    })));
+  });
+
+  it("never promises more visual references than the active FastGen route can send", () => {
+    const data = {
+      ...fallback,
+      coverSettings: {
+        ...fallback.coverSettings,
+        referenceProviderLimit: 4,
+        referenceWillSendCount: 4,
+        referenceWillSendCountMyFaces: 3,
+      },
+    };
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+
+    fireEvent.click(screen.getByLabelText("Использовать референсы FastGen"));
+    expect(screen.getByText(/будет отправлено до 4 визуальных референсов/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "FastGen всё + мои лица" }));
+    expect(screen.getByText(/будет отправлено до 3 визуальных референсов/)).toBeTruthy();
+  });
+
   it("does not submit the cover-start sequence twice while the current command is pending", async () => {
     let releaseCurrentCommand: (() => void) | undefined;
     const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {
@@ -329,6 +367,26 @@ describe("Covers Light view", () => {
     expect(command).not.toHaveBeenCalledWith("retry-cover-generation", expect.anything());
   });
 
+  it("requires an explicit terminal provider failure before a new paid retry", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:failed", title: "Failed", image_prompt: "same",
+        status: "Требуется создать заново FastGen", accepted_generation_id: "generation-1",
+        provider_generation_status: "failed", paths: [],
+      }],
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Failed" }));
+    const retry = screen.getByRole("button", { name: "Создать новый платный запрос" });
+    expect(retry.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(retry);
+    expect(command).toHaveBeenCalledWith("retry-cover-generation-new-paid", {
+      indices: [0], productionItemIds: ["production:failed"],
+    });
+  });
+
   it("keeps new-prompt creation separate and does not start a manual render", async () => {
     const command = vi.fn(async () => undefined);
     const data = {
@@ -488,6 +546,36 @@ describe("Covers Light view", () => {
     expect(screen.getByRole("table", { name: "Очередь обложек" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "1. Ормуз" }));
     expect(screen.getByText("Инспектор обложки")).toBeTruthy();
+  });
+
+  it("keeps manual text explicit until the operator submits a manual save", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:manual",
+        title: "Кремль меняет тон переговоров",
+        image_prompt: "Negotiation scene",
+        cover_headline: "РУЧНОЙ ЗАГОЛОВОК",
+        headline_source: "MANUAL" as const,
+        cover_subheadline: "Ручная вторая строка",
+        subheadline_source: "MANUAL" as const,
+        paths: [],
+      }],
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Кремль меняет тон переговоров" }));
+    expect(screen.getAllByText("Вручную · сохранено")).toHaveLength(2);
+
+    const headline = screen.getByRole("textbox", { name: /Заголовок на обложке/ });
+    fireEvent.change(headline, { target: { value: "НОВЫЙ РУЧНОЙ ЗАГОЛОВОК" } });
+    fireEvent.submit(headline.closest("form")!);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-cover-headline", {
+      index: 0,
+      headline: "НОВЫЙ РУЧНОЙ ЗАГОЛОВОК",
+    }));
+
   });
 
   it("opens a cover inspector with FastGen prompt provenance", () => {

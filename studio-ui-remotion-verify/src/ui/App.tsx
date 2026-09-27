@@ -196,6 +196,14 @@ export const fallback: NewsFlowSnapshot = {
     aiReferencePaths: [],
     aiReferenceRanges: [],
     aiReferenceToFastgen: false,
+    useReferences: false,
+    referenceImagePaths: [],
+    referenceModeStyle: false,
+    referenceModeComposition: false,
+    referenceModeMoodLighting: false,
+    referenceModeAuto: false,
+    referenceMissingPaths: [],
+    tabloidMode: false,
     faceLibraryFolder: "",
     facePreparedFolder: "",
     faceLibraryEnabled: false,
@@ -554,18 +562,21 @@ function Button({
   onClick,
   ariaLabel,
   disabled = false,
+  type = "button",
 }: {
   children: React.ReactNode;
   kind?: "primary" | "success" | "danger" | "secondary";
   onClick?: () => void;
   ariaLabel?: string;
   disabled?: boolean;
+  type?: "button" | "submit";
 }) {
-  const available = typeof onClick === "function";
+  const available = typeof onClick === "function" || type === "submit";
   const variant = kind === "danger" ? "destructive" : kind;
   return (
     <UiButton
       variant={variant}
+      type={type}
       onClick={onClick}
       aria-label={ariaLabel}
       disabled={disabled || !available}
@@ -3769,7 +3780,11 @@ const coverManualRetryStatuses = new Set([
 const isCoverManualRetryEligible = (
   cover: NewsFlowSnapshot["covers"][number],
 ) => coverManualRetryStatuses.has(String(cover.status || "")) &&
-  !String((cover as typeof cover & { accepted_generation_id?: string }).accepted_generation_id || "").trim();
+  !String(cover.accepted_generation_id || "").trim();
+
+const isCoverNewPaidRetryEligible = (
+  cover: NewsFlowSnapshot["covers"][number],
+) => String(cover.provider_generation_status || "").toLowerCase() === "failed";
 
 const isCoverRenderActive = (cover: NewsFlowSnapshot["covers"][number]) => {
   const status = String(cover.status || "");
@@ -3816,6 +3831,17 @@ export function Covers({
       aiReferenceRanges: rawData.coverSettings?.aiReferenceRanges || [],
       aiReferenceToFastgen:
         rawData.coverSettings?.aiReferenceToFastgen || false,
+      useReferences: Boolean(rawData.coverSettings?.useReferences),
+      referenceImagePaths: rawData.coverSettings?.referenceImagePaths || [],
+      referenceModeStyle: Boolean(rawData.coverSettings?.referenceModeStyle),
+      referenceModeComposition: Boolean(rawData.coverSettings?.referenceModeComposition),
+      referenceModeMoodLighting: Boolean(rawData.coverSettings?.referenceModeMoodLighting),
+      referenceModeAuto: Boolean(rawData.coverSettings?.referenceModeAuto),
+      referenceMissingPaths: rawData.coverSettings?.referenceMissingPaths || [],
+      referenceProviderLimit: rawData.coverSettings?.referenceProviderLimit || 10,
+      referenceWillSendCount: rawData.coverSettings?.referenceWillSendCount || 0,
+      referenceWillSendCountMyFaces: rawData.coverSettings?.referenceWillSendCountMyFaces || 0,
+      tabloidMode: Boolean(rawData.coverSettings?.tabloidMode),
       faceLibrary: {
         ...fallback.coverSettings.faceLibrary,
         ...(rawData.coverSettings?.faceLibrary || {}),
@@ -3875,6 +3901,25 @@ export function Covers({
   const [aiReferenceToFastgen, setAiReferenceToFastgen] = useState(
     data.coverSettings.aiReferenceToFastgen || false,
   );
+  const [fastgenUseReferences, setFastgenUseReferences] = useState(
+    Boolean(data.coverSettings.useReferences),
+  );
+  const [fastgenReferencePaths, setFastgenReferencePaths] = useState<string[]>(
+    data.coverSettings.referenceImagePaths || [],
+  );
+  const [fastgenReferenceModeStyle, setFastgenReferenceModeStyle] = useState(
+    Boolean(data.coverSettings.referenceModeStyle),
+  );
+  const [fastgenReferenceModeComposition, setFastgenReferenceModeComposition] = useState(
+    Boolean(data.coverSettings.referenceModeComposition),
+  );
+  const [fastgenReferenceModeMoodLighting, setFastgenReferenceModeMoodLighting] = useState(
+    Boolean(data.coverSettings.referenceModeMoodLighting),
+  );
+  const [fastgenReferenceModeAuto, setFastgenReferenceModeAuto] = useState(
+    Boolean(data.coverSettings.referenceModeAuto),
+  );
+  const [tabloidMode, setTabloidMode] = useState(Boolean(data.coverSettings.tabloidMode));
   const [faceLibraryFolder, setFaceLibraryFolder] = useState(
     data.coverSettings.faceLibraryFolder || "",
   );
@@ -4144,6 +4189,8 @@ export function Covers({
   const selectedManualRetryCount = selectedPromptRows.filter(isCoverManualRetryEligible).length;
   const allSelectedManualRetryEligible =
     selected.length > 0 && selectedManualRetryCount === selected.length;
+  const allSelectedNewPaidRetryEligible =
+    selected.length > 0 && selectedPromptRows.every(isCoverNewPaidRetryEligible);
   const selectedHasActiveRender = selectedPromptRows.some(isCoverRenderActive);
   const selectedNewPromptsReadyCount = selectedPromptRows.filter(
     (cover) => cover.status === "Новые промпты созданы",
@@ -4284,6 +4331,13 @@ export function Covers({
     aiReferencePaths: aiReferences,
     aiReferenceRanges,
     aiReferenceToFastgen,
+    useReferences: fastgenUseReferences,
+    referenceImagePaths: fastgenReferencePaths,
+    referenceModeStyle: fastgenReferenceModeStyle,
+    referenceModeComposition: fastgenReferenceModeComposition,
+    referenceModeMoodLighting: fastgenReferenceModeMoodLighting,
+    referenceModeAuto: fastgenReferenceModeAuto,
+    tabloidMode,
     faceLibraryFolder,
     facePreparedFolder,
     faceLibraryEnabled,
@@ -4360,6 +4414,7 @@ export function Covers({
       template: headlineTemplate,
       useStructure: useTextStructure,
       avoidRepeats: avoidTextRepeats,
+      tabloidMode,
       force,
     }));
   const generateSubheadlines = (force = false) =>
@@ -4369,6 +4424,7 @@ export function Covers({
       template: subheadlineTemplate,
       useStructure: useTextStructure,
       avoidRepeats: avoidTextRepeats,
+      tabloidMode,
       force,
     }));
   const pauseHeadlines = () =>
@@ -4386,6 +4442,7 @@ export function Covers({
       useDefault: true,
       useStructure: useTextStructure,
       avoidRepeats: avoidTextRepeats,
+      tabloidMode,
       force,
     }));
   const generateAutoSubheadlines = (force = false) =>
@@ -4395,15 +4452,18 @@ export function Covers({
       useDefault: true,
       useStructure: useTextStructure,
       avoidRepeats: avoidTextRepeats,
+      tabloidMode,
       force,
     }));
-  const generateAutoCoverTextPair = (force = false, indices = selected) =>
+  const generateAutoCoverTextPair = (force = false, indices = selected, replaceManual = false) =>
     void command("generate-cover-texts", coverWordPairGenerationPayload({
       ...coverSelectionPayload(indices),
       provider: headlineProvider,
       useStructure: useTextStructure,
       avoidRepeats: avoidTextRepeats,
+      tabloidMode,
       force,
+      replaceManual,
     }));
   const cancelSubheadlines = () =>
     void command("cancel-cover-subheadlines", { indices: selected });
@@ -4540,6 +4600,41 @@ export function Covers({
           .slice(0, 10),
       );
   };
+  const chooseFastgenReferences = async () => {
+    const paths = await window.newsflowDesktop?.chooseImages();
+    if (!paths?.length) return;
+    setFastgenReferencePaths((current) =>
+      [...current, ...paths].filter((path, index, values) => values.indexOf(path) === index),
+    );
+  };
+  const chooseFastgenReferenceFolder = async () => {
+    const folder = await window.newsflowDesktop?.chooseFolder();
+    if (!folder) return;
+    const saved = await command("save-cover-settings", {
+      ...coverSettingsPayload(),
+      referenceImageFolders: [folder],
+    });
+    if (saved?.coverSettings.referenceImagePaths) {
+      setFastgenReferencePaths(saved.coverSettings.referenceImagePaths);
+    }
+  };
+  const setFastgenReferenceAuto = (enabled: boolean) => {
+    setFastgenReferenceModeAuto(enabled);
+    if (enabled) {
+      setFastgenReferenceModeStyle(false);
+      setFastgenReferenceModeComposition(false);
+      setFastgenReferenceModeMoodLighting(false);
+    }
+  };
+  const setFastgenReferenceManualMode = (
+    mode: "style" | "composition" | "mood",
+    enabled: boolean,
+  ) => {
+    setFastgenReferenceModeAuto(false);
+    if (mode === "style") setFastgenReferenceModeStyle(enabled);
+    if (mode === "composition") setFastgenReferenceModeComposition(enabled);
+    if (mode === "mood") setFastgenReferenceModeMoodLighting(enabled);
+  };
   const addAiReferenceRange = () =>
     setAiReferenceRanges((current) => [
       ...current,
@@ -4655,6 +4750,8 @@ export function Covers({
     });
   const retrySelectedGeneration = () =>
     void command("retry-cover-generation", coverSelectionPayload());
+  const retrySelectedGenerationNewPaid = () =>
+    void command("retry-cover-generation-new-paid", coverSelectionPayload());
   const regenerateNewPrompts = () =>
     void command("regenerate-covers-new-prompts", {
       ...coverSelectionPayload(),
@@ -4944,6 +5041,89 @@ export function Covers({
                   ? "FastGen сам рисует сцену, лица и текст; пользовательский PNG не загружается."
                   : "NewsFlow подбирает только подтверждённо релевантный PNG и отправляет один референс в FastGen. FastGen сам рисует финальную сцену, лицо и текст."}
               </small>
+              <div className="cover-fastgen-reference-controls">
+                <label className="check-row reference-enable-toggle">
+                  <input
+                    aria-label="Использовать референсы FastGen"
+                    type="checkbox"
+                    checked={fastgenUseReferences}
+                    onChange={(event) => setFastgenUseReferences(event.target.checked)}
+                  />
+                  Использовать референсы FastGen
+                </label>
+                {fastgenUseReferences ? (
+                  <div className="cover-fastgen-reference-panel">
+                    <small>
+                      Визуальная подсказка, а не источник сюжета: тема, люди и события всегда берутся только из текущего сценария.
+                    </small>
+                    <div className="cover-workflow-faces">
+                      <Button onClick={() => void chooseFastgenReferences()}>
+                        <Upload size={15} />
+                        Добавить изображения
+                      </Button>
+                      <Button onClick={() => void chooseFastgenReferenceFolder()}>
+                        <FolderOpen size={15} />
+                        Добавить папку
+                      </Button>
+                      <Button
+                        kind="danger"
+                        onClick={fastgenReferencePaths.length ? () => setFastgenReferencePaths([]) : undefined}
+                      >
+                        <Trash2 size={15} />
+                        Очистить
+                      </Button>
+                      <Button kind="primary" onClick={() => void command("save-cover-settings", coverSettingsPayload())}>
+                        <Check size={15} />
+                        Сохранить референсы FastGen
+                      </Button>
+                    </div>
+                    <div className="cover-workflow-faces">
+                      <label className="check-row">
+                        <input type="checkbox" checked={fastgenReferenceModeStyle}
+                          disabled={fastgenReferenceModeAuto}
+                          onChange={(event) => setFastgenReferenceManualMode("style", event.target.checked)} />
+                        Стиль
+                      </label>
+                      <label className="check-row">
+                        <input type="checkbox" checked={fastgenReferenceModeComposition}
+                          disabled={fastgenReferenceModeAuto}
+                          onChange={(event) => setFastgenReferenceManualMode("composition", event.target.checked)} />
+                        Композиция
+                      </label>
+                      <label className="check-row">
+                        <input type="checkbox" checked={fastgenReferenceModeMoodLighting}
+                          disabled={fastgenReferenceModeAuto}
+                          onChange={(event) => setFastgenReferenceManualMode("mood", event.target.checked)} />
+                        Атмосфера / цвет / свет
+                      </label>
+                      <label className="check-row">
+                        <input type="checkbox" checked={fastgenReferenceModeAuto}
+                          onChange={(event) => setFastgenReferenceAuto(event.target.checked)} />
+                        Авто
+                      </label>
+                    </div>
+                    <small>
+                      Загружено {fastgenReferencePaths.length} / будет отправлено до {coverBuildMode === "fastgen-full"
+                        ? data.coverSettings.referenceWillSendCount
+                        : data.coverSettings.referenceWillSendCountMyFaces} визуальных референсов (лимит {data.coverSettings.referenceProviderLimit}; в режиме «мои лица» один слот может занять портрет).
+                      {data.coverSettings.referenceMissingPaths.length
+                        ? ` Недоступно: ${data.coverSettings.referenceMissingPaths.length}.`
+                        : ""}
+                    </small>
+                    {fastgenReferencePaths.length ? (
+                      <div className="reference-list compact">
+                        {fastgenReferencePaths.map((path) => (
+                          <span key={path}>
+                            {path.split(/[\\/]/).pop()}
+                            <button aria-label={`Убрать FastGen референс ${path.split(/[\\/]/).pop()}`}
+                              onClick={() => setFastgenReferencePaths((current) => current.filter((value) => value !== path))}>×</button>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
               <div className="cover-mode-ranges" aria-label="Диапазоны режимов FastGen">
                 <div className="toolbar compact">
                   <Button onClick={addBuildModeRange}>
@@ -6386,9 +6566,28 @@ export function Covers({
               <WandSparkles size={16} />
               Перегенерировать подзаголовки — авто
             </Button>
+            <Button
+              kind="danger"
+              onClick={selected.length ? () => generateAutoCoverTextPair(true, selected, true) : undefined}
+            >
+              <WandSparkles size={16} />
+              Заменить ручной текст ИИ
+            </Button>
           </div>
         </div>
         <div className="cover-preset-row cover-headline-preset-row">
+          <label className="check-row">
+            <input
+              aria-label="Жёлтая пресса / максимально кликбейтный стиль"
+              type="checkbox"
+              checked={tabloidMode}
+              onChange={(event) => {
+                setTabloidMode(event.target.checked);
+                void command("save-cover-settings", { tabloidMode: event.target.checked });
+              }}
+            />
+            Жёлтая пресса / максимально кликбейтный стиль
+          </label>
           <select
             value={selectedHeadlinePreset}
             onChange={(event) => applyHeadlinePreset(event.target.value)}
@@ -6740,6 +6939,13 @@ export function Covers({
             Придумать заголовки и подзаголовки — выбранным
           </Button>
           <Button
+            kind="danger"
+            onClick={selected.length ? () => generateAutoCoverTextPair(true, selected, true) : undefined}
+          >
+            <WandSparkles size={17} />
+            Заменить ручной текст ИИ
+          </Button>
+          <Button
             kind="success"
             onClick={
               !data.coverSettings.generationPaused && promptsReady && !coverGenerationStarting
@@ -6796,6 +7002,13 @@ export function Covers({
           <span className="status">
             Повтор генерации доступен: {selectedManualRetryCount}/{selected.length}
           </span>
+          <Button
+            kind="danger"
+            onClick={allSelectedNewPaidRetryEligible ? retrySelectedGenerationNewPaid : undefined}
+          >
+            <Play size={16} />
+            Создать новый платный запрос
+          </Button>
           <Button
             kind="success"
             onClick={allSelectedNewPromptsReady ? regenerate : undefined}
@@ -6944,8 +7157,34 @@ export function Covers({
                     </dd>
                   </div>
                   <div>
+                    <dt>Лицо для обложки</dt>
+                    <dd>
+                      {cover.portrait_subject
+                        ? `${cover.portrait_subject} · ${cover.portrait_side || "side not set"} · ${cover.portrait_source || "source unavailable"} · ${cover.portrait_resolver_reason || "reason unavailable"} · confidence ${cover.portrait_confidence ?? cover.cover_primary_person?.confidence ?? "n/a"}`
+                        : cover.portrait_source === "disabled"
+                          ? "Отключён пользователем для этой темы"
+                          : "Нужно определить лицо для обложки"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Alternatives</dt>
+                    <dd>{cover.cover_people_candidates?.slice(1).map((person) => person.name).join(", ") || "Нет"}</dd>
+                  </div>
+                  <div>
                     <dt>Режим FastGen</dt>
                     <dd>{cover.render_profile?.build_mode || "Ещё не запускался"}</dd>
+                  </div>
+                  <div>
+                    <dt>Стиль текста</dt>
+                    <dd>{cover.text_style || "STANDARD"} · headline: {cover.headline_candidate_count || 0} · subtitle: {cover.subheadline_candidate_count || 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Visual references</dt>
+                    <dd>
+                      {cover.reference_use_enabled
+                        ? `загружено ${cover.reference_uploaded_count || 0} · отправлено ${cover.reference_final_provider_count || 0}/${cover.reference_provider_limit || 0} · visual ${cover.reference_visual_reference_count || 0}${cover.reference_missing_paths?.length ? ` · missing ${cover.reference_missing_paths.length}` : ""}${cover.reference_dropped_paths?.length ? ` · dropped ${cover.reference_dropped_paths.length}` : ""}`
+                        : "Отключены"}
+                    </dd>
                   </div>
                   <div>
                     <dt>PNG лица в FastGen</dt>
@@ -7090,46 +7329,54 @@ export function Covers({
                     </Button>
                   </div>
                 </div>
-                <div className="cover-headline-row">
+                <form
+                  className="cover-headline-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const value = new FormData(event.currentTarget).get("headline");
+                    void command("save-cover-headline", { index, headline: String(value || "") });
+                  }}
+                >
                   <label>
                     <small>Заголовок на обложке</small>
                     <input
+                      name="headline"
                       key={`${cover.title}-${cover.cover_headline || ""}`}
                       defaultValue={cover.cover_headline || ""}
-                      onBlur={(event) =>
-                        void command("save-cover-headline", {
-                          index,
-                          headline: event.target.value,
-                        })
-                      }
                       placeholder="Создай заголовок или впишите его вручную"
                     />
                     <span>
-                      {cover.headline_status || cover.headline_error || ""}
+                      {cover.headline_source === "MANUAL"
+                        ? "Вручную · сохранено"
+                        : cover.headline_status || cover.headline_error || ""}
                     </span>
                   </label>
-                </div>
-                <div className="cover-subheadline-row">
+                  <Button type="submit">Сохранить вручную</Button>
+                </form>
+                <form
+                  className="cover-subheadline-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const value = new FormData(event.currentTarget).get("subheadline");
+                    void command("save-cover-subheadline", { index, subheadline: String(value || "") });
+                  }}
+                >
                   <label>
                     <small>Подзаголовок на обложке</small>
                     <input
+                      name="subheadline"
                       key={`${cover.title}-${cover.cover_subheadline || ""}`}
                       defaultValue={cover.cover_subheadline || ""}
-                      onBlur={(event) =>
-                        void command("save-cover-subheadline", {
-                          index,
-                          subheadline: event.target.value,
-                        })
-                      }
                       placeholder="Создай подзаголовок или впишите его вручную"
                     />
                     <span>
-                      {cover.subheadline_status ||
-                        cover.subheadline_error ||
-                        ""}
+                      {cover.subheadline_source === "MANUAL"
+                        ? "Вручную · сохранено"
+                        : cover.subheadline_status || cover.subheadline_error || ""}
                     </span>
                   </label>
-                </div>
+                  <Button type="submit">Сохранить вручную</Button>
+                </form>
                 {cover.image_prompt_options?.length ? (
                   <div className="cover-prompt-cards">
                     {cover.image_prompt_options.map((prompt, option) => (

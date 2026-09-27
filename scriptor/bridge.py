@@ -305,6 +305,23 @@ def _active_cover_production_ids(settings: Settings) -> set[str]:
         identity = job_identity or ids_by_title.get(str(title).casefold(), "")
         if identity:
             identities.add(identity)
+    # A renderer action can be dispatched in the short interval after a
+    # scenario has been durably written but before its session projection is
+    # restored.  The durable scenario context and current ProductionItem list
+    # are sufficient evidence here; use their ID intersection, never a title
+    # match and never an old library row.
+    if not identities and not titles:
+        current_ids = {
+            str(item.get("id", "")).strip()
+            for item in getattr(settings, "idea_production_items", [])
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        context_ids = {
+            str(item.get("id", "")).strip()
+            for item in getattr(settings, "idea_scenario_context", {}).values()
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        identities.update(current_ids & context_ids)
     return identities
 
 
@@ -754,6 +771,298 @@ def _cover_face_match_score(topic_tokens: set[str], candidate_tokens: set[str]) 
     return best
 
 
+# This is intentionally separate from the file-name matcher above.  The face
+# tree is optional operator media, while the FastGen-only route still needs a
+# concrete editorial subject when a political topic names a country, capital or
+# institution rather than the person.  The ordered aliases are editorial
+# fallback knowledge, not a substitute for a supplied person/entity.
+def _cover_portrait_context(item: dict) -> str:
+    return " ".join(_cover_context_values(item.get(key)) for key in (
+        "title", "topic", "script", "angle", "event_context", "supporting_context",
+        "selected_people", "primary_entities", "primary_entity", "entities",
+    ) if item.get(key) not in (None, "", [], {}))
+
+
+_COVER_POLITICAL_MARKERS = (
+    "президент", "премьер", "министр", "парламент", "правительств", "переговор",
+    "санкц", "посол", "выбор", "тариф", "пошлин", "дипломат", "саммит", "кремл",
+    "белый дом", "внешн", "международн",
+)
+_COVER_PERSON_ENTITY_TYPES = {"person", "human", "public_figure", "politician", "individual"}
+
+
+def _cover_entity_is_explicit_person(value: object) -> bool:
+    """Accept structured entities only when their person type is explicit."""
+    if not isinstance(value, dict):
+        return False
+    classifications = {
+        str(value.get(key, "") or "").strip().casefold()
+        for key in ("type", "entity_type", "kind", "classification")
+    }
+    return bool(classifications & _COVER_PERSON_ENTITY_TYPES) or bool(value.get("is_person") is True)
+
+
+def _cover_has_role_qualified_person(item: dict) -> bool:
+    return any(re.search(
+        r"\b(?:президент|премьер(?:-министр)?|министр|лидер|глава|канцлер|посол)\s+"
+        r"(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)(?:\s+(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)){1,2}",
+        " ".join(str(item.get(key, "")).split()), flags=re.IGNORECASE,
+    ) for key in ("title", "topic", "script", "supporting_context", "event_context"))
+
+
+def _cover_requires_political_portrait(item: dict) -> bool:
+    """Identify a political/public-figure cover without guessing an identity.
+
+    This is intentionally not just a marker-list decision: explicit people,
+    typed person entities and role-qualified factual context are independent
+    evidence.  A public-affairs classifier also catches stories such as tariff
+    policy, where the current topic contains no legacy office marker.
+    """
+    selected_people = item.get("selected_people")
+    selected_people = selected_people if isinstance(selected_people, list) else [selected_people]
+    if any(_cover_person_name(value) for value in selected_people):
+        return True
+    for key in ("primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        if any(_cover_entity_is_explicit_person(value) for value in values):
+            return True
+    if _cover_has_role_qualified_person(item):
+        return True
+    classification = " ".join(_cover_context_values(item.get(key)) for key in (
+        "topic_classification", "category", "categories", "topic_type",
+    )).casefold()
+    if any(term in classification for term in ("polit", "public figure", "government", "geopolit")):
+        return True
+    context = _cover_portrait_context(item).casefold()
+    return any(marker in context for marker in _COVER_POLITICAL_MARKERS)
+
+
+def _cover_person_name(value: object) -> str:
+    if isinstance(value, dict):
+        value = " ".join(str(value.get(key, "") or "") for key in ("name", "label", "title", "person"))
+    words = re.findall(r"(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)", " ".join(str(value or "").split()))
+    return " ".join(words[-2:]) if len(words) >= 2 else ""
+
+
+def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
+    """Select a named person already present in current structured material.
+
+    This deliberately contains no country-to-leader knowledge. Structured
+    entities win; otherwise a role-qualified full name in the script/context
+    is a deterministic safe candidate.
+    """
+    # selected_people is the operator-owned person-only source.  Generic
+    # entities are deliberately *not* inferred from capitalised words: an
+    # organisation or place must carry an explicit person classification.
+    for key in ("selected_people", "primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        for value in values:
+            if key != "selected_people" and not _cover_entity_is_explicit_person(value):
+                continue
+            name = _cover_person_name(value)
+            if name:
+                return name, f"structured-{key}", f"explicit person from {key}"
+    for key in ("title", "topic", "script", "supporting_context", "event_context"):
+        text = " ".join(str(item.get(key, "")).split())
+        match = re.search(
+            r"\b(?:президент|премьер(?:-министр)?|министр|лидер|глава|канцлер|посол)\s+"
+            r"((?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)(?:\s+(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)){1,2})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            name = _cover_person_name(match.group(1))
+            if name:
+                return name, f"{key}-role-qualified", f"role-qualified person from {key}"
+    return "", "", ""
+
+
+def _cover_story_planner_candidate(item: dict) -> tuple[str, str, str, float]:
+    """Return the persisted Planner choice only when it remains a person."""
+    if str(item.get("cover_face_resolution_status", "")).strip().upper() not in {"RESOLVED", "LOW_CONFIDENCE"}:
+        return "", "", "", 0.0
+    candidate = item.get("cover_primary_person")
+    if not _cover_entity_is_explicit_person(candidate):
+        return "", "", "", 0.0
+    name = _cover_person_name(candidate)
+    if not name:
+        return "", "", "", 0.0
+    try:
+        confidence = float(candidate.get("confidence", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        confidence = 0.0
+    relation = " ".join(str(candidate.get("relation_to_story", "") or "").split())
+    source = " ".join(str(candidate.get("source", "story-planner") or "story-planner").split())
+    return name, "story-planner", relation or f"planner-selected person from {source}", max(0.0, min(1.0, confidence))
+
+
+def _cover_person_evidence_type(candidate: object) -> str:
+    """Return only evidence that a Core-owned derivation has recorded."""
+    if not isinstance(candidate, dict):
+        return ""
+    explicit = str(candidate.get("evidence_type", "")).strip().upper()
+    source = str(candidate.get("source", "")).strip().casefold()
+    if explicit in {"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "ANCHOR_DERIVED"} and source.startswith("core-"):
+        return explicit
+    return "ANCHOR_DERIVED"
+
+
+def _cover_exact_person_in_text(name: str, value: object) -> bool:
+    """Match a known person name without treating a partial token as identity."""
+    candidate = " ".join(str(name or "").split()).casefold()
+    text = " ".join(str(value or "").split()).casefold()
+    return bool(candidate and text and re.search(rf"(?<!\\w){re.escape(candidate)}(?!\\w)", text))
+
+
+def _cover_explicit_person_evidence(name: str, item: dict) -> tuple[str, str]:
+    """Locate the person in actual operator-owned current ProductionItem data."""
+    for value in item.get("selected_people", []) if isinstance(item.get("selected_people"), list) else [item.get("selected_people")]:
+        if _cover_exact_person_in_text(name, _cover_person_name(value)):
+            return "selected_people", "person named in selected_people"
+    for key in ("primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        for value in values:
+            if _cover_entity_is_explicit_person(value) and _cover_exact_person_in_text(name, _cover_person_name(value)):
+                return key, f"typed person named in {key}"
+    for key in ("title", "topic", "script", "event_context", "supporting_context"):
+        if _cover_exact_person_in_text(name, item.get(key)):
+            return key, f"person named in current {key}"
+    return "", ""
+
+
+def _cover_factual_anchor_summary(item: dict) -> str:
+    """Return compact factual anchors without accepting provider prose as proof."""
+    for key in (
+        "event_context", "supporting_context", "primary_entities", "primary_entity", "entities",
+        "direction", "angle", "conflict", "main_consequence", "consequence", "geography",
+    ):
+        value = _cover_context_values(item.get(key))
+        if value:
+            return f"current {key}: {value[:240]}"
+    return ""
+
+
+def derive_person_evidence(candidate: object, production_item: dict, settings: Settings | None = None) -> tuple[dict | None, str]:
+    """Derive trusted evidence from Core data, never a provider self-claim."""
+    if not _cover_entity_is_explicit_person(candidate):
+        return None, "NEEDS_REVIEW"
+    name = _cover_person_name(candidate)
+    if not name:
+        return None, "NEEDS_REVIEW"
+    resolved = dict(candidate)
+    claim = resolved.get("provider_evidence_claim")
+    if not isinstance(claim, dict):
+        claim = {
+            "source": str(resolved.get("source", "") or "UNSPECIFIED"),
+            "evidence_type": str(resolved.get("evidence_type", "") or "UNSPECIFIED"),
+        }
+    resolved["provider_evidence_claim"] = {
+        "source": " ".join(str(claim.get("source", "UNSPECIFIED")).split()) or "UNSPECIFIED",
+        "evidence_type": " ".join(str(claim.get("evidence_type", "UNSPECIFIED")).split()).upper() or "UNSPECIFIED",
+    }
+    explicit_source, explicit_summary = _cover_explicit_person_evidence(name, production_item)
+    anchor_summary = _cover_factual_anchor_summary(production_item)
+    if explicit_source:
+        resolved.update({
+            "source": f"core-explicit-context:{explicit_source}",
+            "evidence_type": "EXPLICIT_CONTEXT",
+            "evidence_summary": explicit_summary,
+        })
+        status = "RESOLVED"
+    elif anchor_summary:
+        resolved.update({
+            "source": "core-anchor-derived",
+            "evidence_type": "ANCHOR_DERIVED",
+            "evidence_summary": anchor_summary,
+        })
+        status = "LOW_CONFIDENCE"
+    else:
+        return None, "NEEDS_REVIEW"
+
+    # A tree can only verify the already resolved Person X; it is never an
+    # identity selector. Its absence leaves the semantic person intact for
+    # FastGen to draw without a reference PNG.
+    if settings is not None:
+        verification_item = {**production_item, "portrait_subject": name, "cover_face_required": True}
+        path, label, _source = _match_cover_face_reference(verification_item, settings)
+        if path and _cover_face_match_score(_cover_face_tokens(name), _cover_face_tokens(label)) >= 78:
+            resolved.update({
+                "source": "core-face-tree",
+                "evidence_type": "VERIFIED_LOCAL_IDENTITY",
+                "evidence_summary": f"matching local face-tree identity for {name}",
+            })
+            status = "RESOLVED"
+    return resolved, status
+
+
+def _resolve_cover_portrait(
+    item: dict, settings: Settings, *, face_mode: str, allow_manual_reference: bool,
+) -> dict[str, object]:
+    """Persist the named political portrait contract before the provider prompt.
+
+    A prepared PNG may be unavailable and is never required for this decision.
+    The resolver therefore records the intended person and side separately from
+    the optional local reference transport used by the my-faces route.
+    """
+    if face_mode == "without" or item.get("face_reference_disabled"):
+        resolved = {
+            "portrait_subject": "", "portrait_side": "", "portrait_source": "disabled",
+            "portrait_resolver_reason": "operator explicitly selected without faces",
+            "portrait_confidence": 0,
+        }
+    else:
+        manual_label = " ".join(str(item.get("face_reference_label", "")).split())
+        if item.get("face_reference_source") == "manual" and manual_label:
+            subject, source, reason, confidence = manual_label, "manual", "operator selected a portrait for this topic", 1.0
+        else:
+            subject, source, reason, confidence = _cover_story_planner_candidate(item)
+            if not subject:
+                subject, source, reason = _cover_explicit_portrait_candidate(item)
+                confidence = 0.8 if subject else 0.0
+            if not subject:
+                # The tree can verify a subject only after structured/context
+                # evidence has named one. It never becomes a random identity
+                # selector merely because a PNG folder is present.
+                _path, tree_label, tree_source = _match_cover_face_reference(item, settings)
+                if tree_label:
+                    subject = tree_label
+                    source = f"face-tree-{tree_source or 'match'}"
+                    reason = "explicit person matched in the configured face tree"
+                    confidence = 0.6
+        resolved = {
+            "portrait_subject": subject,
+            "portrait_side": _cover_face_side(item) if subject else "",
+            "portrait_source": source or "none",
+            "portrait_resolver_reason": reason or "no resolved public figure from current ProductionItem evidence",
+            "portrait_confidence": confidence if subject else 0,
+        }
+        if subject:
+            if str(item.get("cover_face_resolution_status", "")).strip().upper() != "LOW_CONFIDENCE":
+                item["cover_face_resolution_status"] = "RESOLVED"
+        elif item.get("cover_face_required"):
+            item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+    item.update(resolved)
+    return resolved
+
+
+def _cover_resolved_portrait_layout(item: dict, subject: str, side: str) -> str:
+    """Return the stable edge portrait composition for any resolved subject."""
+    if not subject or side not in {"LEFT", "RIGHT"}:
+        return ""
+    opposite = "RIGHT" if side == "LEFT" else "LEFT"
+    instruction = (
+        f"Place {subject} as one large side portrait on the {side}, hard-anchored to that outer edge and bottom edge. "
+        "Use a recognisable photorealistic head-and-shoulders likeness that fills roughly 48–66% of image height; "
+        "never centre it, never use a tiny face, and never substitute an unrelated public figure. "
+        f"Keep the opposite {opposite} side available for the story scene and mobile-size headline hierarchy."
+    )
+    item["face_layout"] = f"крупный боковой портрет {side.lower()}"
+    return instruction
+
+
 def _cover_tokens_match(values: set[str], expected: set[str]) -> bool:
     """Allow word forms such as ``хаменея`` and folder names like Hameneyi."""
     return any(value == hint or value.startswith(hint) or hint.startswith(value)
@@ -913,7 +1222,7 @@ def _cover_face_catalog(settings: Settings) -> list[dict]:
 
 def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool = False,
                                 prepared_only: bool = False) -> tuple[str, str, str]:
-    """Find a portrait only where the identity is explicitly present in the topic."""
+    """Find a PNG only for the already resolved, never substituted person."""
     if item.get("face_reference_disabled"):
         return "", "", ""
     # A manually picked reference must remain fixed.  An automatically picked
@@ -926,16 +1235,22 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    # Only current identity metadata may select a face.  Arbitrary person
-    # folders work without a pre-known politician/country table.
-    identity_context = " ".join((
-        str(item.get("title", "")),
-        str(item.get("topic", "")),
-        _cover_context_values(item.get("selected_people")),
-        _cover_context_values(item.get("primary_entities")),
-        _cover_context_values(item.get("primary_entity")),
-        _cover_context_values(item.get("entities")),
-    ))
+    # A planner/manual/structured choice takes absolute identity priority. A
+    # visual reference is deliberately absent here, so Person Y in a style
+    # image can never replace the resolved Person X.
+    planner_subject, _source, _reason, _confidence = _cover_story_planner_candidate(item)
+    explicit_subject, _explicit_source, _explicit_reason = _cover_explicit_portrait_candidate(item)
+    identity_context = str(item.get("portrait_subject") or planner_subject or explicit_subject or "").strip()
+    if not identity_context:
+        # Legacy imported rows predate the ProductionItem face contract. Keep
+        # direct title-to-tree matching only for those rows; a current explicit
+        # NEEDS_REVIEW item must never get a random identity from a folder.
+        if not bool(item.get("cover_face_required")):
+            identity_context = " ".join(str(item.get(key, "")) for key in ("title", "topic", "script"))
+        else:
+            identity_context = _cover_context_values(item.get("selected_people"))
+    if not identity_context:
+        return "", "", ""
     topic_tokens = _cover_face_tokens(identity_context)
     best_score = 0
     candidates: list[Path] = []
@@ -1016,7 +1331,13 @@ def _cover_references_for_item(item: dict, settings: Settings, *, refine: bool =
     # them.  In particular, a portrait-orientation PNG must not be sent raw
     # and become a stretched or rejected reference just because it came from
     # a different panel in the UI.
-    scene_references: list[str] = []
+    visual_limit = max(0, int(max_references)) - (1 if face_path else 0)
+    # The new explicit FastGen channel is an operator choice for this render;
+    # keep it ahead of legacy packs so it cannot disappear behind old channel
+    # references while still leaving a reserved portrait slot.
+    scene_references: list[str] = list(_cover_fastgen_visual_reference_selection(
+        settings, max_references=visual_limit,
+    )["paths"])
     visual_path = Path(str(item.get("visual_reference_path", "") or "")).expanduser()
     if visual_path.is_file() and item.get("visual_reference_to_fastgen"):
         scene_references.append(str(visual_path))
@@ -1965,6 +2286,27 @@ def snapshot() -> dict:
             "aiReferencePaths": settings.cover_ai_reference_paths,
             "aiReferenceRanges": settings.cover_ai_reference_ranges,
             "aiReferenceToFastgen": settings.cover_ai_reference_to_fastgen,
+            "useReferences": settings.cover_fastgen_use_references,
+            "referenceImagePaths": settings.cover_fastgen_reference_paths,
+            "referenceModeStyle": settings.cover_fastgen_reference_mode_style,
+            "referenceModeComposition": settings.cover_fastgen_reference_mode_composition,
+            "referenceModeMoodLighting": settings.cover_fastgen_reference_mode_mood_lighting,
+            "referenceModeAuto": settings.cover_fastgen_reference_mode_auto,
+            "referenceMissingPaths": [path for path in settings.cover_fastgen_reference_paths
+                                      if not Path(path).expanduser().is_file()],
+            "referenceProviderLimit": _cover_operation_reference_limit(settings, settings.cover_operation) or 10,
+            # FastGen full sends visual references only.  The my-faces route
+            # can reserve one provider slot for a topic-relevant portrait, so
+            # the UI must advertise that conservative visual-reference cap.
+            "referenceWillSendCount": len(_cover_fastgen_visual_reference_selection(
+                settings,
+                max_references=_cover_operation_reference_limit(settings, settings.cover_operation) or 10,
+            )["paths"]),
+            "referenceWillSendCountMyFaces": len(_cover_fastgen_visual_reference_selection(
+                settings,
+                max_references=max(0, (_cover_operation_reference_limit(settings, settings.cover_operation) or 10) - 1),
+            )["paths"]),
+            "tabloidMode": settings.cover_tabloid_mode,
             "faceLibraryFolder": _cover_face_folder_value(settings.cover_face_library_folder),
             "facePreparedFolder": _cover_face_folder_value(settings.cover_face_prepared_folder),
             "faceLibraryEnabled": settings.cover_face_library_enabled,
@@ -2804,6 +3146,9 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
     generation never treats it as a validated contemporary item.
     """
     changed = ensure_production_item_ids(getattr(settings, "idea_production_items", []))
+    for item in getattr(settings, "idea_production_items", []):
+        if isinstance(item, dict):
+            changed = _ensure_cover_face_resolution_item(item) or changed
     existing = {str(item.get("title", "")).casefold() for item in getattr(settings, "idea_production_items", [])
                 if isinstance(item, dict)}
     for raw_title in getattr(settings, "idea_results", []):
@@ -2887,6 +3232,7 @@ def ensure_idea_production_items(settings, *, active_titles: list[str] | None = 
         if detail and str(detail.get("review_status", "")).strip():
             item["status"] = str(detail["review_status"]).strip().upper()
         ensure_production_item_ids([item])
+        _ensure_cover_face_resolution_item(item)
         settings.idea_production_items.append(item)
         existing.add(title.casefold())
         changed = True
@@ -5670,6 +6016,36 @@ def production_item_prompt(item: dict) -> str:
         blocks.append(f"Что обязан раскрыть сценарий: {item['promised_question']}")
     if requirements:
         blocks.append("Обязательные пункты: " + "; ".join(requirements))
+    selected_people = _cover_context_values(item.get("selected_people"))
+    if selected_people:
+        blocks.append("Выбранные оператором реальные люди: " + selected_people)
+    typed_entities = []
+    for key in ("primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        for value in values:
+            if _cover_entity_is_explicit_person(value):
+                name = _cover_person_name(value)
+                if name:
+                    typed_entities.append(name)
+    if typed_entities:
+        blocks.append("Типизированные люди ProductionItem: " + "; ".join(dict.fromkeys(typed_entities)))
+    semantic_anchors = []
+    for label, value in (
+        ("тема", item.get("topic")),
+        ("событие", item.get("event_context")),
+        ("опорный контекст", item.get("supporting_context")),
+        ("стороны и институции", item.get("primary_entities") or item.get("primary_entity") or item.get("entities")),
+        ("география", item.get("geography")),
+    ):
+        text = _cover_context_values(value)
+        if text:
+            semantic_anchors.append(f"{label}: {text}")
+    if semantic_anchors:
+        blocks.append(
+            "Семантические anchors для поиска реального decision maker/публичной фигуры (не являются лицом сами по себе): "
+            + " | ".join(semantic_anchors)
+        )
     framing = str(item.get("framing_type", "EDITORIAL")).strip().upper()
     if framing == "HYPOTHETICAL":
         blocks.extend([
@@ -5688,6 +6064,90 @@ def production_item_prompt(item: dict) -> str:
         blocks.append("Режим подачи: FACTUAL — все основные утверждения должны следовать из опорного контекста.")
     blocks.append("Не добавляй как факт то, чего нет в опорном контексте.")
     return "\n".join(blocks)
+
+
+def _ensure_cover_face_resolution_item(item: dict, *, settings: Settings | None = None,
+                                       evidence_item: dict | None = None) -> bool:
+    """Give every durable ProductionItem an explicit safe Cover-face state.
+
+    Legacy items are deliberately *not* guessed from country/place labels. A
+    future planner run can promote this state to RESOLVED using evidence; until
+    then the item is visibly reviewable and cannot reach FastGen anonymously.
+    """
+    if not isinstance(item, dict):
+        return False
+    before = dict(item)
+    # The Core owns this invariant. A stale or model-provided false value must
+    # never allow a current ProductionItem to bypass face resolution.
+    item["cover_face_required"] = True
+    candidates = item.get("cover_people_candidates")
+    candidates = [dict(row) for row in candidates if isinstance(row, dict)] if isinstance(candidates, list) else []
+    primary = item.get("cover_primary_person")
+    current = evidence_item if isinstance(evidence_item, dict) else item
+    primary, status = derive_person_evidence(primary, current, settings)
+    if primary is None:
+        item["cover_people_candidates"] = []
+        item["cover_primary_person"] = None
+        item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+        return item != before
+    derived_candidates: list[dict] = [primary]
+    for candidate in candidates:
+        if _cover_person_name(candidate).casefold() == _cover_person_name(primary).casefold():
+            continue
+        derived, _candidate_status = derive_person_evidence(candidate, current, settings)
+        if derived is not None:
+            derived_candidates.append(derived)
+    item["cover_people_candidates"] = derived_candidates
+    item["cover_primary_person"] = primary
+    item["cover_face_resolution_status"] = status
+    return item != before
+
+
+def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job | None) -> bool:
+    """Persist Story Planner's semantic choice before Covers sees the scenario.
+
+    The Story Map is the primary resolver. This projector copies only its
+    compact identity record into the durable ProductionItem/context; Covers
+    later verifies an optional PNG and never silently replaces the person.
+    """
+    plan = getattr(job, "story_plan", None)
+    if not isinstance(plan, dict):
+        return False
+    record = {
+        "cover_face_required": True,
+        "cover_people_candidates": [dict(row) for row in plan.get("cover_people_candidates", []) if isinstance(row, dict)],
+        "cover_primary_person": (dict(plan["cover_primary_person"])
+                                if isinstance(plan.get("cover_primary_person"), dict) else None),
+        "cover_face_resolution_status": str(plan.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper(),
+    }
+    production_id = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
+    changed = False
+    context = getattr(settings, "idea_scenario_context", {}).get(title)
+    for item in getattr(settings, "idea_production_items", []):
+        if not isinstance(item, dict):
+            continue
+        if (production_id and str(item.get("id", "")).strip() == production_id) or (
+            not production_id and str(item.get("title", "")).casefold() == str(title).casefold()
+        ):
+            derived_record = dict(record)
+            evidence = {**item, **context} if isinstance(context, dict) else item
+            _ensure_cover_face_resolution_item(derived_record, settings=settings, evidence_item=evidence)
+            record = derived_record
+            if any(item.get(key) != value for key, value in record.items()):
+                item.update(record)
+                changed = True
+            break
+    if isinstance(context, dict) and (
+        not production_id or str(context.get("id", "")).strip() == production_id
+    ):
+        if not changed:
+            derived_record = dict(record)
+            _ensure_cover_face_resolution_item(derived_record, settings=settings, evidence_item=context)
+            record = derived_record
+        if any(context.get(key) != value for key, value in record.items()):
+            context.update(record)
+            changed = True
+    return changed
 
 
 def generate_scenarios(payload: dict) -> dict:
@@ -5793,10 +6253,17 @@ def generate_scenarios(payload: dict) -> dict:
     def save_job(job):
         current[job.request.index] = job
         save_session(titles, list(current.values()))
+        # The runner notifies immediately after it has persisted a validated
+        # Story Map and before its first Writer call. Keep the semantic Cover
+        # person on the durable ProductionItem at that same checkpoint.
+        if _project_story_plan_face_resolution(settings, job.request.title, job):
+            save_settings(settings)
 
     workers = pool.concurrency
     finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected, resume_jobs=resume_jobs))
     current.update({job.request.index: job for job in finished})
+    for job in finished:
+        _project_story_plan_face_resolution(settings, job.request.title, job)
     save_session(titles, list(current.values()))
     save_settings(settings)
     return snapshot()
@@ -6095,10 +6562,21 @@ def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bo
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
     """Keep a single automatic cover entry for every current scenario identity."""
-    script = job.result if job and job.state == RunState.DONE else ""
     production_item = dict(getattr(settings, "idea_scenario_context", {}).get(title, {}) or {})
     job_identity = str(job.request.production_item_id if job else "").strip()
     production_item_id = job_identity or str(production_item.get("id", "")).strip()
+    canonical_item = next((item for item in getattr(settings, "idea_production_items", [])
+                           if isinstance(item, dict) and production_item_id
+                           and str(item.get("id", "")).strip() == production_item_id), None)
+    if canonical_item:
+        # Current context owns scenario-specific text, while the durable item
+        # owns semantic planning data such as the mandatory face resolution.
+        production_item = {**dict(canonical_item), **production_item}
+        for key in ("cover_face_required", "cover_people_candidates", "cover_primary_person",
+                    "cover_face_resolution_status"):
+            production_item[key] = canonical_item.get(key)
+    _ensure_cover_face_resolution_item(production_item)
+    script = job.result if job and job.state == RunState.DONE else str(production_item.get("script", "") or "")
     existing = next((item for item in settings.cover_queue
                      if (production_item_id and str(item.get("production_item_id", "")).strip() == production_item_id)
                      or (not str(item.get("production_item_id", "")).strip()
@@ -6107,7 +6585,9 @@ def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Jo
     context_keys = (
         "direction", "topic", "angle", "event_ids", "event_context", "supporting_context",
         "primary_entities", "primary_entity", "entities", "geography", "conflict",
-        "main_consequence", "consequence", "framing", "framing_type",
+        "main_consequence", "consequence", "framing", "framing_type", "selected_people",
+        "cover_face_required", "cover_people_candidates", "cover_primary_person",
+        "cover_face_resolution_status",
     )
     context = {key: production_item[key] for key in context_keys if production_item.get(key) not in (None, "", [], {})}
     if existing is None:
@@ -6169,6 +6649,10 @@ def _sync_current_scenario_covers(settings: Settings) -> bool:
     changed = settings.cover_queue != before or changed
     for index, title in enumerate(titles):
         changed = _sync_scenario_to_covers(settings, index, str(title), jobs_by_index.get(index)) or changed
+    if not titles:
+        for index, (title, context) in enumerate(getattr(settings, "idea_scenario_context", {}).items()):
+            if isinstance(context, dict) and str(context.get("id", "")).strip() in active_ids:
+                changed = _sync_scenario_to_covers(settings, index, str(title), None) or changed
     _assign_cover_production_ids(settings)
     return changed
 
@@ -6291,6 +6775,48 @@ def save_cover_settings(payload: dict) -> dict:
         settings.cover_ai_reference_ranges = _clean_cover_reference_ranges(payload["aiReferenceRanges"])
     if isinstance(payload.get("aiReferenceToFastgen"), bool):
         settings.cover_ai_reference_to_fastgen = bool(payload["aiReferenceToFastgen"])
+    if isinstance(payload.get("useReferences"), bool):
+        settings.cover_fastgen_use_references = bool(payload["useReferences"])
+    if isinstance(payload.get("referenceImagePaths"), list):
+        # Do not discard missing entries: the UI needs a visible warning and
+        # an explicit operator decision, while transport filters them later.
+        settings.cover_fastgen_reference_paths = list(dict.fromkeys(
+            str(path).strip() for path in payload["referenceImagePaths"] if str(path).strip()
+        ))
+    if isinstance(payload.get("referenceImageFolders"), list):
+        folder_paths: list[str] = []
+        for raw_folder in payload["referenceImageFolders"]:
+            folder = Path(str(raw_folder or "")).expanduser()
+            if not folder.is_dir():
+                continue
+            try:
+                folder_paths.extend(
+                    str(path) for path in sorted(folder.rglob("*"))
+                    if path.is_file() and path.suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp"}
+                )
+            except OSError:
+                continue
+        settings.cover_fastgen_reference_paths = list(dict.fromkeys([
+            *settings.cover_fastgen_reference_paths, *folder_paths,
+        ]))
+    if isinstance(payload.get("referenceModeAuto"), bool):
+        settings.cover_fastgen_reference_mode_auto = bool(payload["referenceModeAuto"])
+        if settings.cover_fastgen_reference_mode_auto:
+            settings.cover_fastgen_reference_mode_style = False
+            settings.cover_fastgen_reference_mode_composition = False
+            settings.cover_fastgen_reference_mode_mood_lighting = False
+    if not settings.cover_fastgen_reference_mode_auto:
+        for payload_key, setting_name in (
+            ("referenceModeStyle", "cover_fastgen_reference_mode_style"),
+            ("referenceModeComposition", "cover_fastgen_reference_mode_composition"),
+            ("referenceModeMoodLighting", "cover_fastgen_reference_mode_mood_lighting"),
+        ):
+            if isinstance(payload.get(payload_key), bool):
+                setattr(settings, setting_name, bool(payload[payload_key]))
+        if any(key in payload for key in ("referenceModeStyle", "referenceModeComposition", "referenceModeMoodLighting")):
+            settings.cover_fastgen_reference_mode_auto = False
+    if isinstance(payload.get("tabloidMode"), bool):
+        settings.cover_tabloid_mode = bool(payload["tabloidMode"])
     if "faceLibraryFolder" in payload:
         raw_folder = str(payload.get("faceLibraryFolder", "") or "").strip().strip('"')
         if raw_folder in {".", ".\\", "./"}:
@@ -6832,6 +7358,52 @@ def _cover_ai_reference_paths_for_fastgen(item: dict, position: int, settings: S
     return unique[:10]
 
 
+def _cover_fastgen_visual_reference_selection(settings: Settings, *, max_references: int) -> dict[str, object]:
+    """Select explicit FastGen visual guidance without hiding unavailable files.
+
+    Reference content is never a source of story facts.  The returned list is
+    deterministic so the UI, persisted inspector and provider request can all
+    describe the same bounded transport decision.
+    """
+    configured = list(dict.fromkeys(str(value).strip() for value in settings.cover_fastgen_reference_paths if str(value).strip()))
+    missing = [path for path in configured if not Path(path).expanduser().is_file()]
+    if not settings.cover_fastgen_use_references:
+        return {"paths": [], "missing": missing, "dropped": configured, "reason": "disabled"}
+    available = [path for path in configured if Path(path).expanduser().is_file()]
+    limit = max(0, int(max_references))
+    paths = available[:limit]
+    return {
+        "paths": paths,
+        "missing": missing,
+        "dropped": available[limit:],
+        "reason": "selected" if paths else ("missing" if missing else "empty"),
+    }
+
+
+def _cover_fastgen_reference_instruction(settings: Settings) -> str:
+    """Provider-side contract for references: visual guidance, never facts."""
+    if not settings.cover_fastgen_use_references:
+        return ""
+    if settings.cover_fastgen_reference_mode_auto:
+        modes = "AUTO: infer only useful style, composition and mood properties"
+    else:
+        labels = []
+        if settings.cover_fastgen_reference_mode_style:
+            labels.append("STYLE: visual language, realism and detail density")
+        if settings.cover_fastgen_reference_mode_composition:
+            labels.append("COMPOSITION: framing, portrait placement, text zones and depth")
+        if settings.cover_fastgen_reference_mode_mood_lighting:
+            labels.append("MOOD/COLOR/LIGHT: palette, contrast, lighting and shadows")
+        modes = "; ".join(labels) or "STYLE: general visual language only"
+    return (
+        "REFERENCE = VISUAL GUIDANCE ONLY. PRODUCTIONITEM = SOURCE OF TRUTH FOR CONTENT. "
+        f"Use references only for {modes}. Do not copy their scene, people, text, headline, logos, branding, watermark, "
+        "objects, buildings, vehicles, weapons, flags, destruction or event. If a reference conflicts with the current "
+        "ProductionItem, ignore its content and keep only the allowed visual properties. A reference person must never "
+        "replace the resolved portrait subject."
+    )
+
+
 def _cover_reference_instruction(item: dict, position: int, settings: Settings) -> str:
     paths = _cover_reference_paths_for_item(item, position, settings)
     if not paths:
@@ -7308,6 +7880,10 @@ _COVER_WORD_STRENGTHENING_RULES = (
 )
 _COVER_WORD_RISK_TERMS = ("может", "могут", "риск", "вероят", "возмож", "угроз")
 _COVER_WORD_ASSERTIVE_TERMS = ("взлетел", "рухнул", "обвалил", "закрыл", "остановил", "сорвал")
+_COVER_WORD_UNNATURAL_PATTERNS = (
+    "на нерве", "поджимает помидор", "трещит по швам", "раскачивает ситуацию",
+    "градус раст", "входит в штопор",
+)
 _COVER_WORD_SEMANTIC_GROUPS = {
     "collapse": ("рух", "обвал", "сократ", "паден", "провал"),
     "closure": ("закро", "перекр", "останов", "замороз"),
@@ -7317,7 +7893,7 @@ _COVER_WORD_SEMANTIC_GROUPS = {
 
 
 def _cover_word_structure_pair(item: dict, variation_index: int = 0) -> dict[str, object]:
-    """Stable by item ID; explicit regenerate moves to the next compatible pair."""
+    """Stable candidate ordering hint, never an editorial sentence template."""
     identity = str(item.get("production_item_id") or item.get("id") or item.get("title") or "cover")
     digest = int(hashlib.sha256(identity.casefold().encode("utf-8")).hexdigest()[:12], 16)
     variation = max(0, int(variation_index))
@@ -7331,12 +7907,24 @@ def _cover_word_structure_pair(item: dict, variation_index: int = 0) -> dict[str
     }
 
 
-def _cover_word_should_generate(item: dict, kind: str, *, force: bool = False) -> bool:
+def _cover_word_should_generate(
+    item: dict, kind: str, *, force: bool = False, replace_manual: bool = False,
+) -> bool:
     prefix = "headline" if kind == "headline" else "subheadline"
     value_key = "cover_headline" if prefix == "headline" else "cover_subheadline"
     source = str(item.get(f"{prefix}_source", "")).upper()
-    status = str(item.get(f"{prefix}_status", "")).upper()
-    return bool(force or (source != "MANUAL" and status not in {"READY", "MANUAL"} and not str(item.get(value_key, "")).strip()))
+    value = str(item.get(value_key, "")).strip()
+    # A non-empty manual edit is an explicit operator override. Ordinary
+    # retries/regeneration repair missing or AI-owned text only; replacement
+    # must be opt-in through the dedicated replaceManual action.
+    if source == "MANUAL" and value:
+        return bool(replace_manual)
+    # Clearing a manual value deliberately asks the missing-field repair path
+    # to fill this field.  Its old MANUAL status must not make that blank field
+    # permanently ineligible for normal generation.
+    if not value:
+        return True
+    return bool(force)
 
 def _cover_word_source_text(item: dict) -> str:
     fields = ("title", "topic", "angle", "event_context", "supporting_context", "script",
@@ -7483,6 +8071,92 @@ def _cover_word_strengthens_source(value: str, item: dict) -> bool:
     return False
 
 
+def _cover_word_editorial_evaluation(
+    value: str, item: dict, *, factual_pass: bool, grounding_pass: bool, duplicate_pass: bool,
+) -> dict[str, object]:
+    """Bounded local editorial rubric for one factual-safe thumbnail candidate.
+
+    This is purposefully not a phrase blacklist.  It evaluates a candidate's
+    relation to the current ProductionItem: content words must form a clear,
+    source-grounded statement, and a novel invented verb/object pairing cannot
+    become READY merely because the candidate mentions the right country.
+    The persisted result is compact audit evidence, not model reasoning.
+    """
+    text = " ".join(str(value or "").casefold().split())
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
+    stems = _cover_meaningful_word_stems(text)
+    source_stems = _cover_meaningful_word_stems(_cover_word_source_text(item))
+    source_matches = {stem for stem in stems if stem in source_stems}
+    unknown_stems = stems - source_stems
+    # Finite verbs invented by the model are a reliable, context-independent
+    # signal of an unsupported and often nonsensical subject/action pairing.
+    # These are normal literal newsroom actions, not a negative phrase list.
+    # When a source uses a close verb form (or an editor uses a literal verb
+    # such as "держит курс"), that alone is not an artificial metaphor.
+    neutral_action_stems = {
+        "держ", "меня", "обсуж", "повыш", "усил", "дави", "давл", "отвеч", "заяв", "ввод",
+        "реша", "соглас", "отказ", "треб", "сниж", "раст", "рван", "постав", "закры",
+    }
+    unknown_action = any(
+        word[:4] in unknown_stems
+        and not any(word.startswith(stem) for stem in neutral_action_stems)
+        and re.search(r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али)$", word)
+        for word in words
+    )
+    bare_abstract_state = (
+        len(words) <= 3
+        and "на" in text.split()
+        and len(source_matches) < max(2, len(stems))
+    )
+    negative_example_signal = any(pattern in text for pattern in _COVER_WORD_UNNATURAL_PATTERNS)
+    # These quantities are deliberately finite and explainable rather than a
+    # hidden chain of reasoning.  The known historical examples merely add a
+    # weak signal; they cannot independently reject a phrase.
+    semantic_coherence_pass = not unknown_action and not bare_abstract_state
+    literal_clarity_pass = not bare_abstract_state and bool(source_matches)
+    naturalness_pass = semantic_coherence_pass and literal_clarity_pass
+    cliche_penalty = int(negative_example_signal) + int(
+        len(stems) > 0 and all(any(stem.startswith(generic) for generic in _COVER_WORD_GENERIC_STEMS)
+                               for stem in stems)
+    )
+    named_anchors = _cover_word_named_source_entities(item)
+    specificity_score = min(5, len(source_matches) + int(bool(stems & named_anchors)) + int(len(stems) >= 3))
+    hook_markers = (
+        "давл", "спор", "конфликт", "тариф", "санкц", "угроз", "рост", "паден", "усил",
+        "закро", "переговор", "решен", "ответ",
+    )
+    hook_score = min(5, sum(any(stem.startswith(marker) or marker.startswith(stem)
+                                for marker in hook_markers) for stem in stems))
+    # Historical negative examples raise an audit signal, but never form a
+    # standalone rejection path.  The contextual coherence/clarity checks
+    # above must independently explain why a phrase is unsuitable.
+    editorial_plausibility_pass = naturalness_pass
+    reasons: list[str] = []
+    if unknown_action:
+        reasons.append("unsourced_action_pairing")
+    if bare_abstract_state:
+        reasons.append("unclear_abstract_state")
+    if negative_example_signal:
+        reasons.append("historical_negative_example_signal")
+    if cliche_penalty and not negative_example_signal:
+        reasons.append("generic_clickbait")
+    if not naturalness_pass:
+        reasons.append("naturalness_or_clarity_failed")
+    return {
+        "naturalness_pass": naturalness_pass,
+        "semantic_coherence_pass": semantic_coherence_pass,
+        "literal_clarity_pass": literal_clarity_pass,
+        "cliche_penalty": cliche_penalty,
+        "editorial_plausibility_pass": editorial_plausibility_pass,
+        "specificity_score": specificity_score,
+        "hook_score": hook_score,
+        "factual_pass": factual_pass,
+        "grounding_pass": grounding_pass,
+        "duplicate_pass": duplicate_pass,
+        "quality_reasons": reasons,
+    }
+
+
 def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "",
                          structure: dict | None = None, recent: list[dict] | None = None) -> dict[str, object]:
     """Return explicit validation/reason codes; never silently truncate into READY."""
@@ -7565,6 +8239,17 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         if sum(1 for saved_signature in recent_signatures if saved_signature == signature) >= 3:
             result.update(reason_code="RECENT_PATTERN_REPEAT", reason_detail="Недавний паттерн использован слишком часто")
             return result
+    evaluation = _cover_word_editorial_evaluation(
+        raw, item, factual_pass=True, grounding_pass=True, duplicate_pass=True,
+    )
+    result["editorial_evaluation"] = evaluation
+    if not (evaluation["naturalness_pass"] and evaluation["semantic_coherence_pass"]
+            and evaluation["literal_clarity_pass"] and evaluation["editorial_plausibility_pass"]):
+        result.update(
+            reason_code="EDITORIAL_QUALITY_FAILED",
+            reason_detail="Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+        )
+        return result
     result.update(valid=True, semantic_slots=list((structure or {}).get("semantic_slots", [])))
     return result
 
@@ -7720,7 +8405,7 @@ def _migrate_legacy_cover_texts(settings: Settings) -> bool:
 
 
 def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure: dict[str, object],
-                                headline: str = "") -> str:
+                                headline: str = "", *, tabloid_mode: bool = False) -> str:
     """Strict V2 provider prompt; visual generation remains outside this layer."""
     title = str(item.get("title", "")).strip()
     context = _cover_word_source_text(item)[:4000]
@@ -7729,18 +8414,29 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
     prefix = "headline" if kind == "headline" else "subheadline"
     role = structure[f"{prefix}_structure"]
     slots = structure[f"{prefix}_semantic_slots"]
-    schema = '{"headline":"..."}' if kind == "headline" else '{"subheadline":"..."}'
+    schema = (
+        '{"headline":"...", "candidates":["...","...","...","..."]}'
+        if kind == "headline" else
+        '{"subheadline":"...", "candidates":["...","...","...","..."]}'
+    )
     target = "1–5 слов, максимум 5 слов и 100 символов" if kind == "headline" else "3–7 слов, максимум 10 слов и 110 символов"
     task = (
         "Ты создаёшь только одну строку для новостной YouTube-обложки. "
         "Примеры пользовательского стиля не являются фактами и не могут переносить чужие имена, страны или события. "
         f"ТЕМА: «{title}». КОНТЕКСТ: «{context}». ДОСТУПНЫЕ СЕМАНТИЧЕСКИЕ СЛОТЫ: {json.dumps(plan, ensure_ascii=False)}. "
         f"ПОЛЬЗОВАТЕЛЬСКИЙ STYLE TEMPLATE: {source_template}. "
-        f"ЦЕЛЕВАЯ РОЛЬ: {role}. ПРЕДПОЧТИТЕЛЬНЫЕ СЛОТЫ: {', '.join(slots)}. "
+        f"РЕДАКЦИОННОЕ НАПРАВЛЕНИЕ: {role}. ПРЕДПОЧТИТЕЛЬНЫЕ СЛОТЫ: {', '.join(slots)}. "
+        "Это направление не является обязательным шаблоном: сначала найди естественный subject/action/conflict/stake, "
+        "затем предложи разные короткие варианты. Верни 4–6 кандидатов, а не один случайный hash-шаблон. "
+    )
+    task += (
+        "СТИЛЬ: TABLOID. Усиль конфликт, риск, последствия и интригу, но не добавляй фактов, чисел, угроз, "
+        "ультиматумов, действий или сущностей, которых нет в источнике. "
+        if tabloid_mode else
+        "СТИЛЬ: STANDARD. Сильный, конкретный и современный новостной hook без искусственной истерики. "
     )
     if kind == "headline":
         task += (
-            "Внутренне сравни минимум пять разных подходов и верни один лучший. "
             "Headline обязан быть самодостаточным: без полного названия ролика зритель сразу должен понимать, "
             "кто или что находится в центре конфликта. Если в теме назван человек, страна, город или организация, "
             "включи хотя бы одну такую конкретную сущность в headline. Запрещены голые действия и абстрактные "
@@ -7758,45 +8454,118 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
             "последствие, ставку, объект, место, действие или сторону. Не перефразируй headline и не повторяй его смысл. "
         )
     return (
-        task + f"Требование длины: {target}. Не придумывай числа и не усиливай риск до факта. "
-        "Не используй лишние кавычки, Markdown, комментарии или варианты. Верни строго только JSON: " + schema
+        task + f"Требование длины каждого кандидата: {target}. Не придумывай числа и не усиливай риск до факта. "
+        "Пиши естественным современным русским: без канцелярита, газетных штампов, странных глаголов с объектом и "
+        "метафор ради драмы. Не используй лишние кавычки, Markdown или комментарии. Верни строго только JSON: " + schema
     )
 
 
 def _cover_word_repair_prompt(kind: str, value: str, validation: dict[str, object], item: dict,
-                              structure: dict[str, object], headline: str = "") -> str:
+                              structure: dict[str, object], headline: str = "", *, tabloid_mode: bool = False) -> str:
     prefix = "headline" if kind == "headline" else "subheadline"
     next_pair = _cover_word_structure_pair(item, int(item.get(f"{prefix}_variation_index", 0) or 0) + 1)
     return (
         f"Предыдущая строка «{value or 'пусто'}» отклонена. REASON: {validation['reason_code']}. "
         f"DETAIL: {validation['reason_detail']}. Исправь только эту проблему, не выдумывай новых фактов и не копируй "
         "предыдущую фразу. "
-        + _cover_word_provider_prompt(kind, "", item, next_pair, headline)
+        + _cover_word_provider_prompt(kind, "", item, next_pair, headline, tabloid_mode=tabloid_mode)
     )
+
+
+def _cover_word_candidates(raw: str, kind: str) -> list[str]:
+    """Read a candidate batch while remaining compatible with old one-value providers."""
+    text = str(raw or "").strip()
+    parsed = None
+    try:
+        parsed = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except (ValueError, TypeError, IndexError, json.JSONDecodeError):
+        pass
+    values: list[object] = []
+    if isinstance(parsed, dict):
+        values = parsed.get("candidates") if isinstance(parsed.get("candidates"), list) else [
+            parsed.get(kind), parsed.get("text"), parsed.get("headline" if kind == "headline" else "subheadline"),
+        ]
+    else:
+        values = [text]
+    cleaner = _clean_cover_headline if kind == "headline" else _clean_cover_subheadline
+    return list(dict.fromkeys(value for value in (cleaner(str(value), emergency_limit=False)
+                                                  if kind == "headline" else cleaner(str(value))
+                                                  for value in values if isinstance(value, str)) if value))
+
+
+def _cover_word_candidate_score(value: str, item: dict) -> tuple[int, int, int]:
+    """Compatibility wrapper for callers that only need a stable source score."""
+    source = _cover_word_source_text(item).casefold()
+    anchors = _cover_word_named_source_entities(item)
+    terms = {word[:4] for word in re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", value.casefold())}
+    return (int(bool(terms & anchors)), sum(term in source for term in terms), -len(value))
+
+
+def _cover_word_editorial_selection_score(
+    value: str, validation: dict[str, object], *, tabloid_mode: bool,
+) -> tuple[int, int, int, int, int]:
+    """Select only from validated candidates using persisted editorial evidence."""
+    evaluation = validation.get("editorial_evaluation")
+    if not isinstance(evaluation, dict):
+        return (0, 0, 0, 0, -len(value))
+    natural = int(bool(evaluation.get("naturalness_pass")))
+    factual = int(bool(evaluation.get("factual_pass")))
+    specificity = int(evaluation.get("specificity_score", 0) or 0)
+    hook = int(evaluation.get("hook_score", 0) or 0)
+    # Standard favours compact concrete news wording; Tabloid uses the same
+    # factual/natural gate but deliberately promotes a stronger supported hook.
+    return ((natural, factual, hook, specificity, -len(value)) if tabloid_mode
+            else (natural, factual, -len(value), specificity, hook))
 
 
 async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, template: str,
                                   structure: dict[str, object], *, headline: str = "",
-                                  pause_waiter=None, recent: list[dict] | None = None) -> tuple[str, dict[str, object], list[dict]]:
+                                  pause_waiter=None, recent: list[dict] | None = None,
+                                  tabloid_mode: bool = False) -> tuple[str, dict[str, object], list[dict]]:
     """Generate, validate and repair at most twice; callers persist state per item."""
-    prompt = _cover_word_provider_prompt(kind, template, item, structure, headline)
+    prompt = _cover_word_provider_prompt(kind, template, item, structure, headline, tabloid_mode=tabloid_mode)
     attempts: list[dict] = []
     for repair_index in range(3):
         raw = await pool.generate(prompt, before_request=pause_waiter)
-        value = (_clean_cover_headline(raw, emergency_limit=False)
-                 if kind == "headline" else _clean_cover_subheadline(raw))
-        validation = _validate_cover_word(
-            kind, value, item, headline=headline,
-            structure={"semantic_slots": structure[f"{kind}_semantic_slots"]},
-            recent=recent,
-        )
-        attempts.append({"attempt": repair_index, "value": value, "validation": validation})
-        if validation["valid"]:
+        accepted: list[tuple[str, dict[str, object]]] = []
+        for candidate in _cover_word_candidates(raw, kind):
+            validation = _validate_cover_word(
+                kind, candidate, item, headline=headline,
+                structure={"semantic_slots": structure[f"{kind}_semantic_slots"]}, recent=recent,
+            )
+            attempts.append({"attempt": repair_index, "value": candidate, "validation": validation})
+            if validation["valid"]:
+                accepted.append((candidate, validation))
+        if accepted:
+            value, validation = max(
+                accepted,
+                key=lambda pair: _cover_word_editorial_selection_score(
+                    pair[0], pair[1], tabloid_mode=tabloid_mode,
+                ),
+            )
+            validation = dict(validation)
+            evidence = dict(validation.get("editorial_evaluation", {}))
+            validation.update(
+                candidate_count=len(_cover_word_candidates(raw, kind)),
+                selection_reason=("best supported tabloid hook after editorial quality evaluation"
+                                  if tabloid_mode else "best compact standard candidate after editorial quality evaluation"),
+                selection_evidence={
+                    "style": "TABLOID" if tabloid_mode else "STANDARD",
+                    "naturalness_pass": bool(evidence.get("naturalness_pass")),
+                    "specificity_score": int(evidence.get("specificity_score", 0) or 0),
+                    "hook_score": int(evidence.get("hook_score", 0) or 0),
+                    "factual_pass": bool(evidence.get("factual_pass")),
+                },
+            )
             return value, validation, attempts
         if repair_index == 2:
             break
-        prompt = _cover_word_repair_prompt(kind, value, validation, item, structure, headline)
-    raise ValueError(f"{validation['reason_code']}: {validation['reason_detail']}")
+        last = attempts[-1]["validation"] if attempts else {"reason_code": "INVALID_JSON", "reason_detail": "Пустой ответ"}
+        prompt = _cover_word_repair_prompt(kind, "", last, item, structure, headline, tabloid_mode=tabloid_mode)
+    final_validation = attempts[-1]["validation"] if attempts else {
+        "reason_code": "INVALID_JSON", "reason_detail": "Провайдер не вернул кандидатов",
+    }
+    raise ValueError(f"{final_validation['reason_code']}: {final_validation['reason_detail']}")
 
 
 def _cover_text_prompt(kind: str, template: str, title: str, context: str, headline: str = "",
@@ -7910,6 +8679,8 @@ def set_cover_text_pause(payload: dict, paused: bool) -> dict:
 def generate_cover_headlines(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
+    if isinstance(payload.get("tabloidMode"), bool):
+        settings.cover_tabloid_mode = bool(payload["tabloidMode"])
     provider = str(payload.get("provider", settings.cover_headline_provider)).strip().casefold()
     if provider not in {"agent", "openai"}:
         raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
@@ -7918,12 +8689,13 @@ def generate_cover_headlines(payload: dict) -> dict:
     if template and not use_default:
         settings.cover_headline_template = template[:12000]
     active_template = Settings().cover_headline_template if use_default else settings.cover_headline_template
-    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
+    force = bool(payload.get("force") or payload.get("regenerate"))
+    replace_manual = bool(payload.get("replaceManual"))
     scope = _current_cover_generation_scope(
         settings, payload, "Выберите сценарии для фраз на обложку",
     )
     selected = [(index, item) for index, item in scope
-                if _cover_word_should_generate(item, "headline", force=force)]
+                if _cover_word_should_generate(item, "headline", force=force, replace_manual=replace_manual)]
     if not selected:
         return _cover_noop_result(
             "cover-headlines", "Все выбранные заголовки уже готовы; генерация не требуется.",
@@ -7956,12 +8728,18 @@ def generate_cover_headlines(payload: dict) -> dict:
             headline, validation, attempts = await _generate_cover_word_v2(
                 provider_call, "headline", item, active_template, structure,
                 pause_waiter=lambda: _wait_for_cover_text_resume("headline"), recent=recent,
+                tabloid_mode=settings.cover_tabloid_mode,
             )
             current = settings.cover_queue[index]
             current.update(cover_headline=headline, headline_source="AI", headline_status="READY", headline_error="",
                            headline_structure_id=structure["headline_structure_id"], headline_variation_index=variation,
                            headline_attempt_count=len(attempts), headline_semantic_slots=validation["semantic_slots"],
                            headline_repair_history=attempts, headline_pattern_signature=_cover_word_pattern_signature(headline),
+                           text_style="TABLOID" if settings.cover_tabloid_mode else "STANDARD",
+                           headline_candidate_count=int(validation.get("candidate_count", 1) or 1),
+                           headline_selection_reason=str(validation.get("selection_reason", "validated candidate")),
+                           headline_editorial_evaluation=dict(validation.get("editorial_evaluation", {})),
+                           headline_selection_evidence=dict(validation.get("selection_evidence", {})),
                            headline_generation_timestamp=datetime.now().astimezone().isoformat(timespec="seconds"))
             _mark_cover_prompt_stale_for_current_text(current)
             current["headline_provider_attempt_count"] = provider_call.attempts
@@ -8010,6 +8788,8 @@ def generate_cover_subheadlines(payload: dict) -> dict:
     """Create a second thumbnail phrase without replacing the main headline."""
     settings = load_settings()
     _hydrate_cover_library(settings)
+    if isinstance(payload.get("tabloidMode"), bool):
+        settings.cover_tabloid_mode = bool(payload["tabloidMode"])
     provider = str(payload.get("provider", settings.cover_headline_provider)).strip().casefold()
     if provider not in {"agent", "openai"}:
         raise ValueError("Выберите «Агент NewsFlow» или «ChatGPT»")
@@ -8018,12 +8798,13 @@ def generate_cover_subheadlines(payload: dict) -> dict:
     if template and not use_default:
         settings.cover_subheadline_template = template[:12000]
     active_template = Settings().cover_subheadline_template if use_default else settings.cover_subheadline_template
-    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
+    force = bool(payload.get("force") or payload.get("regenerate"))
+    replace_manual = bool(payload.get("replaceManual"))
     scope = _current_cover_generation_scope(
         settings, payload, "Выберите сценарии для подзаголовков",
     )
     selected = [(index, item) for index, item in scope
-                if _cover_word_should_generate(item, "subheadline", force=force)]
+                if _cover_word_should_generate(item, "subheadline", force=force, replace_manual=replace_manual)]
     if not selected:
         return _cover_noop_result(
             "cover-subheadlines", "Все выбранные подзаголовки уже готовы; генерация не требуется.",
@@ -8059,6 +8840,7 @@ def generate_cover_subheadlines(payload: dict) -> dict:
             subheadline, validation, attempts = await _generate_cover_word_v2(
                 provider_call, "subheadline", item, active_template, structure, headline=headline,
                 pause_waiter=lambda: _wait_for_cover_text_resume("subheadline"), recent=recent,
+                tabloid_mode=settings.cover_tabloid_mode,
             )
             current = settings.cover_queue[index]
             current.update(cover_subheadline=subheadline, subheadline_source="AI", subheadline_status="READY", subheadline_error="",
@@ -8066,6 +8848,11 @@ def generate_cover_subheadlines(payload: dict) -> dict:
                            subheadline_variation_index=variation, subheadline_attempt_count=len(attempts),
                            subheadline_semantic_slots=validation["semantic_slots"], subheadline_repair_history=attempts,
                            subheadline_pattern_signature=_cover_word_pattern_signature(subheadline),
+                           text_style="TABLOID" if settings.cover_tabloid_mode else "STANDARD",
+                           subheadline_candidate_count=int(validation.get("candidate_count", 1) or 1),
+                           subheadline_selection_reason=str(validation.get("selection_reason", "validated candidate")),
+                           subheadline_editorial_evaluation=dict(validation.get("editorial_evaluation", {})),
+                           subheadline_selection_evidence=dict(validation.get("selection_evidence", {})),
                            subheadline_generation_timestamp=datetime.now().astimezone().isoformat(timespec="seconds"))
             _mark_cover_prompt_stale_for_current_text(current)
             current["subheadline_provider_attempt_count"] = provider_call.attempts
@@ -8842,6 +9629,49 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             item.update(error="", rate_limit_wait_until=resume_at, rate_limit_used=rate.used)
             _save_cover_state(settings)
             continue
+        # Exact repeat is an immutable provider contract: it must neither
+        # rebuild the prompt nor reselect a portrait/reference from today's
+        # face tree.  New renders resolve and persist portrait metadata before
+        # any provider request.
+        portrait = (
+            {
+                "portrait_subject": str(item.get("portrait_subject", "") or ""),
+                "portrait_side": str(item.get("portrait_side", "") or ""),
+                "portrait_source": str(item.get("portrait_source", "saved") or "saved"),
+                "portrait_resolver_reason": str(item.get("portrait_resolver_reason", "saved render contract") or "saved render contract"),
+                "portrait_confidence": item.get("portrait_confidence", 0),
+            }
+            if repeat_current_contract else
+            _resolve_cover_portrait(item, settings, face_mode=face_mode, allow_manual_reference=use_my_face)
+        )
+        # Every real ProductionItem needs an accountable public figure before
+        # FastGen. Do not guess a leader from geography/organisation and do
+        # not let an arbitrary visual-reference PNG choose the identity.
+        face_required = bool(item.get("cover_face_required")) or _cover_requires_political_portrait(item)
+        if face_mode != "without" and face_required and not portrait["portrait_subject"]:
+            if item.get("cover_face_required"):
+                detail = (
+                    "Нужно определить лицо для обложки: добавьте реальную публичную фигуру в ProductionItem "
+                    "или выберите её вручную; FastGen не будет подставлять случайного человека."
+                )
+                status = "Нужно определить лицо для обложки"
+            else:
+                detail = (
+                    "Для политической темы не найден явно указанный человек для портрета. "
+                    "Добавьте человека в контекст/сценарий или выберите режим «без лиц»."
+                )
+                status = "Нужно определить политического субъекта"
+            _cover_step(item, status, 100, detail)
+            item["error"] = detail
+            item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+            _save_cover_state(settings)
+            continue
+        has_portrait_reference = False
+        prepared_portrait_available = False
+        visual_reference_selection = _cover_fastgen_visual_reference_selection(
+            settings,
+            max_references=operation_reference_limit if operation_reference_limit is not None else 10,
+        )
         try:
             if repeat_current_contract:
                 references = _cover_saved_provider_references(item)
@@ -8855,7 +9685,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                         + ", ".join(missing_references)
                     )
                 face_label = str(
-                    item.get("final_provider_face_label")
+                    portrait["portrait_subject"]
+                    or item.get("final_provider_face_label")
                     or item.get("face_reference_label")
                     or item.get("semantic_face_label")
                     or ""
@@ -8867,6 +9698,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     )
                 except (TypeError, ValueError):
                     saved_face_count = 0
+                has_portrait_reference = bool(saved_face_count and use_my_face)
                 item["face_reference_count"] = saved_face_count if use_my_face else 0
                 item["faceSelectionMode"] = "prepared-reference" if use_my_face else "semantic-only"
                 item["faceSelectionReason"] = (
@@ -8875,31 +9707,46 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     else "reused saved zero-PNG provider contract"
                 )
             elif use_my_face:
-                references, face_label = _cover_references_for_item(
+                references, matched_face_label = _cover_references_for_item(
                     item, settings, refine=refine_with_face, face_mode=face_mode, position=index,
                     max_references=operation_reference_limit if operation_reference_limit is not None else 10,
                     prepared_auto_face=True,
                 )
+                face_path = str(item.get("face_reference_path", "")).strip()
+                prepared_portrait_available = bool(matched_face_label and face_path)
+                has_portrait_reference = bool(prepared_portrait_available and face_path in references)
+                face_label = str(portrait["portrait_subject"] or matched_face_label).strip()
                 item.pop("semantic_face_label", None)
                 item.pop("semantic_face_source", None)
                 item["faceSelectionMode"] = "prepared-reference"
-                item["face_reference_count"] = 1 if face_label else 0
+                item["face_reference_count"] = 1 if has_portrait_reference else 0
                 item["faceSelectionReason"] = (
                     "topic-relevant prepared face-tree match"
-                    if face_label
-                    else "no confident prepared face-tree match; continued without PNG"
+                    if has_portrait_reference
+                    else ("political portrait resolved; no prepared PNG, continued with generated side portrait"
+                          if portrait["portrait_subject"]
+                          else "no confident prepared face-tree match; continued without PNG")
                 )
             else:
-                references = []
-                face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
+                # The all-FastGen route deliberately transports no portrait
+                # PNG, but explicit visual references still belong in the
+                # provider call. Their content remains constrained by the
+                # final prompt below.
+                references = list(visual_reference_selection["paths"])
+                matched_face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
+                face_label = str(portrait["portrait_subject"] or matched_face_label).strip()
                 item["faceSelectionMode"] = "semantic-only"
                 item["face_reference_count"] = 0
                 item["faceSelectionReason"] = (
-                    "topic-relevant face-tree metadata match"
-                    if face_label else "no confident face-tree match"
+                    "political portrait resolved from current topic"
+                    if portrait["portrait_subject"]
+                    else ("topic-relevant face-tree metadata match" if matched_face_label else "no confident face-tree match")
                 )
                 if face_label:
-                    item.update(semantic_face_label=face_label, semantic_face_source="tree")
+                    item.update(
+                        semantic_face_label=face_label,
+                        semantic_face_source=(portrait["portrait_source"] if portrait["portrait_subject"] else "tree"),
+                    )
                 else:
                     item.pop("semantic_face_label", None)
                     item.pop("semantic_face_source", None)
@@ -8907,7 +9754,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             # operation.  When there is no relevant portrait, the my-faces
             # route deliberately continues with zero PNGs instead of choosing
             # a random identity or stopping the whole generation batch.
-            if not repeat_current_contract and use_my_face and face_label and operation_reference_limit is None:
+            if not repeat_current_contract and use_my_face and prepared_portrait_available and operation_reference_limit is None:
                 detail = (
                     "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
                     "обновите список моделей или выберите reference-capable operation."
@@ -8916,7 +9763,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item["error"] = detail
                 _save_cover_state(settings)
                 continue
-            if not repeat_current_contract and use_my_face and face_label and not operation_accepts_references:
+            if not repeat_current_contract and use_my_face and prepared_portrait_available and not operation_accepts_references:
                 detail = (
                     f"Операция FastGen {operation} не поддерживает image/reference input; "
                     "выберите reference-capable operation для режима «FastGen всё + мои лица»."
@@ -8928,6 +9775,15 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             # Text-only generation endpoints must not receive files in the
             # remaining scene-only and diagnostic routes.
             if not repeat_current_contract and not operation_accepts_references:
+                if references and settings.cover_fastgen_use_references:
+                    detail = (
+                        f"Операция FastGen {operation} не поддерживает image/reference input; "
+                        "выберите operation с references или выключите визуальные референсы."
+                    )
+                    _cover_step(item, "Операция FastGen без references", 100, detail)
+                    item["error"] = detail
+                    _save_cover_state(settings)
+                    continue
                 references = []
         except ValueError as exc:
             _cover_step(item, "Ошибка подготовки лица", 100, str(exc))
@@ -8950,12 +9806,19 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             reference_notes.append(
                 "Supplied references guide composition, scale, contrast and scene density only; adapt them to this topic."
             )
+        explicit_reference_instruction = _cover_fastgen_reference_instruction(settings)
+        if explicit_reference_instruction:
+            reference_notes.append(explicit_reference_instruction)
         if item.get("visual_reference_to_fastgen") and str(item.get("visual_reference_path", "")).strip():
             reference_notes.append(
                 "The supplied user reference sets hierarchy and framing; create a new topic-accurate scene."
             )
         if face_label:
-            if use_my_face:
+            if portrait["portrait_subject"]:
+                face_layout = _cover_resolved_portrait_layout(
+                    item, portrait["portrait_subject"], portrait["portrait_side"],
+                )
+            elif use_my_face:
                 face_layout = _cover_face_layout(
                     item, settings, str(item.get("face_reference_path", "")), face_label,
                 )
@@ -8972,7 +9835,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 )
             else:
                 identity_notes.append(_cover_fastgen_identity_instruction(
-                    face_label, has_remote_reference=bool(references),
+                    face_label, has_remote_reference=has_portrait_reference,
                 ))
             composition_notes.append(face_layout)
         if refine_with_face:
@@ -9016,6 +9879,19 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         item["final_provider_prompt_options"] = final_prompt_options
         item["final_provider_prompt"] = final_prompt_options[0]
         item["final_provider_reference_paths"] = list(references)
+        item["reference_use_enabled"] = settings.cover_fastgen_use_references
+        item["reference_uploaded_count"] = len(settings.cover_fastgen_reference_paths)
+        item["reference_visual_reference_count"] = max(
+            0, len(references) - (1 if has_portrait_reference else 0),
+        )
+        item["reference_missing_paths"] = list(visual_reference_selection["missing"])
+        item["reference_dropped_paths"] = list(visual_reference_selection["dropped"])
+        item["reference_final_provider_count"] = len(references)
+        item["reference_provider_limit"] = operation_reference_limit if operation_reference_limit is not None else 10
+        item["reference_mode_style"] = settings.cover_fastgen_reference_mode_style
+        item["reference_mode_composition"] = settings.cover_fastgen_reference_mode_composition
+        item["reference_mode_mood_lighting"] = settings.cover_fastgen_reference_mode_mood_lighting
+        item["reference_mode_auto"] = settings.cover_fastgen_reference_mode_auto
         item["final_provider_face_label"] = face_label
         item["final_provider_face_reference_count"] = (
             int(item.get("face_reference_count", 0) or 0) if use_my_face else 0
@@ -9554,6 +10430,48 @@ def regenerate_covers(payload: dict) -> dict:
 _COVER_MANUAL_RETRY_STATUSES = {"Ошибка FastGen", "Нужен новый промпт", "Ошибка рендера"}
 
 
+def recover_cover_generation(payload: dict) -> dict:
+    """Recover accepted FastGen jobs through GET only; never create here."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    accepted = [(index, item) for index, item in selected if str(item.get("accepted_generation_id", "")).strip()]
+    if not accepted:
+        raise ValueError("Нет принятой FastGen generation для восстановления")
+    pool = FastGenPool(settings.cover_api_keys)
+    output = Path(settings.cover_output_folder)
+    for index, item in accepted:
+        generation_id = str(item["accepted_generation_id"]).strip()
+        try:
+            result = pool.recover_generation(generation_id, output, f"{index + 1:03d} — {item.get('title', '')}")
+        except _BRIDGE_OPERATION_ERRORS as exc:
+            # The original accepted ID is still retained for operator
+            # diagnostics, but a failed recovery endpoint must not strand the
+            # rest of a selected batch or trigger another paid create.
+            result = {"status": "failed", "error": _cover_provider_error_message(exc)}
+        status = str(result.get("status", "failed")).casefold()
+        error = _cover_provider_error_message(result.get("error", ""))
+        item.update(
+            provider_generation_id=generation_id,
+            provider_generation_status=status,
+            provider_generation_error=error,
+            recovery_checked_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        if status == "succeeded":
+            paths = [str(path) for path in result.get("paths", [])]
+            item.update(status="Готово", progress=100, error="", raw_paths=paths, paths=paths,
+                        path=paths[0] if paths else "", selected_path=paths[0] if paths else "",
+                        selected_base_path=paths[0] if paths else "")
+            item.pop("accepted_generation_id", None)
+        elif status == "processing":
+            _cover_step(item, "FastGen генерирует", max(30, int(item.get("progress", 30) or 30)), generation_id)
+        else:
+            _cover_step(item, "Требуется создать заново FastGen", 100, error or generation_id)
+            item["error"] = error or "FastGen завершил принятую generation без результата"
+    _save_cover_state(settings)
+    return snapshot()
+
+
 def retry_cover_generation(payload: dict) -> dict:
     """Start a deliberate new render cycle without changing its current contract."""
     settings = load_settings()
@@ -9561,6 +10479,8 @@ def retry_cover_generation(payload: dict) -> dict:
     selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
     if not selected:
         raise ValueError("Выберите обложки для повторной генерации")
+    if selected and all(bool(str(item.get("accepted_generation_id", "")).strip()) for _index, item in selected):
+        return recover_cover_generation(payload)
     blocked = [
         str(item.get("title", "") or index + 1)
         for index, item in selected
@@ -9572,6 +10492,25 @@ def retry_cover_generation(payload: dict) -> dict:
             "Ручной повтор недоступен для выбранных тем: " + ", ".join(blocked)
             + ". Дождитесь завершения активной/принятой задачи или выберите только terminal errors."
         )
+    return regenerate_covers({
+        "indices": [index for index, _item in selected],
+        "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
+        "currentProfile": True,
+    })
+
+
+def retry_cover_generation_new_paid(payload: dict) -> dict:
+    """Explicitly discard a terminal recovery ID before a new billable create."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if not selected:
+        raise ValueError("Выберите обложки для нового платного запроса")
+    if any(str(item.get("provider_generation_status", "")).casefold() != "failed" for _index, item in selected):
+        raise ValueError("Новый платный запрос доступен только после terminal FastGen failure")
+    for _index, item in selected:
+        item.pop("accepted_generation_id", None)
+    _save_cover_state(settings)
     return regenerate_covers({
         "indices": [index for index, _item in selected],
         "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
@@ -17681,6 +18620,10 @@ def main() -> None:
             result = regenerate_covers(payload if isinstance(payload, dict) else {})
         elif command == "retry-cover-generation":
             result = retry_cover_generation(payload if isinstance(payload, dict) else {})
+        elif command == "recover-cover-generation":
+            result = recover_cover_generation(payload if isinstance(payload, dict) else {})
+        elif command == "retry-cover-generation-new-paid":
+            result = retry_cover_generation_new_paid(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-cover-with-face":
             result = regenerate_cover_with_face(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-covers-new-prompts":

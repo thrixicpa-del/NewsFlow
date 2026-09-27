@@ -32,6 +32,25 @@ describe("coverWordGenerationPayload", () => {
     });
   });
 
+  it("marks replacement of a manual override as a distinct explicit action", () => {
+    expect(
+      coverWordPairGenerationPayload({
+        indices: [3],
+        productionItemIds: ["production:manual"],
+        provider: "agent",
+        useStructure: true,
+        avoidRepeats: true,
+        replaceManual: true,
+      }),
+    ).toMatchObject({
+      indices: [3],
+      productionItemIds: ["production:manual"],
+      force: true,
+      regenerate: true,
+      replaceManual: true,
+    });
+  });
+
   it("persists ChatGPT selection before the next snapshot can restore the old agent value", () => {
     expect(coverHeadlineProviderPayload("openai")).toEqual({
       headlineProvider: "openai",
