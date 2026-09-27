@@ -112,7 +112,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertTrue(persisted["cover_face_required"])
         self.assertEqual(persisted["cover_primary_person"]["name"], "Марек Новак")
         self.assertEqual([row["name"] for row in persisted["cover_people_candidates"]], ["Марек Новак", "Амина Диалло"])
-        self.assertEqual(persisted["cover_face_resolution_status"], "RESOLVED")
+        self.assertEqual(persisted["cover_face_resolution_status"], "LOW_CONFIDENCE")
+        self.assertEqual(persisted["cover_primary_person"]["provider_evidence_claim"]["source"], "selected_people")
 
     def test_parser_rejects_non_person_primary_cover_entity(self):
         response = json.dumps({

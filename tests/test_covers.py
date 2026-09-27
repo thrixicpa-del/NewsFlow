@@ -132,7 +132,10 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель",
             "relation_to_story": "отвечает за решение", "source": "institution-decision-maker", "confidence": 0.62,
         }
-        settings = Settings(idea_production_items=[{"id": "production:anchor", "title": title}])
+        settings = Settings(idea_production_items=[{
+            "id": "production:anchor", "title": title,
+            "event_context": "Институция рассматривает решение после заседания.",
+        }])
         job = SimpleNamespace(
             request=SimpleNamespace(production_item_id="production:anchor"), result="Сценарий", state=RunState.DONE,
             story_plan={"cover_people_candidates": [primary], "cover_primary_person": primary,
@@ -144,7 +147,156 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         stored = settings.idea_production_items[0]
         self.assertEqual(stored["cover_face_resolution_status"], "LOW_CONFIDENCE")
         self.assertEqual(stored["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
-        self.assertEqual(stored["cover_primary_person"]["evidence_summary"], "отвечает за решение")
+        self.assertIn("event_context", stored["cover_primary_person"]["evidence_summary"])
+
+    def test_provider_claimed_selected_person_is_downgraded_when_absent_from_current_item(self):
+        from scriptor import bridge
+
+        title = "Комиссия готовит решение"
+        candidate = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель",
+            "relation_to_story": "отвечает за решение комиссии", "source": "selected_people",
+            "evidence_type": "EXPLICIT_CONTEXT", "confidence": 0.73,
+        }
+        settings = Settings(idea_production_items=[{
+            "id": "production:fabricated", "title": title,
+            "primary_entities": [{"name": "Комиссия", "type": "organization"}],
+            "event_context": "Комиссия готовит решение после заседания.",
+        }])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:fabricated"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_people_candidates": [candidate], "cover_primary_person": candidate,
+                        "cover_face_resolution_status": "RESOLVED"},
+        )
+
+        bridge._project_story_plan_face_resolution(settings, title, job)
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_face_resolution_status"], "LOW_CONFIDENCE")
+        self.assertEqual(stored["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
+        self.assertEqual(stored["cover_primary_person"]["provider_evidence_claim"]["evidence_type"], "EXPLICIT_CONTEXT")
+
+    def test_provider_person_without_actual_context_evidence_needs_review(self):
+        from scriptor import bridge
+
+        title = "Обычный городской сюжет"
+        candidate = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+            "relation_to_story": "якобы связан с темой", "source": "selected_people", "confidence": 0.73,
+        }
+        settings = Settings(idea_production_items=[{"id": "production:no-evidence", "title": title}])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:no-evidence"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_people_candidates": [candidate], "cover_primary_person": candidate,
+                        "cover_face_resolution_status": "RESOLVED"},
+        )
+
+        bridge._project_story_plan_face_resolution(settings, title, job)
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_face_resolution_status"], "NEEDS_REVIEW")
+        self.assertIsNone(stored["cover_primary_person"])
+
+    def test_actual_selected_person_is_core_verified_as_explicit_context(self):
+        from scriptor import bridge
+
+        title = "Марек Новак объявил о решении"
+        candidate = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+            "relation_to_story": "объявил о решении", "source": "provider", "confidence": 0.94,
+        }
+        settings = Settings(idea_production_items=[{
+            "id": "production:selected", "title": title, "selected_people": ["Марек Новак"],
+        }])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:selected"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_people_candidates": [candidate], "cover_primary_person": candidate,
+                        "cover_face_resolution_status": "LOW_CONFIDENCE"},
+        )
+
+        bridge._project_story_plan_face_resolution(settings, title, job)
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_face_resolution_status"], "RESOLVED")
+        self.assertEqual(stored["cover_primary_person"]["evidence_type"], "EXPLICIT_CONTEXT")
+
+    def test_actual_typed_person_entity_is_core_verified_as_explicit_context(self):
+        from scriptor import bridge
+
+        title = "Решение объявлено на брифинге"
+        candidate = {
+            "name": "Амина Диалло", "entity_type": "public_figure", "role_in_story": "министр",
+            "relation_to_story": "представила решение", "source": "provider", "confidence": 0.91,
+        }
+        settings = Settings(idea_production_items=[{
+            "id": "production:typed", "title": title,
+            "entities": [{"name": "Амина Диалло", "type": "person"}],
+        }])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:typed"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_people_candidates": [candidate], "cover_primary_person": candidate,
+                        "cover_face_resolution_status": "LOW_CONFIDENCE"},
+        )
+
+        bridge._project_story_plan_face_resolution(settings, title, job)
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_face_resolution_status"], "RESOLVED")
+        self.assertEqual(stored["cover_primary_person"]["evidence_type"], "EXPLICIT_CONTEXT")
+        self.assertIn("entities", stored["cover_primary_person"]["source"])
+
+    def test_provider_cannot_self_certify_local_identity_without_face_tree_match(self):
+        from scriptor import bridge
+
+        title = "Марек Новак объявил о решении"
+        candidate = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+            "relation_to_story": "объявил о решении", "source": "provider",
+            "evidence_type": "VERIFIED_LOCAL_IDENTITY", "confidence": 0.94,
+        }
+        settings = Settings(idea_production_items=[{
+            "id": "production:no-tree", "title": title, "selected_people": ["Марек Новак"],
+        }])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:no-tree"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_people_candidates": [candidate], "cover_primary_person": candidate,
+                        "cover_face_resolution_status": "RESOLVED"},
+        )
+
+        bridge._project_story_plan_face_resolution(settings, title, job)
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_primary_person"]["evidence_type"], "EXPLICIT_CONTEXT")
+        self.assertEqual(stored["cover_primary_person"]["provider_evidence_claim"]["evidence_type"], "VERIFIED_LOCAL_IDENTITY")
+
+    def test_matching_face_tree_promotes_only_the_resolved_current_person(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            portrait = folder / "Марек Новак" / "portrait.png"
+            portrait.parent.mkdir()
+            portrait.write_bytes(b"portrait")
+            title = "Марек Новак объявил о решении"
+            candidate = {
+                "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                "relation_to_story": "объявил о решении", "source": "provider", "confidence": 0.94,
+            }
+            settings = Settings(
+                cover_face_library_enabled=True, cover_face_library_folder=str(folder),
+                idea_production_items=[{"id": "production:tree", "title": title, "selected_people": ["Марек Новак"]}],
+            )
+            job = SimpleNamespace(
+                request=SimpleNamespace(production_item_id="production:tree"), result="Сценарий", state=RunState.DONE,
+                story_plan={"cover_people_candidates": [candidate], "cover_primary_person": candidate,
+                            "cover_face_resolution_status": "RESOLVED"},
+            )
+
+            bridge._project_story_plan_face_resolution(settings, title, job)
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_primary_person"]["evidence_type"], "VERIFIED_LOCAL_IDENTITY")
+        self.assertEqual(stored["cover_primary_person"]["name"], "Марек Новак")
 
     def test_story_planner_primary_person_wins_over_face_tree_and_is_persisted_to_cover(self):
         from scriptor import bridge
@@ -155,7 +307,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             "relation_to_story": "возглавил переговоры", "source": "story-planner", "confidence": 0.94,
         }
         settings = Settings(
-            idea_production_items=[{"id": "production:planner", "title": title}],
+            idea_production_items=[{
+                "id": "production:planner", "title": title, "selected_people": ["Марек Новак"],
+            }],
             idea_scenario_context={title: {"id": "production:planner", "title": title}},
             cover_queue=[],
         )

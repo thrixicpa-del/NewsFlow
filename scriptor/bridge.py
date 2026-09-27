@@ -899,21 +899,103 @@ def _cover_story_planner_candidate(item: dict) -> tuple[str, str, str, float]:
 
 
 def _cover_person_evidence_type(candidate: object) -> str:
-    """Classify persisted person evidence conservatively for older plans."""
+    """Return only evidence that a Core-owned derivation has recorded."""
     if not isinstance(candidate, dict):
         return ""
     explicit = str(candidate.get("evidence_type", "")).strip().upper()
-    if explicit in {"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "ANCHOR_DERIVED"}:
-        return explicit
     source = str(candidate.get("source", "")).strip().casefold()
-    if source in {
-        "selected_people", "entities", "primary_entities", "title", "topic", "script",
-        "event_context", "supporting_context", "structured-context",
-    }:
-        return "EXPLICIT_CONTEXT"
-    if source.startswith("face-tree"):
-        return "VERIFIED_LOCAL_IDENTITY"
+    if explicit in {"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "ANCHOR_DERIVED"} and source.startswith("core-"):
+        return explicit
     return "ANCHOR_DERIVED"
+
+
+def _cover_exact_person_in_text(name: str, value: object) -> bool:
+    """Match a known person name without treating a partial token as identity."""
+    candidate = " ".join(str(name or "").split()).casefold()
+    text = " ".join(str(value or "").split()).casefold()
+    return bool(candidate and text and re.search(rf"(?<!\\w){re.escape(candidate)}(?!\\w)", text))
+
+
+def _cover_explicit_person_evidence(name: str, item: dict) -> tuple[str, str]:
+    """Locate the person in actual operator-owned current ProductionItem data."""
+    for value in item.get("selected_people", []) if isinstance(item.get("selected_people"), list) else [item.get("selected_people")]:
+        if _cover_exact_person_in_text(name, _cover_person_name(value)):
+            return "selected_people", "person named in selected_people"
+    for key in ("primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        for value in values:
+            if _cover_entity_is_explicit_person(value) and _cover_exact_person_in_text(name, _cover_person_name(value)):
+                return key, f"typed person named in {key}"
+    for key in ("title", "topic", "script", "event_context", "supporting_context"):
+        if _cover_exact_person_in_text(name, item.get(key)):
+            return key, f"person named in current {key}"
+    return "", ""
+
+
+def _cover_factual_anchor_summary(item: dict) -> str:
+    """Return compact factual anchors without accepting provider prose as proof."""
+    for key in (
+        "event_context", "supporting_context", "primary_entities", "primary_entity", "entities",
+        "direction", "angle", "conflict", "main_consequence", "consequence", "geography",
+    ):
+        value = _cover_context_values(item.get(key))
+        if value:
+            return f"current {key}: {value[:240]}"
+    return ""
+
+
+def derive_person_evidence(candidate: object, production_item: dict, settings: Settings | None = None) -> tuple[dict | None, str]:
+    """Derive trusted evidence from Core data, never a provider self-claim."""
+    if not _cover_entity_is_explicit_person(candidate):
+        return None, "NEEDS_REVIEW"
+    name = _cover_person_name(candidate)
+    if not name:
+        return None, "NEEDS_REVIEW"
+    resolved = dict(candidate)
+    claim = resolved.get("provider_evidence_claim")
+    if not isinstance(claim, dict):
+        claim = {
+            "source": str(resolved.get("source", "") or "UNSPECIFIED"),
+            "evidence_type": str(resolved.get("evidence_type", "") or "UNSPECIFIED"),
+        }
+    resolved["provider_evidence_claim"] = {
+        "source": " ".join(str(claim.get("source", "UNSPECIFIED")).split()) or "UNSPECIFIED",
+        "evidence_type": " ".join(str(claim.get("evidence_type", "UNSPECIFIED")).split()).upper() or "UNSPECIFIED",
+    }
+    explicit_source, explicit_summary = _cover_explicit_person_evidence(name, production_item)
+    anchor_summary = _cover_factual_anchor_summary(production_item)
+    if explicit_source:
+        resolved.update({
+            "source": f"core-explicit-context:{explicit_source}",
+            "evidence_type": "EXPLICIT_CONTEXT",
+            "evidence_summary": explicit_summary,
+        })
+        status = "RESOLVED"
+    elif anchor_summary:
+        resolved.update({
+            "source": "core-anchor-derived",
+            "evidence_type": "ANCHOR_DERIVED",
+            "evidence_summary": anchor_summary,
+        })
+        status = "LOW_CONFIDENCE"
+    else:
+        return None, "NEEDS_REVIEW"
+
+    # A tree can only verify the already resolved Person X; it is never an
+    # identity selector. Its absence leaves the semantic person intact for
+    # FastGen to draw without a reference PNG.
+    if settings is not None:
+        verification_item = {**production_item, "portrait_subject": name, "cover_face_required": True}
+        path, label, _source = _match_cover_face_reference(verification_item, settings)
+        if path and _cover_face_match_score(_cover_face_tokens(name), _cover_face_tokens(label)) >= 78:
+            resolved.update({
+                "source": "core-face-tree",
+                "evidence_type": "VERIFIED_LOCAL_IDENTITY",
+                "evidence_summary": f"matching local face-tree identity for {name}",
+            })
+            status = "RESOLVED"
+    return resolved, status
 
 
 def _resolve_cover_portrait(
@@ -5984,7 +6066,8 @@ def production_item_prompt(item: dict) -> str:
     return "\n".join(blocks)
 
 
-def _ensure_cover_face_resolution_item(item: dict) -> bool:
+def _ensure_cover_face_resolution_item(item: dict, *, settings: Settings | None = None,
+                                       evidence_item: dict | None = None) -> bool:
     """Give every durable ProductionItem an explicit safe Cover-face state.
 
     Legacy items are deliberately *not* guessed from country/place labels. A
@@ -5998,20 +6081,24 @@ def _ensure_cover_face_resolution_item(item: dict) -> bool:
     # never allow a current ProductionItem to bypass face resolution.
     item["cover_face_required"] = True
     candidates = item.get("cover_people_candidates")
-    item["cover_people_candidates"] = [dict(row) for row in candidates if isinstance(row, dict)] if isinstance(candidates, list) else []
+    candidates = [dict(row) for row in candidates if isinstance(row, dict)] if isinstance(candidates, list) else []
     primary = item.get("cover_primary_person")
-    item["cover_primary_person"] = dict(primary) if isinstance(primary, dict) else None
-    for candidate in [*item["cover_people_candidates"], item["cover_primary_person"]]:
-        if candidate is not None:
-            candidate["evidence_type"] = _cover_person_evidence_type(candidate)
-            candidate.setdefault("evidence_summary", str(candidate.get("relation_to_story", "")).strip())
-    status = str(item.get("cover_face_resolution_status", "")).strip().upper()
-    if status not in {"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"}:
-        status = "RESOLVED" if item["cover_primary_person"] else "NEEDS_REVIEW"
-    if not item["cover_primary_person"]:
-        status = "NEEDS_REVIEW"
-    elif _cover_person_evidence_type(item["cover_primary_person"]) == "ANCHOR_DERIVED":
-        status = "LOW_CONFIDENCE"
+    current = evidence_item if isinstance(evidence_item, dict) else item
+    primary, status = derive_person_evidence(primary, current, settings)
+    if primary is None:
+        item["cover_people_candidates"] = []
+        item["cover_primary_person"] = None
+        item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+        return item != before
+    derived_candidates: list[dict] = [primary]
+    for candidate in candidates:
+        if _cover_person_name(candidate).casefold() == _cover_person_name(primary).casefold():
+            continue
+        derived, _candidate_status = derive_person_evidence(candidate, current, settings)
+        if derived is not None:
+            derived_candidates.append(derived)
+    item["cover_people_candidates"] = derived_candidates
+    item["cover_primary_person"] = primary
     item["cover_face_resolution_status"] = status
     return item != before
 
@@ -6026,45 +6113,40 @@ def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job
     plan = getattr(job, "story_plan", None)
     if not isinstance(plan, dict):
         return False
-    candidates = [dict(row) for row in plan.get("cover_people_candidates", []) if isinstance(row, dict)]
-    primary = dict(plan["cover_primary_person"]) if isinstance(plan.get("cover_primary_person"), dict) else None
-    for candidate in [*candidates, primary]:
-        if candidate is not None:
-            candidate["evidence_type"] = _cover_person_evidence_type(candidate)
-            candidate.setdefault("evidence_summary", str(candidate.get("relation_to_story", "")).strip())
     record = {
         "cover_face_required": True,
-        "cover_people_candidates": candidates,
-        "cover_primary_person": primary,
+        "cover_people_candidates": [dict(row) for row in plan.get("cover_people_candidates", []) if isinstance(row, dict)],
+        "cover_primary_person": (dict(plan["cover_primary_person"])
+                                if isinstance(plan.get("cover_primary_person"), dict) else None),
         "cover_face_resolution_status": str(plan.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper(),
     }
-    if record["cover_face_resolution_status"] not in {"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"}:
-        record["cover_face_resolution_status"] = "NEEDS_REVIEW"
-    if not record["cover_primary_person"]:
-        record["cover_face_resolution_status"] = "NEEDS_REVIEW"
-    elif _cover_person_evidence_type(record["cover_primary_person"]) == "ANCHOR_DERIVED":
-        record["cover_face_resolution_status"] = "LOW_CONFIDENCE"
     production_id = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
     changed = False
+    context = getattr(settings, "idea_scenario_context", {}).get(title)
     for item in getattr(settings, "idea_production_items", []):
         if not isinstance(item, dict):
             continue
         if (production_id and str(item.get("id", "")).strip() == production_id) or (
             not production_id and str(item.get("title", "")).casefold() == str(title).casefold()
         ):
+            derived_record = dict(record)
+            evidence = {**item, **context} if isinstance(context, dict) else item
+            _ensure_cover_face_resolution_item(derived_record, settings=settings, evidence_item=evidence)
+            record = derived_record
             if any(item.get(key) != value for key, value in record.items()):
                 item.update(record)
                 changed = True
-            _ensure_cover_face_resolution_item(item)
             break
-    context = getattr(settings, "idea_scenario_context", {}).get(title)
     if isinstance(context, dict) and (
         not production_id or str(context.get("id", "")).strip() == production_id
     ):
+        if not changed:
+            derived_record = dict(record)
+            _ensure_cover_face_resolution_item(derived_record, settings=settings, evidence_item=context)
+            record = derived_record
         if any(context.get(key) != value for key, value in record.items()):
             context.update(record)
             changed = True
-        _ensure_cover_face_resolution_item(context)
     return changed
 
 
