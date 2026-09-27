@@ -881,7 +881,7 @@ def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
 
 def _cover_story_planner_candidate(item: dict) -> tuple[str, str, str, float]:
     """Return the persisted Planner choice only when it remains a person."""
-    if str(item.get("cover_face_resolution_status", "")).strip().upper() != "RESOLVED":
+    if str(item.get("cover_face_resolution_status", "")).strip().upper() not in {"RESOLVED", "LOW_CONFIDENCE"}:
         return "", "", "", 0.0
     candidate = item.get("cover_primary_person")
     if not _cover_entity_is_explicit_person(candidate):
@@ -940,7 +940,8 @@ def _resolve_cover_portrait(
             "portrait_confidence": confidence if subject else 0,
         }
         if subject:
-            item["cover_face_resolution_status"] = "RESOLVED"
+            if str(item.get("cover_face_resolution_status", "")).strip().upper() != "LOW_CONFIDENCE":
+                item["cover_face_resolution_status"] = "RESOLVED"
         elif item.get("cover_face_required"):
             item["cover_face_resolution_status"] = "NEEDS_REVIEW"
     item.update(resolved)
@@ -5981,7 +5982,7 @@ def _ensure_cover_face_resolution_item(item: dict) -> bool:
     primary = item.get("cover_primary_person")
     item["cover_primary_person"] = dict(primary) if isinstance(primary, dict) else None
     status = str(item.get("cover_face_resolution_status", "")).strip().upper()
-    if status not in {"RESOLVED", "NEEDS_REVIEW"}:
+    if status not in {"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"}:
         status = "RESOLVED" if item["cover_primary_person"] else "NEEDS_REVIEW"
     if not item["cover_primary_person"]:
         status = "NEEDS_REVIEW"
@@ -6008,7 +6009,7 @@ def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job
         ),
         "cover_face_resolution_status": str(plan.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper(),
     }
-    if record["cover_face_resolution_status"] not in {"RESOLVED", "NEEDS_REVIEW"}:
+    if record["cover_face_resolution_status"] not in {"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"}:
         record["cover_face_resolution_status"] = "NEEDS_REVIEW"
     if not record["cover_primary_person"]:
         record["cover_face_resolution_status"] = "NEEDS_REVIEW"

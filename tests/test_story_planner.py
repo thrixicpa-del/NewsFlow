@@ -79,6 +79,27 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cover person"):
             parse_story_plan_response(response, (5000,))
 
+    def test_parser_accepts_low_confidence_real_person_after_deeper_actor_resolution(self):
+        response = json.dumps({
+            "thesis": "История решения институции.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
+                               "content_kind": "SUPPORTED"}],
+            "cover_face_required": True,
+            "cover_people_candidates": [{"name": "Марек Новак", "entity_type": "public_figure",
+                                         "role_in_story": "председатель комиссии", "relation_to_story": "отвечает за решение",
+                                         "source": "institution-decision-maker", "confidence": 0.62}],
+            "cover_primary_person": {"name": "Марек Новак", "entity_type": "public_figure",
+                                     "role_in_story": "председатель комиссии", "relation_to_story": "отвечает за решение",
+                                     "source": "institution-decision-maker", "confidence": 0.62},
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
+                       "content_ids": ["C001"]}],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000,))
+
+        self.assertEqual(plan.to_dict()["cover_face_resolution_status"], "LOW_CONFIDENCE")
+
     def test_legacy_persisted_plan_defaults_cover_resolution_to_needs_review(self):
         legacy = {
             "thesis": "Старая история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
@@ -231,7 +252,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
 
         self.assertIn("cover_people_candidates", prompt)
         self.assertIn("cover_primary_person", prompt)
-        self.assertIn("NEEDS_REVIEW", prompt)
+        self.assertIn("LOW_CONFIDENCE", prompt)
         self.assertIn("Never infer a person from geography", prompt)
 
     def test_planner_uses_place_or_institution_as_an_anchor_for_contextual_actor_resolution(self):

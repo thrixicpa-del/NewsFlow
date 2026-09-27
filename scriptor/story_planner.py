@@ -16,7 +16,7 @@ _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 _COVER_PERSON_ENTITY_TYPES = frozenset({"person", "public_figure", "politician", "human", "individual"})
-_COVER_FACE_RESOLUTION_STATUSES = frozenset({"RESOLVED", "NEEDS_REVIEW"})
+_COVER_FACE_RESOLUTION_STATUSES = frozenset({"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"})
 
 
 @dataclass(frozen=True)
@@ -181,9 +181,9 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
     )
     face_status = _optional_text(raw.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper()
     if face_status not in _COVER_FACE_RESOLUTION_STATUSES:
-        raise ValueError("story plan cover_face_resolution_status must be RESOLVED or NEEDS_REVIEW")
-    if face_status == "RESOLVED" and cover_primary_person is None:
-        raise ValueError("story plan RESOLVED cover face requires cover_primary_person")
+        raise ValueError("story plan cover_face_resolution_status must be RESOLVED, LOW_CONFIDENCE or NEEDS_REVIEW")
+    if face_status in {"RESOLVED", "LOW_CONFIDENCE"} and cover_primary_person is None:
+        raise ValueError("story plan resolved cover face requires cover_primary_person")
     if face_status == "NEEDS_REVIEW" and cover_primary_person is not None:
         raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_primary_person")
     if cover_primary_person and not any(
@@ -414,15 +414,16 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "new content atom. Any opened loop must be closed by a later planned part.\n\n"
         "COVER FACE RESOLUTION (required for this ProductionItem): return cover_face_required=true, "
         "cover_people_candidates (ranked real public people only), cover_primary_person, and "
-        "cover_face_resolution_status RESOLVED or NEEDS_REVIEW. Every candidate needs name, entity_type "
+        "cover_face_resolution_status RESOLVED, LOW_CONFIDENCE or NEEDS_REVIEW. Every candidate needs name, entity_type "
         "person/public_figure, role_in_story, relation_to_story, source and confidence from 0 to 1. Select a "
         "person only from explicit current-story evidence: selected people, typed person entities, a named person "
         "in title/topic/context, or a factual action/decision relation. Treat an institution/place/event as a semantic "
         "anchor: continue through the supplied sides, actions and responsibility to identify the factually relevant "
         "decision maker or public figure. Do not stop at the institution/place/event and do not use a static country-or-place "
         "to leader mapping. Never infer a person from geography, a country, an organisation or a place without a factual "
-        "relation in the ProductionItem. Only after those evidence-based steps fail, return an empty candidate list, null "
-        "cover_primary_person and NEEDS_REVIEW; do not invent a leader.\n\n"
+        "relation in the ProductionItem. Use LOW_CONFIDENCE only when a real person is still grounded but the evidence is "
+        "weaker; only after those evidence-based steps fail, return an empty candidate list, null cover_primary_person and "
+        "NEEDS_REVIEW; do not invent a leader.\n\n"
         f"TOPIC: {request.title}\n"
         f"TARGET: {request.target_chars}; MIN: {request.allowed_min}; MAX: {request.allowed_max}\n"
         f"PARTS: {part_rows}\n\n"

@@ -174,6 +174,61 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         create.assert_not_called()
         self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить лицо для обложки")
+
+    def test_unresolved_item_isolated_while_resolved_batch_item_reaches_fastgen(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(cover_output_folder=directory, cover_auto_overlay_text=False, cover_variant_count=1)
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            primary = {
+                "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                "relation_to_story": "ведёт переговоры", "source": "story-planner", "confidence": 0.94,
+            }
+            settings.cover_queue = [
+                {"production_item_id": "production:review", "title": "Городская тема", "image_prompt": "Город",
+                 "cover_face_required": True, "cover_face_resolution_status": "NEEDS_REVIEW"},
+                {"production_item_id": "production:resolved", "title": "Переговоры", "image_prompt": "Переговоры",
+                 "cover_face_required": True, "cover_people_candidates": [primary], "cover_primary_person": primary,
+                 "cover_face_resolution_status": "RESOLVED"},
+            ]
+            calls = []
+
+            def render(_prompt, output, _stem, _operation, _ratio, **_kwargs):
+                calls.append(True)
+                generated = output / "resolved.png"
+                generated.write_bytes(b"image")
+                return [generated]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "_run_parallel_cover_workers", side_effect=lambda indices, worker: [worker(index) for index in indices]), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge._generate_covers_unlocked({
+                    "indices": [0, 1], "productionItemIds": ["production:review", "production:resolved"],
+                    "buildMode": "fastgen-full", "faceMode": "auto", "textMode": "fastgen",
+                })
+
+        self.assertEqual(calls, [True])
+        self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить лицо для обложки")
+        self.assertEqual(settings.cover_queue[1]["status"], "Готово")
+
+    def test_low_confidence_primary_person_still_reaches_covers_without_downgrading_to_needs_review(self):
+        from scriptor import bridge
+
+        item = {
+            "title": "Институция приняла решение", "cover_face_required": True,
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
+            "cover_primary_person": {"name": "Марек Новак", "entity_type": "public_figure",
+                                     "role_in_story": "председатель", "relation_to_story": "ответственный actor",
+                                     "source": "institution-decision-maker", "confidence": 0.62},
+        }
+        resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
+
+        self.assertEqual(resolved["portrait_subject"], "Марек Новак")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
     def test_cover_text_generation_projects_a_current_context_row_before_provider_call(self):
         """A durable current scenario must not need a prior manual Covers transfer."""
         from scriptor import bridge
