@@ -411,6 +411,32 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(jobs[0].state, RunState.DONE)
                 self.assertEqual(len(jobs[0].accepted_story_parts), 1)
 
+    async def test_single_part_without_length_contract_keeps_natural_writer_length(self):
+        class UnboundedClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
+                if "CURRENT TARGET: no explicit character target" not in prompt:
+                    raise AssertionError("unbounded writer must not receive a fake one-character target")
+                if "approximately 1 characters" in prompt:
+                    raise AssertionError("unbounded writer received a one-character target")
+                return "Готовый цельный сценарий естественной длины. " * 20
+
+        client = UnboundedClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "S", "ORIGINAL WRITING CONTRACT"),
+        ])
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].length_status, "")
+        self.assertGreater(jobs[0].actual_chars, 100)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 1)
+
     async def test_single_part_plan_is_persisted_before_the_writer_starts(self):
         changes = []
 
@@ -534,6 +560,37 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.PAUSED)
         self.assertEqual(jobs[0].result, "мало")
         self.assertEqual(jobs[0].length_status, "SHORT")
+        self.assertEqual(jobs[0].accepted_story_parts, [])
+
+    async def test_short_single_complete_writer_retry_regenerates_p1_without_replanning(self):
+        class RetryShortClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(1)
+                self.writer_calls += 1
+                return "мало" if self.writer_calls == 1 else "а" * 120
+
+        client = RetryShortClient()
+        runner = ParallelRunner(client, 1)
+        request = ScenarioRequest(
+            0, "S", "P", target_chars=120, allowed_min=100, allowed_max=140,
+        )
+        jobs = await runner.run([request])
+
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].accepted_story_parts, [])
+        retried = await runner.retry(jobs[0])
+
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.writer_calls, 2)
+        self.assertEqual(retried.state, RunState.DONE)
+        self.assertEqual(retried.length_status, "READY")
+        self.assertEqual(len(retried.accepted_story_parts), 1)
 
     async def test_one_sided_maximum_is_trimmed_without_a_rewrite(self):
         class MaximumClient:
@@ -550,6 +607,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertLessEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 1)
+        self.assertEqual(jobs[0].accepted_story_parts[0]["text"], jobs[0].result)
+        self.assertLessEqual(len(jobs[0].accepted_story_parts[0]["text"]), 10000)
 
     async def test_in_range_script_finishes_after_one_provider_response(self):
         class LengthClient:
