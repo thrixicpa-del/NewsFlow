@@ -1378,11 +1378,11 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "prepared-reference")
                     self.assertIn("prepared face-tree match", settings.cover_queue[0]["faceSelectionReason"])
                 else:
-                    self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Зеленский")
-                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "tree")
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Владимир Зеленский")
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "explicit-topic-entity")
                     self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "semantic-only")
-                    self.assertIn("face-tree metadata match", settings.cover_queue[0]["faceSelectionReason"])
-                    self.assertIn("recognisable editorial portrait of Зеленский", settings.cover_queue[0]["final_provider_prompt"])
+                    self.assertIn("political portrait resolved", settings.cover_queue[0]["faceSelectionReason"])
+                    self.assertIn("recognisable editorial portrait of Владимир Зеленский", settings.cover_queue[0]["final_provider_prompt"])
                     self.assertNotIn(str(prepared), settings.cover_queue[0]["final_provider_prompt"])
 
     def test_mixed_mode_ranges_send_zero_then_exactly_one_prepared_png(self):
@@ -1500,8 +1500,112 @@ class CoverFaceLibraryTests(unittest.TestCase):
         self.assertEqual(calls, [()])
         self.assertEqual(settings.cover_queue[0]["status"], "Готово")
         self.assertEqual(settings.cover_queue[0]["face_reference_count"], 0)
-        self.assertIn("continued without PNG", settings.cover_queue[0]["faceSelectionReason"])
+        self.assertIn("no prepared PNG", settings.cover_queue[0]["faceSelectionReason"])
         self.assertNotIn("face_reference_path", settings.cover_queue[0])
+
+    def test_political_portrait_resolver_reaches_both_fastgen_routes_without_a_png(self):
+        """A political scene must keep an identified side portrait even without local files."""
+        from scriptor import bridge
+
+        for build_mode in ("fastgen-full", "fastgen-full-my-face"):
+            with self.subTest(build_mode=build_mode), TemporaryDirectory() as directory:
+                root = Path(directory)
+                settings = Settings(
+                    cover_output_folder=directory,
+                    cover_variant_count=1,
+                    cover_operation="reference_image_edit",
+                    cover_face_library_folder=str(root / "missing-faces"),
+                    cover_face_prepared_folder=str(root / "missing-prepared"),
+                    cover_face_library_enabled=True,
+                )
+                settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+                settings.fastgen_capabilities_cache = {"image": [{
+                    "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+                }]}
+                settings.cover_queue = [{
+                    "title": "Кремль усилил давление: переговоры по Украине меняют тон",
+                    "scenario_index": 1,
+                    "production_item_id": "production:kremlin",
+                    "image_prompt": "Topic-accurate editorial negotiation scene",
+                    "cover_headline": "КРЕМЛЬ ДАВИТ",
+                    "cover_subheadline": "ПЕРЕГОВОРЫ МЕНЯЮТ ТОН",
+                    "paths": [],
+                }]
+                calls: list[tuple[str, tuple[str, ...]]] = []
+
+                def render(prompt, output, _stem, _operation, _ratio, *, _calls=calls,
+                           _build_mode=build_mode, **kwargs):
+                    _calls.append((prompt, tuple(str(path) for path in kwargs.get("references") or [])))
+                    generated = output / f"{_build_mode}.png"
+                    generated.write_bytes(b"generated")
+                    return [generated]
+
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                     patch.object(bridge, "_save_cover_state"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                    bridge.generate_covers({
+                        "indices": [0], "productionItemIds": ["production:kremlin"],
+                        "_parallel_cover_worker": True, "buildMode": build_mode,
+                        "faceMode": "auto", "textMode": "fastgen",
+                        "operation": "reference_image_edit",
+                    })
+
+                item = settings.cover_queue[0]
+                self.assertEqual(calls[0][1], ())
+                self.assertEqual(item["portrait_subject"], "Владимир Путин")
+                self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
+                self.assertEqual(item["portrait_source"], "political-context-map")
+                self.assertIn("кремль", item["portrait_resolver_reason"].casefold())
+                self.assertIn("Владимир Путин", calls[0][0])
+                self.assertIn("large side portrait", calls[0][0])
+                self.assertEqual(item["face_reference_count"], 0)
+
+    def test_explicit_without_faces_bypasses_political_portrait_resolution(self):
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(cover_output_folder=directory, cover_variant_count=1)
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {"image": [{
+                "id": "reference_image_edit", "inputs": {"min": 0, "max": 2},
+            }]}
+            settings.cover_queue = [{
+                "title": "Кремль усилил давление: переговоры по Украине меняют тон",
+                "scenario_index": 1,
+                "production_item_id": "production:kremlin-without",
+                "image_prompt": "Topic-accurate editorial negotiation scene",
+                "cover_headline": "КРЕМЛЬ ДАВИТ",
+                "cover_subheadline": "ПЕРЕГОВОРЫ МЕНЯЮТ ТОН",
+                "paths": [],
+            }]
+            prompts: list[str] = []
+
+            def render(prompt, output, _stem, _operation, _ratio, **_kwargs):
+                prompts.append(prompt)
+                generated = output / "without-face.png"
+                generated.write_bytes(b"generated")
+                return [generated]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:kremlin-without"],
+                    "_parallel_cover_worker": True, "buildMode": "fastgen-full",
+                    "faceMode": "without", "textMode": "fastgen",
+                    "operation": "reference_image_edit",
+                })
+
+            item = settings.cover_queue[0]
+            self.assertEqual(item["portrait_subject"], "")
+            self.assertEqual(item["portrait_side"], "")
+            self.assertEqual(item["portrait_source"], "disabled")
+            self.assertNotIn("Владимир Путин", prompts[0])
+            self.assertEqual(item["face_reference_count"], 0)
 
 
     def test_face_match_does_not_infer_a_person_from_place_only(self):
@@ -3190,6 +3294,94 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
         self.assertEqual(settings.cover_queue[0]["cover_subheadline"], "Ручной подзаголовок")
         self.assertEqual(result["operationResult"]["count"], 1)
 
+    def test_force_repair_does_not_replace_manual_cover_text_without_explicit_override(self):
+        """A normal retry repairs missing AI text, never words explicitly typed by the operator."""
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            cover_headline="РУЧНОЙ ЗАГОЛОВОК", headline_status="MANUAL", headline_source="MANUAL",
+            cover_subheadline="Ручной подзаголовок", subheadline_status="MANUAL", subheadline_source="MANUAL",
+        )]
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool") as pool:
+            result = bridge.generate_cover_texts({"provider": "agent", "force": True, "regenerate": True})
+
+        pool.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "РУЧНОЙ ЗАГОЛОВОК")
+        self.assertEqual(settings.cover_queue[0]["cover_subheadline"], "Ручной подзаголовок")
+        self.assertEqual(result["operationResult"]["count"], 1)
+
+    def test_explicit_replace_manual_action_can_replace_both_manual_fields(self):
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            cover_headline="РУЧНОЙ ЗАГОЛОВОК", headline_status="MANUAL", headline_source="MANUAL",
+            cover_subheadline="Ручной подзаголовок", subheadline_status="MANUAL", subheadline_source="MANUAL",
+        )]
+
+        async def generated(_pool, kind, *_args, **_kwargs):
+            value = "НОВЫЙ ЗАГОЛОВОК" if kind == "headline" else "Новая вторая строка"
+            return value, {"semantic_slots": ["subject"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            bridge.generate_cover_texts({"provider": "agent", "replaceManual": True})
+
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "НОВЫЙ ЗАГОЛОВОК")
+        self.assertEqual(settings.cover_queue[0]["headline_source"], "AI")
+        self.assertEqual(settings.cover_queue[0]["cover_subheadline"], "Новая вторая строка")
+        self.assertEqual(settings.cover_queue[0]["subheadline_source"], "AI")
+
+    def test_pair_repair_generates_only_the_missing_subheadline(self):
+        """Repair must retain the valid neighbouring field and issue one provider request."""
+        from scriptor import bridge
+
+        settings = Settings()
+        settings.cover_queue = [self._current_row(
+            cover_headline="РУЧНОЙ ЗАГОЛОВОК", headline_status="MANUAL", headline_source="MANUAL",
+        )]
+        calls: list[str] = []
+
+        async def generated(_pool, kind, *_args, **_kwargs):
+            calls.append(kind)
+            return "Новая вторая строка", {"semantic_slots": ["action"], "valid": True}, [{"attempt": 1}]
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge._save_cover_text_progress"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace()), \
+             patch("scriptor.bridge._generate_cover_word_v2", side_effect=generated):
+            result = bridge.generate_cover_texts({"provider": "agent"})
+
+        self.assertEqual(calls, ["subheadline"])
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "РУЧНОЙ ЗАГОЛОВОК")
+        self.assertEqual(settings.cover_queue[0]["headline_source"], "MANUAL")
+        self.assertEqual(settings.cover_queue[0]["cover_subheadline"], "Новая вторая строка")
+        self.assertEqual(result["operationResult"]["count"], 1)
+
+    def test_repair_fills_an_explicitly_cleared_manual_field(self):
+        """A blank manual field is missing content, not an immutable override."""
+        from scriptor import bridge
+
+        item = self._current_row(
+            cover_headline="", headline_status="MANUAL", headline_source="MANUAL",
+            cover_subheadline="Ручной подзаголовок", subheadline_status="MANUAL", subheadline_source="MANUAL",
+        )
+
+        self.assertTrue(bridge._cover_word_should_generate(item, "headline"))
+        self.assertFalse(bridge._cover_word_should_generate(item, "subheadline"))
+
     def test_mass_pair_batch_marks_one_terminal_failure_instead_of_leaving_a_hole(self):
         from scriptor import bridge
 
@@ -3568,10 +3760,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                 self.assertIn(f"<exact-text>{row['cover_headline']}</exact-text>", calls[0][0])
                 self.assertIn(f"<exact-text>{row['cover_subheadline']}</exact-text>", calls[0][0])
                 self.assertEqual(calls[0][1], (str(face),) if row["expect_reference"] else ())
-                if row["expect_reference"]:
-                    self.assertIn(row["face_label"], calls[0][0])
-                else:
-                    self.assertNotIn(row["face_label"], calls[0][0])
+                self.assertIn(row["face_label"], calls[0][0])
                 compose.assert_not_called()
 
     def test_fastgen_full_with_selected_face_rejects_operation_without_reference_input(self):

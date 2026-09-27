@@ -554,18 +554,21 @@ function Button({
   onClick,
   ariaLabel,
   disabled = false,
+  type = "button",
 }: {
   children: React.ReactNode;
   kind?: "primary" | "success" | "danger" | "secondary";
   onClick?: () => void;
   ariaLabel?: string;
   disabled?: boolean;
+  type?: "button" | "submit";
 }) {
-  const available = typeof onClick === "function";
+  const available = typeof onClick === "function" || type === "submit";
   const variant = kind === "danger" ? "destructive" : kind;
   return (
     <UiButton
       variant={variant}
+      type={type}
       onClick={onClick}
       aria-label={ariaLabel}
       disabled={disabled || !available}
@@ -4397,13 +4400,14 @@ export function Covers({
       avoidRepeats: avoidTextRepeats,
       force,
     }));
-  const generateAutoCoverTextPair = (force = false, indices = selected) =>
+  const generateAutoCoverTextPair = (force = false, indices = selected, replaceManual = false) =>
     void command("generate-cover-texts", coverWordPairGenerationPayload({
       ...coverSelectionPayload(indices),
       provider: headlineProvider,
       useStructure: useTextStructure,
       avoidRepeats: avoidTextRepeats,
       force,
+      replaceManual,
     }));
   const cancelSubheadlines = () =>
     void command("cancel-cover-subheadlines", { indices: selected });
@@ -6386,6 +6390,13 @@ export function Covers({
               <WandSparkles size={16} />
               Перегенерировать подзаголовки — авто
             </Button>
+            <Button
+              kind="danger"
+              onClick={selected.length ? () => generateAutoCoverTextPair(true, selected, true) : undefined}
+            >
+              <WandSparkles size={16} />
+              Заменить ручной текст ИИ
+            </Button>
           </div>
         </div>
         <div className="cover-preset-row cover-headline-preset-row">
@@ -6740,6 +6751,13 @@ export function Covers({
             Придумать заголовки и подзаголовки — выбранным
           </Button>
           <Button
+            kind="danger"
+            onClick={selected.length ? () => generateAutoCoverTextPair(true, selected, true) : undefined}
+          >
+            <WandSparkles size={17} />
+            Заменить ручной текст ИИ
+          </Button>
+          <Button
             kind="success"
             onClick={
               !data.coverSettings.generationPaused && promptsReady && !coverGenerationStarting
@@ -6944,6 +6962,16 @@ export function Covers({
                     </dd>
                   </div>
                   <div>
+                    <dt>Политический портрет</dt>
+                    <dd>
+                      {cover.portrait_subject
+                        ? `${cover.portrait_subject} · ${cover.portrait_side || "side not set"} · ${cover.portrait_source || "source unavailable"} · ${cover.portrait_resolver_reason || "reason unavailable"}`
+                        : cover.portrait_source === "disabled"
+                          ? "Отключён пользователем для этой темы"
+                          : "Для этой темы политический портрет не выбран"}
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Режим FastGen</dt>
                     <dd>{cover.render_profile?.build_mode || "Ещё не запускался"}</dd>
                   </div>
@@ -7090,46 +7118,54 @@ export function Covers({
                     </Button>
                   </div>
                 </div>
-                <div className="cover-headline-row">
+                <form
+                  className="cover-headline-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const value = new FormData(event.currentTarget).get("headline");
+                    void command("save-cover-headline", { index, headline: String(value || "") });
+                  }}
+                >
                   <label>
                     <small>Заголовок на обложке</small>
                     <input
+                      name="headline"
                       key={`${cover.title}-${cover.cover_headline || ""}`}
                       defaultValue={cover.cover_headline || ""}
-                      onBlur={(event) =>
-                        void command("save-cover-headline", {
-                          index,
-                          headline: event.target.value,
-                        })
-                      }
                       placeholder="Создай заголовок или впишите его вручную"
                     />
                     <span>
-                      {cover.headline_status || cover.headline_error || ""}
+                      {cover.headline_source === "MANUAL"
+                        ? "Вручную · сохранено"
+                        : cover.headline_status || cover.headline_error || ""}
                     </span>
                   </label>
-                </div>
-                <div className="cover-subheadline-row">
+                  <Button type="submit">Сохранить вручную</Button>
+                </form>
+                <form
+                  className="cover-subheadline-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const value = new FormData(event.currentTarget).get("subheadline");
+                    void command("save-cover-subheadline", { index, subheadline: String(value || "") });
+                  }}
+                >
                   <label>
                     <small>Подзаголовок на обложке</small>
                     <input
+                      name="subheadline"
                       key={`${cover.title}-${cover.cover_subheadline || ""}`}
                       defaultValue={cover.cover_subheadline || ""}
-                      onBlur={(event) =>
-                        void command("save-cover-subheadline", {
-                          index,
-                          subheadline: event.target.value,
-                        })
-                      }
                       placeholder="Создай подзаголовок или впишите его вручную"
                     />
                     <span>
-                      {cover.subheadline_status ||
-                        cover.subheadline_error ||
-                        ""}
+                      {cover.subheadline_source === "MANUAL"
+                        ? "Вручную · сохранено"
+                        : cover.subheadline_status || cover.subheadline_error || ""}
                     </span>
                   </label>
-                </div>
+                  <Button type="submit">Сохранить вручную</Button>
+                </form>
                 {cover.image_prompt_options?.length ? (
                   <div className="cover-prompt-cards">
                     {cover.image_prompt_options.map((prompt, option) => (

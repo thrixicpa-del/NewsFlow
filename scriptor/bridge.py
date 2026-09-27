@@ -754,6 +754,91 @@ def _cover_face_match_score(topic_tokens: set[str], candidate_tokens: set[str]) 
     return best
 
 
+# This is intentionally separate from the file-name matcher above.  The face
+# tree is optional operator media, while the FastGen-only route still needs a
+# concrete editorial subject when a political topic names a country, capital or
+# institution rather than the person.  The ordered aliases are editorial
+# fallback knowledge, not a substitute for a supplied person/entity.
+_COVER_POLITICAL_PORTRAIT_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("Владимир Путин", ("владимир путин", "путин"), ("россия", "россии", "кремль", "москва")),
+    ("Владимир Зеленский", ("владимир зеленский", "зеленский"), ("украина", "украины", "киев", "киеву")),
+    ("Дональд Трамп", ("дональд трамп", "трамп"), ("сша", "соединенные штаты", "белый дом", "вашингтон")),
+    ("Ильхам Алиев", ("ильхам алиев", "алиев"), ("азербайджан", "азербайджана", "баку", "карабах")),
+    ("Никол Пашинян", ("никол пашинян", "пашинян"), ("армения", "армении", "ереван")),
+    ("Реджеп Тайип Эрдоган", ("реджеп тайип эрдоган", "эрдоган"), ("турция", "турции", "анкара")),
+)
+
+
+def _cover_portrait_context(item: dict) -> str:
+    return " ".join(_cover_context_values(item.get(key)) for key in (
+        "title", "topic", "angle", "event_context", "supporting_context",
+        "selected_people", "primary_entities", "primary_entity", "entities",
+    ) if item.get(key) not in (None, "", [], {}))
+
+
+def _resolve_cover_portrait(
+    item: dict, settings: Settings, *, face_mode: str, allow_manual_reference: bool,
+) -> dict[str, str]:
+    """Persist the named political portrait contract before the provider prompt.
+
+    A prepared PNG may be unavailable and is never required for this decision.
+    The resolver therefore records the intended person and side separately from
+    the optional local reference transport used by the my-faces route.
+    """
+    del settings
+    if face_mode == "without" or item.get("face_reference_disabled"):
+        resolved = {
+            "portrait_subject": "", "portrait_side": "", "portrait_source": "disabled",
+            "portrait_resolver_reason": "operator explicitly selected without faces",
+        }
+    else:
+        manual_label = " ".join(str(item.get("face_reference_label", "")).split())
+        manual_path = Path(str(item.get("face_reference_path", "") or "")).expanduser()
+        if (allow_manual_reference and item.get("face_reference_source") == "manual"
+                and manual_label and manual_path.is_file()):
+            subject, source, reason = manual_label, "manual", "operator selected a portrait for this topic"
+        else:
+            context = _cover_portrait_context(item).casefold()
+            candidates: list[tuple[int, int, str, str, str]] = []
+            for subject, person_aliases, political_aliases in _COVER_POLITICAL_PORTRAIT_RULES:
+                for alias in person_aliases:
+                    position = context.find(alias)
+                    if position >= 0:
+                        candidates.append((position, 0, subject, "explicit-topic-entity", alias))
+                for alias in political_aliases:
+                    position = context.find(alias)
+                    if position >= 0:
+                        candidates.append((position, 1, subject, "political-context-map", alias))
+            if candidates:
+                _position, _priority, subject, source, alias = min(candidates)
+                reason = f"political subject resolved from topic marker: {alias}"
+            else:
+                subject = source = reason = ""
+        resolved = {
+            "portrait_subject": subject,
+            "portrait_side": _cover_face_side(item) if subject else "",
+            "portrait_source": source or "none",
+            "portrait_resolver_reason": reason or "no political portrait subject resolved from current topic",
+        }
+    item.update(resolved)
+    return resolved
+
+
+def _cover_resolved_portrait_layout(item: dict, subject: str, side: str) -> str:
+    """Return the stable edge portrait composition for any resolved subject."""
+    if not subject or side not in {"LEFT", "RIGHT"}:
+        return ""
+    opposite = "RIGHT" if side == "LEFT" else "LEFT"
+    instruction = (
+        f"Place {subject} as one large side portrait on the {side}, hard-anchored to that outer edge and bottom edge. "
+        "Use a recognisable photorealistic head-and-shoulders likeness that fills roughly 48–66% of image height; "
+        "never centre it, never use a tiny face, and never substitute an unrelated public figure. "
+        f"Keep the opposite {opposite} side available for the story scene and mobile-size headline hierarchy."
+    )
+    item["face_layout"] = f"крупный боковой портрет {side.lower()}"
+    return instruction
+
+
 def _cover_tokens_match(values: set[str], expected: set[str]) -> bool:
     """Allow word forms such as ``хаменея`` and folder names like Hameneyi."""
     return any(value == hint or value.startswith(hint) or hint.startswith(value)
@@ -7331,12 +7416,24 @@ def _cover_word_structure_pair(item: dict, variation_index: int = 0) -> dict[str
     }
 
 
-def _cover_word_should_generate(item: dict, kind: str, *, force: bool = False) -> bool:
+def _cover_word_should_generate(
+    item: dict, kind: str, *, force: bool = False, replace_manual: bool = False,
+) -> bool:
     prefix = "headline" if kind == "headline" else "subheadline"
     value_key = "cover_headline" if prefix == "headline" else "cover_subheadline"
     source = str(item.get(f"{prefix}_source", "")).upper()
-    status = str(item.get(f"{prefix}_status", "")).upper()
-    return bool(force or (source != "MANUAL" and status not in {"READY", "MANUAL"} and not str(item.get(value_key, "")).strip()))
+    value = str(item.get(value_key, "")).strip()
+    # A non-empty manual edit is an explicit operator override. Ordinary
+    # retries/regeneration repair missing or AI-owned text only; replacement
+    # must be opt-in through the dedicated replaceManual action.
+    if source == "MANUAL" and value:
+        return bool(replace_manual)
+    # Clearing a manual value deliberately asks the missing-field repair path
+    # to fill this field.  Its old MANUAL status must not make that blank field
+    # permanently ineligible for normal generation.
+    if not value:
+        return True
+    return bool(force)
 
 def _cover_word_source_text(item: dict) -> str:
     fields = ("title", "topic", "angle", "event_context", "supporting_context", "script",
@@ -7918,12 +8015,13 @@ def generate_cover_headlines(payload: dict) -> dict:
     if template and not use_default:
         settings.cover_headline_template = template[:12000]
     active_template = Settings().cover_headline_template if use_default else settings.cover_headline_template
-    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
+    force = bool(payload.get("force") or payload.get("regenerate"))
+    replace_manual = bool(payload.get("replaceManual"))
     scope = _current_cover_generation_scope(
         settings, payload, "Выберите сценарии для фраз на обложку",
     )
     selected = [(index, item) for index, item in scope
-                if _cover_word_should_generate(item, "headline", force=force)]
+                if _cover_word_should_generate(item, "headline", force=force, replace_manual=replace_manual)]
     if not selected:
         return _cover_noop_result(
             "cover-headlines", "Все выбранные заголовки уже готовы; генерация не требуется.",
@@ -8018,12 +8116,13 @@ def generate_cover_subheadlines(payload: dict) -> dict:
     if template and not use_default:
         settings.cover_subheadline_template = template[:12000]
     active_template = Settings().cover_subheadline_template if use_default else settings.cover_subheadline_template
-    force = bool(payload.get("force") or payload.get("regenerate") or payload.get("replaceManual"))
+    force = bool(payload.get("force") or payload.get("regenerate"))
+    replace_manual = bool(payload.get("replaceManual"))
     scope = _current_cover_generation_scope(
         settings, payload, "Выберите сценарии для подзаголовков",
     )
     selected = [(index, item) for index, item in scope
-                if _cover_word_should_generate(item, "subheadline", force=force)]
+                if _cover_word_should_generate(item, "subheadline", force=force, replace_manual=replace_manual)]
     if not selected:
         return _cover_noop_result(
             "cover-subheadlines", "Все выбранные подзаголовки уже готовы; генерация не требуется.",
@@ -8842,6 +8941,11 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             item.update(error="", rate_limit_wait_until=resume_at, rate_limit_used=rate.used)
             _save_cover_state(settings)
             continue
+        portrait = _resolve_cover_portrait(
+            item, settings, face_mode=face_mode, allow_manual_reference=use_my_face,
+        )
+        has_portrait_reference = False
+        prepared_portrait_available = False
         try:
             if repeat_current_contract:
                 references = _cover_saved_provider_references(item)
@@ -8855,7 +8959,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                         + ", ".join(missing_references)
                     )
                 face_label = str(
-                    item.get("final_provider_face_label")
+                    portrait["portrait_subject"]
+                    or item.get("final_provider_face_label")
                     or item.get("face_reference_label")
                     or item.get("semantic_face_label")
                     or ""
@@ -8867,6 +8972,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     )
                 except (TypeError, ValueError):
                     saved_face_count = 0
+                has_portrait_reference = bool(saved_face_count and use_my_face)
                 item["face_reference_count"] = saved_face_count if use_my_face else 0
                 item["faceSelectionMode"] = "prepared-reference" if use_my_face else "semantic-only"
                 item["faceSelectionReason"] = (
@@ -8875,31 +8981,42 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     else "reused saved zero-PNG provider contract"
                 )
             elif use_my_face:
-                references, face_label = _cover_references_for_item(
+                references, matched_face_label = _cover_references_for_item(
                     item, settings, refine=refine_with_face, face_mode=face_mode, position=index,
                     max_references=operation_reference_limit if operation_reference_limit is not None else 10,
                     prepared_auto_face=True,
                 )
+                face_path = str(item.get("face_reference_path", "")).strip()
+                prepared_portrait_available = bool(matched_face_label and face_path)
+                has_portrait_reference = bool(prepared_portrait_available and face_path in references)
+                face_label = str(portrait["portrait_subject"] or matched_face_label).strip()
                 item.pop("semantic_face_label", None)
                 item.pop("semantic_face_source", None)
                 item["faceSelectionMode"] = "prepared-reference"
-                item["face_reference_count"] = 1 if face_label else 0
+                item["face_reference_count"] = 1 if has_portrait_reference else 0
                 item["faceSelectionReason"] = (
                     "topic-relevant prepared face-tree match"
-                    if face_label
-                    else "no confident prepared face-tree match; continued without PNG"
+                    if has_portrait_reference
+                    else ("political portrait resolved; no prepared PNG, continued with generated side portrait"
+                          if portrait["portrait_subject"]
+                          else "no confident prepared face-tree match; continued without PNG")
                 )
             else:
                 references = []
-                face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
+                matched_face_label = _cover_semantic_face_label(item, settings, face_mode=face_mode)
+                face_label = str(portrait["portrait_subject"] or matched_face_label).strip()
                 item["faceSelectionMode"] = "semantic-only"
                 item["face_reference_count"] = 0
                 item["faceSelectionReason"] = (
-                    "topic-relevant face-tree metadata match"
-                    if face_label else "no confident face-tree match"
+                    "political portrait resolved from current topic"
+                    if portrait["portrait_subject"]
+                    else ("topic-relevant face-tree metadata match" if matched_face_label else "no confident face-tree match")
                 )
                 if face_label:
-                    item.update(semantic_face_label=face_label, semantic_face_source="tree")
+                    item.update(
+                        semantic_face_label=face_label,
+                        semantic_face_source=(portrait["portrait_source"] if portrait["portrait_subject"] else "tree"),
+                    )
                 else:
                     item.pop("semantic_face_label", None)
                     item.pop("semantic_face_source", None)
@@ -8907,7 +9024,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             # operation.  When there is no relevant portrait, the my-faces
             # route deliberately continues with zero PNGs instead of choosing
             # a random identity or stopping the whole generation batch.
-            if not repeat_current_contract and use_my_face and face_label and operation_reference_limit is None:
+            if not repeat_current_contract and use_my_face and prepared_portrait_available and operation_reference_limit is None:
                 detail = (
                     "Не подтверждена поддержка image/reference input для выбранной FastGen operation; "
                     "обновите список моделей или выберите reference-capable operation."
@@ -8916,7 +9033,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item["error"] = detail
                 _save_cover_state(settings)
                 continue
-            if not repeat_current_contract and use_my_face and face_label and not operation_accepts_references:
+            if not repeat_current_contract and use_my_face and prepared_portrait_available and not operation_accepts_references:
                 detail = (
                     f"Операция FastGen {operation} не поддерживает image/reference input; "
                     "выберите reference-capable operation для режима «FastGen всё + мои лица»."
@@ -8955,7 +9072,11 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 "The supplied user reference sets hierarchy and framing; create a new topic-accurate scene."
             )
         if face_label:
-            if use_my_face:
+            if portrait["portrait_subject"]:
+                face_layout = _cover_resolved_portrait_layout(
+                    item, portrait["portrait_subject"], portrait["portrait_side"],
+                )
+            elif use_my_face:
                 face_layout = _cover_face_layout(
                     item, settings, str(item.get("face_reference_path", "")), face_label,
                 )
@@ -8972,7 +9093,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 )
             else:
                 identity_notes.append(_cover_fastgen_identity_instruction(
-                    face_label, has_remote_reference=bool(references),
+                    face_label, has_remote_reference=has_portrait_reference,
                 ))
             composition_notes.append(face_layout)
         if refine_with_face:

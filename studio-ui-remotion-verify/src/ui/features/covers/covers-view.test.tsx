@@ -490,6 +490,36 @@ describe("Covers Light view", () => {
     expect(screen.getByText("Инспектор обложки")).toBeTruthy();
   });
 
+  it("keeps manual text explicit until the operator submits a manual save", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:manual",
+        title: "Кремль меняет тон переговоров",
+        image_prompt: "Negotiation scene",
+        cover_headline: "РУЧНОЙ ЗАГОЛОВОК",
+        headline_source: "MANUAL" as const,
+        cover_subheadline: "Ручная вторая строка",
+        subheadline_source: "MANUAL" as const,
+        paths: [],
+      }],
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Кремль меняет тон переговоров" }));
+    expect(screen.getAllByText("Вручную · сохранено")).toHaveLength(2);
+
+    const headline = screen.getByRole("textbox", { name: /Заголовок на обложке/ });
+    fireEvent.change(headline, { target: { value: "НОВЫЙ РУЧНОЙ ЗАГОЛОВОК" } });
+    fireEvent.submit(headline.closest("form")!);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-cover-headline", {
+      index: 0,
+      headline: "НОВЫЙ РУЧНОЙ ЗАГОЛОВОК",
+    }));
+
+  });
+
   it("opens a cover inspector with FastGen prompt provenance", () => {
     const data = {
       ...fallback,
