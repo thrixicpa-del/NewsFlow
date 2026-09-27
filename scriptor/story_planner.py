@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass
+from itertools import pairwise
 from typing import Any
 
 PREFERRED_PART_CHARS = 5_000
@@ -17,6 +18,11 @@ _COMPACT_ATOM_CHARS = 180
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 _COVER_PERSON_ENTITY_TYPES = frozenset({"person", "public_figure", "politician", "human", "individual"})
 _COVER_FACE_RESOLUTION_STATUSES = frozenset({"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"})
+_COVER_PERSON_EVIDENCE_TYPES = frozenset({"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "ANCHOR_DERIVED"})
+_EXPLICIT_CONTEXT_PERSON_SOURCES = frozenset({
+    "selected_people", "entities", "primary_entities", "title", "topic", "script",
+    "event_context", "supporting_context", "structured-context",
+})
 
 
 @dataclass(frozen=True)
@@ -130,13 +136,32 @@ def _cover_person_candidate(value: object, field: str) -> dict[str, Any]:
         raise ValueError(f"story plan {field}.confidence must be numeric") from exc
     if not 0 <= confidence <= 1:
         raise ValueError(f"story plan {field}.confidence must be between 0 and 1")
+    source = _clean_text(value.get("source"), f"{field}.source")
+    evidence_type = _optional_text(value.get("evidence_type")).upper()
+    if not evidence_type:
+        # Persisted plans predate explicit evidence classes.  Preserve them by
+        # deriving a conservative class from the existing source rather than
+        # treating a generic model assertion as proof of a real public person.
+        if source.casefold() in _EXPLICIT_CONTEXT_PERSON_SOURCES:
+            evidence_type = "EXPLICIT_CONTEXT"
+        elif source.casefold().startswith("face-tree"):
+            evidence_type = "VERIFIED_LOCAL_IDENTITY"
+        else:
+            evidence_type = "ANCHOR_DERIVED"
+    if evidence_type not in _COVER_PERSON_EVIDENCE_TYPES:
+        raise ValueError(f"story plan {field}.evidence_type must identify person evidence")
+    evidence_summary = _optional_text(value.get("evidence_summary")) or _clean_text(
+        value.get("relation_to_story"), f"{field}.relation_to_story"
+    )
     return {
         "name": _clean_text(value.get("name"), f"{field}.name"),
         "entity_type": entity_type,
         "role_in_story": _clean_text(value.get("role_in_story"), f"{field}.role_in_story"),
         "relation_to_story": _clean_text(value.get("relation_to_story"), f"{field}.relation_to_story"),
-        "source": _clean_text(value.get("source"), f"{field}.source"),
+        "source": source,
         "confidence": confidence,
+        "evidence_type": evidence_type,
+        "evidence_summary": evidence_summary,
     }
 
 
@@ -164,7 +189,9 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
     # Every planned ProductionItem gets an explicit Cover face-resolution
     # record. Missing fields are retained as a backwards-compatible
     # NEEDS_REVIEW result so a legacy resumable plan is never invalidated.
-    face_required = bool(raw.get("cover_face_required", True))
+    if "cover_face_required" in raw and raw["cover_face_required"] is not True:
+        raise ValueError("story plan cover_face_required is Core-owned and must be true")
+    face_required = True
     raw_candidates = raw.get("cover_people_candidates", [])
     if not isinstance(raw_candidates, list):
         raise TypeError("story plan cover_people_candidates must be a list")
@@ -186,11 +213,27 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
         raise ValueError("story plan resolved cover face requires cover_primary_person")
     if face_status == "NEEDS_REVIEW" and cover_primary_person is not None:
         raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_primary_person")
+    if face_status == "NEEDS_REVIEW" and cover_people_candidates:
+        raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_people_candidates")
     if cover_primary_person and not any(
         candidate["name"].casefold() == cover_primary_person["name"].casefold()
         for candidate in cover_people_candidates
     ):
         raise ValueError("story plan cover_primary_person must be one of cover_people_candidates")
+    if cover_people_candidates:
+        if cover_primary_person is None:
+            raise ValueError("story plan ranked cover people require cover_primary_person")
+        if cover_people_candidates[0]["name"].casefold() != cover_primary_person["name"].casefold():
+            raise ValueError("story plan cover_primary_person must be the first ranked candidate")
+        confidences = [candidate["confidence"] for candidate in cover_people_candidates]
+        if any(left < right for left, right in pairwise(confidences)):
+            raise ValueError("story plan cover_people_candidates confidence must be non-increasing")
+    if (
+        cover_primary_person
+        and cover_primary_person["evidence_type"] == "ANCHOR_DERIVED"
+        and face_status != "LOW_CONFIDENCE"
+    ):
+        raise ValueError("story plan anchor-derived cover person requires LOW_CONFIDENCE")
 
     raw_blocks = raw.get("macro_blocks")
     if not isinstance(raw_blocks, list) or not raw_blocks:
@@ -356,7 +399,10 @@ def story_plan_from_dict(value: dict[str, Any]) -> StoryPlan:
             else atom
             for atom in raw_atoms
         ]
-    persisted.setdefault("cover_face_required", True)
+    # Persisted sessions may predate the Core-owned invariant. Repair rather
+    # than invalidate a resumable session, while fresh Planner responses with
+    # an explicit false remain rejected above.
+    persisted["cover_face_required"] = True
     persisted.setdefault("cover_people_candidates", [])
     persisted.setdefault("cover_primary_person", None)
     persisted.setdefault("cover_face_resolution_status", "NEEDS_REVIEW")
@@ -415,7 +461,11 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "COVER FACE RESOLUTION (required for this ProductionItem): return cover_face_required=true, "
         "cover_people_candidates (ranked real public people only), cover_primary_person, and "
         "cover_face_resolution_status RESOLVED, LOW_CONFIDENCE or NEEDS_REVIEW. Every candidate needs name, entity_type "
-        "person/public_figure, role_in_story, relation_to_story, source and confidence from 0 to 1. Select a "
+        "person/public_figure, role_in_story, relation_to_story, source, confidence from 0 to 1, evidence_type and "
+        "evidence_summary. evidence_type must be EXPLICIT_CONTEXT for a named/typed/current-context person, "
+        "VERIFIED_LOCAL_IDENTITY only for an already verified local identity, or ANCHOR_DERIVED for a decision maker "
+        "derived from an institution/place/event; ANCHOR_DERIVED always requires LOW_CONFIDENCE. Keep candidates in "
+        "strict descending confidence order and make the first candidate exactly cover_primary_person. Select a "
         "person only from explicit current-story evidence: selected people, typed person entities, a named person "
         "in title/topic/context, or a factual action/decision relation. Treat an institution/place/event as a semantic "
         "anchor: continue through the supplied sides, actions and responsibility to identify the factually relevant "

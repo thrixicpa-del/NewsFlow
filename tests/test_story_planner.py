@@ -29,6 +29,61 @@ class StoryPartSizingTests(unittest.TestCase):
 
 
 class StoryPlanValidationTests(unittest.TestCase):
+    def _single_part_cover_response(self, *, candidates, primary, status="RESOLVED", required=True):
+        return json.dumps({
+            "thesis": "Проверяемая история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
+                               "content_kind": "SUPPORTED"}],
+            "cover_face_required": required,
+            "cover_people_candidates": candidates,
+            "cover_primary_person": primary,
+            "cover_face_resolution_status": status,
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
+                       "content_ids": ["C001"]}],
+        }, ensure_ascii=False)
+
+    def test_planner_cannot_disable_core_face_requirement(self):
+        person = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                  "relation_to_story": "выступил", "source": "selected_people", "confidence": 0.94}
+
+        with self.assertRaisesRegex(ValueError, "cover_face_required"):
+            parse_story_plan_response(
+                self._single_part_cover_response(candidates=[person], primary=person, required=False), (5000,),
+            )
+
+    def test_ranked_people_require_primary_first_and_non_increasing_confidence(self):
+        primary = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                   "relation_to_story": "выступил", "source": "selected_people", "confidence": 0.94}
+        weaker = {"name": "Амина Диалло", "entity_type": "person", "role_in_story": "министр",
+                  "relation_to_story": "участвует", "source": "entities", "confidence": 0.71}
+        ranked = parse_story_plan_response(
+            self._single_part_cover_response(candidates=[primary, weaker], primary=primary), (5000,),
+        )
+        self.assertEqual(ranked.to_dict()["cover_people_candidates"][0]["name"], "Марек Новак")
+
+        with self.assertRaisesRegex(ValueError, "first ranked"):
+            parse_story_plan_response(
+                self._single_part_cover_response(candidates=[weaker, primary], primary=primary), (5000,),
+            )
+        with self.assertRaisesRegex(ValueError, "non-increasing"):
+            parse_story_plan_response(
+                self._single_part_cover_response(candidates=[weaker, primary], primary=weaker), (5000,),
+            )
+
+    def test_anchor_derived_person_requires_low_confidence_evidence_not_resolved(self):
+        person = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель",
+                  "relation_to_story": "отвечает за решение комиссии", "source": "institution-decision-maker",
+                  "confidence": 0.62, "evidence_type": "ANCHOR_DERIVED",
+                  "evidence_summary": "Контекст связывает комиссию с решением и её председателем."}
+
+        with self.assertRaisesRegex(ValueError, "LOW_CONFIDENCE"):
+            parse_story_plan_response(
+                self._single_part_cover_response(candidates=[person], primary=person), (5000,),
+            )
+        plan = parse_story_plan_response(
+            self._single_part_cover_response(candidates=[person], primary=person, status="LOW_CONFIDENCE"), (5000,),
+        )
+        self.assertEqual(plan.to_dict()["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
     def test_parser_persists_ranked_cover_people_and_primary_person(self):
         response = json.dumps({
             "thesis": "История с проверяемым главным действующим лицом.",

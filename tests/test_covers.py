@@ -62,6 +62,16 @@ from scriptor.runner import RunState
 
 
 class CoverGalleryFileStateTests(unittest.TestCase):
+    def test_current_production_item_forces_face_requirement_even_if_legacy_data_says_false(self):
+        from scriptor import bridge
+
+        item = {"id": "production:face-invariant", "title": "Неполитическая тема", "cover_face_required": False}
+
+        changed = bridge._ensure_cover_face_resolution_item(item)
+
+        self.assertTrue(changed)
+        self.assertTrue(item["cover_face_required"])
+        self.assertEqual(item["cover_face_resolution_status"], "NEEDS_REVIEW")
     def test_story_planner_context_includes_selected_and_typed_people(self):
         from scriptor import bridge
 
@@ -113,6 +123,28 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         self.assertEqual(resolved["portrait_subject"], "Марек Новак")
         self.assertNotEqual(resolved["portrait_subject"], "Европейский Союз")
+
+    def test_legacy_anchor_derived_person_is_persisted_as_low_confidence_with_evidence(self):
+        from scriptor import bridge
+
+        title = "Институция готовит решение"
+        primary = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель",
+            "relation_to_story": "отвечает за решение", "source": "institution-decision-maker", "confidence": 0.62,
+        }
+        settings = Settings(idea_production_items=[{"id": "production:anchor", "title": title}])
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:anchor"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_people_candidates": [primary], "cover_primary_person": primary,
+                        "cover_face_resolution_status": "RESOLVED"},
+        )
+
+        self.assertTrue(bridge._project_story_plan_face_resolution(settings, title, job))
+
+        stored = settings.idea_production_items[0]
+        self.assertEqual(stored["cover_face_resolution_status"], "LOW_CONFIDENCE")
+        self.assertEqual(stored["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
+        self.assertEqual(stored["cover_primary_person"]["evidence_summary"], "отвечает за решение")
 
     def test_story_planner_primary_person_wins_over_face_tree_and_is_persisted_to_cover(self):
         from scriptor import bridge

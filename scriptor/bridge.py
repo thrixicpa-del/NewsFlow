@@ -898,6 +898,24 @@ def _cover_story_planner_candidate(item: dict) -> tuple[str, str, str, float]:
     return name, "story-planner", relation or f"planner-selected person from {source}", max(0.0, min(1.0, confidence))
 
 
+def _cover_person_evidence_type(candidate: object) -> str:
+    """Classify persisted person evidence conservatively for older plans."""
+    if not isinstance(candidate, dict):
+        return ""
+    explicit = str(candidate.get("evidence_type", "")).strip().upper()
+    if explicit in {"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "ANCHOR_DERIVED"}:
+        return explicit
+    source = str(candidate.get("source", "")).strip().casefold()
+    if source in {
+        "selected_people", "entities", "primary_entities", "title", "topic", "script",
+        "event_context", "supporting_context", "structured-context",
+    }:
+        return "EXPLICIT_CONTEXT"
+    if source.startswith("face-tree"):
+        return "VERIFIED_LOCAL_IDENTITY"
+    return "ANCHOR_DERIVED"
+
+
 def _resolve_cover_portrait(
     item: dict, settings: Settings, *, face_mode: str, allow_manual_reference: bool,
 ) -> dict[str, object]:
@@ -5976,16 +5994,24 @@ def _ensure_cover_face_resolution_item(item: dict) -> bool:
     if not isinstance(item, dict):
         return False
     before = dict(item)
-    item.setdefault("cover_face_required", True)
+    # The Core owns this invariant. A stale or model-provided false value must
+    # never allow a current ProductionItem to bypass face resolution.
+    item["cover_face_required"] = True
     candidates = item.get("cover_people_candidates")
-    item["cover_people_candidates"] = list(candidates) if isinstance(candidates, list) else []
+    item["cover_people_candidates"] = [dict(row) for row in candidates if isinstance(row, dict)] if isinstance(candidates, list) else []
     primary = item.get("cover_primary_person")
     item["cover_primary_person"] = dict(primary) if isinstance(primary, dict) else None
+    for candidate in [*item["cover_people_candidates"], item["cover_primary_person"]]:
+        if candidate is not None:
+            candidate["evidence_type"] = _cover_person_evidence_type(candidate)
+            candidate.setdefault("evidence_summary", str(candidate.get("relation_to_story", "")).strip())
     status = str(item.get("cover_face_resolution_status", "")).strip().upper()
     if status not in {"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"}:
         status = "RESOLVED" if item["cover_primary_person"] else "NEEDS_REVIEW"
     if not item["cover_primary_person"]:
         status = "NEEDS_REVIEW"
+    elif _cover_person_evidence_type(item["cover_primary_person"]) == "ANCHOR_DERIVED":
+        status = "LOW_CONFIDENCE"
     item["cover_face_resolution_status"] = status
     return item != before
 
@@ -6000,19 +6026,24 @@ def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job
     plan = getattr(job, "story_plan", None)
     if not isinstance(plan, dict):
         return False
+    candidates = [dict(row) for row in plan.get("cover_people_candidates", []) if isinstance(row, dict)]
+    primary = dict(plan["cover_primary_person"]) if isinstance(plan.get("cover_primary_person"), dict) else None
+    for candidate in [*candidates, primary]:
+        if candidate is not None:
+            candidate["evidence_type"] = _cover_person_evidence_type(candidate)
+            candidate.setdefault("evidence_summary", str(candidate.get("relation_to_story", "")).strip())
     record = {
-        "cover_face_required": bool(plan.get("cover_face_required", True)),
-        "cover_people_candidates": [dict(row) for row in plan.get("cover_people_candidates", []) if isinstance(row, dict)],
-        "cover_primary_person": (
-            dict(plan["cover_primary_person"])
-            if isinstance(plan.get("cover_primary_person"), dict) else None
-        ),
+        "cover_face_required": True,
+        "cover_people_candidates": candidates,
+        "cover_primary_person": primary,
         "cover_face_resolution_status": str(plan.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper(),
     }
     if record["cover_face_resolution_status"] not in {"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"}:
         record["cover_face_resolution_status"] = "NEEDS_REVIEW"
     if not record["cover_primary_person"]:
         record["cover_face_resolution_status"] = "NEEDS_REVIEW"
+    elif _cover_person_evidence_type(record["cover_primary_person"]) == "ANCHOR_DERIVED":
+        record["cover_face_resolution_status"] = "LOW_CONFIDENCE"
     production_id = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
     changed = False
     for item in getattr(settings, "idea_production_items", []):
