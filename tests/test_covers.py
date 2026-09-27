@@ -73,6 +73,47 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("Марек Новак", prompt)
         self.assertIn("Амина Диалло", prompt)
 
+    def test_story_planner_context_keeps_institution_and_event_as_actor_resolution_anchors(self):
+        from scriptor import bridge
+
+        prompt = bridge.production_item_prompt({
+            "topic": "ЕС вводит новые ограничения",
+            "event_context": "Еврокомиссия готовит решение после переговоров с отраслью.",
+            "primary_entities": [{"name": "Европейский Союз", "type": "organization"}],
+            "geography": ["Брюссель"],
+        })
+
+        self.assertIn("Европейский Союз", prompt)
+        self.assertIn("Еврокомиссия", prompt)
+        self.assertIn("Брюссель", prompt)
+
+    def test_planner_resolved_institution_decision_maker_reaches_covers_as_real_person(self):
+        from scriptor import bridge
+
+        title = "ЕС вводит новые ограничения"
+        primary = {
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель комиссии",
+            "relation_to_story": "несёт ответственность за решение Еврокомиссии", "source": "institution-decision-maker",
+            "confidence": 0.91,
+        }
+        settings = Settings(
+            idea_production_items=[{"id": "production:institution", "title": title}],
+            idea_scenario_context={title: {"id": "production:institution", "title": title,
+                                            "primary_entities": [{"name": "Европейский Союз", "type": "organization"}]}},
+        )
+        job = SimpleNamespace(
+            request=SimpleNamespace(production_item_id="production:institution"), result="Сценарий", state=RunState.DONE,
+            story_plan={"cover_face_required": True, "cover_people_candidates": [primary],
+                        "cover_primary_person": primary, "cover_face_resolution_status": "RESOLVED"},
+        )
+
+        bridge._project_story_plan_face_resolution(settings, title, job)
+        bridge._sync_scenario_to_covers(settings, 0, title, job)
+        resolved = bridge._resolve_cover_portrait(settings.cover_queue[0], settings, face_mode="auto", allow_manual_reference=False)
+
+        self.assertEqual(resolved["portrait_subject"], "Марек Новак")
+        self.assertNotEqual(resolved["portrait_subject"], "Европейский Союз")
+
     def test_story_planner_primary_person_wins_over_face_tree_and_is_persisted_to_cover(self):
         from scriptor import bridge
 

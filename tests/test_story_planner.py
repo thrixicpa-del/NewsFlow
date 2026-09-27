@@ -234,6 +234,16 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("NEEDS_REVIEW", prompt)
         self.assertIn("Never infer a person from geography", prompt)
 
+    def test_planner_uses_place_or_institution_as_an_anchor_for_contextual_actor_resolution(self):
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "ЕС вводит новые ограничения", "Сторона решения: Еврокомиссия."),
+            (5000,),
+        )
+
+        self.assertIn("institution/place/event as a semantic", prompt)
+        self.assertIn("decision maker", prompt)
+        self.assertIn("Do not stop at the institution/place/event", prompt)
+
     def test_single_part_planner_prompt_requires_one_complete_part(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 

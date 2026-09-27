@@ -5929,6 +5929,22 @@ def production_item_prompt(item: dict) -> str:
                     typed_entities.append(name)
     if typed_entities:
         blocks.append("Типизированные люди ProductionItem: " + "; ".join(dict.fromkeys(typed_entities)))
+    semantic_anchors = []
+    for label, value in (
+        ("тема", item.get("topic")),
+        ("событие", item.get("event_context")),
+        ("опорный контекст", item.get("supporting_context")),
+        ("стороны и институции", item.get("primary_entities") or item.get("primary_entity") or item.get("entities")),
+        ("география", item.get("geography")),
+    ):
+        text = _cover_context_values(value)
+        if text:
+            semantic_anchors.append(f"{label}: {text}")
+    if semantic_anchors:
+        blocks.append(
+            "Семантические anchors для поиска реального decision maker/публичной фигуры (не являются лицом сами по себе): "
+            + " | ".join(semantic_anchors)
+        )
     framing = str(item.get("framing_type", "EDITORIAL")).strip().upper()
     if framing == "HYPOTHETICAL":
         blocks.extend([
