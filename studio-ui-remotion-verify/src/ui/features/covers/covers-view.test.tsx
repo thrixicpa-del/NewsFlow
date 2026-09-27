@@ -329,6 +329,26 @@ describe("Covers Light view", () => {
     expect(command).not.toHaveBeenCalledWith("retry-cover-generation", expect.anything());
   });
 
+  it("requires an explicit terminal provider failure before a new paid retry", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:failed", title: "Failed", image_prompt: "same",
+        status: "Требуется создать заново FastGen", accepted_generation_id: "generation-1",
+        provider_generation_status: "failed", paths: [],
+      }],
+    };
+    render(<Covers data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать: Failed" }));
+    const retry = screen.getByRole("button", { name: "Создать новый платный запрос" });
+    expect(retry.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(retry);
+    expect(command).toHaveBeenCalledWith("retry-cover-generation-new-paid", {
+      indices: [0], productionItemIds: ["production:failed"],
+    });
+  });
+
   it("keeps new-prompt creation separate and does not start a manual render", async () => {
     const command = vi.fn(async () => undefined);
     const data = {

@@ -61,6 +61,194 @@ from scriptor.covers import (
 
 
 class CoverGalleryFileStateTests(unittest.TestCase):
+    def test_cover_text_generation_projects_a_current_context_row_before_provider_call(self):
+        """A durable current scenario must not need a prior manual Covers transfer."""
+        from scriptor import bridge
+
+        title = "Переговоры о новом соглашении"
+        settings = Settings(
+            idea_production_items=[{"id": "production:current", "title": title}],
+            idea_scenario_context={title: {"id": "production:current", "title": title, "script": "Контекст."}},
+            cover_queue=[],
+        )
+        calls: list[str] = []
+
+        async def generated(_pool, kind, *_args, **_kwargs):
+            calls.append(kind)
+            return ("ГЛАВНЫЙ ЗАГОЛОВОК" if kind == "headline" else "Вторая строка",
+                    {"semantic_slots": ["subject"], "valid": True}, [{"attempt": 1}])
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([], [])), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "_save_cover_text_progress"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace()), \
+             patch.object(bridge, "_generate_cover_word_v2", side_effect=generated):
+            bridge.generate_cover_texts({"provider": "agent"})
+
+        self.assertEqual(calls, ["headline", "subheadline"])
+        self.assertEqual(settings.cover_queue[0]["production_item_id"], "production:current")
+
+    def test_portrait_resolver_uses_an_arbitrary_explicit_person_from_script_without_country_mapping(self):
+        from scriptor import bridge
+
+        item = {
+            "title": "Парламент обсуждает новое соглашение",
+            "script": "Президент Лидии Марек Новак выступил перед парламентом и ответил на вопросы.",
+        }
+
+        resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
+
+        self.assertEqual(resolved["portrait_subject"], "Марек Новак")
+        self.assertIn(resolved["portrait_side"], {"LEFT", "RIGHT"})
+        self.assertNotEqual(resolved["portrait_source"], "none")
+
+    def test_portrait_resolver_accepts_an_arbitrary_latin_named_entity_from_current_context(self):
+        from scriptor import bridge
+
+        item = {"title": "Переговоры о торговле", "entities": [{"name": "Amina Diallo"}]}
+        resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
+
+        self.assertEqual(resolved["portrait_subject"], "Amina Diallo")
+        self.assertEqual(resolved["portrait_source"], "structured-entities")
+
+    def test_political_topic_without_explicit_person_stays_recoverable_before_provider_call(self):
+        """Generic politics cannot silently reach FastGen with an empty portrait subject."""
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [{
+            "production_item_id": "production:politics", "title": "Парламент обсуждает санкции",
+            "image_prompt": "Парламентская сцена", "status": "Ожидает",
+        }]
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.FastGenPool, "generate_media") as create:
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": ["production:politics"],
+                "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True,
+            })
+
+        create.assert_not_called()
+        row = settings.cover_queue[0]
+        self.assertEqual(row["portrait_source"], "none")
+        self.assertEqual(row["status"], "Нужно определить политического субъекта")
+        self.assertIn("явно указан", row["error"])
+
+    def test_accepted_generation_retry_checks_existing_generation_without_create(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_queue=[{
+            "production_item_id": "production:recovery", "title": "Тема", "image_prompt": "scene",
+            "status": "Требуется восстановление FastGen", "accepted_generation_id": "gen-existing",
+            "render_profile": {"build_mode": "fastgen-full", "face_mode": "auto", "text_mode": "fastgen",
+                               "local_face_only": False, "operation": "nano_banana_pro_image_generate"},
+        }])
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        pool = SimpleNamespace(recover_generation=lambda *_args, **_kwargs: {"status": "processing", "error": ""})
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "FastGenPool", return_value=pool), \
+             patch.object(bridge, "generate_covers") as create:
+            bridge.retry_cover_generation({"indices": [0], "productionItemIds": ["production:recovery"]})
+
+        create.assert_not_called()
+        self.assertEqual(settings.cover_queue[0]["provider_generation_id"], "gen-existing")
+
+    def test_accepted_generation_recovery_materializes_success_and_records_terminal_failure_per_item(self):
+        """One stale provider job must not prevent another accepted job from recovering."""
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_queue=[
+            {
+                "production_item_id": "production:failed", "title": "Failed", "image_prompt": "scene",
+                "accepted_generation_id": "gen-failed", "status": "Требуется восстановление FastGen",
+            },
+            {
+                "production_item_id": "production:done", "title": "Done", "image_prompt": "scene",
+                "accepted_generation_id": "gen-done", "status": "Требуется восстановление FastGen",
+            },
+        ])
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        pool = SimpleNamespace(recover_generation=lambda generation_id, *_args: (
+            {"status": "failed", "error": "Generation failed, please try again later"}
+            if generation_id == "gen-failed" else {"status": "succeeded", "paths": [Path("recovered.png")]}
+        ))
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "FastGenPool", return_value=pool):
+            bridge.recover_cover_generation({
+                "indices": [0, 1], "productionItemIds": ["production:failed", "production:done"],
+            })
+
+        failed, done = settings.cover_queue
+        self.assertEqual(failed["provider_generation_id"], "gen-failed")
+        self.assertEqual(failed["provider_generation_status"], "failed")
+        self.assertIn("Generation failed", failed["provider_generation_error"])
+        self.assertEqual(failed["status"], "Требуется создать заново FastGen")
+        self.assertIn("recovery_checked_at", failed)
+        self.assertEqual(done["status"], "Готово")
+        self.assertEqual(done["paths"], ["recovered.png"])
+        self.assertNotIn("accepted_generation_id", done)
+
+    def test_recovery_transport_error_is_terminal_for_one_row_but_other_rows_continue(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_queue=[
+            {"production_item_id": "production:broken", "title": "Broken", "image_prompt": "scene", "accepted_generation_id": "gen-broken"},
+            {"production_item_id": "production:processing", "title": "Processing", "image_prompt": "scene", "accepted_generation_id": "gen-processing"},
+        ])
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+
+        def recover(generation_id, *_args):
+            if generation_id == "gen-broken":
+                raise FastGenError("FastGen API (404): generation expired", 404)
+            return {"status": "processing", "error": ""}
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "FastGenPool", return_value=SimpleNamespace(recover_generation=recover)):
+            bridge.recover_cover_generation({
+                "indices": [0, 1], "productionItemIds": ["production:broken", "production:processing"],
+            })
+
+        self.assertEqual(settings.cover_queue[0]["provider_generation_status"], "failed")
+        self.assertEqual(settings.cover_queue[0]["status"], "Требуется создать заново FastGen")
+        self.assertEqual(settings.cover_queue[1]["provider_generation_status"], "processing")
+        self.assertEqual(settings.cover_queue[1]["status"], "FastGen генерирует")
+
+    def test_failed_recovery_requires_explicit_new_paid_retry(self):
+        from scriptor import bridge
+
+        settings = Settings(cover_output_folder=".", cover_queue=[{
+            "production_item_id": "production:failed", "title": "Тема", "image_prompt": "scene",
+            "status": "Требуется создать заново FastGen", "accepted_generation_id": "gen-failed",
+            "provider_generation_status": "failed",
+            "render_profile": {"build_mode": "fastgen-full", "face_mode": "auto", "text_mode": "fastgen",
+                               "local_face_only": False, "operation": "nano_banana_pro_image_generate"},
+        }])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "regenerate_covers", return_value={}) as paid_create:
+            bridge.retry_cover_generation_new_paid({
+                "indices": [0], "productionItemIds": ["production:failed"],
+            })
+
+        self.assertNotIn("accepted_generation_id", settings.cover_queue[0])
+        paid_create.assert_called_once()
+
     def test_fastgen_pool_skips_expired_license_and_uses_next_active_key(self):
         """One expired FastGen key must not block another active key."""
         from scriptor.covers import FastGenPool
@@ -780,16 +968,17 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         settings = Settings(cover_prompt_variant_count=1, cover_variant_count=1, cover_auto_overlay_text=False)
         settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
         rows = [
-            ("Трамп усиливает давление на поставки нефти", "ТРАМП ДАВИТ", "Танкеры ждут решения"),
-            ("Путин и Макрон обсуждают переговоры", "ПУТИН ДАВИТ", "Макрон требует гарантий"),
-            ("Цены на нефть могут вырасти", "НЕФТЬ РВАНЁТ?", "Рынок ждёт дефицита"),
-            ("Порт закрыт из-за кризиса", "ПОРТ ЗАКРЫТ", "Контейнеры застряли на терминале"),
-            ("Поставки газа могут сократиться", "ПОСТАВКИ ПОД РИСКОМ?", "Заводы сокращают выпуск"),
+            ("Трамп усиливает давление на поставки нефти", "ТРАМП ДАВИТ", "Танкеры ждут решения", "Дональд Трамп"),
+            ("Путин и Макрон обсуждают переговоры", "ПУТИН ДАВИТ", "Макрон требует гарантий", "Владимир Путин"),
+            ("Цены на нефть могут вырасти", "НЕФТЬ РВАНЁТ?", "Рынок ждёт дефицита", ""),
+            ("Порт закрыт из-за кризиса", "ПОРТ ЗАКРЫТ", "Контейнеры застряли на терминале", ""),
+            ("Поставки газа могут сократиться", "ПОСТАВКИ ПОД РИСКОМ?", "Заводы сокращают выпуск", ""),
         ]
         settings.cover_queue = [
             {"title": title, "script": f"Контекст: {title}", "cover_headline": headline,
-             "cover_subheadline": subheadline, "headline_status": "READY", "subheadline_status": "READY"}
-            for title, headline, subheadline in rows
+             "cover_subheadline": subheadline, "selected_people": [person] if person else [],
+             "headline_status": "READY", "subheadline_status": "READY"}
+            for title, headline, subheadline, person in rows
         ]
         payloads: list[str] = []
 
@@ -815,7 +1004,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             generate_covers({"indices": list(range(5)), "textMode": "fastgen"})
 
         self.assertEqual(len(payloads), 5)
-        for _title, headline, subheadline in rows:
+        for _title, headline, subheadline, _person in rows:
             matching = [payload for payload in payloads if f"HEADLINE:\n<exact-text>{headline}</exact-text>" in payload]
             self.assertEqual(len(matching), 1)
             payload = matching[0]
@@ -865,6 +1054,17 @@ class CoverRateLimitTests(unittest.TestCase):
 
 
 class FastGenClientTests(unittest.TestCase):
+    def test_recovery_polls_an_accepted_generation_with_get_only(self):
+        client = FastGenClient("test-key")
+        with TemporaryDirectory() as directory, \
+             patch.object(client, "_json", return_value={"status": "succeeded", "results": ["image"]}) as request, \
+             patch.object(client, "_save_result", return_value=Path(directory) / "recovered.png"):
+            recovered = client.recover_generation("accepted-123", Path(directory), "cover")
+
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertEqual(recovered["paths"], [Path(directory) / "recovered.png"])
+        request.assert_called_once_with("GET", "/api/v6/generations/accepted-123")
+
     def test_same_reference_upload_id_is_reused_across_create_retries(self):
         with TemporaryDirectory() as directory:
             reference = Path(directory) / "face.png"
@@ -1335,6 +1535,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 settings.cover_queue = [{
                     "title": "Зеленский обсуждает переговоры",
                     "topic": "Трамп-Зеленский — давление и переговоры",
+                    "selected_people": ["Владимир Зеленский"],
                     "production_item_id": "production:0",
                     "image_prompt": "Topic-accurate editorial news scene",
                     "cover_headline": "ЗЕЛЕНСКИЙ НА ПЕРЕГОВОРАХ",
@@ -1379,7 +1580,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     self.assertIn("prepared face-tree match", settings.cover_queue[0]["faceSelectionReason"])
                 else:
                     self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Владимир Зеленский")
-                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "explicit-topic-entity")
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "structured-selected_people")
                     self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "semantic-only")
                     self.assertIn("political portrait resolved", settings.cover_queue[0]["faceSelectionReason"])
                     self.assertIn("recognisable editorial portrait of Владимир Зеленский", settings.cover_queue[0]["final_provider_prompt"])
@@ -1474,6 +1675,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
             }]}
             settings.cover_queue = [{
                 "title": "Зеленский обсуждает переговоры", "scenario_index": 1,
+                "selected_people": ["Владимир Зеленский"],
                 "production_item_id": "production:1", "image_prompt": "Negotiation scene",
                 "cover_headline": "ПЕРЕГОВОРЫ", "paths": [],
             }]
@@ -1524,6 +1726,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 }]}
                 settings.cover_queue = [{
                     "title": "Кремль усилил давление: переговоры по Украине меняют тон",
+                    "selected_people": ["Владимир Путин"],
                     "scenario_index": 1,
                     "production_item_id": "production:kremlin",
                     "image_prompt": "Topic-accurate editorial negotiation scene",
@@ -1556,8 +1759,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 self.assertEqual(calls[0][1], ())
                 self.assertEqual(item["portrait_subject"], "Владимир Путин")
                 self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
-                self.assertEqual(item["portrait_source"], "political-context-map")
-                self.assertIn("кремль", item["portrait_resolver_reason"].casefold())
+                self.assertEqual(item["portrait_source"], "structured-selected_people")
+                self.assertIn("selected_people", item["portrait_resolver_reason"])
                 self.assertIn("Владимир Путин", calls[0][0])
                 self.assertIn("large side portrait", calls[0][0])
                 self.assertEqual(item["face_reference_count"], 0)
@@ -1842,20 +2045,22 @@ class CoverVisualInstructionTests(unittest.TestCase):
         )
         self.assertIn("краткое, естественное английское описание фактов сцены", instruction)
         self.assertIn("конкретное действие, визуальное доказательство и тему", instruction)
-        self.assertIn("ПЛАН ИНЦИДЕНТА", instruction)
+        self.assertIn("УНИВЕРСАЛЬНЫЙ ВИЗУАЛЬНЫЙ КОНТРАКТ", instruction)
         self.assertNotIn("ACTION = HIGH.", instruction)
 
     def test_visual_prompt_requires_a_real_press_photograph_not_an_illustration(self):
         instruction = _cover_instruction({"title": "Удар по промышленному объекту", "script": ""}, 0, Settings())
         prompt = _normalize_cover_photo_prompt("Wide view of a damaged factory with responders", {"title": "Удар по промышленному объекту"})
         self.assertIn("Не добавляй style prompt", instruction)
-        self.assertIn("CORE STYLE:\nNEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.", prompt)
+        self.assertIn("CORE STYLE:\n", prompt)
+        self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.", prompt)
         self.assertIn("PHOTOREALISM = MAXIMUM.", prompt)
         self.assertIn("No artwork, illustration", prompt)
 
     def test_every_new_saved_fastgen_prompt_carries_the_universal_v2_contract_once(self):
         prompt = _normalize_cover_photo_prompt("Wide view of a damaged factory with responders")
-        self.assertTrue(prompt.startswith("CORE STYLE:\nNEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2."))
+        self.assertTrue(prompt.startswith("CORE STYLE:\n"))
+        self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.", prompt)
         self.assertIn("PHOTOREALISM = MAXIMUM.", prompt)
         self.assertIn("STORY CONTEXT:\nWide view of a damaged factory with responders", prompt)
         self.assertEqual(prompt.count("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2"), 1)
@@ -2101,13 +2306,13 @@ class CoverLocalCompositorTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "_hydrate_cover_library", return_value=False), \
                  patch.object(bridge, "_save_cover_state"), \
-                 patch.object(bridge, "generate_covers") as generate:
-                with self.assertRaisesRegex(ValueError, "Final FastGen prompt"):
-                    regenerate_covers({
-                        "indices": [0],
-                        "productionItemIds": ["production:legacy"],
-                        "currentProfile": True,
-                    })
+                 patch.object(bridge, "generate_covers") as generate, \
+                 self.assertRaisesRegex(ValueError, "Final FastGen prompt"):
+                regenerate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:legacy"],
+                    "currentProfile": True,
+                })
 
             self.assertTrue(old_path.exists())
             generate.assert_not_called()
@@ -2130,14 +2335,14 @@ class CoverLocalCompositorTests(unittest.TestCase):
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "_hydrate_cover_library", return_value=False), \
                  patch.object(bridge, "_save_cover_state"), \
-                 patch.object(bridge, "generate_covers") as generate:
-                with self.assertRaisesRegex(ValueError, "render profile"):
-                    regenerate_covers({
-                        "indices": [0],
-                        "productionItemIds": ["production:no-profile"],
-                        "currentProfile": True,
-                        "operation": "caller-must-not-override",
-                    })
+                 patch.object(bridge, "generate_covers") as generate, \
+                 self.assertRaisesRegex(ValueError, "render profile"):
+                regenerate_covers({
+                    "indices": [0],
+                    "productionItemIds": ["production:no-profile"],
+                    "currentProfile": True,
+                    "operation": "caller-must-not-override",
+                })
 
             self.assertTrue(old_path.exists())
             generate.assert_not_called()
@@ -2528,7 +2733,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
              patch("scriptor.bridge.HybridTextPool", return_value=pool):
             generate_cover_prompts({"indices": [0], "provider": "agent"})
         self.assertEqual(len(settings.cover_queue[0]["image_prompt_options"]), 2)
-        self.assertTrue(all(prompt.startswith("CORE STYLE:\nNEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2.")
+        self.assertTrue(all(prompt.startswith("CORE STYLE:\n")
+                            and "NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2." in prompt
                             for prompt in settings.cover_queue[0]["image_prompt_options"]))
 
     def test_prompt_writer_accepts_a_selected_topic_after_its_visual_prompt_was_deleted(self):
@@ -3732,6 +3938,7 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     image_prompt="Topic-accurate editorial news scene",
                     cover_headline=row["cover_headline"],
                     cover_subheadline=row["cover_subheadline"],
+                    selected_people=[row["face_label"]],
                     face_reference_path=str(face),
                     face_reference_label=row["face_label"],
                     face_reference_source="manual",
@@ -4011,6 +4218,15 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
                     "operation": "reference_image_edit",
                 },
             )]
+            original_prompt = bridge.build_final_provider_prompt(
+                "Old rejected visual prompt", settings.cover_queue[0], text_mode="fastgen",
+            )
+            settings.cover_queue[0].update(
+                final_provider_prompt=original_prompt,
+                final_provider_prompt_options=[original_prompt],
+                final_provider_reference_paths=[str(face)],
+                final_provider_face_reference_count=1,
+            )
             retry_calls = []
 
             def retry_render(prompt, _output, _stem, operation, _ratio, **kwargs):

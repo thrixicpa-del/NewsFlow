@@ -3772,7 +3772,11 @@ const coverManualRetryStatuses = new Set([
 const isCoverManualRetryEligible = (
   cover: NewsFlowSnapshot["covers"][number],
 ) => coverManualRetryStatuses.has(String(cover.status || "")) &&
-  !String((cover as typeof cover & { accepted_generation_id?: string }).accepted_generation_id || "").trim();
+  !String(cover.accepted_generation_id || "").trim();
+
+const isCoverNewPaidRetryEligible = (
+  cover: NewsFlowSnapshot["covers"][number],
+) => String(cover.provider_generation_status || "").toLowerCase() === "failed";
 
 const isCoverRenderActive = (cover: NewsFlowSnapshot["covers"][number]) => {
   const status = String(cover.status || "");
@@ -4147,6 +4151,8 @@ export function Covers({
   const selectedManualRetryCount = selectedPromptRows.filter(isCoverManualRetryEligible).length;
   const allSelectedManualRetryEligible =
     selected.length > 0 && selectedManualRetryCount === selected.length;
+  const allSelectedNewPaidRetryEligible =
+    selected.length > 0 && selectedPromptRows.every(isCoverNewPaidRetryEligible);
   const selectedHasActiveRender = selectedPromptRows.some(isCoverRenderActive);
   const selectedNewPromptsReadyCount = selectedPromptRows.filter(
     (cover) => cover.status === "Новые промпты созданы",
@@ -4659,6 +4665,8 @@ export function Covers({
     });
   const retrySelectedGeneration = () =>
     void command("retry-cover-generation", coverSelectionPayload());
+  const retrySelectedGenerationNewPaid = () =>
+    void command("retry-cover-generation-new-paid", coverSelectionPayload());
   const regenerateNewPrompts = () =>
     void command("regenerate-covers-new-prompts", {
       ...coverSelectionPayload(),
@@ -6814,6 +6822,13 @@ export function Covers({
           <span className="status">
             Повтор генерации доступен: {selectedManualRetryCount}/{selected.length}
           </span>
+          <Button
+            kind="danger"
+            onClick={allSelectedNewPaidRetryEligible ? retrySelectedGenerationNewPaid : undefined}
+          >
+            <Play size={16} />
+            Создать новый платный запрос
+          </Button>
           <Button
             kind="success"
             onClick={allSelectedNewPromptsReady ? regenerate : undefined}

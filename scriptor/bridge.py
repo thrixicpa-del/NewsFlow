@@ -305,6 +305,23 @@ def _active_cover_production_ids(settings: Settings) -> set[str]:
         identity = job_identity or ids_by_title.get(str(title).casefold(), "")
         if identity:
             identities.add(identity)
+    # A renderer action can be dispatched in the short interval after a
+    # scenario has been durably written but before its session projection is
+    # restored.  The durable scenario context and current ProductionItem list
+    # are sufficient evidence here; use their ID intersection, never a title
+    # match and never an old library row.
+    if not identities and not titles:
+        current_ids = {
+            str(item.get("id", "")).strip()
+            for item in getattr(settings, "idea_production_items", [])
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        context_ids = {
+            str(item.get("id", "")).strip()
+            for item in getattr(settings, "idea_scenario_context", {}).values()
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        identities.update(current_ids & context_ids)
     return identities
 
 
@@ -759,21 +776,56 @@ def _cover_face_match_score(topic_tokens: set[str], candidate_tokens: set[str]) 
 # concrete editorial subject when a political topic names a country, capital or
 # institution rather than the person.  The ordered aliases are editorial
 # fallback knowledge, not a substitute for a supplied person/entity.
-_COVER_POLITICAL_PORTRAIT_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
-    ("Владимир Путин", ("владимир путин", "путин"), ("россия", "россии", "кремль", "москва")),
-    ("Владимир Зеленский", ("владимир зеленский", "зеленский"), ("украина", "украины", "киев", "киеву")),
-    ("Дональд Трамп", ("дональд трамп", "трамп"), ("сша", "соединенные штаты", "белый дом", "вашингтон")),
-    ("Ильхам Алиев", ("ильхам алиев", "алиев"), ("азербайджан", "азербайджана", "баку", "карабах")),
-    ("Никол Пашинян", ("никол пашинян", "пашинян"), ("армения", "армении", "ереван")),
-    ("Реджеп Тайип Эрдоган", ("реджеп тайип эрдоган", "эрдоган"), ("турция", "турции", "анкара")),
-)
-
-
 def _cover_portrait_context(item: dict) -> str:
     return " ".join(_cover_context_values(item.get(key)) for key in (
-        "title", "topic", "angle", "event_context", "supporting_context",
+        "title", "topic", "script", "angle", "event_context", "supporting_context",
         "selected_people", "primary_entities", "primary_entity", "entities",
     ) if item.get(key) not in (None, "", [], {}))
+
+
+_COVER_POLITICAL_MARKERS = ("президент", "премьер", "министр", "парламент", "правительств", "переговор", "санкц", "посол", "выбор")
+
+
+def _cover_requires_political_portrait(item: dict) -> bool:
+    """Identify a political cover without guessing which person represents it."""
+    context = _cover_portrait_context(item).casefold()
+    return any(marker in context for marker in _COVER_POLITICAL_MARKERS)
+
+
+def _cover_person_name(value: object) -> str:
+    if isinstance(value, dict):
+        value = " ".join(str(value.get(key, "") or "") for key in ("name", "label", "title", "person"))
+    words = re.findall(r"(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)", " ".join(str(value or "").split()))
+    return " ".join(words[-2:]) if len(words) >= 2 else ""
+
+
+def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
+    """Select a named person already present in current structured material.
+
+    This deliberately contains no country-to-leader knowledge. Structured
+    entities win; otherwise a role-qualified full name in the script/context
+    is a deterministic safe candidate.
+    """
+    for key in ("selected_people", "primary_entities", "primary_entity", "entities"):
+        values = item.get(key)
+        values = values if isinstance(values, list) else [values]
+        for value in values:
+            name = _cover_person_name(value)
+            if name:
+                return name, f"structured-{key}", f"explicit person from {key}"
+    for key in ("title", "topic", "script", "supporting_context", "event_context"):
+        text = " ".join(str(item.get(key, "")).split())
+        match = re.search(
+            r"\b(?:президент|премьер(?:-министр)?|министр|лидер|глава|канцлер|посол)\s+"
+            r"((?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)(?:\s+(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)){1,2})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            name = _cover_person_name(match.group(1))
+            if name:
+                return name, f"{key}-role-qualified", f"role-qualified person from {key}"
+    return "", "", ""
 
 
 def _resolve_cover_portrait(
@@ -785,7 +837,6 @@ def _resolve_cover_portrait(
     The resolver therefore records the intended person and side separately from
     the optional local reference transport used by the my-faces route.
     """
-    del settings
     if face_mode == "without" or item.get("face_reference_disabled"):
         resolved = {
             "portrait_subject": "", "portrait_side": "", "portrait_source": "disabled",
@@ -798,22 +849,13 @@ def _resolve_cover_portrait(
                 and manual_label and manual_path.is_file()):
             subject, source, reason = manual_label, "manual", "operator selected a portrait for this topic"
         else:
-            context = _cover_portrait_context(item).casefold()
-            candidates: list[tuple[int, int, str, str, str]] = []
-            for subject, person_aliases, political_aliases in _COVER_POLITICAL_PORTRAIT_RULES:
-                for alias in person_aliases:
-                    position = context.find(alias)
-                    if position >= 0:
-                        candidates.append((position, 0, subject, "explicit-topic-entity", alias))
-                for alias in political_aliases:
-                    position = context.find(alias)
-                    if position >= 0:
-                        candidates.append((position, 1, subject, "political-context-map", alias))
-            if candidates:
-                _position, _priority, subject, source, alias = min(candidates)
-                reason = f"political subject resolved from topic marker: {alias}"
-            else:
-                subject = source = reason = ""
+            subject, source, reason = _cover_explicit_portrait_candidate(item)
+            if not subject:
+                _path, tree_label, tree_source = _match_cover_face_reference(item, settings)
+                if tree_label:
+                    subject = tree_label
+                    source = f"face-tree-{tree_source or 'match'}"
+                    reason = "explicit person matched in the configured face tree"
         resolved = {
             "portrait_subject": subject,
             "portrait_side": _cover_face_side(item) if subject else "",
@@ -6180,8 +6222,8 @@ def _sync_scenario_to_seo(settings: Settings, title: str, job: Job | None) -> bo
 
 def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Job | None) -> bool:
     """Keep a single automatic cover entry for every current scenario identity."""
-    script = job.result if job and job.state == RunState.DONE else ""
     production_item = dict(getattr(settings, "idea_scenario_context", {}).get(title, {}) or {})
+    script = job.result if job and job.state == RunState.DONE else str(production_item.get("script", "") or "")
     job_identity = str(job.request.production_item_id if job else "").strip()
     production_item_id = job_identity or str(production_item.get("id", "")).strip()
     existing = next((item for item in settings.cover_queue
@@ -6192,7 +6234,7 @@ def _sync_scenario_to_covers(settings: Settings, index: int, title: str, job: Jo
     context_keys = (
         "direction", "topic", "angle", "event_ids", "event_context", "supporting_context",
         "primary_entities", "primary_entity", "entities", "geography", "conflict",
-        "main_consequence", "consequence", "framing", "framing_type",
+        "main_consequence", "consequence", "framing", "framing_type", "selected_people",
     )
     context = {key: production_item[key] for key in context_keys if production_item.get(key) not in (None, "", [], {})}
     if existing is None:
@@ -6254,6 +6296,10 @@ def _sync_current_scenario_covers(settings: Settings) -> bool:
     changed = settings.cover_queue != before or changed
     for index, title in enumerate(titles):
         changed = _sync_scenario_to_covers(settings, index, str(title), jobs_by_index.get(index)) or changed
+    if not titles:
+        for index, (title, context) in enumerate(getattr(settings, "idea_scenario_context", {}).items()):
+            if isinstance(context, dict) and str(context.get("id", "")).strip() in active_ids:
+                changed = _sync_scenario_to_covers(settings, index, str(title), None) or changed
     _assign_cover_production_ids(settings)
     return changed
 
@@ -8941,9 +8987,34 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             item.update(error="", rate_limit_wait_until=resume_at, rate_limit_used=rate.used)
             _save_cover_state(settings)
             continue
-        portrait = _resolve_cover_portrait(
-            item, settings, face_mode=face_mode, allow_manual_reference=use_my_face,
+        # Exact repeat is an immutable provider contract: it must neither
+        # rebuild the prompt nor reselect a portrait/reference from today's
+        # face tree.  New renders resolve and persist portrait metadata before
+        # any provider request.
+        portrait = (
+            {
+                "portrait_subject": str(item.get("portrait_subject", "") or ""),
+                "portrait_side": str(item.get("portrait_side", "") or ""),
+                "portrait_source": str(item.get("portrait_source", "saved") or "saved"),
+                "portrait_resolver_reason": str(item.get("portrait_resolver_reason", "saved render contract") or "saved render contract"),
+            }
+            if repeat_current_contract else
+            _resolve_cover_portrait(item, settings, face_mode=face_mode, allow_manual_reference=use_my_face)
         )
+        # A political thumbnail needs an accountable editorial subject.  Do
+        # not guess one from a country or organisation: persist the resolver
+        # evidence and let the operator add an explicit person instead.  The
+        # only exemption is the explicit no-faces mode.
+        if (face_mode != "without" and _cover_requires_political_portrait(item)
+                and not portrait["portrait_subject"]):
+            detail = (
+                "Для политической темы не найден явно указанный человек для портрета. "
+                "Добавьте человека в контекст/сценарий или выберите режим «без лиц»."
+            )
+            _cover_step(item, "Нужно определить политического субъекта", 100, detail)
+            item["error"] = detail
+            _save_cover_state(settings)
+            continue
         has_portrait_reference = False
         prepared_portrait_available = False
         try:
@@ -9675,6 +9746,48 @@ def regenerate_covers(payload: dict) -> dict:
 _COVER_MANUAL_RETRY_STATUSES = {"Ошибка FastGen", "Нужен новый промпт", "Ошибка рендера"}
 
 
+def recover_cover_generation(payload: dict) -> dict:
+    """Recover accepted FastGen jobs through GET only; never create here."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    accepted = [(index, item) for index, item in selected if str(item.get("accepted_generation_id", "")).strip()]
+    if not accepted:
+        raise ValueError("Нет принятой FastGen generation для восстановления")
+    pool = FastGenPool(settings.cover_api_keys)
+    output = Path(settings.cover_output_folder)
+    for index, item in accepted:
+        generation_id = str(item["accepted_generation_id"]).strip()
+        try:
+            result = pool.recover_generation(generation_id, output, f"{index + 1:03d} — {item.get('title', '')}")
+        except _BRIDGE_OPERATION_ERRORS as exc:
+            # The original accepted ID is still retained for operator
+            # diagnostics, but a failed recovery endpoint must not strand the
+            # rest of a selected batch or trigger another paid create.
+            result = {"status": "failed", "error": _cover_provider_error_message(exc)}
+        status = str(result.get("status", "failed")).casefold()
+        error = _cover_provider_error_message(result.get("error", ""))
+        item.update(
+            provider_generation_id=generation_id,
+            provider_generation_status=status,
+            provider_generation_error=error,
+            recovery_checked_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        if status == "succeeded":
+            paths = [str(path) for path in result.get("paths", [])]
+            item.update(status="Готово", progress=100, error="", raw_paths=paths, paths=paths,
+                        path=paths[0] if paths else "", selected_path=paths[0] if paths else "",
+                        selected_base_path=paths[0] if paths else "")
+            item.pop("accepted_generation_id", None)
+        elif status == "processing":
+            _cover_step(item, "FastGen генерирует", max(30, int(item.get("progress", 30) or 30)), generation_id)
+        else:
+            _cover_step(item, "Требуется создать заново FastGen", 100, error or generation_id)
+            item["error"] = error or "FastGen завершил принятую generation без результата"
+    _save_cover_state(settings)
+    return snapshot()
+
+
 def retry_cover_generation(payload: dict) -> dict:
     """Start a deliberate new render cycle without changing its current contract."""
     settings = load_settings()
@@ -9682,6 +9795,8 @@ def retry_cover_generation(payload: dict) -> dict:
     selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
     if not selected:
         raise ValueError("Выберите обложки для повторной генерации")
+    if selected and all(bool(str(item.get("accepted_generation_id", "")).strip()) for _index, item in selected):
+        return recover_cover_generation(payload)
     blocked = [
         str(item.get("title", "") or index + 1)
         for index, item in selected
@@ -9693,6 +9808,25 @@ def retry_cover_generation(payload: dict) -> dict:
             "Ручной повтор недоступен для выбранных тем: " + ", ".join(blocked)
             + ". Дождитесь завершения активной/принятой задачи или выберите только terminal errors."
         )
+    return regenerate_covers({
+        "indices": [index for index, _item in selected],
+        "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
+        "currentProfile": True,
+    })
+
+
+def retry_cover_generation_new_paid(payload: dict) -> dict:
+    """Explicitly discard a terminal recovery ID before a new billable create."""
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+    if not selected:
+        raise ValueError("Выберите обложки для нового платного запроса")
+    if any(str(item.get("provider_generation_status", "")).casefold() != "failed" for _index, item in selected):
+        raise ValueError("Новый платный запрос доступен только после terminal FastGen failure")
+    for _index, item in selected:
+        item.pop("accepted_generation_id", None)
+    _save_cover_state(settings)
     return regenerate_covers({
         "indices": [index for index, _item in selected],
         "productionItemIds": [str(item.get("production_item_id", "")).strip() for _index, item in selected],
@@ -17802,6 +17936,10 @@ def main() -> None:
             result = regenerate_covers(payload if isinstance(payload, dict) else {})
         elif command == "retry-cover-generation":
             result = retry_cover_generation(payload if isinstance(payload, dict) else {})
+        elif command == "recover-cover-generation":
+            result = recover_cover_generation(payload if isinstance(payload, dict) else {})
+        elif command == "retry-cover-generation-new-paid":
+            result = retry_cover_generation_new_paid(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-cover-with-face":
             result = regenerate_cover_with_face(payload if isinstance(payload, dict) else {})
         elif command == "regenerate-covers-new-prompts":

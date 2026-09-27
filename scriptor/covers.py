@@ -166,6 +166,26 @@ class FastGenClient:
         data.pop("api_key", None)
         return data
 
+    def recover_generation(self, generation_id: str, output_folder: Path, title: str) -> dict:
+        """Inspect an accepted generation without issuing another billable create."""
+        generation_id = str(generation_id or "").strip()
+        if not generation_id:
+            raise ValueError("Не указан FastGen generation ID")
+        status = self._json("GET", f"/api/v6/generations/{generation_id}")
+        state = str(status.get("status", "")).casefold()
+        if state == "succeeded":
+            results = status.get("results") or []
+            if not results:
+                return {"status": "failed", "error": "FastGen завершил задачу без изображения", "generation_id": generation_id}
+            return {"status": "succeeded", "generation_id": generation_id,
+                    "paths": [self._save_result(result, output_folder, title, index + 1)
+                              for index, result in enumerate(results)]}
+        if state == "failed":
+            return {"status": "failed", "generation_id": generation_id,
+                    "error": str(status.get("error") or "Генерация FastGen завершилась ошибкой")}
+        return {"status": "processing", "generation_id": generation_id,
+                "error": str(status.get("error") or "")}
+
     def upload_reference(self, path: Path) -> str:
         path = Path(path)
         if not path.is_file():
@@ -439,3 +459,18 @@ class FastGenPool:
                     continue
                 raise
         raise FastGenError("Нет ключей FastGen с доступными кредитами. " + "; ".join(errors))
+
+    def recover_generation(self, generation_id: str, output_folder: Path, title: str) -> dict:
+        errors = []
+        for index, entry in enumerate(self.entries):
+            if index in self.exhausted:
+                continue
+            try:
+                return self.clients[index].recover_generation(generation_id, output_folder, title)
+            except FastGenError as exc:
+                if exc.quota_exhausted or exc.credential_rejected:
+                    self.exhausted.add(index)
+                    errors.append(f"{entry.label}: ключ недоступен ({exc})")
+                    continue
+                raise
+        raise FastGenError("Не удалось проверить принятую генерацию FastGen. " + "; ".join(errors))
