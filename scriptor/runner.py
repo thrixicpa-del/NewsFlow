@@ -282,6 +282,25 @@ class ParallelRunner:
             or self._writer_output_is_structural(text)
         )
 
+    async def _generate_fresh_result(
+        self,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+    ) -> str:
+        """Run one bounded fresh-chat recovery before any new artifact is accepted."""
+        generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+        result = await self._generate_for_request(
+            generate_fresh, prompt, request, expected_chars,
+        )
+        if looks_like_action_required(result):
+            generate_openai = getattr(self.client, "generate_openai", None)
+            if generate_openai is not None:
+                result = await self._generate_for_request(
+                    generate_openai, prompt, request, expected_chars,
+                )
+        return result
+
     async def _generate_writer_usable(
         self,
         prompt: str,
@@ -346,14 +365,42 @@ class ParallelRunner:
             try:
                 plan = parse_story_plan_response(planner_response, part_targets)
             except (TypeError, ValueError):
-                # The planner's story material remains immutable. One bounded
-                # recovery may correct only the exact part topology.
-                structural_repair = await self._generate_usable(
-                    build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
-                    job.request,
-                    planner_budget,
-                )
-                plan = repair_story_plan_parts_response(structural_repair, planner_response, part_targets)
+                # Prefer the non-regenerative repair: keep the original Story
+                # Map substance and correct only its part topology/ownership.
+                try:
+                    structural_repair = await self._generate_usable(
+                        build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
+                        job.request,
+                        planner_budget,
+                    )
+                    plan = repair_story_plan_parts_response(
+                        structural_repair, planner_response, part_targets,
+                    )
+                except (TypeError, ValueError):
+                    # Some real provider failures are outside the parts-only
+                    # repair scope (missing content_kind, malformed macro/thesis,
+                    # empty/non-JSON response). No Writer prose exists yet, so
+                    # one fresh Planner retry is safe and does not regenerate an
+                    # accepted scenario or mutate an accepted prefix.
+                    fresh_planner_prompt = (
+                        "FRESH STORY PLANNER RETRY. The previous planning response was invalid. "
+                        "Plan the SAME NewsFlow story again from the original task below. "
+                        "Return only the complete JSON Story Map; do not write scenario prose.\n\n"
+                        f"TASK:\n{planner_prompt}"
+                    )
+                    fresh_planner_response = await self._generate_fresh_result(
+                        fresh_planner_prompt, job.request, planner_budget,
+                    )
+                    if looks_like_action_required(fresh_planner_response):
+                        job.result = fresh_planner_response
+                        job.actual_chars = len(fresh_planner_response.strip())
+                        job.length_status = "FAILED"
+                        job.state = RunState.PAUSED
+                        job.error = "Планировщик сценария не вернул рабочий план"
+                        return False
+                    plan = parse_story_plan_response(
+                        fresh_planner_response, part_targets,
+                    )
             face_repair_deferred = False
             if plan.cover_face_repair_needed:
                 try:
