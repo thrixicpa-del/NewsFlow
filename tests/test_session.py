@@ -38,7 +38,11 @@ class SessionTests(unittest.TestCase):
                         nonlocal attempts
                         attempts += 1
                         if attempts == 1:
-                            raise OSError(13, "Access is denied", str(target), winerror)
+                            error = PermissionError(13, "Access is denied", str(target))
+                            # CPython on Linux omits ``winerror`` from the
+                            # constructor; model the actual Windows field.
+                            error.winerror = winerror
+                            raise error
                         return real_replace(source, target)
 
                     with patch("scriptor.session.os.replace", side_effect=transient_replace):
