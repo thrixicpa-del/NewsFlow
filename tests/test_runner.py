@@ -544,6 +544,20 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
         self.assertEqual(len(jobs[0].accepted_story_parts), 2)
 
+    def test_structural_writer_filter_rejects_part_labels_but_not_normal_part_prose(self):
+        self.assertTrue(ParallelRunner._writer_output_is_structural("PART 1: техническая разметка"))
+        self.assertTrue(ParallelRunner._writer_output_is_structural("Часть 2: продолжение"))
+        self.assertTrue(ParallelRunner._writer_output_is_structural("P3: служебный блок"))
+        self.assertFalse(ParallelRunner._writer_output_is_structural(
+            "Часть экспертов считает, что переговоры зашли в тупик."
+        ))
+        self.assertFalse(ParallelRunner._writer_output_is_structural(
+            "Часть территории оказалась под ударом, после чего ситуация изменилась."
+        ))
+        self.assertFalse(ParallelRunner._writer_output_is_structural(
+            "Part of the evidence was published later."
+        ))
+
     def test_detects_claude_request_to_rephrase_but_not_normal_script(self):
         self.assertTrue(looks_like_action_required("К сожалению, я не могу написать это. Переформулируйте тему."))
         self.assertTrue(looks_like_action_required("Please rephrase the topic and try again."))
