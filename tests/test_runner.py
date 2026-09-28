@@ -658,7 +658,10 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_with_changed_length_contract_pauses_without_discarding_accepted_prefix(self):
         from scriptor.runner import Job
-        from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
+        from scriptor.story_planner import (
+            calculate_story_part_targets,
+            parse_story_plan_response,
+        )
 
         old_request = ScenarioRequest(
             0, "Тема", "OLD", target_chars=10000,
@@ -696,6 +699,79 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.accepted_story_parts), 1)
         self.assertEqual(result.result, "А" * 4999)
         self.assertIn("явный перезапуск", result.error)
+
+    async def test_resume_with_changed_maximum_pauses_even_when_part_targets_match(self):
+        """A persisted prefix must not silently adopt a narrower max contract."""
+        from scriptor.runner import Job
+        from scriptor.story_planner import (
+            calculate_story_part_targets,
+            parse_story_plan_response,
+        )
+
+        old_request = ScenarioRequest(
+            0, "Тема", "OLD", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )
+        old_plan = parse_story_plan_response(
+            ParallelRunnerTests._story_plan_json(2),
+            calculate_story_part_targets(10000),
+        )
+        persisted_plan = old_plan.to_dict()
+        persisted_plan["length_contract"] = {
+            "target_chars": 10000,
+            "allowed_min": 9000,
+            "allowed_max": 11000,
+        }
+        job = Job(
+            request=old_request,
+            story_plan=persisted_plan,
+            accepted_story_parts=[{
+                "part_id": "P1",
+                "text": "А" * 4999,
+                "content_ids": ["C001"],
+                "target_chars": 4999,
+            }],
+        )
+
+        class NoProviderCalls:
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError("changed maximum must require an explicit restart")
+
+        new_request = ScenarioRequest(
+            0, "Тема", "NEW", target_chars=10000,
+            allowed_min=9000, allowed_max=9500,
+        )
+        result = (await ParallelRunner(NoProviderCalls(), 1).run(
+            [new_request], resume_jobs={0: job},
+        ))[0]
+
+        self.assertEqual(result.state, RunState.PAUSED)
+        self.assertEqual(result.length_status, "PLAN_LENGTH_CHANGED")
+        self.assertEqual(result.accepted_story_parts, job.accepted_story_parts)
+        self.assertEqual(result.result, "А" * 4999)
+
+    async def test_new_story_plan_persists_its_complete_length_contract(self):
+        class ContractClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "А" * target
+
+        request = ScenarioRequest(
+            0, "Тема", "CONTRACT", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )
+        result = (await ParallelRunner(ContractClient(), 1).run([request]))[0]
+
+        self.assertEqual(result.state, RunState.DONE)
+        self.assertEqual(result.story_plan["length_contract"], {
+            "target_chars": 10000,
+            "allowed_min": 9000,
+            "allowed_max": 11000,
+        })
 
     async def test_writer_part_label_is_not_accepted_as_scenario_prose(self):
         class LabelClient:

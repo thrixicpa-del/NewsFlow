@@ -228,6 +228,35 @@ class ParallelRunner:
     def _story_target_chars(request: ScenarioRequest) -> int:
         return max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
 
+    @staticmethod
+    def _story_length_contract(request: ScenarioRequest) -> dict[str, int]:
+        """Persist the complete contract that produced a resumable Story Map."""
+        return {
+            "target_chars": max(0, int(request.target_chars or 0)),
+            "allowed_min": max(0, int(request.allowed_min or 0)),
+            "allowed_max": max(0, int(request.allowed_max or 0)),
+        }
+
+    @classmethod
+    def _persisted_story_contract_changed(
+        cls, persisted_plan: dict[str, Any], request: ScenarioRequest,
+    ) -> bool:
+        """Detect every persisted range change, with a safe legacy fallback."""
+        stored = persisted_plan.get("length_contract")
+        if not isinstance(stored, dict):
+            return False
+        try:
+            stored_contract = {
+                key: max(0, int(stored.get(key, 0) or 0))
+                for key in ("target_chars", "allowed_min", "allowed_max")
+            }
+        except (TypeError, ValueError):
+            # Legacy or malformed metadata must not make a resumable prefix
+            # fail; the established part-target fallback below still protects
+            # plans whose target changed.
+            return False
+        return stored_contract != cls._story_length_contract(request)
+
     def _next_story_part_target(
         self, job: Job, plan: StoryPlan, part_index: int,
     ) -> int:
@@ -349,7 +378,10 @@ class ParallelRunner:
 
         if job.story_plan:
             plan = story_plan_from_dict(job.story_plan)
-            if tuple(part.target_chars for part in plan.parts) != part_targets:
+            if (
+                self._persisted_story_contract_changed(job.story_plan, job.request)
+                or tuple(part.target_chars for part in plan.parts) != part_targets
+            ):
                 job.state = RunState.PAUSED
                 job.error = (
                     "Диапазон длины изменился после создания Story Map. "
@@ -426,6 +458,9 @@ class ParallelRunner:
                     # later continue semantic resolution from its own context.
                     face_repair_deferred = True
             job.story_plan = plan.to_dict()
+            job.story_plan["length_contract"] = self._story_length_contract(
+                job.request,
+            )
             job.accepted_story_parts = []
             job.story_planner_status = "FACE_REPAIR_DEFERRED" if face_repair_deferred else "READY"
             # Persist the complete plan before a prose part is accepted.
@@ -523,12 +558,17 @@ class ParallelRunner:
                 prefix_text = self._assembled_story(plan, job.accepted_story_parts)
                 separator_chars = 2 if prefix_text else 0
 
-                def final_candidate(text: str) -> tuple[str, str, int]:
+                def final_candidate(
+                    text: str,
+                    *,
+                    _part=part,
+                    _active_target=active_target,
+                ) -> tuple[str, str, int]:
                     record = {
-                        "part_id": part.id,
+                        "part_id": _part.id,
                         "text": text,
-                        "content_ids": list(part.content_ids),
-                        "target_chars": active_target,
+                        "content_ids": list(_part.content_ids),
+                        "target_chars": _active_target,
                     }
                     assembled = self._assembled_story(
                         plan, [*job.accepted_story_parts, record],

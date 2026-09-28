@@ -366,6 +366,7 @@ class SessionTests(unittest.TestCase):
             "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "История", "macro_id": "M1",
                        "content_ids": ["C001"], "target_chars": 5000, "opens": [], "closes": [],
                        "transition_direction": "финал"}],
+            "length_contract": {"target_chars": 5000, "allowed_min": 4500, "allowed_max": 5500},
         }
         job = Job(
             ScenarioRequest(0, "Первая", "P", target_chars=5000), RunState.PAUSED,
