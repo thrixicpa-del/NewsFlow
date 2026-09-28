@@ -1,13 +1,18 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import (
+    SessionWriteConflictError,
+    _session_data,
+    _write_session_file,
     backup_session_path,
     legacy_session_path,
     load_session,
@@ -20,6 +25,308 @@ from scriptor.session import (
 
 
 class SessionTests(unittest.TestCase):
+    def test_session_write_retries_a_transient_windows_access_denied(self):
+        """A snapshot reader may briefly deny an atomic Windows replace."""
+        with tempfile.TemporaryDirectory() as folder:
+            for winerror in (5, 32):
+                for attempt_number in range(5):
+                    path = Path(folder) / f"session-{winerror}-{attempt_number}.json"
+                    real_replace = os.replace
+                    attempts = 0
+
+                    def transient_replace(source, target, winerror=winerror, real_replace=real_replace):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts == 1:
+                            error = PermissionError(13, "Access is denied", str(target))
+                            # CPython on Linux omits ``winerror`` from the
+                            # constructor; model the actual Windows field.
+                            error.winerror = winerror
+                            raise error
+                        return real_replace(source, target)
+
+                    with patch("scriptor.session.os.replace", side_effect=transient_replace):
+                        _write_session_file(path, {"version": 2, "titles": [], "jobs": []})
+
+                    self.assertEqual(attempts, 2)
+                    self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
+
+    def test_session_write_does_not_retry_nontransient_os_errors_and_keeps_previous_file(self):
+        """Only WinError 5/32 are retryable; a permanent error never destroys LKG."""
+        with tempfile.TemporaryDirectory() as folder:
+            for attempt_number in range(5):
+                path = Path(folder) / f"session-permanent-{attempt_number}.json"
+                previous = {"version": 2, "titles": ["old"], "jobs": []}
+                path.write_text(json.dumps(previous), encoding="utf-8")
+                calls = 0
+
+                def permanent_replace(source, target):
+                    nonlocal calls
+                    calls += 1
+                    raise OSError(13, "Permanent access denial", str(target), 1314)
+
+                with patch("scriptor.session.os.replace", side_effect=permanent_replace), self.assertRaises(OSError):
+                    _write_session_file(path, {"version": 2, "titles": ["new"], "jobs": []})
+
+                self.assertEqual(calls, 1)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), previous)
+                self.assertEqual(list(Path(folder).glob(f".{path.name}.*.tmp")), [])
+
+    def test_transient_windows_replace_exhaustion_keeps_previous_session_and_cleans_stage(self):
+        """A permanent sharing violation is bounded, durable, and leaves no staged file."""
+        with tempfile.TemporaryDirectory() as folder:
+            for winerror in (5, 32):
+                path = Path(folder) / f"session-exhausted-{winerror}.json"
+                previous = {"version": 2, "titles": ["old"], "jobs": []}
+                path.write_text(json.dumps(previous), encoding="utf-8")
+                calls = 0
+
+                def always_locked(source, target, winerror=winerror):
+                    nonlocal calls
+                    calls += 1
+                    error = PermissionError(13, "Access is denied", str(target))
+                    error.winerror = winerror
+                    raise error
+
+                with (
+                    patch("scriptor.session._SESSION_REPLACE_TIMEOUT_SECONDS", 0.01),
+                    patch("scriptor.session._SESSION_REPLACE_RETRY_SECONDS", 0.001),
+                    patch("scriptor.session.os.replace", side_effect=always_locked),
+                    self.assertRaises(PermissionError),
+                ):
+                    _write_session_file(path, {"version": 2, "titles": ["new"], "jobs": []})
+
+                self.assertGreater(calls, 1)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), previous)
+                self.assertEqual(list(Path(folder).glob(f".{path.name}.*.tmp")), [])
+
+    def test_session_write_flushes_and_fsyncs_before_atomic_publication(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            with patch("scriptor.session.os.fsync", wraps=os.fsync) as fsync:
+                _write_session_file(path, {"version": 2, "titles": ["durable"], "jobs": []})
+            self.assertGreaterEqual(fsync.call_count, 1)
+
+    def test_concurrent_reader_observes_only_complete_old_or_new_json(self):
+        """Atomic publication must never expose a partial JSON document to snapshots."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_session(["old"], [])
+            observed: list[str] = []
+            failures: list[BaseException] = []
+            stop = threading.Event()
+
+            def reader() -> None:
+                while not stop.is_set():
+                    try:
+                        observed.append(load_session()[0][0])
+                    except (OSError, ValueError, IndexError, KeyError) as error:  # test records any partial-read failure
+                        failures.append(error)
+                        return
+
+            worker = threading.Thread(target=reader)
+            worker.start()
+            for index in range(5):
+                save_session([f"new-{index}"], [])
+            stop.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            self.assertTrue(set(observed).issubset({"old", "new-0", "new-1", "new-2", "new-3", "new-4"}))
+
+    def test_stale_writer_is_rejected_instead_of_overwriting_newer_session(self):
+        """A bridge process that loaded an old session must not silently clobber a newer save."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            original = [Job(ScenarioRequest(0, "old", "P"), RunState.WAITING)]
+            newer = [Job(ScenarioRequest(0, "new", "P"), RunState.DONE, "new prose", "")]
+            for _ in range(5):
+                load_session()  # refresh this test writer before starting a new round
+                save_session(["old"], original)
+                load_session()  # establishes this writer's observed revision
+                _write_session_file(session_path(), _session_data(["new"], newer))
+                with self.assertRaises(SessionWriteConflictError):
+                    save_session(["old"], original)
+                self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["new"])
+
+    def test_load_binds_observed_revision_to_bytes_read_under_lock(self):
+        """R1 read, then R2 committed, must not let the R1 writer overwrite R2."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            stale_jobs = [Job(ScenarioRequest(0, "R1", "P"), RunState.WAITING)]
+            newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
+            save_session(["R1"], stale_jobs)
+            original_remember = __import__("scriptor.session", fromlist=["_remember_session_revision"])._remember_session_revision
+            committed_newer = False
+
+            def commit_r2_before_remember(path, *revision):
+                nonlocal committed_newer
+                if not committed_newer:
+                    committed_newer = True
+                    _write_session_file(path, _session_data(["R2"], newer_jobs))
+                return original_remember(path, *revision)
+
+            with patch("scriptor.session._remember_session_revision", side_effect=commit_r2_before_remember):
+                loaded_titles, _loaded_jobs = load_session()
+
+            self.assertEqual(loaded_titles, ["R1"])
+            with self.assertRaises(SessionWriteConflictError):
+                save_session(["R1"], stale_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
+
+    def test_empty_primary_backup_recovery_never_binds_old_state_to_newer_primary_revision(self):
+        """R1 empty → R2 commit during recovery leaves recovered state stale, never clobbering R2."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            recovered_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
+            save_settings(Settings(idea_results=["backup"]))
+            _write_session_file(session_path(), _session_data([], []))
+            _write_session_file(backup_session_path(), _session_data(["backup"], recovered_jobs))
+            session_module = __import__("scriptor.session", fromlist=["_recover_empty_primary_from_backup"])
+            original_recover = session_module._recover_empty_primary_from_backup
+            committed_newer = False
+
+            def commit_r2_then_recover(*args, **kwargs):
+                nonlocal committed_newer
+                if not committed_newer:
+                    committed_newer = True
+                    _write_session_file(session_path(), _session_data(["R2"], newer_jobs))
+                return original_recover(*args, **kwargs)
+
+            with patch("scriptor.session._recover_empty_primary_from_backup", side_effect=commit_r2_then_recover):
+                recovered_titles, _recovered = load_session()
+
+            self.assertEqual(recovered_titles, ["backup"])
+            with self.assertRaises(SessionWriteConflictError):
+                save_session(["backup"], recovered_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
+
+    def test_empty_primary_backup_recovery_self_heals_and_saves_without_false_conflict(self):
+        """A no-race LKG recovery observes its healed primary, not the old empty bytes."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            recovered_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            save_settings(Settings(idea_results=["backup"]))
+            _write_session_file(session_path(), _session_data([], []))
+            _write_session_file(backup_session_path(), _session_data(["backup"], recovered_jobs))
+
+            recovered_titles, loaded_jobs = load_session()
+
+            self.assertEqual(recovered_titles, ["backup"])
+            save_session(recovered_titles, loaded_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+            self.assertEqual(json.loads(backup_session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+
+    def test_invalid_primary_backup_fallback_keeps_the_invalid_snapshot_revision(self):
+        """An invalid R1 followed by R2 must not let backup fallback overwrite R2."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            backup_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
+            session_path().write_bytes(b"{")
+            _write_session_file(backup_session_path(), _session_data(["backup"], backup_jobs))
+            session_module = __import__("scriptor.session", fromlist=["_read_session_snapshot"])
+            original_snapshot = session_module._read_session_snapshot
+            committed_newer = False
+
+            def invalid_read_then_commit(candidate):
+                nonlocal committed_newer
+                try:
+                    return original_snapshot(candidate)
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                    if candidate == session_path() and not committed_newer:
+                        committed_newer = True
+                        _write_session_file(session_path(), _session_data(["R2"], newer_jobs))
+                    raise
+
+            with patch("scriptor.session._read_session_snapshot", side_effect=invalid_read_then_commit):
+                backup_titles, _backup_jobs = load_session()
+
+            self.assertEqual(backup_titles, ["backup"])
+            with self.assertRaises(SessionWriteConflictError):
+                save_session(["backup"], backup_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
+
+    def test_invalid_primary_backup_self_heals_and_immediate_save_succeeds(self):
+        """A no-race malformed primary is conditionally restored from LKG before continuing."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            backup_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            session_path().write_bytes(b"{")
+            _write_session_file(backup_session_path(), _session_data(["backup"], backup_jobs))
+
+            recovered_titles, loaded_jobs = load_session()
+
+            self.assertEqual(recovered_titles, ["backup"])
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+            save_session(recovered_titles, loaded_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+
+    def test_invalid_primary_recovery_preserves_lkg_when_next_publication_fails(self):
+        """A failed post-recovery publish must never replace the valid LKG with malformed bytes."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            backup_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            session_path().write_bytes(b"{")
+            _write_session_file(backup_session_path(), _session_data(["backup"], backup_jobs))
+            recovered_titles, loaded_jobs = load_session()
+
+            with (
+                patch("scriptor.session._write_session_file", side_effect=OSError("forced publication failure")),
+                self.assertRaises(OSError),
+            ):
+                save_session(recovered_titles, loaded_jobs)
+
+            self.assertEqual(json.loads(backup_session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+
+    def test_each_session_write_uses_a_unique_staging_file(self):
+        """Separate bridge processes must never publish through one shared .tmp name."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            real_replace = os.replace
+            staged_sources: list[Path] = []
+
+            def capture_replace(source, target):
+                staged_sources.append(Path(source))
+                return real_replace(source, target)
+
+            with patch("scriptor.session.os.replace", side_effect=capture_replace):
+                _write_session_file(path, {"version": 2, "titles": ["one"], "jobs": []})
+                _write_session_file(path, {"version": 2, "titles": ["two"], "jobs": []})
+
+            self.assertEqual(len(staged_sources), 2)
+            self.assertNotEqual(staged_sources[0].name, staged_sources[1].name)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["titles"], ["two"])
+
     def test_rename_scenario_updates_saved_job_title(self):
         job = Job(ScenarioRequest(0, "Старая", "P"), RunState.PAUSED, "Ответ", "Причина")
         titles, jobs = rename_scenario(["Старая"], [job], 0, "  Новая тема  ")
