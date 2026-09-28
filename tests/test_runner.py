@@ -700,6 +700,93 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.result, "А" * 4999)
         self.assertIn("явный перезапуск", result.error)
 
+    async def test_legacy_resume_without_length_metadata_migrates_old_request_before_comparison(self):
+        from scriptor.runner import Job
+        from scriptor.story_planner import (
+            calculate_story_part_targets,
+            parse_story_plan_response,
+        )
+
+        old_request = ScenarioRequest(
+            0, "Тема", "OLD", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )
+        old_plan = parse_story_plan_response(
+            ParallelRunnerTests._story_plan_json(2),
+            calculate_story_part_targets(10000),
+        ).to_dict()
+        self.assertNotIn("length_contract", old_plan)
+        job = Job(
+            request=old_request,
+            story_plan=old_plan,
+            accepted_story_parts=[{
+                "part_id": "P1",
+                "text": "А" * 4999,
+                "content_ids": ["C001"],
+                "target_chars": 4999,
+            }],
+        )
+
+        class NoProviderCalls:
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError("legacy changed max must be caught before provider use")
+
+        new_request = ScenarioRequest(
+            0, "Тема", "NEW", target_chars=10000,
+            allowed_min=9000, allowed_max=9500,
+        )
+        result = (await ParallelRunner(NoProviderCalls(), 1).run(
+            [new_request], resume_jobs={0: job},
+        ))[0]
+
+        self.assertEqual(result.state, RunState.PAUSED)
+        self.assertEqual(result.length_status, "PLAN_LENGTH_CHANGED")
+        self.assertEqual(result.result, "А" * 4999)
+        self.assertEqual(result.story_plan["length_contract"], {
+            "target_chars": 10000,
+            "allowed_min": 9000,
+            "allowed_max": 11000,
+        })
+
+    async def test_malformed_persisted_length_metadata_fails_safe_without_provider_calls(self):
+        from scriptor.runner import Job
+        from scriptor.story_planner import (
+            calculate_story_part_targets,
+            parse_story_plan_response,
+        )
+
+        request = ScenarioRequest(
+            0, "Тема", "CURRENT", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )
+        plan = parse_story_plan_response(
+            ParallelRunnerTests._story_plan_json(2),
+            calculate_story_part_targets(10000),
+        ).to_dict()
+        plan["length_contract"] = "corrupt"
+        job = Job(
+            request=request,
+            story_plan=plan,
+            accepted_story_parts=[{
+                "part_id": "P1",
+                "text": "А" * 4999,
+                "content_ids": ["C001"],
+                "target_chars": 4999,
+            }],
+        )
+
+        class NoProviderCalls:
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError("corrupt length metadata must fail safe")
+
+        result = (await ParallelRunner(NoProviderCalls(), 1).run(
+            [request], resume_jobs={0: job},
+        ))[0]
+
+        self.assertEqual(result.state, RunState.PAUSED)
+        self.assertEqual(result.length_status, "PLAN_LENGTH_CHANGED")
+        self.assertEqual(result.accepted_story_parts, job.accepted_story_parts)
+
     async def test_resume_with_changed_maximum_pauses_even_when_part_targets_match(self):
         """A persisted prefix must not silently adopt a narrower max contract."""
         from scriptor.runner import Job
