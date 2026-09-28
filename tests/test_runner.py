@@ -201,6 +201,41 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].length_status, "READY")
         self.assertEqual(jobs[0].state, RunState.DONE)
 
+    async def test_early_overlong_part_is_recovered_before_it_can_make_global_max_impossible(self):
+        class EarlyLongClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 12000
+                return "Б" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                if "CURRENT SEGMENT LENGTH RECOVERY" not in prompt:
+                    raise AssertionError("unexpected fresh retry")
+                self.fresh_calls += 1
+                target = int(__import__("re").search(
+                    r"aim for (\d+)", prompt,
+                ).group(1))
+                return "В" * target
+
+        client = EarlyLongClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertLessEqual(jobs[0].actual_chars, 11000)
+        self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
+
     async def test_short_final_multipart_part_retries_before_acceptance(self):
         class FinalLengthClient:
             def __init__(self):
