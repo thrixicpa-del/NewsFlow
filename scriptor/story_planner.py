@@ -101,6 +101,39 @@ def _clean_text(value: object, field: str) -> str:
     return cleaned
 
 
+def _load_json_object(
+    value: object,
+    *,
+    invalid_message: str,
+    object_message: str,
+) -> dict[str, Any]:
+    """Load one provider JSON object, tolerating only transport-style wrappers.
+
+    Real text models sometimes wrap otherwise valid JSON in a Markdown fence or
+    a short explanatory sentence.  The Story Map itself remains strict: this
+    helper only extracts the first syntactically valid JSON object and does not
+    repair fields, invent defaults or accept partial JSON.
+    """
+    text = str(value or "").strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as first_error:
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                candidate, _end = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                return candidate
+        raise ValueError(invalid_message) from first_error
+    if not isinstance(parsed, dict):
+        raise TypeError(object_message)
+    return parsed
+
+
 def _optional_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
@@ -275,12 +308,11 @@ def parse_story_plan_response(
     legacy_face_metadata: bool = False,
 ) -> StoryPlan:
     """Parse and validate the complete planner map before any writer starts."""
-    try:
-        raw = json.loads(str(text or ""))
-    except json.JSONDecodeError as exc:
-        raise ValueError("story planner must return strict JSON") from exc
-    if not isinstance(raw, dict):
-        raise TypeError("story planner response must be an object")
+    raw = _load_json_object(
+        text,
+        invalid_message="story planner must return strict JSON",
+        object_message="story planner response must be an object",
+    )
 
     targets = tuple(max(0, int(target or 0)) for target in part_targets) or (0,)
     part_count = len(targets)
@@ -430,12 +462,11 @@ def parse_story_plan_response(
 
 def repair_story_plan_face_metadata_response(text: str, plan: StoryPlan) -> StoryPlan:
     """Apply only a small face-resolution response to an already valid Story Map."""
-    try:
-        repair = json.loads(str(text or ""))
-    except json.JSONDecodeError as exc:
-        raise ValueError("story plan face repair must return strict JSON") from exc
-    if not isinstance(repair, dict):
-        raise TypeError("story plan face repair must be an object")
+    repair = _load_json_object(
+        text,
+        invalid_message="story plan face repair must return strict JSON",
+        object_message="story plan face repair must be an object",
+    )
     allowed = {"cover_people_candidates", "cover_primary_person", "cover_face_resolution_status"}
     if not (allowed & set(repair)):
         raise ValueError("story plan face repair must contain cover metadata")
@@ -449,12 +480,17 @@ def repair_story_plan_face_metadata_response(text: str, plan: StoryPlan) -> Stor
 
 def repair_story_plan_parts_response(text: str, original_response: str, part_targets: tuple[int, ...]) -> StoryPlan:
     """Repair only part topology; atoms keep identity/meaning but may move owner."""
-    try:
-        original = json.loads(str(original_response or ""))
-        repair = json.loads(str(text or ""))
-    except json.JSONDecodeError as exc:
-        raise ValueError("story plan structural repair must return strict JSON") from exc
-    if not isinstance(original, dict) or not isinstance(repair, dict) or not isinstance(repair.get("parts"), list):
+    original = _load_json_object(
+        original_response,
+        invalid_message="story plan structural repair requires a JSON Story Map",
+        object_message="story plan structural repair requires an object Story Map",
+    )
+    repair = _load_json_object(
+        text,
+        invalid_message="story plan structural repair must return strict JSON",
+        object_message="story plan structural repair must return an object",
+    )
+    if not isinstance(repair.get("parts"), list):
         raise TypeError("story plan structural repair must contain parts")
     original_atoms = original.get("content_atoms")
     if not isinstance(original_atoms, list) or not all(isinstance(atom, dict) for atom in original_atoms):
