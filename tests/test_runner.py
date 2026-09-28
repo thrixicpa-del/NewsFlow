@@ -548,6 +548,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(looks_like_action_required("К сожалению, я не могу написать это. Переформулируйте тему."))
         self.assertTrue(looks_like_action_required("Please rephrase the topic and try again."))
         self.assertFalse(looks_like_action_required("Герой сказал: «Я не могу уйти», но затем продолжил путь." * 30))
+        self.assertFalse(looks_like_action_required(
+            "Юристы заявили, что удар нарушает правила ведения войны. " * 30
+        ))
+        self.assertFalse(looks_like_action_required(
+            "Эвакуацию провели по соображениям безопасности после тревоги. " * 30
+        ))
         self.assertTrue(looks_like_action_required("Я не могу выполнить вашу просьбу по соображениям безопасности."))
         self.assertTrue(looks_like_action_required("Пояснение. " * 80 + "Этот запрос нарушает правила, поэтому я не могу продолжить выполнение."))
 
