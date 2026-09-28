@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,8 @@ from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import (
+    SessionWriteConflictError,
+    _session_data,
     _write_session_file,
     backup_session_path,
     legacy_session_path,
@@ -25,22 +28,92 @@ class SessionTests(unittest.TestCase):
     def test_session_write_retries_a_transient_windows_access_denied(self):
         """A snapshot reader may briefly deny an atomic Windows replace."""
         with tempfile.TemporaryDirectory() as folder:
+            for winerror in (5, 32):
+                for attempt_number in range(5):
+                    path = Path(folder) / f"session-{winerror}-{attempt_number}.json"
+                    real_replace = os.replace
+                    attempts = 0
+
+                    def transient_replace(source, target, winerror=winerror, real_replace=real_replace):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts == 1:
+                            raise OSError(13, "Access is denied", str(target), winerror)
+                        return real_replace(source, target)
+
+                    with patch("scriptor.session.os.replace", side_effect=transient_replace):
+                        _write_session_file(path, {"version": 2, "titles": [], "jobs": []})
+
+                    self.assertEqual(attempts, 2)
+                    self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
+
+    def test_session_write_does_not_retry_nontransient_os_errors_and_keeps_previous_file(self):
+        """Only WinError 5/32 are retryable; a permanent error never destroys LKG."""
+        with tempfile.TemporaryDirectory() as folder:
+            for attempt_number in range(5):
+                path = Path(folder) / f"session-permanent-{attempt_number}.json"
+                previous = {"version": 2, "titles": ["old"], "jobs": []}
+                path.write_text(json.dumps(previous), encoding="utf-8")
+                calls = 0
+
+                def permanent_replace(source, target):
+                    nonlocal calls
+                    calls += 1
+                    raise OSError(13, "Permanent access denial", str(target), 1314)
+
+                with patch("scriptor.session.os.replace", side_effect=permanent_replace), self.assertRaises(OSError):
+                    _write_session_file(path, {"version": 2, "titles": ["new"], "jobs": []})
+
+                self.assertEqual(calls, 1)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), previous)
+                self.assertEqual(list(Path(folder).glob(f".{path.name}.*.tmp")), [])
+
+    def test_session_write_flushes_and_fsyncs_before_atomic_publication(self):
+        with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "session.json"
-            real_replace = os.replace
-            attempts = 0
+            with patch("scriptor.session.os.fsync", wraps=os.fsync) as fsync:
+                _write_session_file(path, {"version": 2, "titles": ["durable"], "jobs": []})
+            self.assertGreaterEqual(fsync.call_count, 1)
 
-            def transient_replace(source, target):
-                nonlocal attempts
-                attempts += 1
-                if attempts == 1:
-                    raise PermissionError(5, "Access is denied", str(target))
-                return real_replace(source, target)
+    def test_concurrent_reader_observes_only_complete_old_or_new_json(self):
+        """Atomic publication must never expose a partial JSON document to snapshots."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_session(["old"], [])
+            observed: list[str] = []
+            failures: list[BaseException] = []
+            stop = threading.Event()
 
-            with patch("scriptor.session.os.replace", side_effect=transient_replace):
-                _write_session_file(path, {"version": 2, "titles": [], "jobs": []})
+            def reader() -> None:
+                while not stop.is_set():
+                    try:
+                        observed.append(load_session()[0][0])
+                    except (OSError, ValueError, IndexError, KeyError) as error:  # test records any partial-read failure
+                        failures.append(error)
+                        return
 
-            self.assertEqual(attempts, 2)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
+            worker = threading.Thread(target=reader)
+            worker.start()
+            for index in range(5):
+                save_session([f"new-{index}"], [])
+            stop.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            self.assertTrue(set(observed).issubset({"old", "new-0", "new-1", "new-2", "new-3", "new-4"}))
+
+    def test_stale_writer_is_rejected_instead_of_overwriting_newer_session(self):
+        """A bridge process that loaded an old session must not silently clobber a newer save."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            original = [Job(ScenarioRequest(0, "old", "P"), RunState.WAITING)]
+            newer = [Job(ScenarioRequest(0, "new", "P"), RunState.DONE, "new prose", "")]
+            for _ in range(5):
+                load_session()  # refresh this test writer before starting a new round
+                save_session(["old"], original)
+                load_session()  # establishes this writer's observed revision
+                _write_session_file(session_path(), _session_data(["new"], newer))
+                with self.assertRaises(SessionWriteConflictError):
+                    save_session(["old"], original)
+                self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["new"])
 
     def test_each_session_write_uses_a_unique_staging_file(self):
         """Separate bridge processes must never publish through one shared .tmp name."""

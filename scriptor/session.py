@@ -6,6 +6,8 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 
 from .config import app_data_root, load_settings
@@ -107,6 +109,73 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
 
 _SESSION_REPLACE_TIMEOUT_SECONDS = 3.0
 _SESSION_REPLACE_RETRY_SECONDS = 0.05
+_SESSION_WRITE_LOCK_GUARD = threading.Lock()
+_SESSION_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_SESSION_OBSERVED_REVISIONS: dict[str, str | None] = {}
+_TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32})
+
+
+class SessionWriteConflictError(RuntimeError):
+    """A stale bridge attempted to overwrite a session it did not load."""
+
+
+def _session_revision(path: Path) -> str | None:
+    """Return an opaque content revision without parsing user session data."""
+    if not path.is_file():
+        return None
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def _remember_session_revision(path: Path) -> None:
+    _SESSION_OBSERVED_REVISIONS[str(path.resolve()).casefold()] = _session_revision(path)
+
+
+@contextmanager
+def _exclusive_session_write(path: Path, timeout: float = 12.0):
+    """Serialize publication across threads and independent Windows bridge processes."""
+    key = str(path.resolve()).casefold()
+    with _SESSION_WRITE_LOCK_GUARD:
+        thread_lock = _SESSION_WRITE_LOCKS.setdefault(key, threading.Lock())
+    with thread_lock:
+        lock_path = path.with_name(f".{path.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with lock_path.open("xb") as initializer:
+                initializer.write(b"0")
+                initializer.flush()
+                os.fsync(initializer.fileno())
+        except FileExistsError:
+            pass
+        with lock_path.open("r+b") as handle:
+            acquired = False
+            deadline = time.monotonic() + timeout
+            if os.name == "nt":
+                import msvcrt
+                while not acquired:
+                    try:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        acquired = True
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Не удалось дождаться сохранения сессии NewsFlow")
+                        time.sleep(0.08)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                acquired = True
+            try:
+                yield
+            finally:
+                if acquired:
+                    try:
+                        handle.seek(0)
+                        if os.name == "nt":
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        else:
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
 
 
 def _replace_session_file(source: Path, target: Path) -> None:
@@ -118,12 +187,14 @@ def _replace_session_file(source: Path, target: Path) -> None:
     unique per write, making a retry safe across independent bridge processes.
     """
     deadline = time.monotonic() + _SESSION_REPLACE_TIMEOUT_SECONDS
-    last_error: PermissionError | None = None
+    last_error: OSError | None = None
     while True:
         try:
             os.replace(source, target)
             return
-        except PermissionError as error:
+        except OSError as error:
+            if getattr(error, "winerror", None) not in _TRANSIENT_WINDOWS_REPLACE_ERRORS:
+                raise
             last_error = error
             if time.monotonic() >= deadline:
                 raise last_error
@@ -137,33 +208,54 @@ def _write_session_file(path: Path, data: dict) -> None:
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
     )
     try:
-        temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
         _replace_session_file(temporary, path)
     finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+        temporary.unlink(missing_ok=True)
 
 
 def save_session(titles: list[str], jobs: list[Job]):
     data = _session_data(titles, jobs)
     path = session_path()
-    # Retain the previously good file.  The backup is intentionally outside
-    # the installed application directory, so updating/reinstalling NewsFlow
-    # never touches completed scripts.
-    if path.is_file():
-        try:
+    key = str(path.resolve()).casefold()
+    with _exclusive_session_write(path):
+        current_revision = _session_revision(path)
+        observed_revision = _SESSION_OBSERVED_REVISIONS.get(key)
+        if observed_revision is not None and observed_revision != current_revision:
+            raise SessionWriteConflictError(
+                "Сессия NewsFlow была обновлена другим процессом; устаревшая запись не опубликована."
+            )
+        # Retain the previously committed file while holding the same lock as
+        # publication.  A failed replacement therefore leaves both primary
+        # and LKG intact, and a later writer cannot interleave a new backup.
+        if path.is_file():
             shutil.copy2(path, backup_session_path())
-        except OSError:
-            # The primary atomic write still protects the latest state.  A
-            # backup failure must never prevent the user from saving work.
-            pass
-    _write_session_file(path, data)
+        _write_session_file(path, data)
+        _remember_session_revision(path)
+
+
+def _read_session_text(path: Path) -> str:
+    """Read through the same short Windows sharing violations as publication."""
+    deadline = time.monotonic() + _SESSION_REPLACE_TIMEOUT_SECONDS
+    while True:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as error:
+            if (getattr(error, "winerror", None) not in _TRANSIENT_WINDOWS_REPLACE_ERRORS
+                    or time.monotonic() >= deadline):
+                raise
+            time.sleep(_SESSION_REPLACE_RETRY_SECONDS)
 
 
 def _read_session(path: Path) -> tuple[list[str], list[Job]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # Snapshot bridge processes use this path too.  Taking the same very short
+    # sidecar lock as a publisher means they observe a complete old or new JSON
+    # file rather than racing a Windows replace operation.
+    with _exclusive_session_write(path):
+        data = json.loads(_read_session_text(path))
     titles = [str(item) for item in data.get("titles", [])]
     jobs = []
     for item in data.get("jobs", []):
@@ -382,7 +474,10 @@ def load_session() -> tuple[list[str], list[Job]]:
             if candidate == path and not titles and not jobs:
                 recovered_empty = _recover_empty_primary_from_backup()
                 if recovered_empty:
+                    _remember_session_revision(path)
                     return _apply_scenario_tombstones(*recovered_empty)
+            if candidate == path:
+                _remember_session_revision(path)
             return titles, jobs
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue
