@@ -457,6 +457,68 @@ class ParallelRunner:
                     job.actual_chars = single_chars
                     job.length_status = "SHORT"
                     return False
+            elif part_index == len(plan.parts) - 1:
+                # The final multipart segment is not immutable until the
+                # assembled story satisfies the global length contract.
+                # Otherwise a SHORT/LONG final would be accepted and every
+                # ordinary retry would skip all parts forever.
+                prefix_text = self._assembled_story(plan, job.accepted_story_parts)
+                separator_chars = 2 if prefix_text else 0
+
+                def final_candidate(text: str) -> tuple[str, str, int]:
+                    record = {
+                        "part_id": part.id,
+                        "text": text,
+                        "content_ids": list(part.content_ids),
+                        "target_chars": active_target,
+                    }
+                    assembled = self._assembled_story(
+                        plan, [*job.accepted_story_parts, record],
+                    )
+                    status, chars = scenario_length_status(job.request, assembled)
+                    return assembled, status, chars
+
+                candidate_result, final_status, final_chars = final_candidate(accepted_text)
+                if final_status == "SHORT":
+                    minimum_final_chars = max(
+                        1,
+                        int(job.request.allowed_min or 0)
+                        - len(prefix_text)
+                        - separator_chars,
+                    )
+                    length_retry_prompt = (
+                        "FINAL SEGMENT LENGTH RECOVERY. Retry only this same unfinished final segment. "
+                        f"The assembled scenario is too short. Write at least {minimum_final_chars} characters "
+                        f"for this segment and aim for {active_target} characters. Preserve the assigned Story Map "
+                        "content and final role; do not restart earlier parts, add labels, JSON or commentary.\n\n"
+                        f"TASK:\n{writer_prompt}"
+                    )
+                    length_retry = await self._generate_fresh_result(
+                        length_retry_prompt, job.request, max(active_target, minimum_final_chars),
+                    )
+                    if not self._writer_output_unusable(length_retry):
+                        accepted_text = length_retry.strip()
+                        candidate_result, final_status, final_chars = final_candidate(accepted_text)
+
+                if final_status == "LONG" and job.request.allowed_max:
+                    maximum_final_chars = max(
+                        1,
+                        int(job.request.allowed_max)
+                        - len(prefix_text)
+                        - separator_chars,
+                    )
+                    accepted_text = trim_text_to_sentence_boundary(
+                        accepted_text, maximum_final_chars,
+                    )
+                    candidate_result, final_status, final_chars = final_candidate(accepted_text)
+
+                if final_status in {"SHORT", "LONG"}:
+                    job.state = RunState.PAUSED
+                    job.error = "Финальная часть сценария не уложилась в выбранный диапазон длины"
+                    job.result = candidate_result
+                    job.actual_chars = final_chars
+                    job.length_status = final_status
+                    return False
 
             job.accepted_story_parts.append({
                 "part_id": part.id,
