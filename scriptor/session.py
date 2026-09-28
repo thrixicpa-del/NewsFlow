@@ -126,8 +126,9 @@ def _session_revision(path: Path) -> str | None:
     return sha256(path.read_bytes()).hexdigest()
 
 
-def _remember_session_revision(path: Path) -> None:
-    _SESSION_OBSERVED_REVISIONS[str(path.resolve()).casefold()] = _session_revision(path)
+def _remember_session_revision(path: Path, revision: str | None) -> None:
+    """Remember the revision of the exact snapshot or publication already locked."""
+    _SESSION_OBSERVED_REVISIONS[str(path.resolve()).casefold()] = revision
 
 
 @contextmanager
@@ -234,15 +235,15 @@ def save_session(titles: list[str], jobs: list[Job]):
         if path.is_file():
             shutil.copy2(path, backup_session_path())
         _write_session_file(path, data)
-        _remember_session_revision(path)
+        _remember_session_revision(path, _session_revision(path))
 
 
-def _read_session_text(path: Path) -> str:
+def _read_session_bytes(path: Path) -> bytes:
     """Read through the same short Windows sharing violations as publication."""
     deadline = time.monotonic() + _SESSION_REPLACE_TIMEOUT_SECONDS
     while True:
         try:
-            return path.read_text(encoding="utf-8")
+            return path.read_bytes()
         except OSError as error:
             if (getattr(error, "winerror", None) not in _TRANSIENT_WINDOWS_REPLACE_ERRORS
                     or time.monotonic() >= deadline):
@@ -250,12 +251,14 @@ def _read_session_text(path: Path) -> str:
             time.sleep(_SESSION_REPLACE_RETRY_SECONDS)
 
 
-def _read_session(path: Path) -> tuple[list[str], list[Job]]:
+def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
     # Snapshot bridge processes use this path too.  Taking the same very short
     # sidecar lock as a publisher means they observe a complete old or new JSON
     # file rather than racing a Windows replace operation.
     with _exclusive_session_write(path):
-        data = json.loads(_read_session_text(path))
+        payload = _read_session_bytes(path)
+        revision = sha256(payload).hexdigest()
+        data = json.loads(payload.decode("utf-8"))
     titles = [str(item) for item in data.get("titles", [])]
     jobs = []
     for item in data.get("jobs", []):
@@ -281,6 +284,12 @@ def _read_session(path: Path) -> tuple[list[str], list[Job]]:
             accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
             str(item.get("story_planner_status", "") or ""),
         ))
+    return titles, jobs, revision
+
+
+def _read_session(path: Path) -> tuple[list[str], list[Job]]:
+    """Read the current snapshot without exposing its concurrency revision."""
+    titles, jobs, _revision = _read_session_snapshot(path)
     return titles, jobs
 
 
@@ -469,15 +478,17 @@ def load_session() -> tuple[list[str], list[Job]]:
         if not candidate.is_file():
             continue
         try:
-            titles, jobs = _read_session(candidate)
+            titles, jobs, revision = _read_session_snapshot(candidate)
             titles, jobs = _apply_scenario_tombstones(titles, jobs)
             if candidate == path and not titles and not jobs:
                 recovered_empty = _recover_empty_primary_from_backup()
                 if recovered_empty:
-                    _remember_session_revision(path)
+                    with _exclusive_session_write(path):
+                        recovered_revision = _session_revision(path)
+                    _remember_session_revision(path, recovered_revision)
                     return _apply_scenario_tombstones(*recovered_empty)
             if candidate == path:
-                _remember_session_revision(path)
+                _remember_session_revision(path, revision)
             return titles, jobs
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue

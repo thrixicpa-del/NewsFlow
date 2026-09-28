@@ -72,6 +72,34 @@ class SessionTests(unittest.TestCase):
                 self.assertEqual(json.loads(path.read_text(encoding="utf-8")), previous)
                 self.assertEqual(list(Path(folder).glob(f".{path.name}.*.tmp")), [])
 
+    def test_transient_windows_replace_exhaustion_keeps_previous_session_and_cleans_stage(self):
+        """A permanent sharing violation is bounded, durable, and leaves no staged file."""
+        with tempfile.TemporaryDirectory() as folder:
+            for winerror in (5, 32):
+                path = Path(folder) / f"session-exhausted-{winerror}.json"
+                previous = {"version": 2, "titles": ["old"], "jobs": []}
+                path.write_text(json.dumps(previous), encoding="utf-8")
+                calls = 0
+
+                def always_locked(source, target, winerror=winerror):
+                    nonlocal calls
+                    calls += 1
+                    error = PermissionError(13, "Access is denied", str(target))
+                    error.winerror = winerror
+                    raise error
+
+                with (
+                    patch("scriptor.session._SESSION_REPLACE_TIMEOUT_SECONDS", 0.01),
+                    patch("scriptor.session._SESSION_REPLACE_RETRY_SECONDS", 0.001),
+                    patch("scriptor.session.os.replace", side_effect=always_locked),
+                    self.assertRaises(PermissionError),
+                ):
+                    _write_session_file(path, {"version": 2, "titles": ["new"], "jobs": []})
+
+                self.assertGreater(calls, 1)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), previous)
+                self.assertEqual(list(Path(folder).glob(f".{path.name}.*.tmp")), [])
+
     def test_session_write_flushes_and_fsyncs_before_atomic_publication(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "session.json"
@@ -118,6 +146,36 @@ class SessionTests(unittest.TestCase):
                 with self.assertRaises(SessionWriteConflictError):
                     save_session(["old"], original)
                 self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["new"])
+
+    def test_load_binds_observed_revision_to_bytes_read_under_lock(self):
+        """R1 read, then R2 committed, must not let the R1 writer overwrite R2."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            stale_jobs = [Job(ScenarioRequest(0, "R1", "P"), RunState.WAITING)]
+            newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
+            save_session(["R1"], stale_jobs)
+            original_remember = __import__("scriptor.session", fromlist=["_remember_session_revision"])._remember_session_revision
+            committed_newer = False
+
+            def commit_r2_before_remember(path, *revision):
+                nonlocal committed_newer
+                if not committed_newer:
+                    committed_newer = True
+                    _write_session_file(path, _session_data(["R2"], newer_jobs))
+                return original_remember(path, *revision)
+
+            with patch("scriptor.session._remember_session_revision", side_effect=commit_r2_before_remember):
+                loaded_titles, _loaded_jobs = load_session()
+
+            self.assertEqual(loaded_titles, ["R1"])
+            with self.assertRaises(SessionWriteConflictError):
+                save_session(["R1"], stale_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
 
     def test_each_session_write_uses_a_unique_staging_file(self):
         """Separate bridge processes must never publish through one shared .tmp name."""
