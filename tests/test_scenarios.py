@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -169,7 +170,10 @@ class ScenarioGenerationTests(unittest.TestCase):
 
             async def generate(self, prompt):
                 self.prompts.append(prompt)
-                return "а" * 10000
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(2)
+                target = re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
+                return "а" * int(target.group(1))
 
         for provider in ("openai", "agent"):
             with self.subTest(provider=provider):
@@ -190,7 +194,7 @@ class ScenarioGenerationTests(unittest.TestCase):
                      patch.object(bridge, "HybridTextPool", return_value=pool):
                     bridge.generate_scenarios({"provider": provider})
 
-                self.assertEqual(len(pool.prompts), 1)
+                self.assertEqual(len(pool.prompts), 3)
                 prompt = pool.prompts[0]
                 self.assertIn("FULL_USER_PROMPT_BEGIN :: Напиши сценарий для Проверочная тема.", prompt)
                 self.assertIn("FULL_USER_PROMPT_END", prompt)

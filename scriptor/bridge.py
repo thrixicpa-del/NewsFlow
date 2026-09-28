@@ -1043,7 +1043,10 @@ def _resolve_cover_portrait(
             if str(item.get("cover_face_resolution_status", "")).strip().upper() != "LOW_CONFIDENCE":
                 item["cover_face_resolution_status"] = "RESOLVED"
         elif item.get("cover_face_required"):
-            item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+            # Current items never use NEEDS_REVIEW as an operational stop
+            # state. A missing provider proposal remains an explicit low-
+            # confidence resolver outcome and may be repaired independently.
+            item["cover_face_resolution_status"] = "LOW_CONFIDENCE"
     item.update(resolved)
     return resolved
 
@@ -6088,7 +6091,7 @@ def _ensure_cover_face_resolution_item(item: dict, *, settings: Settings | None 
     if primary is None:
         item["cover_people_candidates"] = []
         item["cover_primary_person"] = None
-        item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+        item["cover_face_resolution_status"] = "LOW_CONFIDENCE"
         return item != before
     derived_candidates: list[dict] = [primary]
     for candidate in candidates:
@@ -9663,7 +9666,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 status = "Нужно определить политического субъекта"
             _cover_step(item, status, 100, detail)
             item["error"] = detail
-            item["cover_face_resolution_status"] = "NEEDS_REVIEW"
+            item["cover_face_resolution_status"] = "LOW_CONFIDENCE"
             _save_cover_state(settings)
             continue
         has_portrait_reference = False

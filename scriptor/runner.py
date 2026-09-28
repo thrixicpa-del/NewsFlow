@@ -13,10 +13,14 @@ from typing import Any
 from .core import ScenarioRequest
 from .story_planner import (
     StoryPlan,
+    build_story_plan_face_repair_prompt,
+    build_story_plan_structure_repair_prompt,
     build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
+    repair_story_plan_face_metadata_response,
+    repair_story_plan_parts_response,
     story_plan_from_dict,
 )
 
@@ -267,12 +271,36 @@ class ParallelRunner:
                 job.state = RunState.PAUSED
                 job.error = "Планировщик сценария не вернул рабочий план"
                 return False
-            plan = parse_story_plan_response(
-                planner_response, part_targets, require_cover_person=True,
-            )
+            try:
+                plan = parse_story_plan_response(planner_response, part_targets)
+            except (TypeError, ValueError):
+                # The planner's story material remains immutable. One bounded
+                # recovery may correct only the exact part topology.
+                structural_repair = await self._generate_usable(
+                    build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
+                    job.request,
+                    planner_budget,
+                )
+                plan = repair_story_plan_parts_response(structural_repair, planner_response, part_targets)
+            face_repair_deferred = False
+            if plan.cover_face_repair_needed:
+                try:
+                    plan = repair_story_plan_face_metadata_response(
+                        await self._generate_usable(
+                            build_story_plan_face_repair_prompt(job.request, plan),
+                            job.request,
+                            2048,
+                        ),
+                        plan,
+                    )
+                except Exception:  # noqa: BLE001 - provider boundary cannot cancel valid prose
+                    # A malformed provider face block must never discard a
+                    # valid plan or accepted/next Writer work. Covers may
+                    # later continue semantic resolution from its own context.
+                    face_repair_deferred = True
             job.story_plan = plan.to_dict()
             job.accepted_story_parts = []
-            job.story_planner_status = "READY"
+            job.story_planner_status = "FACE_REPAIR_DEFERRED" if face_repair_deferred else "READY"
             # Persist the complete plan before a prose part is accepted.
             self._notify(job)
 

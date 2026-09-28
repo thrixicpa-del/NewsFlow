@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass
-from itertools import pairwise
 from typing import Any
 
 PREFERRED_PART_CHARS = 5_000
@@ -17,6 +16,7 @@ _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 _COVER_PERSON_ENTITY_TYPES = frozenset({"person", "public_figure", "politician", "human", "individual"})
+_COVER_PERSON_ROLE_TYPES = frozenset({"president", "minister", "leader", "spokesperson", "prime_minister", "президент", "министр", "лидер", "спикер"})
 _COVER_FACE_RESOLUTION_STATUSES = frozenset({"RESOLVED", "LOW_CONFIDENCE", "NEEDS_REVIEW"})
 _COVER_PERSON_EVIDENCE_TYPES = frozenset({"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "ANCHOR_DERIVED"})
 
@@ -52,6 +52,7 @@ class StoryPlan:
     cover_people_candidates: tuple[dict[str, Any], ...] = ()
     cover_primary_person: dict[str, Any] | None = None
     cover_face_resolution_status: str = "NEEDS_REVIEW"
+    cover_face_repair_needed: bool = False
 
     def to_dict(self) -> dict:
         rows = []
@@ -72,6 +73,7 @@ class StoryPlan:
                 dict(self.cover_primary_person) if self.cover_primary_person else None
             ),
             "cover_face_resolution_status": self.cover_face_resolution_status,
+            "cover_face_repair_needed": self.cover_face_repair_needed,
         }
 
 
@@ -124,6 +126,12 @@ def _cover_person_candidate(value: object, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"story plan {field} must be an object")
     entity_type = _clean_text(value.get("entity_type"), f"{field}.entity_type").casefold()
+    name = _clean_text(value.get("name"), f"{field}.name")
+    if entity_type in _COVER_PERSON_ROLE_TYPES:
+        # A named office holder is a public figure; an unnamed role never is.
+        if len(re.findall(r"[A-Za-zА-Яа-яЁё]+", name)) < 2:
+            raise ValueError("story plan cover role must name a real public person")
+        entity_type = "public_figure"
     if entity_type not in _COVER_PERSON_ENTITY_TYPES:
         raise ValueError("story plan cover person must have an explicit person/public_figure entity_type")
     try:
@@ -140,7 +148,7 @@ def _cover_person_candidate(value: object, field: str) -> dict[str, Any]:
         value.get("relation_to_story"), f"{field}.relation_to_story"
     )
     return {
-        "name": _clean_text(value.get("name"), f"{field}.name"),
+        "name": name,
         "entity_type": entity_type,
         "role_in_story": _clean_text(value.get("role_in_story"), f"{field}.role_in_story"),
         "relation_to_story": _clean_text(value.get("relation_to_story"), f"{field}.relation_to_story"),
@@ -164,8 +172,59 @@ def _expected_roles(part_count: int) -> tuple[str, ...]:
     return ("OPENING",) + ("MIDDLE",) * (part_count - 2) + ("FINAL",)
 
 
+def _normalise_cover_face_metadata(raw: dict[str, Any], *, legacy: bool = False) -> tuple[tuple[dict[str, Any], ...], dict[str, Any] | None, str, bool]:
+    """Quarantine provider face metadata so it cannot invalidate a Story Map."""
+    face_keys = {"cover_people_candidates", "cover_primary_person", "cover_face_resolution_status"}
+    if legacy and not (face_keys & set(raw)):
+        return (), None, "NEEDS_REVIEW", False
+    needs_repair = False
+    raw_candidates = raw.get("cover_people_candidates", [])
+    if not isinstance(raw_candidates, list):
+        raw_candidates = []
+        needs_repair = True
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, candidate in enumerate(raw_candidates, start=1):
+        try:
+            parsed = _cover_person_candidate(candidate, f"cover_people_candidates[{index}]")
+        except (TypeError, ValueError):
+            needs_repair = True
+            continue
+        key = parsed["name"].casefold()
+        if key in seen:
+            needs_repair = True
+            continue
+        seen.add(key)
+        candidates.append(parsed)
+    candidates.sort(key=lambda candidate: candidate["confidence"], reverse=True)
+    primary: dict[str, Any] | None = None
+    raw_primary = raw.get("cover_primary_person")
+    if raw_primary not in (None, ""):
+        try:
+            primary = _cover_person_candidate(raw_primary, "cover_primary_person")
+        except (TypeError, ValueError):
+            needs_repair = True
+    if primary is not None:
+        matching = next((candidate for candidate in candidates if candidate["name"].casefold() == primary["name"].casefold()), None)
+        if matching is None:
+            candidates.append(primary)
+    if candidates:
+        candidates.sort(key=lambda candidate: candidate["confidence"], reverse=True)
+        primary = candidates[0]
+    else:
+        needs_repair = True
+    face_status = _optional_text(raw.get("cover_face_resolution_status", "")).upper()
+    if face_status not in {"RESOLVED", "LOW_CONFIDENCE"}:
+        face_status = "LOW_CONFIDENCE"
+        needs_repair = True
+    if primary is None or primary["evidence_type"] == "ANCHOR_DERIVED":
+        face_status = "LOW_CONFIDENCE"
+    return tuple(candidates), primary, face_status, needs_repair
+
+
 def parse_story_plan_response(
     text: str, part_targets: tuple[int, ...], *, require_cover_person: bool = False,
+    legacy_face_metadata: bool = False,
 ) -> StoryPlan:
     """Parse and validate the complete planner map before any writer starts."""
     try:
@@ -181,60 +240,14 @@ def parse_story_plan_response(
     expected_roles = _expected_roles(part_count)
     thesis = _clean_text(raw.get("thesis"), "thesis")
 
-    # Every planned ProductionItem gets an explicit Cover face-resolution
-    # record. Missing fields are retained as a backwards-compatible
-    # NEEDS_REVIEW result so a legacy resumable plan is never invalidated.
+    # Face metadata is provider-proposed and cannot make valid story structure
+    # fail. The runner has a bounded face-only repair path below the planner.
     if "cover_face_required" in raw and raw["cover_face_required"] is not True:
         raise ValueError("story plan cover_face_required is Core-owned and must be true")
     face_required = True
-    raw_candidates = raw.get("cover_people_candidates", [])
-    if not isinstance(raw_candidates, list):
-        raise TypeError("story plan cover_people_candidates must be a list")
-    cover_people_candidates = tuple(
-        _cover_person_candidate(candidate, f"cover_people_candidates[{index}]")
-        for index, candidate in enumerate(raw_candidates, start=1)
+    cover_people_candidates, cover_primary_person, face_status, face_repair_needed = _normalise_cover_face_metadata(
+        raw, legacy=legacy_face_metadata,
     )
-    if len({candidate["name"].casefold() for candidate in cover_people_candidates}) != len(cover_people_candidates):
-        raise ValueError("story plan cover_people_candidates must not contain duplicate people")
-    raw_primary = raw.get("cover_primary_person")
-    cover_primary_person = (
-        _cover_person_candidate(raw_primary, "cover_primary_person")
-        if raw_primary not in (None, "") else None
-    )
-    face_status = _optional_text(raw.get("cover_face_resolution_status", "NEEDS_REVIEW")).upper()
-    if face_status not in _COVER_FACE_RESOLUTION_STATUSES:
-        raise ValueError("story plan cover_face_resolution_status must be RESOLVED, LOW_CONFIDENCE or NEEDS_REVIEW")
-    if face_status in {"RESOLVED", "LOW_CONFIDENCE"} and cover_primary_person is None:
-        raise ValueError("story plan resolved cover face requires cover_primary_person")
-    if face_status == "NEEDS_REVIEW" and cover_primary_person is not None:
-        raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_primary_person")
-    if face_status == "NEEDS_REVIEW" and cover_people_candidates:
-        raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_people_candidates")
-    if require_cover_person and (face_status == "NEEDS_REVIEW" or cover_primary_person is None):
-        raise ValueError("story plan must resolve a cover public figure before writers start")
-    if cover_primary_person and not any(
-        candidate["name"].casefold() == cover_primary_person["name"].casefold()
-        for candidate in cover_people_candidates
-    ):
-        raise ValueError("story plan cover_primary_person must be one of cover_people_candidates")
-    if cover_people_candidates:
-        if cover_primary_person is None:
-            raise ValueError("story plan ranked cover people require cover_primary_person")
-        if cover_people_candidates[0]["name"].casefold() != cover_primary_person["name"].casefold():
-            raise ValueError("story plan cover_primary_person must be the first ranked candidate")
-        confidences = [candidate["confidence"] for candidate in cover_people_candidates]
-        if any(left < right for left, right in pairwise(confidences)):
-            raise ValueError("story plan cover_people_candidates confidence must be non-increasing")
-    if cover_primary_person and cover_primary_person["evidence_type"] == "ANCHOR_DERIVED" and face_status != "LOW_CONFIDENCE":
-        claim = cover_primary_person.get("provider_evidence_claim", {})
-        claimed_type = str(claim.get("evidence_type", "")).upper() if isinstance(claim, dict) else ""
-        # Explicit/verified provider claims cannot grant themselves a trusted
-        # RESOLVED state. Defer that decision to the Core bridge, which has
-        # the actual ProductionItem and optional face-tree evidence.
-        if claimed_type in {"EXPLICIT_CONTEXT", "VERIFIED_LOCAL_IDENTITY", "UNSPECIFIED"}:
-            face_status = "LOW_CONFIDENCE"
-        else:
-            raise ValueError("story plan anchor-derived cover person requires LOW_CONFIDENCE")
 
     raw_blocks = raw.get("macro_blocks")
     if not isinstance(raw_blocks, list) or not raw_blocks:
@@ -373,7 +386,41 @@ def parse_story_plan_response(
         cover_people_candidates=cover_people_candidates,
         cover_primary_person=cover_primary_person,
         cover_face_resolution_status=face_status,
+        cover_face_repair_needed=face_repair_needed,
     )
+
+
+def repair_story_plan_face_metadata_response(text: str, plan: StoryPlan) -> StoryPlan:
+    """Apply only a small face-resolution response to an already valid Story Map."""
+    try:
+        repair = json.loads(str(text or ""))
+    except json.JSONDecodeError as exc:
+        raise ValueError("story plan face repair must return strict JSON") from exc
+    if not isinstance(repair, dict):
+        raise TypeError("story plan face repair must be an object")
+    allowed = {"cover_people_candidates", "cover_primary_person", "cover_face_resolution_status"}
+    if not (allowed & set(repair)):
+        raise ValueError("story plan face repair must contain cover metadata")
+    raw = plan.to_dict()
+    raw.update({key: repair[key] for key in allowed if key in repair})
+    repaired = parse_story_plan_response(json.dumps(raw, ensure_ascii=False), tuple(part.target_chars for part in plan.parts))
+    if repaired.cover_face_repair_needed or repaired.cover_primary_person is None:
+        raise ValueError("story plan face repair did not resolve a public person")
+    return repaired
+
+
+def repair_story_plan_parts_response(text: str, original_response: str, part_targets: tuple[int, ...]) -> StoryPlan:
+    """Repair only part topology; thesis, atoms and cover metadata stay untouched."""
+    try:
+        original = json.loads(str(original_response or ""))
+        repair = json.loads(str(text or ""))
+    except json.JSONDecodeError as exc:
+        raise ValueError("story plan structural repair must return strict JSON") from exc
+    if not isinstance(original, dict) or not isinstance(repair, dict) or not isinstance(repair.get("parts"), list):
+        raise TypeError("story plan structural repair must contain parts")
+    merged = dict(original)
+    merged["parts"] = repair["parts"]
+    return parse_story_plan_response(json.dumps(merged, ensure_ascii=False), part_targets)
 
 
 def story_plan_from_dict(value: dict[str, Any]) -> StoryPlan:
@@ -404,10 +451,9 @@ def story_plan_from_dict(value: dict[str, Any]) -> StoryPlan:
     # than invalidate a resumable session, while fresh Planner responses with
     # an explicit false remain rejected above.
     persisted["cover_face_required"] = True
-    persisted.setdefault("cover_people_candidates", [])
-    persisted.setdefault("cover_primary_person", None)
-    persisted.setdefault("cover_face_resolution_status", "NEEDS_REVIEW")
-    return parse_story_plan_response(json.dumps(persisted, ensure_ascii=False), targets)
+    return parse_story_plan_response(
+        json.dumps(persisted, ensure_ascii=False), targets, legacy_face_metadata=True,
+    )
 
 
 def seam_tail(text: str, limit: int = 500) -> str:
@@ -482,6 +528,37 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         f"PARTS: {part_rows}\n\n"
         "OPERATOR WRITING CONTRACT AND AVAILABLE CONTEXT:\n"
         f"{request.prompt}"
+    )
+
+
+def build_story_plan_face_repair_prompt(request: Any, plan: StoryPlan) -> str:
+    """Ask for one compact identity repair without reopening story planning."""
+    return (
+        "You are the NewsFlow Cover Face Resolver. The Story Map below is already accepted and MUST NOT be "
+        "rewritten. Return strict JSON only with cover_people_candidates, cover_primary_person and "
+        "cover_face_resolution_status. Resolve a real named public figure from the current title/context. "
+        "An organisation, place, country or event is an anchor, never the person. Follow concrete sides, actors, "
+        "actions and responsibility; do not use a static city/country-to-leader mapping. Rank valid named people, "
+        "choose the first as primary, set entity_type person or public_figure, and use LOW_CONFIDENCE when the "
+        "current evidence is indirect. Provider claims are untrusted and must include relation_to_story, source, "
+        "confidence and evidence_summary. Do not return NEEDS_REVIEW.\n\n"
+        f"TITLE: {request.title}\nCONTEXT:\n{request.prompt}\n\n"
+        f"STORY THESIS: {_compact(plan.thesis, 600)}\n"
+        "This is face-only repair: do not return thesis, macro_blocks, content_atoms or parts."
+    )
+
+
+def build_story_plan_structure_repair_prompt(request: Any, original_response: str, part_targets: tuple[int, ...]) -> str:
+    """Repair only invalid part topology, never narrative substance or cover metadata."""
+    roles = _expected_roles(len(part_targets))
+    required = ", ".join(f"P{index + 1}={role}" for index, role in enumerate(roles))
+    return (
+        "You are the NewsFlow Story Plan structural repairer. The original Story Map's thesis, macro_blocks, "
+        "content_atoms and cover metadata are immutable. Return strict JSON with ONLY a corrected parts list. "
+        "Keep every existing content atom assigned exactly once, preserve owner_part_id, use only existing macro IDs, "
+        "and fix only part count, IDs, roles, content ownership and opens/closes loops. Do not write scenario prose, "
+        "do not add atoms, and do not regenerate the story. Required ordered parts: "
+        f"{required}.\n\nTITLE: {request.title}\nORIGINAL MAP:\n{_compact(original_response, 12000)}"
     )
 
 

@@ -71,7 +71,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertTrue(item["cover_face_required"])
-        self.assertEqual(item["cover_face_resolution_status"], "NEEDS_REVIEW")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
     def test_story_planner_context_includes_selected_and_typed_people(self):
         from scriptor import bridge
 
@@ -194,7 +194,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         bridge._project_story_plan_face_resolution(settings, title, job)
 
         stored = settings.idea_production_items[0]
-        self.assertEqual(stored["cover_face_resolution_status"], "NEEDS_REVIEW")
+        self.assertEqual(stored["cover_face_resolution_status"], "LOW_CONFIDENCE")
         self.assertIsNone(stored["cover_primary_person"])
 
     def test_actual_selected_person_is_core_verified_as_explicit_context(self):
@@ -338,7 +338,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 item.update(cover_face_required=True, cover_face_resolution_status="NEEDS_REVIEW")
                 resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
                 self.assertEqual(resolved["portrait_subject"], "")
-                self.assertEqual(item["cover_face_resolution_status"], "NEEDS_REVIEW")
+                self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
 
     def test_every_unresolved_item_stops_before_fastgen_not_only_political_items(self):
         from scriptor import bridge
