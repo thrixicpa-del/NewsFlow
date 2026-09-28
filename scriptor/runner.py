@@ -271,7 +271,7 @@ class ParallelRunner:
     def _writer_output_is_structural(text: str) -> bool:
         """Reject planner/part labels before they can enter the user scenario."""
         return bool(re.search(
-            r"(?im)^\s*(?:part|часть|p\d+|\{\s*\"(?:part|text|content))\b",
+            r'(?im)^\s*(?:(?:part|часть)\s+\d+\b|p\d+\b|\{\s*"(?:part|text|content)"\s*:)',
             str(text or "").strip(),
         ))
 
