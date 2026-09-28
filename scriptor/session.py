@@ -240,7 +240,7 @@ def save_session(titles: list[str], jobs: list[Job]):
         # Retain the previously committed file while holding the same lock as
         # publication.  A failed replacement therefore leaves both primary
         # and LKG intact, and a later writer cannot interleave a new backup.
-        if path.is_file():
+        if path.is_file() and _is_valid_session_file(path):
             shutil.copy2(path, backup_session_path())
         _write_session_file(path, data)
         _remember_session_revision(path, _session_revision(path))
@@ -257,6 +257,15 @@ def _read_session_bytes(path: Path) -> bytes:
                     or time.monotonic() >= deadline):
                 raise
             time.sleep(_SESSION_REPLACE_RETRY_SECONDS)
+
+
+def _is_valid_session_file(path: Path) -> bool:
+    """Only let a parseable primary replace the independent LKG backup."""
+    try:
+        data = json.loads(_read_session_bytes(path).decode("utf-8"))
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("titles", []), list) and isinstance(data.get("jobs", []), list)
 
 
 def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
@@ -360,7 +369,25 @@ def _apply_scenario_tombstones(titles: list[str], jobs: list[Job], settings=None
     return remove_scenarios(titles, jobs, removed) if removed else (titles, jobs)
 
 
-def _recover_empty_primary_from_backup(expected_primary_revision: str) -> tuple[list[str], list[Job]] | None:
+def _conditionally_restore_primary_from_backup(expected_primary_revision: str, titles: list[str], jobs: list[Job]) -> str:
+    """Restore LKG only if the primary is still the snapshot this loader saw.
+
+    Return the authoritative revision for the returned state: the healed
+    primary when this loader published it, otherwise the original observed
+    revision so a later save detects that another writer won the race.
+    """
+    primary = session_path()
+    with _exclusive_session_write(primary):
+        if _session_revision(primary) != expected_primary_revision:
+            return expected_primary_revision
+        _write_session_file(primary, _session_data(titles, jobs))
+        healed_revision = _session_revision(primary)
+        if healed_revision is None:
+            raise OSError("NewsFlow session recovery did not publish a primary revision")
+        return healed_revision
+
+
+def _recover_empty_primary_from_backup(expected_primary_revision: str) -> tuple[list[str], list[Job], str] | None:
     """Recover only when settings prove the backup belongs to the active batch.
 
     A zero-byte/empty primary session was produced by an interrupted legacy
@@ -403,11 +430,10 @@ def _recover_empty_primary_from_backup(expected_primary_revision: str) -> tuple[
     # the empty primary.  Keep the independent last-known-good backup intact.
     # A writer may have published newer work after the empty primary snapshot;
     # never replace that work with this older LKG recovery.
-    primary = session_path()
-    with _exclusive_session_write(primary):
-        if _session_revision(primary) == expected_primary_revision:
-            _write_session_file(primary, _session_data(backup_titles, backup_jobs))
-    return backup_titles, backup_jobs
+    authoritative_revision = _conditionally_restore_primary_from_backup(
+        expected_primary_revision, backup_titles, backup_jobs,
+    )
+    return backup_titles, backup_jobs, authoritative_revision
 
 
 def _recover_legacy_jobs(current_titles: list[str]) -> list[Job]:
@@ -500,15 +526,20 @@ def load_session() -> tuple[list[str], list[Job]]:
             if candidate == path and not titles and not jobs:
                 recovered_empty = _recover_empty_primary_from_backup(revision)
                 if recovered_empty:
-                    _remember_session_revision(path, revision)
-                    return _apply_scenario_tombstones(*recovered_empty)
+                    recovered_titles, recovered_jobs, authoritative_revision = recovered_empty
+                    _remember_session_revision(path, authoritative_revision)
+                    return _apply_scenario_tombstones(recovered_titles, recovered_jobs)
             if candidate == path:
                 _remember_session_revision(path, revision)
             elif invalid_primary_revision is not None:
-                # The state comes from LKG, but subsequent publication must
-                # still compare against the exact malformed primary snapshot
-                # that caused this fallback — never a later primary re-hash.
-                _remember_session_revision(path, invalid_primary_revision)
+                # The backup is authoritative only when it can conditionally
+                # self-heal the exact malformed primary snapshot. If another
+                # writer already committed, retain the old observed revision
+                # so the returned LKG state is correctly rejected as stale.
+                authoritative_revision = _conditionally_restore_primary_from_backup(
+                    invalid_primary_revision, titles, jobs,
+                )
+                _remember_session_revision(path, authoritative_revision)
             return titles, jobs
         except _SessionSnapshotReadError as error:
             if candidate == path:

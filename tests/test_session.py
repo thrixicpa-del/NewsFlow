@@ -210,6 +210,27 @@ class SessionTests(unittest.TestCase):
                 save_session(["backup"], recovered_jobs)
             self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
 
+    def test_empty_primary_backup_recovery_self_heals_and_saves_without_false_conflict(self):
+        """A no-race LKG recovery observes its healed primary, not the old empty bytes."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            recovered_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            save_settings(Settings(idea_results=["backup"]))
+            _write_session_file(session_path(), _session_data([], []))
+            _write_session_file(backup_session_path(), _session_data(["backup"], recovered_jobs))
+
+            recovered_titles, loaded_jobs = load_session()
+
+            self.assertEqual(recovered_titles, ["backup"])
+            save_session(recovered_titles, loaded_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+            self.assertEqual(json.loads(backup_session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+
     def test_invalid_primary_backup_fallback_keeps_the_invalid_snapshot_revision(self):
         """An invalid R1 followed by R2 must not let backup fallback overwrite R2."""
         with tempfile.TemporaryDirectory() as folder, patch.dict(
@@ -244,6 +265,48 @@ class SessionTests(unittest.TestCase):
             with self.assertRaises(SessionWriteConflictError):
                 save_session(["backup"], backup_jobs)
             self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
+
+    def test_invalid_primary_backup_self_heals_and_immediate_save_succeeds(self):
+        """A no-race malformed primary is conditionally restored from LKG before continuing."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            backup_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            session_path().write_bytes(b"{")
+            _write_session_file(backup_session_path(), _session_data(["backup"], backup_jobs))
+
+            recovered_titles, loaded_jobs = load_session()
+
+            self.assertEqual(recovered_titles, ["backup"])
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+            save_session(recovered_titles, loaded_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
+
+    def test_invalid_primary_recovery_preserves_lkg_when_next_publication_fails(self):
+        """A failed post-recovery publish must never replace the valid LKG with malformed bytes."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            backup_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            session_path().write_bytes(b"{")
+            _write_session_file(backup_session_path(), _session_data(["backup"], backup_jobs))
+            recovered_titles, loaded_jobs = load_session()
+
+            with (
+                patch("scriptor.session._write_session_file", side_effect=OSError("forced publication failure")),
+                self.assertRaises(OSError),
+            ):
+                save_session(recovered_titles, loaded_jobs)
+
+            self.assertEqual(json.loads(backup_session_path().read_text(encoding="utf-8"))["titles"], ["backup"])
 
     def test_each_session_write_uses_a_unique_staging_file(self):
         """Separate bridge processes must never publish through one shared .tmp name."""
