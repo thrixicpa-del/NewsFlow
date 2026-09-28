@@ -6359,6 +6359,16 @@ def generate_scenarios(payload: dict) -> dict:
     for request in selected:
         previous = current.get(request.index)
         if not force and previous and isinstance(previous.story_plan, dict):
+            if "length_contract" not in previous.story_plan:
+                # r26/legacy Story Maps predate persisted full length metadata.
+                # Capture the historical request contract BEFORE replacing the
+                # request with current UI settings, otherwise changed min/max
+                # with the same target becomes undetectable downstream.
+                previous.story_plan["length_contract"] = {
+                    "target_chars": max(0, int(previous.request.target_chars or 0)),
+                    "allowed_min": max(0, int(previous.request.allowed_min or 0)),
+                    "allowed_max": max(0, int(previous.request.allowed_max or 0)),
+                }
             previous.request = request
             previous.state = RunState.WAITING
             previous.error = ""
