@@ -350,7 +350,15 @@ class ParallelRunner:
         if job.story_plan:
             plan = story_plan_from_dict(job.story_plan)
             if tuple(part.target_chars for part in plan.parts) != part_targets:
-                raise ValueError("persisted story plan no longer matches the selected length contract")
+                job.state = RunState.PAUSED
+                job.error = (
+                    "Диапазон длины изменился после создания Story Map. "
+                    "Сохранённые части не перезаписаны; для нового диапазона нужен явный перезапуск."
+                )
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = "PLAN_LENGTH_CHANGED"
+                return False
         else:
             planner_prompt = build_story_planner_prompt(job.request, part_targets)
             planner_budget = max(2048, min(8192, 1024 + len(part_targets) * 350))
