@@ -36,27 +36,51 @@ def looks_like_action_required(text: str) -> bool:
         "unable to help", "i can’t assist", "i can't assist", "i must refuse",
         "i won’t", "i won't", "cannot comply",
     )
-    requests = (
+    user_action_requests = (
         "переформулируйте", "измените тему", "уточните тему", "please rephrase",
-        "change the topic", "clarify the topic", "не могу продолжить", "не могу создать",
-        "не могу сгенерировать", "не могу написать", "не могу предоставить",
-        "i can't help with", "i cannot help with", "i can’t help with",
-        "не могу помочь с этим", "не могу выполнить этот запрос",
-        "не могу выполнить вашу просьбу", "не могу продолжить выполнение",
-        "не могу создать такой", "не могу написать такой", "не могу повторить",
-        "не могу перезапустить", "не могу выполнить задачу", "я отказываюсь",
-        "это противоречит", "нарушает правила", "по соображениям безопасности",
-        "i can't comply", "i can’t comply", "i cannot fulfill", "i cannot complete",
+        "change the topic", "clarify the topic",
+    )
+    refusal_markers = (
+        "не могу продолжить", "не могу создать", "не могу сгенерировать",
+        "не могу написать", "не могу предоставить", "i can't help with",
+        "i cannot help with", "i can’t help with", "не могу помочь с этим",
+        "не могу выполнить этот запрос", "не могу выполнить вашу просьбу",
+        "не могу продолжить выполнение", "не могу создать такой",
+        "не могу написать такой", "не могу повторить", "не могу перезапустить",
+        "не могу выполнить задачу", "я отказываюсь", "это противоречит",
+        "нарушает правила", "по соображениям безопасности", "i can't comply",
+        "i can’t comply", "i cannot fulfill", "i cannot complete",
         "against my guidelines", "violates policy", "for safety reasons",
     )
-    # В полноценном сценарии фразы персонажей вроде «я не могу» допустимы. Но короткий
-    # Ответ текстового провайдера с отказом нельзя принимать за готовый сценарий.
+    meta_request_context = (
+        "этот запрос", "данный запрос", "ваш запрос", "вашу просьбу",
+        "запрос пользователя", "this request", "your request", "the request",
+        "my guidelines", "openai policy",
+    )
+    # В полноценном сценарии фразы персонажей вроде «я не могу» и новостные
+    # формулировки вроде «нарушает правила» допустимы. Короткий отказ принимаем
+    # как отказ напрямую; в длинном тексте safety/policy-маркер должен быть
+    # привязан к мета-контексту самого запроса, а не к сюжету.
     short_refusal = len(sample) < 700 and any(marker in sample[:600] for marker in (
         "я не могу", "не могу помочь", "не могу выполнить", "не могу создать",
         "не могу написать", "i can't", "i can’t", "i cannot", "unable to",
     ))
-    return (sample.startswith(refusal_prefixes) or short_refusal
-            or any(marker in sample[:1600] for marker in requests))
+    explicit_user_action = any(
+        marker in sample[:1600] for marker in user_action_requests
+    )
+    contextual_refusal = (
+        any(marker in sample[:1600] for marker in refusal_markers)
+        and (
+            len(sample) < 700
+            or any(marker in sample[:1600] for marker in meta_request_context)
+        )
+    )
+    return (
+        sample.startswith(refusal_prefixes)
+        or short_refusal
+        or explicit_user_action
+        or contextual_refusal
+    )
 
 
 class RunState(str, Enum):
