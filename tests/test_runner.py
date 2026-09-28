@@ -201,6 +201,108 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].length_status, "READY")
         self.assertEqual(jobs[0].state, RunState.DONE)
 
+    async def test_short_final_multipart_part_retries_before_acceptance(self):
+        class FinalLengthClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                if "CURRENT PART: P2" in prompt:
+                    return "Б" * 1000
+                return "А" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                if "FINAL SEGMENT LENGTH RECOVERY" not in prompt:
+                    raise AssertionError("only final length recovery should use fresh chat")
+                self.fresh_calls += 1
+                target = int(__import__("re").search(
+                    r"aim for (\d+) characters", prompt,
+                ).group(1))
+                return "В" * target
+
+        client = FinalLengthClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
+                            allowed_min=10000, allowed_max=10000),
+        ])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
+
+    async def test_unresolved_short_final_remains_unaccepted_so_normal_retry_can_repeat_only_final(self):
+        class StickyFinalClient:
+            def __init__(self):
+                self.allow_final = False
+                self.planner_calls = 0
+                self.final_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(2)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                if "CURRENT PART: P2" in prompt:
+                    self.final_calls += 1
+                    return "Б" * (target if self.allow_final else 1000)
+                return "А" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                if "FINAL SEGMENT LENGTH RECOVERY" not in prompt:
+                    raise AssertionError("unexpected fresh retry")
+                return "В" * 1000
+
+        client = StickyFinalClient()
+        runner = ParallelRunner(client, 1)
+        request = ScenarioRequest(
+            0, "Тема", "CONTRACT", target_chars=10000,
+            allowed_min=10000, allowed_max=10000,
+        )
+        first = (await runner.run([request]))[0]
+
+        self.assertEqual(first.state, RunState.PAUSED)
+        self.assertEqual(first.length_status, "SHORT")
+        self.assertEqual([row["part_id"] for row in first.accepted_story_parts], ["P1"])
+        self.assertEqual(client.planner_calls, 1)
+
+        client.allow_final = True
+        retried = await runner.retry(first)
+
+        self.assertEqual(retried.state, RunState.DONE, retried.error)
+        self.assertEqual(retried.actual_chars, 10000)
+        self.assertEqual([row["part_id"] for row in retried.accepted_story_parts], ["P1", "P2"])
+        self.assertEqual(client.planner_calls, 1)
+        self.assertGreaterEqual(client.final_calls, 2)
+
+    async def test_long_final_multipart_part_is_trimmed_before_acceptance(self):
+        class LongFinalClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                if "CURRENT PART: P2" in prompt:
+                    return "Б" * (target + 2000)
+                return "А" * target
+
+        jobs = await ParallelRunner(LongFinalClient(), 1).run([
+            ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
+                            allowed_min=10000, allowed_max=10000),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(len(jobs[0].accepted_story_parts[1]["text"]), 4999)
+
     async def test_fifty_thousand_story_uses_ten_owned_parts(self):
         class TenPartClient:
             def __init__(self):
