@@ -443,6 +443,56 @@ class ParallelRunner:
                 return False
 
             accepted_text = writer_result.strip()
+            if (
+                len(plan.parts) > 1
+                and part_index < len(plan.parts) - 1
+                and job.request.allowed_max
+            ):
+                prefix_text = self._assembled_story(plan, job.accepted_story_parts)
+                remaining_after = len(plan.parts) - part_index - 1
+                # Reserve the deterministic separators and at least one prose
+                # character for each future planned part. This is only a
+                # feasibility ceiling, not a new target for normal output.
+                reserved_chars = (
+                    (2 if prefix_text else 0)
+                    + 2 * remaining_after
+                    + remaining_after
+                )
+                maximum_current_chars = (
+                    int(job.request.allowed_max)
+                    - len(prefix_text)
+                    - reserved_chars
+                )
+                if maximum_current_chars < 1:
+                    job.state = RunState.PAUSED
+                    job.error = (
+                        "Принятый префикс сценария уже не помещается в выбранный максимум длины; "
+                        "нужен явный перезапуск с новым Story Map"
+                    )
+                    job.result = prefix_text
+                    job.actual_chars = len(prefix_text)
+                    job.length_status = "LONG"
+                    return False
+                if len(accepted_text) > maximum_current_chars:
+                    length_retry_prompt = (
+                        "CURRENT SEGMENT LENGTH RECOVERY. Retry only this same unfinished segment. "
+                        f"Write no more than {maximum_current_chars} characters and aim for {active_target}. "
+                        "Preserve the assigned Story Map content and role; do not restart earlier parts, "
+                        "add labels, JSON or commentary.\n\n"
+                        f"TASK:\n{writer_prompt}"
+                    )
+                    length_retry = await self._generate_fresh_result(
+                        length_retry_prompt,
+                        job.request,
+                        min(active_target, maximum_current_chars),
+                    )
+                    if not self._writer_output_unusable(length_retry):
+                        accepted_text = length_retry.strip()
+                    if len(accepted_text) > maximum_current_chars:
+                        accepted_text = trim_text_to_sentence_boundary(
+                            accepted_text, maximum_current_chars,
+                        )
+
             if len(plan.parts) == 1:
                 single_status, single_chars = scenario_length_status(job.request, accepted_text)
                 if single_status == "LONG":
