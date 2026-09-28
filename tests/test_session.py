@@ -2,12 +2,14 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import (
+    _write_session_file,
     backup_session_path,
     legacy_session_path,
     load_session,
@@ -20,6 +22,45 @@ from scriptor.session import (
 
 
 class SessionTests(unittest.TestCase):
+    def test_session_write_retries_a_transient_windows_access_denied(self):
+        """A snapshot reader may briefly deny an atomic Windows replace."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            real_replace = os.replace
+            attempts = 0
+
+            def transient_replace(source, target):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError(5, "Access is denied", str(target))
+                return real_replace(source, target)
+
+            with patch("scriptor.session.os.replace", side_effect=transient_replace):
+                _write_session_file(path, {"version": 2, "titles": [], "jobs": []})
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
+
+    def test_each_session_write_uses_a_unique_staging_file(self):
+        """Separate bridge processes must never publish through one shared .tmp name."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            real_replace = os.replace
+            staged_sources: list[Path] = []
+
+            def capture_replace(source, target):
+                staged_sources.append(Path(source))
+                return real_replace(source, target)
+
+            with patch("scriptor.session.os.replace", side_effect=capture_replace):
+                _write_session_file(path, {"version": 2, "titles": ["one"], "jobs": []})
+                _write_session_file(path, {"version": 2, "titles": ["two"], "jobs": []})
+
+            self.assertEqual(len(staged_sources), 2)
+            self.assertNotEqual(staged_sources[0].name, staged_sources[1].name)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["titles"], ["two"])
+
     def test_rename_scenario_updates_saved_job_title(self):
         job = Job(ScenarioRequest(0, "Старая", "P"), RunState.PAUSED, "Ответ", "Причина")
         titles, jobs = rename_scenario(["Старая"], [job], 0, "  Новая тема  ")

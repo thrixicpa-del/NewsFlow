@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
+import time
+import uuid
 from pathlib import Path
 
 from .config import app_data_root, load_settings
@@ -102,12 +105,45 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
     }
 
 
+_SESSION_REPLACE_TIMEOUT_SECONDS = 3.0
+_SESSION_REPLACE_RETRY_SECONDS = 0.05
+
+
+def _replace_session_file(source: Path, target: Path) -> None:
+    """Publish a staged session while tolerating short Windows reader locks.
+
+    Electron snapshots use a separate bridge process.  On Windows that reader
+    can briefly hold ``session.json`` without delete sharing, so retry the
+    atomic replace instead of failing scenario generation.  The source is
+    unique per write, making a retry safe across independent bridge processes.
+    """
+    deadline = time.monotonic() + _SESSION_REPLACE_TIMEOUT_SECONDS
+    last_error: PermissionError | None = None
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as error:
+            last_error = error
+            if time.monotonic() >= deadline:
+                raise last_error
+            time.sleep(_SESSION_REPLACE_RETRY_SECONDS)
+
+
 def _write_session_file(path: Path, data: dict) -> None:
     """Atomically write JSON so a crash cannot leave a half-written session."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _replace_session_file(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def save_session(titles: list[str], jobs: list[Job]):
