@@ -164,7 +164,9 @@ def _expected_roles(part_count: int) -> tuple[str, ...]:
     return ("OPENING",) + ("MIDDLE",) * (part_count - 2) + ("FINAL",)
 
 
-def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> StoryPlan:
+def parse_story_plan_response(
+    text: str, part_targets: tuple[int, ...], *, require_cover_person: bool = False,
+) -> StoryPlan:
     """Parse and validate the complete planner map before any writer starts."""
     try:
         raw = json.loads(str(text or ""))
@@ -208,6 +210,8 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
         raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_primary_person")
     if face_status == "NEEDS_REVIEW" and cover_people_candidates:
         raise ValueError("story plan NEEDS_REVIEW cover face must not set cover_people_candidates")
+    if require_cover_person and (face_status == "NEEDS_REVIEW" or cover_primary_person is None):
+        raise ValueError("story plan must resolve a cover public figure before writers start")
     if cover_primary_person and not any(
         candidate["name"].casefold() == cover_primary_person["name"].casefold()
         for candidate in cover_people_candidates
@@ -457,7 +461,7 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "new content atom. Any opened loop must be closed by a later planned part.\n\n"
         "COVER FACE RESOLUTION (required for this ProductionItem): return cover_face_required=true, "
         "cover_people_candidates (ranked real public people only), cover_primary_person, and "
-        "cover_face_resolution_status RESOLVED, LOW_CONFIDENCE or NEEDS_REVIEW. Every candidate needs name, entity_type "
+        "cover_face_resolution_status RESOLVED or LOW_CONFIDENCE. Every candidate needs name, entity_type "
         "person/public_figure, role_in_story, relation_to_story, source, confidence from 0 to 1, evidence_type and "
         "evidence_summary. evidence_type must be EXPLICIT_CONTEXT for a named/typed/current-context person, "
         "VERIFIED_LOCAL_IDENTITY only for an already verified local identity, or ANCHOR_DERIVED for a decision maker "
@@ -469,8 +473,10 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "decision maker or public figure. Do not stop at the institution/place/event and do not use a static country-or-place "
         "to leader mapping. Never infer a person from geography, a country, an organisation or a place without a factual "
         "relation in the ProductionItem. Use LOW_CONFIDENCE only when a real person is still grounded but the evidence is "
-        "weaker; only after those evidence-based steps fail, return an empty candidate list, null cover_primary_person and "
-        "NEEDS_REVIEW; do not invent a leader.\n\n"
+        "weaker. Never return NEEDS_REVIEW or an empty candidate list for a new Story Map: TITLE/TOPIC is sufficient to "
+        "continue the actor/side resolution. When the relation is indirect but grounded in the current ProductionItem, "
+        "persist the best real public figure with LOW_CONFIDENCE and explain the relation in source and evidence_summary. "
+        "Do not use a static country-or-place mapping and do not select an unrelated person.\n\n"
         f"TOPIC: {request.title}\n"
         f"TARGET: {request.target_chars}; MIN: {request.allowed_min}; MAX: {request.allowed_max}\n"
         f"PARTS: {part_rows}\n\n"

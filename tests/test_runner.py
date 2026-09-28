@@ -33,6 +33,20 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
         return json.dumps({
             "thesis": "Одна последовательная история без второго смыслового круга.",
+            "cover_face_required": True,
+            "cover_people_candidates": [{
+                "name": "Алексей Петров", "entity_type": "public_figure",
+                "role_in_story": "ответственный представитель",
+                "relation_to_story": "связан с центральным решением тестовой истории",
+                "source": "test-fixture", "confidence": 0.62,
+            }],
+            "cover_primary_person": {
+                "name": "Алексей Петров", "entity_type": "public_figure",
+                "role_in_story": "ответственный представитель",
+                "relation_to_story": "связан с центральным решением тестовой истории",
+                "source": "test-fixture", "confidence": 0.62,
+            },
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
                 {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}",

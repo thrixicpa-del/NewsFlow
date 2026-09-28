@@ -267,7 +267,9 @@ class ParallelRunner:
                 job.state = RunState.PAUSED
                 job.error = "Планировщик сценария не вернул рабочий план"
                 return False
-            plan = parse_story_plan_response(planner_response, part_targets)
+            plan = parse_story_plan_response(
+                planner_response, part_targets, require_cover_person=True,
+            )
             job.story_plan = plan.to_dict()
             job.accepted_story_parts = []
             job.story_planner_status = "READY"

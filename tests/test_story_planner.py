@@ -51,6 +51,14 @@ class StoryPlanValidationTests(unittest.TestCase):
                 self._single_part_cover_response(candidates=[person], primary=person, required=False), (5000,),
             )
 
+    def test_fresh_planner_response_cannot_leave_cover_face_for_manual_review(self):
+        """A new Story Map must choose a grounded public person, not block Covers."""
+        with self.assertRaisesRegex(ValueError, "must resolve a cover public figure"):
+            parse_story_plan_response(
+                self._single_part_cover_response(candidates=[], primary=None, status="NEEDS_REVIEW"),
+                (5000,), require_cover_person=True,
+            )
+
     def test_ranked_people_require_primary_first_and_non_increasing_confidence(self):
         primary = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
                    "relation_to_story": "выступил", "source": "selected_people", "confidence": 0.94}
@@ -310,6 +318,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("cover_primary_person", prompt)
         self.assertIn("LOW_CONFIDENCE", prompt)
         self.assertIn("Never infer a person from geography", prompt)
+        self.assertIn("Never return NEEDS_REVIEW", prompt)
 
     def test_planner_uses_place_or_institution_as_an_anchor_for_contextual_actor_resolution(self):
         prompt = build_story_planner_prompt(
