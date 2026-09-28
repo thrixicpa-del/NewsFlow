@@ -33,6 +33,20 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
         return json.dumps({
             "thesis": "Одна последовательная история без второго смыслового круга.",
+            "cover_face_required": True,
+            "cover_people_candidates": [{
+                "name": "Алексей Петров", "entity_type": "public_figure",
+                "role_in_story": "ответственный представитель",
+                "relation_to_story": "связан с центральным решением тестовой истории",
+                "source": "test-fixture", "confidence": 0.62,
+            }],
+            "cover_primary_person": {
+                "name": "Алексей Петров", "entity_type": "public_figure",
+                "role_in_story": "ответственный представитель",
+                "relation_to_story": "связан с центральным решением тестовой истории",
+                "source": "test-fixture", "confidence": 0.62,
+            },
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
                 {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}",
@@ -291,9 +305,110 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                                     allowed_min=target_chars - 100, allowed_max=target_chars + 100),
                 ])
 
-                self.assertEqual(jobs[0].state, RunState.DONE)
+                self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
                 self.assertEqual(jobs[0].story_planner_status, "READY")
                 self.assertEqual(len(jobs[0].accepted_story_parts), expected_parts)
+
+    async def test_malformed_face_metadata_gets_one_face_only_repair_and_writers_finish(self):
+        class FaceRepairClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                    bad = {"name": "Европейский Союз", "entity_type": "organization", "role_in_story": "сторона", "relation_to_story": "решение", "source": "provider", "confidence": 0.9}
+                    raw["cover_people_candidates"] = [bad]
+                    raw["cover_primary_person"] = bad
+                    return json.dumps(raw, ensure_ascii=False)
+                if "Cover Face Resolver" in prompt:
+                    return json.dumps({
+                        "cover_people_candidates": [{"name": "Иван Петров", "entity_type": "public_figure", "role_in_story": "министр", "relation_to_story": "подписал решение", "source": "repair", "confidence": 0.62}],
+                        "cover_primary_person": {"name": "Иван Петров", "entity_type": "public_figure", "role_in_story": "министр", "relation_to_story": "подписал решение", "source": "repair", "confidence": 0.62},
+                        "cover_face_resolution_status": "LOW_CONFIDENCE",
+                    }, ensure_ascii=False)
+                target = __import__("re").search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
+                return "Т" * int(target.group(1))
+
+        client = FaceRepairClient()
+        jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "ЕС вводит меры", "контекст", target_chars=10000, allowed_min=9000, allowed_max=11000)])
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual(jobs[0].story_plan["cover_primary_person"]["name"], "Иван Петров")
+        self.assertEqual(sum("NewsFlow Story Planner" in prompt for prompt in client.prompts), 1)
+        self.assertEqual(sum("Cover Face Resolver" in prompt for prompt in client.prompts), 1)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
+
+    async def test_wrong_part_count_gets_one_structural_repair_then_exact_two_part_story(self):
+        class StructuralRepairClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                    raw["parts"] = raw["parts"][:1]
+                    return json.dumps(raw, ensure_ascii=False)
+                if "structural repairer" in prompt:
+                    return json.dumps({"parts": json.loads(ParallelRunnerTests._story_plan_json(2))["parts"]}, ensure_ascii=False)
+                target = __import__("re").search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
+                return "С" * int(target.group(1))
+
+        client = StructuralRepairClient()
+        jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "Тема", "контекст", target_chars=10000, allowed_min=9000, allowed_max=11000)])
+        self.assertEqual(jobs[0].state, RunState.DONE)
+        self.assertEqual([part["part_id"] for part in jobs[0].accepted_story_parts], ["P1", "P2"])
+        self.assertEqual(sum("NewsFlow Story Planner" in prompt for prompt in client.prompts), 1)
+        self.assertEqual(sum("structural repairer" in prompt for prompt in client.prompts), 1)
+
+    async def test_structural_repair_reassigns_one_or_three_part_atoms_before_writers_finish(self):
+        """Bounded topology repair fixes realistic 1→2 and 3→2 ownership before prose starts."""
+        for returned_parts in (1, 3):
+            with self.subTest(returned_parts=returned_parts):
+                class StructuralOwnershipClient:
+                    def __init__(self):
+                        self.prompts = []
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None, _case=returned_parts):
+                        self.prompts.append(prompt)
+                        if "NewsFlow Story Planner" in prompt:
+                            raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                            if _case == 1:
+                                raw["parts"] = raw["parts"][:1]
+                                raw["parts"][0]["content_ids"] = ["C001", "C002"]
+                                for atom in raw["content_atoms"]:
+                                    atom["owner_part_id"] = "P1"
+                            else:
+                                raw["content_atoms"].append({
+                                    "id": "C003", "summary": "Кульминация", "owner_part_id": "P3",
+                                    "content_kind": "DRAMATIZED",
+                                })
+                                raw["parts"].append({
+                                    "id": "P3", "role": "FINAL", "purpose": "Кульминация", "macro_id": "M1",
+                                    "content_ids": ["C003"], "opens": [], "closes": [], "transition_direction": "финал",
+                                })
+                            return json.dumps(raw, ensure_ascii=False)
+                        if "structural repairer" in prompt:
+                            repaired = json.loads(ParallelRunnerTests._story_plan_json(2))["parts"]
+                            if _case == 3:
+                                repaired[1]["content_ids"] = ["C002", "C003"]
+                            return json.dumps({"parts": repaired}, ensure_ascii=False)
+                        target = __import__("re").search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
+                        return "С" * int(target.group(1))
+
+                client = StructuralOwnershipClient()
+                jobs = await ParallelRunner(client, 1).run([
+                    ScenarioRequest(0, "Тема", "контекст", target_chars=10000, allowed_min=9000, allowed_max=11000),
+                ])
+
+                self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+                self.assertEqual([part["part_id"] for part in jobs[0].accepted_story_parts], ["P1", "P2"])
+                repaired_atoms = {atom["id"]: atom["owner_part_id"] for atom in jobs[0].story_plan["content_atoms"]}
+                self.assertEqual(repaired_atoms["C001"], "P1")
+                self.assertEqual(repaired_atoms["C002"], "P2")
+                if returned_parts == 3:
+                    self.assertEqual(repaired_atoms["C003"], "P2")
 
     async def test_resume_uses_persisted_plan_and_starts_at_first_unfinished_part(self):
         from scriptor.story_planner import (

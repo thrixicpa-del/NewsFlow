@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,20 @@ def _story_plan(part_count: int = 2) -> str:
     roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
     return json.dumps({
         "thesis": "Одна история",
+        "cover_face_required": True,
+        "cover_people_candidates": [{
+            "name": "Алексей Петров", "entity_type": "public_figure",
+            "role_in_story": "ответственный представитель",
+            "relation_to_story": "связан с центральным решением тестовой истории",
+            "source": "test-fixture", "confidence": 0.62,
+        }],
+        "cover_primary_person": {
+            "name": "Алексей Петров", "entity_type": "public_figure",
+            "role_in_story": "ответственный представитель",
+            "relation_to_story": "связан с центральным решением тестовой истории",
+            "source": "test-fixture", "confidence": 0.62,
+        },
+        "cover_face_resolution_status": "LOW_CONFIDENCE",
         "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
         "content_atoms": [
             {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}",
@@ -155,7 +170,10 @@ class ScenarioGenerationTests(unittest.TestCase):
 
             async def generate(self, prompt):
                 self.prompts.append(prompt)
-                return "а" * 10000
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(2)
+                target = re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
+                return "а" * int(target.group(1))
 
         for provider in ("openai", "agent"):
             with self.subTest(provider=provider):
@@ -176,7 +194,7 @@ class ScenarioGenerationTests(unittest.TestCase):
                      patch.object(bridge, "HybridTextPool", return_value=pool):
                     bridge.generate_scenarios({"provider": provider})
 
-                self.assertEqual(len(pool.prompts), 1)
+                self.assertEqual(len(pool.prompts), 3)
                 prompt = pool.prompts[0]
                 self.assertIn("FULL_USER_PROMPT_BEGIN :: Напиши сценарий для Проверочная тема.", prompt)
                 self.assertIn("FULL_USER_PROMPT_END", prompt)

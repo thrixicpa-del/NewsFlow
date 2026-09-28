@@ -7,6 +7,8 @@ from scriptor.story_planner import (
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
+    repair_story_plan_face_metadata_response,
+    repair_story_plan_parts_response,
     seam_tail,
     story_plan_from_dict,
 )
@@ -51,6 +53,15 @@ class StoryPlanValidationTests(unittest.TestCase):
                 self._single_part_cover_response(candidates=[person], primary=person, required=False), (5000,),
             )
 
+    def test_fresh_planner_response_cannot_leave_cover_face_for_manual_review(self):
+        """Malformed face metadata becomes bounded repair work, not a Writer blocker."""
+        plan = parse_story_plan_response(
+            self._single_part_cover_response(candidates=[], primary=None, status="NEEDS_REVIEW"),
+            (5000,), require_cover_person=True,
+        )
+        self.assertTrue(plan.cover_face_repair_needed)
+        self.assertEqual(plan.cover_face_resolution_status, "LOW_CONFIDENCE")
+
     def test_ranked_people_require_primary_first_and_non_increasing_confidence(self):
         primary = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
                    "relation_to_story": "выступил", "source": "selected_people", "confidence": 0.94}
@@ -61,14 +72,10 @@ class StoryPlanValidationTests(unittest.TestCase):
         )
         self.assertEqual(ranked.to_dict()["cover_people_candidates"][0]["name"], "Марек Новак")
 
-        with self.assertRaisesRegex(ValueError, "first ranked"):
-            parse_story_plan_response(
-                self._single_part_cover_response(candidates=[weaker, primary], primary=primary), (5000,),
-            )
-        with self.assertRaisesRegex(ValueError, "non-increasing"):
-            parse_story_plan_response(
-                self._single_part_cover_response(candidates=[weaker, primary], primary=weaker), (5000,),
-            )
+        reordered = parse_story_plan_response(
+            self._single_part_cover_response(candidates=[weaker, primary], primary=primary), (5000,),
+        )
+        self.assertEqual(reordered.cover_people_candidates[0]["name"], "Марек Новак")
 
     def test_anchor_derived_person_requires_low_confidence_evidence_not_resolved(self):
         person = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель",
@@ -76,10 +83,9 @@ class StoryPlanValidationTests(unittest.TestCase):
                   "confidence": 0.62, "evidence_type": "ANCHOR_DERIVED",
                   "evidence_summary": "Контекст связывает комиссию с решением и её председателем."}
 
-        with self.assertRaisesRegex(ValueError, "LOW_CONFIDENCE"):
-            parse_story_plan_response(
-                self._single_part_cover_response(candidates=[person], primary=person), (5000,),
-            )
+        self.assertEqual(parse_story_plan_response(
+            self._single_part_cover_response(candidates=[person], primary=person), (5000,),
+        ).cover_face_resolution_status, "LOW_CONFIDENCE")
         plan = parse_story_plan_response(
             self._single_part_cover_response(candidates=[person], primary=person, status="LOW_CONFIDENCE"), (5000,),
         )
@@ -132,8 +138,99 @@ class StoryPlanValidationTests(unittest.TestCase):
                        "content_ids": ["C001"]}],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "cover person"):
-            parse_story_plan_response(response, (5000,))
+        plan = parse_story_plan_response(response, (5000,))
+        self.assertTrue(plan.cover_face_repair_needed)
+        self.assertIsNone(plan.cover_primary_person)
+
+    def test_malformed_face_metadata_does_not_invalidate_valid_story_structure(self):
+        response = self._single_part_cover_response(
+            candidates=[
+                {"name": "Европейский Союз", "entity_type": "organization", "role_in_story": "сторона", "relation_to_story": "решение", "source": "provider", "confidence": 0.9},
+                {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель", "relation_to_story": "подписал решение", "source": "provider", "confidence": 0.7},
+            ],
+            primary={"name": "Европейский Союз", "entity_type": "organization", "role_in_story": "сторона", "relation_to_story": "решение", "source": "provider", "confidence": 0.9},
+        )
+        plan = parse_story_plan_response(response, (5000,))
+        self.assertEqual(plan.parts[0].id, "P1")
+        self.assertEqual(plan.cover_primary_person["name"], "Марек Новак")
+        self.assertTrue(plan.cover_face_repair_needed)
+
+    def test_face_only_repair_normalizes_a_named_role_without_rewriting_story(self):
+        plan = parse_story_plan_response(
+            self._single_part_cover_response(candidates=[], primary=None, status="NEEDS_REVIEW"), (5000,),
+        )
+        repaired = repair_story_plan_face_metadata_response(json.dumps({
+            "cover_people_candidates": [{"name": "Иван Петров", "entity_type": "president", "role_in_story": "президент", "relation_to_story": "принял решение", "source": "repair", "confidence": 0.61}],
+            "cover_primary_person": {"name": "Иван Петров", "entity_type": "president", "role_in_story": "президент", "relation_to_story": "принял решение", "source": "repair", "confidence": 0.61},
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
+        }, ensure_ascii=False), plan)
+        self.assertEqual(repaired.thesis, plan.thesis)
+        self.assertEqual(repaired.parts, plan.parts)
+        self.assertEqual(repaired.cover_primary_person["entity_type"], "public_figure")
+        self.assertFalse(repaired.cover_face_repair_needed)
+
+    def test_exact_two_part_repair_changes_only_parts_and_requires_opening_final(self):
+        original = json.dumps({
+            "thesis": "Одна история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Финал", "owner_part_id": "P2", "content_kind": "SUPPORTED"},
+            ],
+            "parts": [{"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"]}],
+        }, ensure_ascii=False)
+        repaired = repair_story_plan_parts_response(json.dumps({"parts": [
+            {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"], "opens": [], "closes": []},
+            {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C002"], "opens": [], "closes": []},
+        ]}, ensure_ascii=False), original, (5000, 5000))
+        self.assertEqual([part.role for part in repaired.parts], ["OPENING", "FINAL"])
+        self.assertEqual(repaired.thesis, "Одна история.")
+
+    def test_exact_two_part_repair_redistributes_atoms_owned_only_by_missing_part(self):
+        """A one-part provider map may put every atom on P1; repair owns P2 explicitly."""
+        original = json.dumps({
+            "thesis": "Одна история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Финал", "owner_part_id": "P1", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [{"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001", "C002"]}],
+        }, ensure_ascii=False)
+        repaired = repair_story_plan_parts_response(json.dumps({"parts": [
+            {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"], "opens": ["финал"], "closes": []},
+            {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C002"], "opens": [], "closes": ["финал"]},
+        ]}, ensure_ascii=False), original, (5000, 5000))
+
+        self.assertEqual([part.role for part in repaired.parts], ["OPENING", "FINAL"])
+        self.assertEqual([(atom.id, atom.owner_part_id, atom.content_kind) for atom in repaired.content_atoms], [
+            ("C001", "P1", "SUPPORTED"), ("C002", "P2", "DRAMATIZED"),
+        ])
+
+    def test_exact_two_part_repair_collapses_three_part_ownership_without_rewriting_atoms(self):
+        """A three-part provider map is repaired to two parts by the returned content ownership."""
+        original = json.dumps({
+            "thesis": "Одна история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Развитие", "owner_part_id": "P2", "content_kind": "SUPPORTED"},
+                {"id": "C003", "summary": "Финал", "owner_part_id": "P3", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"]},
+                {"id": "P2", "role": "MIDDLE", "purpose": "Развитие", "macro_id": "M1", "content_ids": ["C002"]},
+                {"id": "P3", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C003"]},
+            ],
+        }, ensure_ascii=False)
+        repaired = repair_story_plan_parts_response(json.dumps({"parts": [
+            {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"], "opens": ["финал"], "closes": []},
+            {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C002", "C003"], "opens": [], "closes": ["финал"]},
+        ]}, ensure_ascii=False), original, (5000, 5000))
+
+        self.assertEqual([part.id for part in repaired.parts], ["P1", "P2"])
+        self.assertEqual([(atom.id, atom.owner_part_id, atom.summary, atom.content_kind) for atom in repaired.content_atoms], [
+            ("C001", "P1", "Вход", "SUPPORTED"),
+            ("C002", "P2", "Развитие", "SUPPORTED"),
+            ("C003", "P2", "Финал", "DRAMATIZED"),
+        ])
 
     def test_parser_accepts_low_confidence_real_person_after_deeper_actor_resolution(self):
         response = json.dumps({
@@ -310,6 +407,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("cover_primary_person", prompt)
         self.assertIn("LOW_CONFIDENCE", prompt)
         self.assertIn("Never infer a person from geography", prompt)
+        self.assertIn("Never return NEEDS_REVIEW", prompt)
 
     def test_planner_uses_place_or_institution_as_an_anchor_for_contextual_actor_resolution(self):
         prompt = build_story_planner_prompt(

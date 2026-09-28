@@ -71,7 +71,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertTrue(item["cover_face_required"])
-        self.assertEqual(item["cover_face_resolution_status"], "NEEDS_REVIEW")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
     def test_story_planner_context_includes_selected_and_typed_people(self):
         from scriptor import bridge
 
@@ -194,7 +194,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         bridge._project_story_plan_face_resolution(settings, title, job)
 
         stored = settings.idea_production_items[0]
-        self.assertEqual(stored["cover_face_resolution_status"], "NEEDS_REVIEW")
+        self.assertEqual(stored["cover_face_resolution_status"], "LOW_CONFIDENCE")
         self.assertIsNone(stored["cover_primary_person"])
 
     def test_actual_selected_person_is_core_verified_as_explicit_context(self):
@@ -338,9 +338,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 item.update(cover_face_required=True, cover_face_resolution_status="NEEDS_REVIEW")
                 resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
                 self.assertEqual(resolved["portrait_subject"], "")
-                self.assertEqual(item["cover_face_resolution_status"], "NEEDS_REVIEW")
+                self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
 
-    def test_every_unresolved_item_stops_before_fastgen_not_only_political_items(self):
+    def test_unresolved_item_reports_semantic_resolution_error_not_manual_face_blocker(self):
         from scriptor import bridge
 
         settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
@@ -359,9 +359,10 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                                     "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True})
 
         create.assert_not_called()
-        self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить лицо для обложки")
+        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка automatic face resolution")
+        self.assertEqual(settings.cover_queue[0]["cover_face_resolution_status"], "FACE_RESOLUTION_ERROR")
 
-    def test_unresolved_item_isolated_while_resolved_batch_item_reaches_fastgen(self):
+    def test_semantically_repaired_item_and_resolved_batch_item_reach_fastgen(self):
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
@@ -382,23 +383,32 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
             def render(_prompt, output, _stem, _operation, _ratio, **_kwargs):
                 calls.append(True)
-                generated = output / "resolved.png"
+                generated = output / f"resolved-{len(calls)}.png"
                 generated.write_bytes(b"image")
                 return [generated]
+
+            def resolve_missing(item, _settings):
+                item.update(
+                    cover_people_candidates=[primary], cover_primary_person=primary,
+                    cover_face_resolution_status="LOW_CONFIDENCE",
+                )
+                return True
 
             with patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "_hydrate_cover_library", return_value=False), \
                  patch.object(bridge, "_save_cover_state"), \
                  patch.object(bridge, "snapshot", return_value={}), \
                  patch.object(bridge, "_run_parallel_cover_workers", side_effect=lambda indices, worker: [worker(index) for index in indices]), \
+                 patch.object(bridge, "_resolve_missing_cover_primary_person", side_effect=resolve_missing) as resolve, \
                  patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
                 bridge._generate_covers_unlocked({
                     "indices": [0, 1], "productionItemIds": ["production:review", "production:resolved"],
                     "buildMode": "fastgen-full", "faceMode": "auto", "textMode": "fastgen",
                 })
 
-        self.assertEqual(calls, [True])
-        self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить лицо для обложки")
+        self.assertEqual(calls, [True, True])
+        resolve.assert_called_once()
+        self.assertEqual(settings.cover_queue[0]["status"], "Готово")
         self.assertEqual(settings.cover_queue[1]["status"], "Готово")
 
     def test_low_confidence_primary_person_still_reaches_covers_without_downgrading_to_needs_review(self):
@@ -415,6 +425,92 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         self.assertEqual(resolved["portrait_subject"], "Марек Новак")
         self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
+
+    def test_missing_primary_gets_one_semantic_person_resolution_before_fastgen(self):
+        """An institution anchor is resolved to a person, not kept as LOW_CONFIDENCE + None."""
+        from scriptor import bridge
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "председатель комиссии",
+                        "relation_to_story": "отвечает за решение комиссии",
+                        "source": "provider", "confidence": 0.62,
+                    },
+                }, ensure_ascii=False)
+
+        item = {
+            "title": "Комиссия готовит новые ограничения", "event_context": "Комиссия обсуждает решение после консультаций.",
+            "primary_entities": [{"name": "Европейский Союз", "type": "organization"}],
+            "cover_face_required": True, "cover_face_resolution_status": "LOW_CONFIDENCE",
+            "cover_primary_person": None,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="test", secret="test")])
+
+        with patch.object(bridge, "HybridTextPool", return_value=SemanticPool()):
+            self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
+        self.assertNotEqual(item["cover_primary_person"], None)
+
+    def test_title_and_completed_script_anchor_persists_low_confidence_person_and_reaches_fastgen(self):
+        """Title/script-only semantic context is enough for bounded LOW_CONFIDENCE face resolution."""
+        from scriptor import bridge
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "председатель комиссии",
+                        "relation_to_story": "несёт ответственность за обсуждаемое решение комиссии",
+                        "source": "provider", "confidence": 0.61,
+                    },
+                }, ensure_ascii=False)
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory, cover_auto_overlay_text=False, cover_variant_count=1,
+                openai_api_keys=[OpenAIKey(label="text", secret="test")],
+                cover_api_keys=[FastGenKey(label="image", secret="test")],
+            )
+            item = {
+                "production_item_id": "production:title-script", "title": "Комиссия обсуждает торговые ограничения",
+                "script": "После заседания комиссия сформировала позицию по новым торговым ограничениям.",
+                "image_prompt": "Редакционная сцена заседания", "status": "Ожидает",
+                "cover_face_required": True, "cover_face_resolution_status": "LOW_CONFIDENCE",
+                "cover_primary_person": None,
+            }
+            settings.cover_queue = [item]
+            generated: list[Path] = []
+
+            def render(_prompt, output, _stem, _operation, _ratio, **_kwargs):
+                path = output / "title-script.png"
+                path.write_bytes(b"image")
+                generated.append(path)
+                return [path]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
+                 patch.object(bridge, "_run_parallel_cover_workers", side_effect=lambda indices, worker: [worker(index) for index in indices]), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge._generate_covers_unlocked({
+                    "indices": [0], "productionItemIds": ["production:title-script"],
+                    "buildMode": "fastgen-full", "faceMode": "auto", "textMode": "fastgen",
+                })
+
+        self.assertIsNotNone(item["cover_primary_person"], item)
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
+        self.assertEqual(item["status"], "Готово")
+        self.assertEqual(len(generated), 1)
     def test_cover_text_generation_projects_a_current_context_row_before_provider_call(self):
         """A durable current scenario must not need a prior manual Covers transfer."""
         from scriptor import bridge
@@ -478,8 +574,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 self.assertEqual(resolved["portrait_subject"], "")
                 self.assertEqual(resolved["portrait_source"], "none")
 
-    def test_named_political_subject_without_legacy_marker_stops_before_fastgen(self):
-        """Political/public-figure detection cannot depend on a marker dictionary."""
+    def test_named_political_subject_without_legacy_marker_uses_semantic_error_not_manual_blocker(self):
+        """Political/public-figure detection cannot retain the legacy manual face status."""
         from scriptor import bridge
 
         settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
@@ -499,9 +595,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             })
 
         create.assert_not_called()
-        self.assertEqual(settings.cover_queue[0]["status"], "Нужно определить политического субъекта")
+        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка automatic face resolution")
 
-    def test_political_topic_without_explicit_person_stays_recoverable_before_provider_call(self):
+    def test_political_topic_without_explicit_person_uses_semantic_error_not_manual_blocker(self):
         """Generic politics cannot silently reach FastGen with an empty portrait subject."""
         from scriptor import bridge
 
@@ -524,8 +620,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         create.assert_not_called()
         row = settings.cover_queue[0]
         self.assertEqual(row["portrait_source"], "none")
-        self.assertEqual(row["status"], "Нужно определить политического субъекта")
-        self.assertIn("явно указан", row["error"])
+        self.assertEqual(row["status"], "Ошибка automatic face resolution")
+        self.assertIn("semantic person-resolution", row["error"])
 
     def test_accepted_generation_retry_checks_existing_generation_without_create(self):
         from scriptor import bridge
