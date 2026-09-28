@@ -327,6 +327,50 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown macro"):
             parse_story_plan_response(response, (5000, 5000))
 
+    def test_orphan_provider_loop_hints_do_not_block_an_otherwise_valid_story_map(self):
+        response = json.dumps({
+            "thesis": "Одна непрерывная история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Финал", "owner_part_id": "P2", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1",
+                 "content_ids": ["C001"], "opens": [], "closes": ["P2"]},
+                {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1",
+                 "content_ids": ["C002"], "opens": [],
+                 "closes": ["Вопрос о том, станет ли эта риторика началом переговоров"]},
+            ],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000, 5000))
+
+        self.assertEqual([part.id for part in plan.parts], ["P1", "P2"])
+        self.assertEqual([part.opens for part in plan.parts], [(), ()])
+        self.assertEqual([part.closes for part in plan.parts], [(), ()])
+
+    def test_valid_cross_part_loop_hint_is_preserved_but_duplicate_or_unpaired_hints_are_advisory(self):
+        response = json.dumps({
+            "thesis": "Одна непрерывная история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Финал", "owner_part_id": "P2", "content_kind": "SUPPORTED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1",
+                 "content_ids": ["C001"], "opens": ["peace-question", "peace-question", "orphan"], "closes": []},
+                {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1",
+                 "content_ids": ["C002"], "opens": [], "closes": ["peace-question"]},
+            ],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000, 5000))
+
+        self.assertEqual(plan.parts[0].opens, ("peace-question",))
+        self.assertEqual(plan.parts[1].closes, ("peace-question",))
+
     def test_parser_persists_supported_and_dramatized_content_kinds(self):
         response = json.dumps({
             "thesis": "История развивается без повтора.",
