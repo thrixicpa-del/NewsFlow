@@ -321,7 +321,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 if "structural repairer" in prompt:
                     raise AssertionError("valid wrapped JSON must not trigger structural repair")
                 target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\\d+) characters", prompt,
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
                 ).group(1))
                 return "Т" * target
 
@@ -356,7 +356,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     return json.dumps(raw, ensure_ascii=False)
                 self.writer_calls += 1
                 target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\\d+) characters", prompt,
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
                 ).group(1))
                 return "Т" * target
 
