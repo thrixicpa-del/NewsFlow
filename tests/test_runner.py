@@ -309,6 +309,76 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(jobs[0].story_planner_status, "READY")
                 self.assertEqual(len(jobs[0].accepted_story_parts), expected_parts)
 
+    async def test_transport_wrapped_planner_json_goes_directly_to_writers_without_repair(self):
+        class WrappedPlannerClient:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return "Here is the JSON:\n```json\n" + ParallelRunnerTests._story_plan_json(2) + "\n```"
+                if "structural repairer" in prompt:
+                    raise AssertionError("valid wrapped JSON must not trigger structural repair")
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+        client = WrappedPlannerClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
+        self.assertEqual(sum("NewsFlow Story Planner" in p for p in client.prompts), 1)
+
+    async def test_non_topology_planner_schema_failure_gets_one_fresh_retry_before_any_writer(self):
+        class PlannerRetryClient:
+            def __init__(self):
+                self.initial_planner_calls = 0
+                self.structural_calls = 0
+                self.fresh_calls = 0
+                self.writer_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    self.structural_calls += 1
+                    return json.dumps({
+                        "parts": json.loads(ParallelRunnerTests._story_plan_json(2))["parts"],
+                    }, ensure_ascii=False)
+                if "NewsFlow Story Planner" in prompt:
+                    self.initial_planner_calls += 1
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                    raw["content_atoms"][0].pop("content_kind")
+                    return json.dumps(raw, ensure_ascii=False)
+                self.writer_calls += 1
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                if "FRESH STORY PLANNER RETRY" not in prompt:
+                    raise AssertionError("schema recovery must use the bounded fresh Planner path")
+                self.fresh_calls += 1
+                return ParallelRunnerTests._story_plan_json(2)
+
+        client = PlannerRetryClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(client.initial_planner_calls, 1)
+        self.assertEqual(client.structural_calls, 1)
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(client.writer_calls, 2)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
+
     async def test_malformed_face_metadata_gets_one_face_only_repair_and_writers_finish(self):
         class FaceRepairClient:
             def __init__(self):
