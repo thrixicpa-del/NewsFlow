@@ -106,14 +106,18 @@ def _optional_text(value: object) -> str:
 
 
 def _id_list(value: object, field: str) -> tuple[str, ...]:
-    if value in (None, ""):
-        return ()
+    """Normalise advisory loop IDs without making them Story Map blockers."""
     if not isinstance(value, list):
-        raise TypeError(f"story plan {field} must be a list")
-    result = tuple(_clean_text(item, field) for item in value)
-    if len(set(result)) != len(result):
-        raise ValueError(f"story plan {field} must not contain duplicates")
-    return result
+        return ()
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        cleaned = _optional_text(item)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return tuple(result)
 
 
 def _cover_person_candidate(value: object, field: str) -> dict[str, Any]:
@@ -170,6 +174,50 @@ def _expected_roles(part_count: int) -> tuple[str, ...]:
     if part_count == 1:
         return ("COMPLETE",)
     return ("OPENING",) + ("MIDDLE",) * (part_count - 2) + ("FINAL",)
+
+
+def _normalise_advisory_loops(parts: list[StoryPartPlan]) -> list[StoryPartPlan]:
+    """Keep only unambiguous cross-part loop hints.
+
+    Loop metadata helps a Writer preserve continuity, but it does not own story
+    content. Provider mistakes such as closing a part ID or a free-text sentence
+    that was never opened must not invalidate an otherwise complete Story Map.
+    """
+    opened_at: dict[str, list[int]] = {}
+    closed_at: dict[str, list[int]] = {}
+    for index, part in enumerate(parts):
+        for loop_id in part.opens:
+            opened_at.setdefault(loop_id, []).append(index)
+        for loop_id in part.closes:
+            closed_at.setdefault(loop_id, []).append(index)
+
+    valid = {
+        loop_id
+        for loop_id, open_indexes in opened_at.items()
+        if len(open_indexes) == 1
+        and len(closed_at.get(loop_id, [])) == 1
+        and open_indexes[0] < closed_at[loop_id][0]
+    }
+    if all(
+        all(loop_id in valid for loop_id in (*part.opens, *part.closes))
+        for part in parts
+    ):
+        return parts
+
+    return [
+        StoryPartPlan(
+            id=part.id,
+            role=part.role,
+            purpose=part.purpose,
+            macro_id=part.macro_id,
+            content_ids=part.content_ids,
+            target_chars=part.target_chars,
+            opens=tuple(loop_id for loop_id in part.opens if loop_id in valid),
+            closes=tuple(loop_id for loop_id in part.closes if loop_id in valid),
+            transition_direction=part.transition_direction,
+        )
+        for part in parts
+    ]
 
 
 def _normalise_cover_face_metadata(raw: dict[str, Any], *, legacy: bool = False) -> tuple[tuple[dict[str, Any], ...], dict[str, Any] | None, str, bool]:
@@ -362,20 +410,10 @@ def parse_story_plan_response(
                     "story plan content atom owner conflicts with its part"
                 )
 
-    opened: set[str] = set()
-    for part in parts:
-        for loop_id in part.closes:
-            if loop_id not in opened:
-                raise ValueError(
-                    f"story plan part {part.id} closes unopened loop {loop_id}"
-                )
-            opened.remove(loop_id)
-        for loop_id in part.opens:
-            if loop_id in opened:
-                raise ValueError(f"story plan opens loop {loop_id} more than once")
-            opened.add(loop_id)
-    if opened:
-        raise ValueError("story plan leaves planned loops unclosed")
+    # opens/closes are continuity hints, not story ownership. Keep strict
+    # validation for parts/macros/atoms above, then locally discard malformed
+    # loop metadata instead of asking the provider to repair prose.
+    parts = _normalise_advisory_loops(parts)
 
     return StoryPlan(
         thesis=thesis,
@@ -523,13 +561,15 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "SUPPORTED atoms must rely on provided NewsFlow context. DRAMATIZED atoms may extend the narrative, but must "
         "still be materially distinct. Do not fill parts by paraphrasing one meaning. Keep thesis/purposes/atom summaries compact. Every part purpose must name a concrete "
         "distinct responsibility; never use generic purposes like 'continue' or 'develop further' without saying what "
-        "new question/content that part owns. Each macro block needs id and purpose. Every part needs id, role, purpose, macro_id, content_ids, opens, closes and transition_direction. "
-        "Every part must reference an existing macro block. For one part, use P1 as COMPLETE, keep opens/closes "
-        "empty because there is no later technical part, and express the internal story structure through ordered "
-        "content_ids/content atoms inside P1. Otherwise use P1 as OPENING, all internal parts as MIDDLE, and only the "
-        "last part as FINAL. Reserve every atom exactly once. A later part may deepen an "
+        "new question/content that part owns. Each macro block needs id and purpose. Every part needs id, role, purpose, macro_id, content_ids and transition_direction. "
+        "opens/closes are optional advisory loop IDs: use [] unless one short loop ID is deliberately opened in an "
+        "earlier part and closed with the exact same ID in a later part; never use part IDs or free-text questions as "
+        "loop IDs. Every part must reference an existing macro block. For one part, use P1 as COMPLETE, keep "
+        "opens/closes empty because there is no later technical part, and express the internal story structure through "
+        "ordered content_ids/content atoms inside P1. Otherwise use P1 as OPENING, all internal parts as MIDDLE, and "
+        "only the last part as FINAL. Reserve every atom exactly once. A later part may deepen an "
         "earlier subject only by answering a different concrete question; paraphrasing the same conclusion is not a "
-        "new content atom. Any opened loop must be closed by a later planned part.\n\n"
+        "new content atom. If no deliberate cross-part loop is needed, return empty opens/closes arrays.\n\n"
         "COVER FACE RESOLUTION (required for this ProductionItem): return cover_face_required=true, "
         "cover_people_candidates (ranked real public people only), cover_primary_person, and "
         "cover_face_resolution_status RESOLVED or LOW_CONFIDENCE. Every candidate needs name, entity_type "
@@ -582,7 +622,8 @@ def build_story_plan_structure_repair_prompt(request: Any, original_response: st
         "content_atoms and cover metadata are immutable. Return strict JSON with ONLY a corrected parts list. "
         "Keep every existing content atom assigned exactly once through the returned parts[].content_ids; those IDs define "
         "the repaired owner_part_id. Use only existing macro IDs, "
-        "and fix only part count, IDs, roles, content ownership and opens/closes loops. Do not write scenario prose, "
+        "and fix only part count, IDs, roles and content ownership. opens/closes are advisory; set them to [] unless "
+        "an exact short loop ID is deliberately paired from an earlier part to a later part. Do not write scenario prose, "
         "do not add atoms, and do not regenerate the story. Required ordered parts: "
         f"{required}.\n\nTITLE: {request.title}\nORIGINAL MAP:\n{_compact(original_response, 12000)}"
     )
