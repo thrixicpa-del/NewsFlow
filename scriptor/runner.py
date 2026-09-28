@@ -36,27 +36,51 @@ def looks_like_action_required(text: str) -> bool:
         "unable to help", "i can’t assist", "i can't assist", "i must refuse",
         "i won’t", "i won't", "cannot comply",
     )
-    requests = (
+    user_action_requests = (
         "переформулируйте", "измените тему", "уточните тему", "please rephrase",
-        "change the topic", "clarify the topic", "не могу продолжить", "не могу создать",
-        "не могу сгенерировать", "не могу написать", "не могу предоставить",
-        "i can't help with", "i cannot help with", "i can’t help with",
-        "не могу помочь с этим", "не могу выполнить этот запрос",
-        "не могу выполнить вашу просьбу", "не могу продолжить выполнение",
-        "не могу создать такой", "не могу написать такой", "не могу повторить",
-        "не могу перезапустить", "не могу выполнить задачу", "я отказываюсь",
-        "это противоречит", "нарушает правила", "по соображениям безопасности",
-        "i can't comply", "i can’t comply", "i cannot fulfill", "i cannot complete",
+        "change the topic", "clarify the topic",
+    )
+    refusal_markers = (
+        "не могу продолжить", "не могу создать", "не могу сгенерировать",
+        "не могу написать", "не могу предоставить", "i can't help with",
+        "i cannot help with", "i can’t help with", "не могу помочь с этим",
+        "не могу выполнить этот запрос", "не могу выполнить вашу просьбу",
+        "не могу продолжить выполнение", "не могу создать такой",
+        "не могу написать такой", "не могу повторить", "не могу перезапустить",
+        "не могу выполнить задачу", "я отказываюсь", "это противоречит",
+        "нарушает правила", "по соображениям безопасности", "i can't comply",
+        "i can’t comply", "i cannot fulfill", "i cannot complete",
         "against my guidelines", "violates policy", "for safety reasons",
     )
-    # В полноценном сценарии фразы персонажей вроде «я не могу» допустимы. Но короткий
-    # Ответ текстового провайдера с отказом нельзя принимать за готовый сценарий.
+    meta_request_context = (
+        "этот запрос", "данный запрос", "ваш запрос", "вашу просьбу",
+        "запрос пользователя", "this request", "your request", "the request",
+        "my guidelines", "openai policy",
+    )
+    # В полноценном сценарии фразы персонажей вроде «я не могу» и новостные
+    # формулировки вроде «нарушает правила» допустимы. Короткий отказ принимаем
+    # как отказ напрямую; в длинном тексте safety/policy-маркер должен быть
+    # привязан к мета-контексту самого запроса, а не к сюжету.
     short_refusal = len(sample) < 700 and any(marker in sample[:600] for marker in (
         "я не могу", "не могу помочь", "не могу выполнить", "не могу создать",
         "не могу написать", "i can't", "i can’t", "i cannot", "unable to",
     ))
-    return (sample.startswith(refusal_prefixes) or short_refusal
-            or any(marker in sample[:1600] for marker in requests))
+    explicit_user_action = any(
+        marker in sample[:1600] for marker in user_action_requests
+    )
+    contextual_refusal = (
+        any(marker in sample[:1600] for marker in refusal_markers)
+        and (
+            len(sample) < 700
+            or any(marker in sample[:1600] for marker in meta_request_context)
+        )
+    )
+    return (
+        sample.startswith(refusal_prefixes)
+        or short_refusal
+        or explicit_user_action
+        or contextual_refusal
+    )
 
 
 class RunState(str, Enum):
@@ -204,6 +228,36 @@ class ParallelRunner:
     def _story_target_chars(request: ScenarioRequest) -> int:
         return max(0, int(request.target_chars or 0), int(request.allowed_min or 0))
 
+    @staticmethod
+    def _story_length_contract(request: ScenarioRequest) -> dict[str, int]:
+        """Persist the complete contract that produced a resumable Story Map."""
+        return {
+            "target_chars": max(0, int(request.target_chars or 0)),
+            "allowed_min": max(0, int(request.allowed_min or 0)),
+            "allowed_max": max(0, int(request.allowed_max or 0)),
+        }
+
+    @classmethod
+    def _persisted_story_contract_changed(
+        cls, persisted_plan: dict[str, Any], request: ScenarioRequest,
+    ) -> bool:
+        """Detect every persisted range change, with a safe legacy fallback."""
+        if "length_contract" not in persisted_plan:
+            return False
+        stored = persisted_plan.get("length_contract")
+        if not isinstance(stored, dict):
+            return True
+        try:
+            stored_contract = {
+                key: max(0, int(stored.get(key, 0) or 0))
+                for key in ("target_chars", "allowed_min", "allowed_max")
+            }
+        except (TypeError, ValueError):
+            # Corrupt contract metadata must fail safe instead of silently
+            # adopting a new range on an immutable accepted prefix.
+            return True
+        return stored_contract != cls._story_length_contract(request)
+
     def _next_story_part_target(
         self, job: Job, plan: StoryPlan, part_index: int,
     ) -> int:
@@ -247,9 +301,76 @@ class ParallelRunner:
     def _writer_output_is_structural(text: str) -> bool:
         """Reject planner/part labels before they can enter the user scenario."""
         return bool(re.search(
-            r"(?im)^\s*(?:part|часть|p\d+|\{\s*\"(?:part|text|content))\b",
+            r'(?im)^\s*(?:(?:part|часть)\s+\d+\b|p\d+\b|\{\s*"(?:part|text|content)"\s*:)',
             str(text or "").strip(),
         ))
+
+    def _writer_output_unusable(self, text: str) -> bool:
+        return (
+            looks_like_action_required(text)
+            or not str(text or "").strip()
+            or self._writer_output_is_structural(text)
+        )
+
+    async def _generate_fresh_result(
+        self,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+    ) -> str:
+        """Run one bounded fresh-chat recovery before any new artifact is accepted."""
+        generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+        result = await self._generate_for_request(
+            generate_fresh, prompt, request, expected_chars,
+        )
+        if looks_like_action_required(result):
+            generate_openai = getattr(self.client, "generate_openai", None)
+            if generate_openai is not None:
+                result = await self._generate_for_request(
+                    generate_openai, prompt, request, expected_chars,
+                )
+        return result
+
+    async def _generate_writer_usable(
+        self,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+    ) -> str:
+        """Retry only the current unaccepted Writer part.
+
+        This is not continuation or regeneration of accepted prose: every retry
+        receives the same bounded Story Map/ledger/seam prompt and happens
+        before the current part is appended to accepted_story_parts.
+        """
+        result = await self._generate_for_request(
+            self.client.generate, prompt, request, expected_chars,
+        )
+        for _attempt in range(2):
+            if not self._writer_output_unusable(result):
+                return result
+            retry_prompt = (
+                "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
+                "Do not restart the whole story, do not emit a part label or JSON, "
+                "and return only the requested continuous prose segment.\n\n"
+                f"TASK:\n{prompt}"
+            )
+            generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+            result = await self._generate_for_request(
+                generate_fresh, retry_prompt, request, expected_chars,
+            )
+        if self._writer_output_unusable(result):
+            generate_openai = getattr(self.client, "generate_openai", None)
+            if generate_openai is not None:
+                openai_prompt = (
+                    "Write only the SAME unfinished NewsFlow story segment below. "
+                    "Do not restart the story, ask questions, emit labels/JSON, or explain limitations.\n\n"
+                    f"TASK:\n{prompt}"
+                )
+                result = await self._generate_for_request(
+                    generate_openai, openai_prompt, request, expected_chars,
+                )
+        return result
 
     async def _run_planned_story(self, job: Job) -> bool:
         """Plan long work once, then accept and persist a contiguous writer prefix."""
@@ -258,8 +379,19 @@ class ParallelRunner:
 
         if job.story_plan:
             plan = story_plan_from_dict(job.story_plan)
-            if tuple(part.target_chars for part in plan.parts) != part_targets:
-                raise ValueError("persisted story plan no longer matches the selected length contract")
+            if (
+                self._persisted_story_contract_changed(job.story_plan, job.request)
+                or tuple(part.target_chars for part in plan.parts) != part_targets
+            ):
+                job.state = RunState.PAUSED
+                job.error = (
+                    "Диапазон длины изменился после создания Story Map. "
+                    "Сохранённые части не перезаписаны; для нового диапазона нужен явный перезапуск."
+                )
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = "PLAN_LENGTH_CHANGED"
+                return False
         else:
             planner_prompt = build_story_planner_prompt(job.request, part_targets)
             planner_budget = max(2048, min(8192, 1024 + len(part_targets) * 350))
@@ -274,14 +406,42 @@ class ParallelRunner:
             try:
                 plan = parse_story_plan_response(planner_response, part_targets)
             except (TypeError, ValueError):
-                # The planner's story material remains immutable. One bounded
-                # recovery may correct only the exact part topology.
-                structural_repair = await self._generate_usable(
-                    build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
-                    job.request,
-                    planner_budget,
-                )
-                plan = repair_story_plan_parts_response(structural_repair, planner_response, part_targets)
+                # Prefer the non-regenerative repair: keep the original Story
+                # Map substance and correct only its part topology/ownership.
+                try:
+                    structural_repair = await self._generate_usable(
+                        build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
+                        job.request,
+                        planner_budget,
+                    )
+                    plan = repair_story_plan_parts_response(
+                        structural_repair, planner_response, part_targets,
+                    )
+                except (TypeError, ValueError):
+                    # Some real provider failures are outside the parts-only
+                    # repair scope (missing content_kind, malformed macro/thesis,
+                    # empty/non-JSON response). No Writer prose exists yet, so
+                    # one fresh Planner retry is safe and does not regenerate an
+                    # accepted scenario or mutate an accepted prefix.
+                    fresh_planner_prompt = (
+                        "FRESH STORY PLANNER RETRY. The previous planning response was invalid. "
+                        "Plan the SAME NewsFlow story again from the original task below. "
+                        "Return only the complete JSON Story Map; do not write scenario prose.\n\n"
+                        f"TASK:\n{planner_prompt}"
+                    )
+                    fresh_planner_response = await self._generate_fresh_result(
+                        fresh_planner_prompt, job.request, planner_budget,
+                    )
+                    if looks_like_action_required(fresh_planner_response):
+                        job.result = fresh_planner_response
+                        job.actual_chars = len(fresh_planner_response.strip())
+                        job.length_status = "FAILED"
+                        job.state = RunState.PAUSED
+                        job.error = "Планировщик сценария не вернул рабочий план"
+                        return False
+                    plan = parse_story_plan_response(
+                        fresh_planner_response, part_targets,
+                    )
             face_repair_deferred = False
             if plan.cover_face_repair_needed:
                 try:
@@ -299,6 +459,9 @@ class ParallelRunner:
                     # later continue semantic resolution from its own context.
                     face_repair_deferred = True
             job.story_plan = plan.to_dict()
+            job.story_plan["length_contract"] = self._story_length_contract(
+                job.request,
+            )
             job.accepted_story_parts = []
             job.story_planner_status = "FACE_REPAIR_DEFERRED" if face_repair_deferred else "READY"
             # Persist the complete plan before a prose part is accepted.
@@ -312,16 +475,10 @@ class ParallelRunner:
             writer_prompt = build_story_writer_prompt(
                 job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
-            if len(plan.parts) == 1:
-                writer_result = await self._generate_usable(
-                    writer_prompt, job.request, active_target,
-                )
-            else:
-                writer_result = await self._generate_for_request(
-                    self.client.generate, writer_prompt, job.request, active_target,
-                )
-            if (looks_like_action_required(writer_result) or not writer_result.strip()
-                    or self._writer_output_is_structural(writer_result)):
+            writer_result = await self._generate_writer_usable(
+                writer_prompt, job.request, active_target,
+            )
+            if self._writer_output_unusable(writer_result):
                 job.state = RunState.PAUSED
                 job.error = f"Писатель части {part.id} не вернул готовый фрагмент"
                 job.result = self._assembled_story(plan, job.accepted_story_parts)
@@ -330,6 +487,56 @@ class ParallelRunner:
                 return False
 
             accepted_text = writer_result.strip()
+            if (
+                len(plan.parts) > 1
+                and part_index < len(plan.parts) - 1
+                and job.request.allowed_max
+            ):
+                prefix_text = self._assembled_story(plan, job.accepted_story_parts)
+                remaining_after = len(plan.parts) - part_index - 1
+                # Reserve the deterministic separators and at least one prose
+                # character for each future planned part. This is only a
+                # feasibility ceiling, not a new target for normal output.
+                reserved_chars = (
+                    (2 if prefix_text else 0)
+                    + 2 * remaining_after
+                    + remaining_after
+                )
+                maximum_current_chars = (
+                    int(job.request.allowed_max)
+                    - len(prefix_text)
+                    - reserved_chars
+                )
+                if maximum_current_chars < 1:
+                    job.state = RunState.PAUSED
+                    job.error = (
+                        "Принятый префикс сценария уже не помещается в выбранный максимум длины; "
+                        "нужен явный перезапуск с новым Story Map"
+                    )
+                    job.result = prefix_text
+                    job.actual_chars = len(prefix_text)
+                    job.length_status = "LONG"
+                    return False
+                if len(accepted_text) > maximum_current_chars:
+                    length_retry_prompt = (
+                        "CURRENT SEGMENT LENGTH RECOVERY. Retry only this same unfinished segment. "
+                        f"Write no more than {maximum_current_chars} characters and aim for {active_target}. "
+                        "Preserve the assigned Story Map content and role; do not restart earlier parts, "
+                        "add labels, JSON or commentary.\n\n"
+                        f"TASK:\n{writer_prompt}"
+                    )
+                    length_retry = await self._generate_fresh_result(
+                        length_retry_prompt,
+                        job.request,
+                        min(active_target, maximum_current_chars),
+                    )
+                    if not self._writer_output_unusable(length_retry):
+                        accepted_text = length_retry.strip()
+                    if len(accepted_text) > maximum_current_chars:
+                        accepted_text = trim_text_to_sentence_boundary(
+                            accepted_text, maximum_current_chars,
+                        )
+
             if len(plan.parts) == 1:
                 single_status, single_chars = scenario_length_status(job.request, accepted_text)
                 if single_status == "LONG":
@@ -343,6 +550,73 @@ class ParallelRunner:
                     job.result = accepted_text
                     job.actual_chars = single_chars
                     job.length_status = "SHORT"
+                    return False
+            elif part_index == len(plan.parts) - 1:
+                # The final multipart segment is not immutable until the
+                # assembled story satisfies the global length contract.
+                # Otherwise a SHORT/LONG final would be accepted and every
+                # ordinary retry would skip all parts forever.
+                prefix_text = self._assembled_story(plan, job.accepted_story_parts)
+                separator_chars = 2 if prefix_text else 0
+
+                def final_candidate(
+                    text: str,
+                    *,
+                    _part=part,
+                    _active_target=active_target,
+                ) -> tuple[str, str, int]:
+                    record = {
+                        "part_id": _part.id,
+                        "text": text,
+                        "content_ids": list(_part.content_ids),
+                        "target_chars": _active_target,
+                    }
+                    assembled = self._assembled_story(
+                        plan, [*job.accepted_story_parts, record],
+                    )
+                    status, chars = scenario_length_status(job.request, assembled)
+                    return assembled, status, chars
+
+                candidate_result, final_status, final_chars = final_candidate(accepted_text)
+                if final_status == "SHORT":
+                    minimum_final_chars = max(
+                        1,
+                        int(job.request.allowed_min or 0)
+                        - len(prefix_text)
+                        - separator_chars,
+                    )
+                    length_retry_prompt = (
+                        "FINAL SEGMENT LENGTH RECOVERY. Retry only this same unfinished final segment. "
+                        f"The assembled scenario is too short. Write at least {minimum_final_chars} characters "
+                        f"for this segment and aim for {active_target} characters. Preserve the assigned Story Map "
+                        "content and final role; do not restart earlier parts, add labels, JSON or commentary.\n\n"
+                        f"TASK:\n{writer_prompt}"
+                    )
+                    length_retry = await self._generate_fresh_result(
+                        length_retry_prompt, job.request, max(active_target, minimum_final_chars),
+                    )
+                    if not self._writer_output_unusable(length_retry):
+                        accepted_text = length_retry.strip()
+                        candidate_result, final_status, final_chars = final_candidate(accepted_text)
+
+                if final_status == "LONG" and job.request.allowed_max:
+                    maximum_final_chars = max(
+                        1,
+                        int(job.request.allowed_max)
+                        - len(prefix_text)
+                        - separator_chars,
+                    )
+                    accepted_text = trim_text_to_sentence_boundary(
+                        accepted_text, maximum_final_chars,
+                    )
+                    candidate_result, final_status, final_chars = final_candidate(accepted_text)
+
+                if final_status in {"SHORT", "LONG"}:
+                    job.state = RunState.PAUSED
+                    job.error = "Финальная часть сценария не уложилась в выбранный диапазон длины"
+                    job.result = candidate_result
+                    job.actual_chars = final_chars
+                    job.length_status = final_status
                     return False
 
             job.accepted_story_parts.append({
@@ -411,6 +685,17 @@ class ParallelRunner:
             if job is None:
                 jobs.append(Job(request))
                 continue
+            if (
+                isinstance(job.story_plan, dict)
+                and "length_contract" not in job.story_plan
+            ):
+                # Migrate r26/legacy persisted Story Maps before replacing the
+                # old request. Session already stores the request range, so use
+                # that exact historical contract rather than guessing from the
+                # new UI settings.
+                job.story_plan["length_contract"] = self._story_length_contract(
+                    job.request,
+                )
             job.request = request
             job.state = RunState.WAITING
             job.error = ""

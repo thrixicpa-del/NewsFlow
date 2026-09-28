@@ -518,6 +518,72 @@ class ScenarioGenerationTests(unittest.TestCase):
                 self.assertEqual(saved_batches[-1][0].state, RunState.DONE)
                 self.assertEqual(len(saved_batches[-1][0].accepted_story_parts), 2)
 
+    def test_bridge_migrates_legacy_length_contract_before_replacing_resume_request(self):
+        title = "Legacy resume length"
+        legacy_plan = parse_story_plan_response(
+            _story_plan(2), calculate_story_part_targets(10000),
+        ).to_dict()
+        self.assertNotIn("length_contract", legacy_plan)
+
+        old = Job(
+            ScenarioRequest(
+                0, title, "old", target_chars=10000,
+                allowed_min=9000, allowed_max=11000,
+            ),
+            RunState.PAUSED,
+            "а" * 5000,
+            "",
+            story_plan=legacy_plan,
+            accepted_story_parts=[{
+                "part_id": "P1",
+                "text": "а" * 5000,
+                "content_ids": ["C001"],
+                "target_chars": 5000,
+            }],
+            story_planner_status="READY",
+        )
+        settings = Settings(
+            scenario_provider="agent",
+            template="USER CONTRACT {title}",
+            prompt_ranges=[],
+            scenario_target_chars=10000,
+            scenario_allowed_min=9000,
+            scenario_allowed_max=9500,
+        )
+        saved_batches = []
+
+        class NoProviderPool:
+            concurrency = 1
+
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError(
+                    "bridge must detect legacy changed max before provider invocation"
+                )
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([title], [old])), \
+             patch.object(
+                 bridge,
+                 "save_session",
+                 side_effect=lambda _titles, jobs: saved_batches.append(list(jobs)),
+             ), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=NoProviderPool()):
+            bridge.generate_scenarios({"provider": "agent", "indices": [0]})
+
+        final = saved_batches[-1][0]
+        self.assertEqual(final.state, RunState.PAUSED)
+        self.assertEqual(final.length_status, "PLAN_LENGTH_CHANGED")
+        self.assertEqual(final.result, "а" * 5000)
+        self.assertEqual(len(final.accepted_story_parts), 1)
+        self.assertEqual(final.story_plan["length_contract"], {
+            "target_chars": 10000,
+            "allowed_min": 9000,
+            "allowed_max": 11000,
+        })
+        self.assertEqual(final.request.allowed_max, 9500)
+
     def test_force_rewrite_updates_only_selected_ready_scenario_and_preserves_identities(self):
         titles = ["Переписать", "Не трогать"]
         settings = Settings(
