@@ -251,6 +251,54 @@ class ParallelRunner:
             str(text or "").strip(),
         ))
 
+    def _writer_output_unusable(self, text: str) -> bool:
+        return (
+            looks_like_action_required(text)
+            or not str(text or "").strip()
+            or self._writer_output_is_structural(text)
+        )
+
+    async def _generate_writer_usable(
+        self,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+    ) -> str:
+        """Retry only the current unaccepted Writer part.
+
+        This is not continuation or regeneration of accepted prose: every retry
+        receives the same bounded Story Map/ledger/seam prompt and happens
+        before the current part is appended to accepted_story_parts.
+        """
+        result = await self._generate_for_request(
+            self.client.generate, prompt, request, expected_chars,
+        )
+        for _attempt in range(2):
+            if not self._writer_output_unusable(result):
+                return result
+            retry_prompt = (
+                "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
+                "Do not restart the whole story, do not emit a part label or JSON, "
+                "and return only the requested continuous prose segment.\n\n"
+                f"TASK:\n{prompt}"
+            )
+            generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
+            result = await self._generate_for_request(
+                generate_fresh, retry_prompt, request, expected_chars,
+            )
+        if self._writer_output_unusable(result):
+            generate_openai = getattr(self.client, "generate_openai", None)
+            if generate_openai is not None:
+                openai_prompt = (
+                    "Write only the SAME unfinished NewsFlow story segment below. "
+                    "Do not restart the story, ask questions, emit labels/JSON, or explain limitations.\n\n"
+                    f"TASK:\n{prompt}"
+                )
+                result = await self._generate_for_request(
+                    generate_openai, openai_prompt, request, expected_chars,
+                )
+        return result
+
     async def _run_planned_story(self, job: Job) -> bool:
         """Plan long work once, then accept and persist a contiguous writer prefix."""
         target = self._story_target_chars(job.request)
@@ -312,16 +360,10 @@ class ParallelRunner:
             writer_prompt = build_story_writer_prompt(
                 job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
-            if len(plan.parts) == 1:
-                writer_result = await self._generate_usable(
-                    writer_prompt, job.request, active_target,
-                )
-            else:
-                writer_result = await self._generate_for_request(
-                    self.client.generate, writer_prompt, job.request, active_target,
-                )
-            if (looks_like_action_required(writer_result) or not writer_result.strip()
-                    or self._writer_output_is_structural(writer_result)):
+            writer_result = await self._generate_writer_usable(
+                writer_prompt, job.request, active_target,
+            )
+            if self._writer_output_unusable(writer_result):
                 job.state = RunState.PAUSED
                 job.error = f"Писатель части {part.id} не вернул готовый фрагмент"
                 job.result = self._assembled_story(plan, job.accepted_story_parts)
