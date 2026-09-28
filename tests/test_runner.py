@@ -466,6 +466,84 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].accepted_story_parts, [])
         self.assertIn("P1", jobs[0].error)
 
+    async def test_multipart_writer_refusal_retries_same_unaccepted_part_without_replanning(self):
+        class RetryMultipartClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_calls = []
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(2)
+                match = __import__("re").search(r"CURRENT PART: P(\d+)", prompt)
+                part_id = int(match.group(1))
+                self.writer_calls.append(part_id)
+                if part_id == 1:
+                    return "К сожалению, я не могу написать такой сценарий. Измените тему."
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Б" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                if "NewsFlow Story Planner" in prompt:
+                    raise AssertionError("Writer retry must not regenerate the Story Map")
+                if "CURRENT PART: P1" not in prompt:
+                    raise AssertionError("retry must stay on the same unfinished part")
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "А" * target
+
+        client = RetryMultipartClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Военная тема", "CONTRACT", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(client.writer_calls, [1, 2])
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
+
+    async def test_multipart_writer_structural_label_gets_fresh_retry_before_acceptance(self):
+        class RetryLabelClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2)
+                if "CURRENT PART: P1" in prompt:
+                    return "PART 1: техническая разметка вместо готового текста"
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Б" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                if "CURRENT PART: P1" not in prompt:
+                    raise AssertionError("structural retry must stay on P1")
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "А" * target
+
+        client = RetryLabelClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
+
     def test_detects_claude_request_to_rephrase_but_not_normal_script(self):
         self.assertTrue(looks_like_action_required("К сожалению, я не могу написать это. Переформулируйте тему."))
         self.assertTrue(looks_like_action_required("Please rephrase the topic and try again."))
