@@ -242,19 +242,20 @@ class ParallelRunner:
         cls, persisted_plan: dict[str, Any], request: ScenarioRequest,
     ) -> bool:
         """Detect every persisted range change, with a safe legacy fallback."""
+        if "length_contract" not in persisted_plan:
+            return False
         stored = persisted_plan.get("length_contract")
         if not isinstance(stored, dict):
-            return False
+            return True
         try:
             stored_contract = {
                 key: max(0, int(stored.get(key, 0) or 0))
                 for key in ("target_chars", "allowed_min", "allowed_max")
             }
         except (TypeError, ValueError):
-            # Legacy or malformed metadata must not make a resumable prefix
-            # fail; the established part-target fallback below still protects
-            # plans whose target changed.
-            return False
+            # Corrupt contract metadata must fail safe instead of silently
+            # adopting a new range on an immutable accepted prefix.
+            return True
         return stored_contract != cls._story_length_contract(request)
 
     def _next_story_part_target(
@@ -684,6 +685,17 @@ class ParallelRunner:
             if job is None:
                 jobs.append(Job(request))
                 continue
+            if (
+                isinstance(job.story_plan, dict)
+                and "length_contract" not in job.story_plan
+            ):
+                # Migrate r26/legacy persisted Story Maps before replacing the
+                # old request. Session already stores the request range, so use
+                # that exact historical contract rather than guessing from the
+                # new UI settings.
+                job.story_plan["length_contract"] = self._story_length_contract(
+                    job.request,
+                )
             job.request = request
             job.state = RunState.WAITING
             job.error = ""
