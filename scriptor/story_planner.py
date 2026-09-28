@@ -410,7 +410,7 @@ def repair_story_plan_face_metadata_response(text: str, plan: StoryPlan) -> Stor
 
 
 def repair_story_plan_parts_response(text: str, original_response: str, part_targets: tuple[int, ...]) -> StoryPlan:
-    """Repair only part topology; thesis, atoms and cover metadata stay untouched."""
+    """Repair only part topology; atoms keep identity/meaning but may move owner."""
     try:
         original = json.loads(str(original_response or ""))
         repair = json.loads(str(text or ""))
@@ -418,8 +418,33 @@ def repair_story_plan_parts_response(text: str, original_response: str, part_tar
         raise ValueError("story plan structural repair must return strict JSON") from exc
     if not isinstance(original, dict) or not isinstance(repair, dict) or not isinstance(repair.get("parts"), list):
         raise TypeError("story plan structural repair must contain parts")
+    original_atoms = original.get("content_atoms")
+    if not isinstance(original_atoms, list) or not all(isinstance(atom, dict) for atom in original_atoms):
+        raise TypeError("story plan structural repair requires existing content atoms")
+    atom_ids = [str(atom.get("id", "")).strip() for atom in original_atoms]
+    if not all(atom_ids) or len(set(atom_ids)) != len(atom_ids):
+        raise ValueError("story plan structural repair requires unique existing atom IDs")
+    ownership: dict[str, str] = {}
+    for part in repair["parts"]:
+        if not isinstance(part, dict):
+            raise TypeError("story plan structural repair part must be an object")
+        part_id = str(part.get("id", "")).strip()
+        content_ids = part.get("content_ids")
+        if not part_id or not isinstance(content_ids, list):
+            raise ValueError("story plan structural repair part requires id and content_ids")
+        for atom_id in content_ids:
+            atom_id = str(atom_id).strip()
+            if atom_id not in atom_ids or atom_id in ownership:
+                raise ValueError("story plan structural repair must assign every existing atom exactly once")
+            ownership[atom_id] = part_id
+    if set(ownership) != set(atom_ids):
+        raise ValueError("story plan structural repair must assign every existing atom exactly once")
     merged = dict(original)
     merged["parts"] = repair["parts"]
+    merged["content_atoms"] = [
+        {**atom, "owner_part_id": ownership[str(atom["id"]).strip()]}
+        for atom in original_atoms
+    ]
     return parse_story_plan_response(json.dumps(merged, ensure_ascii=False), part_targets)
 
 
@@ -555,7 +580,8 @@ def build_story_plan_structure_repair_prompt(request: Any, original_response: st
     return (
         "You are the NewsFlow Story Plan structural repairer. The original Story Map's thesis, macro_blocks, "
         "content_atoms and cover metadata are immutable. Return strict JSON with ONLY a corrected parts list. "
-        "Keep every existing content atom assigned exactly once, preserve owner_part_id, use only existing macro IDs, "
+        "Keep every existing content atom assigned exactly once through the returned parts[].content_ids; those IDs define "
+        "the repaired owner_part_id. Use only existing macro IDs, "
         "and fix only part count, IDs, roles, content ownership and opens/closes loops. Do not write scenario prose, "
         "do not add atoms, and do not regenerate the story. Required ordered parts: "
         f"{required}.\n\nTITLE: {request.title}\nORIGINAL MAP:\n{_compact(original_response, 12000)}"

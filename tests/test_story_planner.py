@@ -185,6 +185,53 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertEqual([part.role for part in repaired.parts], ["OPENING", "FINAL"])
         self.assertEqual(repaired.thesis, "Одна история.")
 
+    def test_exact_two_part_repair_redistributes_atoms_owned_only_by_missing_part(self):
+        """A one-part provider map may put every atom on P1; repair owns P2 explicitly."""
+        original = json.dumps({
+            "thesis": "Одна история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Финал", "owner_part_id": "P1", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [{"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001", "C002"]}],
+        }, ensure_ascii=False)
+        repaired = repair_story_plan_parts_response(json.dumps({"parts": [
+            {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"], "opens": ["финал"], "closes": []},
+            {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C002"], "opens": [], "closes": ["финал"]},
+        ]}, ensure_ascii=False), original, (5000, 5000))
+
+        self.assertEqual([part.role for part in repaired.parts], ["OPENING", "FINAL"])
+        self.assertEqual([(atom.id, atom.owner_part_id, atom.content_kind) for atom in repaired.content_atoms], [
+            ("C001", "P1", "SUPPORTED"), ("C002", "P2", "DRAMATIZED"),
+        ])
+
+    def test_exact_two_part_repair_collapses_three_part_ownership_without_rewriting_atoms(self):
+        """A three-part provider map is repaired to two parts by the returned content ownership."""
+        original = json.dumps({
+            "thesis": "Одна история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Вход", "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Развитие", "owner_part_id": "P2", "content_kind": "SUPPORTED"},
+                {"id": "C003", "summary": "Финал", "owner_part_id": "P3", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"]},
+                {"id": "P2", "role": "MIDDLE", "purpose": "Развитие", "macro_id": "M1", "content_ids": ["C002"]},
+                {"id": "P3", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C003"]},
+            ],
+        }, ensure_ascii=False)
+        repaired = repair_story_plan_parts_response(json.dumps({"parts": [
+            {"id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1", "content_ids": ["C001"], "opens": ["финал"], "closes": []},
+            {"id": "P2", "role": "FINAL", "purpose": "Финал", "macro_id": "M1", "content_ids": ["C002", "C003"], "opens": [], "closes": ["финал"]},
+        ]}, ensure_ascii=False), original, (5000, 5000))
+
+        self.assertEqual([part.id for part in repaired.parts], ["P1", "P2"])
+        self.assertEqual([(atom.id, atom.owner_part_id, atom.summary, atom.content_kind) for atom in repaired.content_atoms], [
+            ("C001", "P1", "Вход", "SUPPORTED"),
+            ("C002", "P2", "Развитие", "SUPPORTED"),
+            ("C003", "P2", "Финал", "DRAMATIZED"),
+        ])
+
     def test_parser_accepts_low_confidence_real_person_after_deeper_actor_resolution(self):
         response = json.dumps({
             "thesis": "История решения институции.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
