@@ -177,6 +177,74 @@ class SessionTests(unittest.TestCase):
                 save_session(["R1"], stale_jobs)
             self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
 
+    def test_empty_primary_backup_recovery_never_binds_old_state_to_newer_primary_revision(self):
+        """R1 empty → R2 commit during recovery leaves recovered state stale, never clobbering R2."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            recovered_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
+            save_settings(Settings(idea_results=["backup"]))
+            _write_session_file(session_path(), _session_data([], []))
+            _write_session_file(backup_session_path(), _session_data(["backup"], recovered_jobs))
+            session_module = __import__("scriptor.session", fromlist=["_recover_empty_primary_from_backup"])
+            original_recover = session_module._recover_empty_primary_from_backup
+            committed_newer = False
+
+            def commit_r2_then_recover(*args, **kwargs):
+                nonlocal committed_newer
+                if not committed_newer:
+                    committed_newer = True
+                    _write_session_file(session_path(), _session_data(["R2"], newer_jobs))
+                return original_recover(*args, **kwargs)
+
+            with patch("scriptor.session._recover_empty_primary_from_backup", side_effect=commit_r2_then_recover):
+                recovered_titles, _recovered = load_session()
+
+            self.assertEqual(recovered_titles, ["backup"])
+            with self.assertRaises(SessionWriteConflictError):
+                save_session(["backup"], recovered_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
+
+    def test_invalid_primary_backup_fallback_keeps_the_invalid_snapshot_revision(self):
+        """An invalid R1 followed by R2 must not let backup fallback overwrite R2."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+            os.environ, {
+                "LOCALAPPDATA": folder,
+                "NEWSFLOW_TEST_ROOT": folder,
+                "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(folder) / "production"),
+            },
+        ):
+            backup_jobs = [Job(ScenarioRequest(0, "backup", "P"), RunState.DONE, "backup prose", "")]
+            newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
+            session_path().write_bytes(b"{")
+            _write_session_file(backup_session_path(), _session_data(["backup"], backup_jobs))
+            session_module = __import__("scriptor.session", fromlist=["_read_session_snapshot"])
+            original_snapshot = session_module._read_session_snapshot
+            committed_newer = False
+
+            def invalid_read_then_commit(candidate):
+                nonlocal committed_newer
+                try:
+                    return original_snapshot(candidate)
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                    if candidate == session_path() and not committed_newer:
+                        committed_newer = True
+                        _write_session_file(session_path(), _session_data(["R2"], newer_jobs))
+                    raise
+
+            with patch("scriptor.session._read_session_snapshot", side_effect=invalid_read_then_commit):
+                backup_titles, _backup_jobs = load_session()
+
+            self.assertEqual(backup_titles, ["backup"])
+            with self.assertRaises(SessionWriteConflictError):
+                save_session(["backup"], backup_jobs)
+            self.assertEqual(json.loads(session_path().read_text(encoding="utf-8"))["titles"], ["R2"])
+
     def test_each_session_write_uses_a_unique_staging_file(self):
         """Separate bridge processes must never publish through one shared .tmp name."""
         with tempfile.TemporaryDirectory() as folder:

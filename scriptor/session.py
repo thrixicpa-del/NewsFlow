@@ -119,6 +119,14 @@ class SessionWriteConflictError(RuntimeError):
     """A stale bridge attempted to overwrite a session it did not load."""
 
 
+class _SessionSnapshotReadError(ValueError):
+    """A malformed snapshot whose locked byte revision remains useful to recovery."""
+
+    def __init__(self, error: Exception, revision: str):
+        super().__init__(str(error))
+        self.revision = revision
+
+
 def _session_revision(path: Path) -> str | None:
     """Return an opaque content revision without parsing user session data."""
     if not path.is_file():
@@ -258,32 +266,35 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
     with _exclusive_session_write(path):
         payload = _read_session_bytes(path)
         revision = sha256(payload).hexdigest()
+    try:
         data = json.loads(payload.decode("utf-8"))
-    titles = [str(item) for item in data.get("titles", [])]
-    jobs = []
-    for item in data.get("jobs", []):
-        request = ScenarioRequest(
-            int(item["index"]), str(item["title"]), str(item.get("prompt", "")),
-            str(item.get("production_item_id", "") or ""),
-            max(0, int(item.get("target_chars", 0) or 0)),
-            max(0, int(item.get("allowed_min", 0) or 0)),
-            max(0, int(item.get("allowed_max", 0) or 0)),
-        )
-        state = RunState(item.get("state", RunState.WAITING.value))
-        story_plan = item.get("story_plan")
-        accepted_parts = item.get("accepted_story_parts")
-        jobs.append(Job(
-            request,
-            state,
-            str(item.get("result", "")),
-            str(item.get("error", "")),
-            max(0, int(item.get("actual_chars", 0) or 0)),
-            str(item.get("length_status", "") or ""),
-            max(0, int(item.get("length_repair_attempts", 0) or 0)),
-            story_plan if isinstance(story_plan, dict) else None,
-            accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
-            str(item.get("story_planner_status", "") or ""),
-        ))
+        titles = [str(item) for item in data.get("titles", [])]
+        jobs = []
+        for item in data.get("jobs", []):
+            request = ScenarioRequest(
+                int(item["index"]), str(item["title"]), str(item.get("prompt", "")),
+                str(item.get("production_item_id", "") or ""),
+                max(0, int(item.get("target_chars", 0) or 0)),
+                max(0, int(item.get("allowed_min", 0) or 0)),
+                max(0, int(item.get("allowed_max", 0) or 0)),
+            )
+            state = RunState(item.get("state", RunState.WAITING.value))
+            story_plan = item.get("story_plan")
+            accepted_parts = item.get("accepted_story_parts")
+            jobs.append(Job(
+                request,
+                state,
+                str(item.get("result", "")),
+                str(item.get("error", "")),
+                max(0, int(item.get("actual_chars", 0) or 0)),
+                str(item.get("length_status", "") or ""),
+                max(0, int(item.get("length_repair_attempts", 0) or 0)),
+                story_plan if isinstance(story_plan, dict) else None,
+                accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
+                str(item.get("story_planner_status", "") or ""),
+            ))
+    except (ValueError, TypeError, KeyError, UnicodeDecodeError) as error:
+        raise _SessionSnapshotReadError(error, revision) from error
     return titles, jobs, revision
 
 
@@ -349,7 +360,7 @@ def _apply_scenario_tombstones(titles: list[str], jobs: list[Job], settings=None
     return remove_scenarios(titles, jobs, removed) if removed else (titles, jobs)
 
 
-def _recover_empty_primary_from_backup() -> tuple[list[str], list[Job]] | None:
+def _recover_empty_primary_from_backup(expected_primary_revision: str) -> tuple[list[str], list[Job]] | None:
     """Recover only when settings prove the backup belongs to the active batch.
 
     A zero-byte/empty primary session was produced by an interrupted legacy
@@ -390,7 +401,12 @@ def _recover_empty_primary_from_backup() -> tuple[list[str], list[Job]] | None:
         return None
     # Do not call save_session here: it would replace the verified backup with
     # the empty primary.  Keep the independent last-known-good backup intact.
-    _write_session_file(session_path(), _session_data(backup_titles, backup_jobs))
+    # A writer may have published newer work after the empty primary snapshot;
+    # never replace that work with this older LKG recovery.
+    primary = session_path()
+    with _exclusive_session_write(primary):
+        if _session_revision(primary) == expected_primary_revision:
+            _write_session_file(primary, _session_data(backup_titles, backup_jobs))
     return backup_titles, backup_jobs
 
 
@@ -474,6 +490,7 @@ def load_session() -> tuple[list[str], list[Job]]:
     # an empty queue.  Legacy Scriptor state is deliberately excluded: it can
     # only enter through ``migrate_legacy_session()`` after explicit action.
     candidates = [path, backup_session_path()]
+    invalid_primary_revision: str | None = None
     for candidate in candidates:
         if not candidate.is_file():
             continue
@@ -481,15 +498,22 @@ def load_session() -> tuple[list[str], list[Job]]:
             titles, jobs, revision = _read_session_snapshot(candidate)
             titles, jobs = _apply_scenario_tombstones(titles, jobs)
             if candidate == path and not titles and not jobs:
-                recovered_empty = _recover_empty_primary_from_backup()
+                recovered_empty = _recover_empty_primary_from_backup(revision)
                 if recovered_empty:
-                    with _exclusive_session_write(path):
-                        recovered_revision = _session_revision(path)
-                    _remember_session_revision(path, recovered_revision)
+                    _remember_session_revision(path, revision)
                     return _apply_scenario_tombstones(*recovered_empty)
             if candidate == path:
                 _remember_session_revision(path, revision)
+            elif invalid_primary_revision is not None:
+                # The state comes from LKG, but subsequent publication must
+                # still compare against the exact malformed primary snapshot
+                # that caused this fallback — never a later primary re-hash.
+                _remember_session_revision(path, invalid_primary_revision)
             return titles, jobs
+        except _SessionSnapshotReadError as error:
+            if candidate == path:
+                invalid_primary_revision = error.revision
+            continue
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue
     return [], []
