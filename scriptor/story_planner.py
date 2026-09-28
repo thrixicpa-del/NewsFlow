@@ -105,7 +105,7 @@ def _optional_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
-def _id_list(value: object, field: str) -> tuple[str, ...]:
+def _id_list(value: object, _field: str) -> tuple[str, ...]:
     """Normalise advisory loop IDs without making them Story Map blockers."""
     if not isinstance(value, list):
         return ()
