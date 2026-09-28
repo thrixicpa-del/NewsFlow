@@ -47,7 +47,7 @@ class StoryPlanValidationTests(unittest.TestCase):
     def test_parser_accepts_transport_wrapped_json_without_relaxing_schema(self):
         response = self._single_part_cover_response(candidates=[], primary=None, status="NEEDS_REVIEW")
         for wrapped in (
-            f"\`\`\`json\n{response}\n\`\`\`",
+            f"```json\n{response}\n```",
             f"Вот JSON Story Map:\n{response}\nГотово.",
         ):
             with self.subTest(wrapped=wrapped[:20]):
@@ -76,8 +76,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         ]}, ensure_ascii=False)
 
         plan = repair_story_plan_parts_response(
-            f"\`\`\`json\n{repair}\n\`\`\`",
-            f"Planner result:\n\`\`\`json\n{original}\n\`\`\`",
+            f"```json\n{repair}\n```",
+            f"Planner result:\n```json\n{original}\n```",
             (5000, 5000),
         )
 
