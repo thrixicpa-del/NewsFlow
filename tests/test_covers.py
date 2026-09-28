@@ -455,6 +455,62 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
         self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
         self.assertNotEqual(item["cover_primary_person"], None)
+
+    def test_title_and_completed_script_anchor_persists_low_confidence_person_and_reaches_fastgen(self):
+        """Title/script-only semantic context is enough for bounded LOW_CONFIDENCE face resolution."""
+        from scriptor import bridge
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "председатель комиссии",
+                        "relation_to_story": "несёт ответственность за обсуждаемое решение комиссии",
+                        "source": "provider", "confidence": 0.61,
+                    },
+                }, ensure_ascii=False)
+
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory, cover_auto_overlay_text=False, cover_variant_count=1,
+                openai_api_keys=[OpenAIKey(label="text", secret="test")],
+                cover_api_keys=[FastGenKey(label="image", secret="test")],
+            )
+            item = {
+                "production_item_id": "production:title-script", "title": "Комиссия обсуждает торговые ограничения",
+                "script": "После заседания комиссия сформировала позицию по новым торговым ограничениям.",
+                "image_prompt": "Редакционная сцена заседания", "status": "Ожидает",
+                "cover_face_required": True, "cover_face_resolution_status": "LOW_CONFIDENCE",
+                "cover_primary_person": None,
+            }
+            settings.cover_queue = [item]
+            generated: list[Path] = []
+
+            def render(_prompt, output, _stem, _operation, _ratio, **_kwargs):
+                path = output / "title-script.png"
+                path.write_bytes(b"image")
+                generated.append(path)
+                return [path]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
+                 patch.object(bridge, "_run_parallel_cover_workers", side_effect=lambda indices, worker: [worker(index) for index in indices]), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge._generate_covers_unlocked({
+                    "indices": [0], "productionItemIds": ["production:title-script"],
+                    "buildMode": "fastgen-full", "faceMode": "auto", "textMode": "fastgen",
+                })
+
+        self.assertIsNotNone(item["cover_primary_person"], item)
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
+        self.assertEqual(item["status"], "Готово")
+        self.assertEqual(len(generated), 1)
     def test_cover_text_generation_projects_a_current_context_row_before_provider_call(self):
         """A durable current scenario must not need a prior manual Covers transfer."""
         from scriptor import bridge

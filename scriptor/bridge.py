@@ -933,7 +933,7 @@ def _cover_explicit_person_evidence(name: str, item: dict) -> tuple[str, str]:
     return "", ""
 
 
-def _cover_factual_anchor_summary(item: dict) -> str:
+def _cover_factual_anchor_summary(item: dict, *, include_semantic_text_anchors: bool = False) -> str:
     """Return compact factual anchors without accepting provider prose as proof."""
     for key in (
         "event_context", "supporting_context", "primary_entities", "primary_entity", "entities",
@@ -942,10 +942,20 @@ def _cover_factual_anchor_summary(item: dict) -> str:
         value = _cover_context_values(item.get(key))
         if value:
             return f"current {key}: {value[:240]}"
+    if include_semantic_text_anchors:
+        # Title/topic/script are enough to support a LOW_CONFIDENCE result only
+        # after the bounded semantic resolver has tied its candidate to this
+        # specific item. They must not promote an arbitrary Planner/provider
+        # person merely because an item has a title.
+        for key in ("title", "topic", "script"):
+            value = _cover_context_values(item.get(key))
+            if value:
+                return f"current {key}: {value[:240]}"
     return ""
 
 
-def derive_person_evidence(candidate: object, production_item: dict, settings: Settings | None = None) -> tuple[dict | None, str]:
+def derive_person_evidence(candidate: object, production_item: dict, settings: Settings | None = None,
+                           *, allow_semantic_text_anchors: bool = False) -> tuple[dict | None, str]:
     """Derive trusted evidence from Core data, never a provider self-claim."""
     if not _cover_entity_is_explicit_person(candidate):
         return None, "NEEDS_REVIEW"
@@ -964,7 +974,9 @@ def derive_person_evidence(candidate: object, production_item: dict, settings: S
         "evidence_type": " ".join(str(claim.get("evidence_type", "UNSPECIFIED")).split()).upper() or "UNSPECIFIED",
     }
     explicit_source, explicit_summary = _cover_explicit_person_evidence(name, production_item)
-    anchor_summary = _cover_factual_anchor_summary(production_item)
+    anchor_summary = _cover_factual_anchor_summary(
+        production_item, include_semantic_text_anchors=allow_semantic_text_anchors,
+    )
     if explicit_source:
         resolved.update({
             "source": f"core-explicit-context:{explicit_source}",
@@ -1086,7 +1098,9 @@ def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> boo
         if candidate is None or candidate["name"].casefold() in seen:
             continue
         seen.add(candidate["name"].casefold())
-        derived, status = derive_person_evidence(candidate, item, settings)
+        derived, status = derive_person_evidence(
+            candidate, item, settings, allow_semantic_text_anchors=True,
+        )
         if derived is None:
             continue
         item["cover_people_candidates"] = [derived]
