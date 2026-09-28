@@ -656,6 +656,47 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(len(jobs[0].accepted_story_parts), 6)
 
+    async def test_resume_with_changed_length_contract_pauses_without_discarding_accepted_prefix(self):
+        from scriptor.runner import Job
+        from scriptor.story_planner import calculate_story_part_targets, parse_story_plan_response
+
+        old_request = ScenarioRequest(
+            0, "Тема", "OLD", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )
+        old_plan = parse_story_plan_response(
+            ParallelRunnerTests._story_plan_json(2),
+            calculate_story_part_targets(10000),
+        )
+        job = Job(
+            request=old_request,
+            story_plan=old_plan.to_dict(),
+            accepted_story_parts=[{
+                "part_id": "P1",
+                "text": "А" * 4999,
+                "content_ids": ["C001"],
+                "target_chars": 4999,
+            }],
+        )
+
+        class NoProviderCalls:
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError("changed length must not call provider or discard accepted prose")
+
+        new_request = ScenarioRequest(
+            0, "Тема", "NEW", target_chars=15000,
+            allowed_min=14000, allowed_max=16000,
+        )
+        result = (await ParallelRunner(NoProviderCalls(), 1).run(
+            [new_request], resume_jobs={0: job},
+        ))[0]
+
+        self.assertEqual(result.state, RunState.PAUSED)
+        self.assertEqual(result.length_status, "PLAN_LENGTH_CHANGED")
+        self.assertEqual(len(result.accepted_story_parts), 1)
+        self.assertEqual(result.result, "А" * 4999)
+        self.assertIn("явный перезапуск", result.error)
+
     async def test_writer_part_label_is_not_accepted_as_scenario_prose(self):
         class LabelClient:
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
