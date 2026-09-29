@@ -1064,8 +1064,13 @@ def _cover_semantic_person_prompt(item: dict) -> str:
         "story's central human is an ordinary protester, witness, victim, resident, employee, volunteer or other private "
         "participant, do NOT use that ordinary participant as the automatic political portrait. Instead follow the "
         "government, institution, political side, decision, responsibility and other current anchors in the item and "
-        "resolve the relevant public figure connected to them. Do not use a static geography-to-leader map and do not "
-        "select an unrelated celebrity. Every candidate object must contain name, entity_type person or public_figure, "
+        "automatically resolve the MOST DIRECTLY RELEVANT political/public figure connected to those anchors. Prefer the "
+        "public figure with the strongest direct relationship to the named institution, government, decision, conflict "
+        "or political responsibility in THIS story; do not choose a merely famous person. If the title/context names a "
+        "political institution or seat of power but no politician by name, infer the relevant public office-holder from "
+        "the full current story context semantically, not from a hardcoded lookup table. Do not use a static "
+        "geography-to-leader map and do not select an unrelated celebrity. Every candidate object must contain name, "
+        "entity_type person or public_figure, "
         "role_in_story, relation_to_story, source and confidence 0..1. Prefer entity_type public_figure. If support is "
         "indirect, still return the best grounded public figure and concise ranked alternatives; NewsFlow will mark "
         "anchor-derived identity LOW_CONFIDENCE. If no real public figure can be tied to the current item at all, return "
@@ -1151,8 +1156,9 @@ def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> boo
             attempt_prompt += (
                 "\n\nRETRY CORRECTION: the previous response did not yield a usable grounded public figure. "
                 "Do not return the ordinary participant merely because that person is central to the event. Resolve "
-                "an office-holder, political leader, decision-maker, minister, spokesperson or comparable public actor "
-                "from the current government/institution/side/responsibility anchors. Return up to 3 concise ranked "
+                "the most directly relevant office-holder, political leader, decision-maker, minister, spokesperson or "
+                "comparable public actor from the current government/institution/side/responsibility anchors. Rank "
+                "candidates by direct relationship to THIS story, not general fame. Return up to 3 concise ranked "
                 "public-figure candidates so NewsFlow can validate them locally."
             )
         try:
