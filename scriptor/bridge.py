@@ -8300,8 +8300,8 @@ def _cover_word_editorial_evaluation(
     # Finite verbs invented by the model are a reliable, context-independent
     # signal of an unsupported and often nonsensical subject/action pairing.
     # These are normal literal newsroom actions, not a negative phrase list.
-    # When a source uses a close verb form (or an editor uses a literal verb
-    # such as "держит курс"), that alone is not an artificial metaphor.
+    # A familiar newsroom verb is not automatically safe: the current source
+    # must still support the action, and figurative pairings are rejected below.
     neutral_action_stems = {
         "обсуж", "повыш", "усил", "дави", "давл", "отвеч", "заяв", "ввод",
         "реша", "соглас", "отказ", "треб", "сниж", "раст", "постав", "закры",
@@ -8683,11 +8683,13 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
         "подтверждённый конфликт, провал, потерю, страх, злость, давление, ответственность, цену или неприятное "
         "последствие. Используй простые массовые слова и прямой разговорный русский, который мгновенно читается "
         "на YouTube-обложке. Грязнее означает выбрать самый острый ПОДТВЕРЖДЁННЫЙ угол, а не придумать обвинение. "
-        "Никаких метафор, образных глаголов, литературных оборотов, газетно-колоночного или политологического языка. "
+        "Стиль не литературный и не газетный. Никаких метафор, образных глаголов, литературных оборотов, "
+        "газетно-колоночного или политологического языка. "
         "Не добавляй фактов, чисел, угроз, ультиматумов, действий или сущностей, которых нет в источнике. "
         if tabloid_mode else
         "СТИЛЬ: STANDARD. Пиши живо, эмоционально и цепко, но буквально: простой современный разговорный русский, "
-        "конкретный subject/action/stake и понятный hook. Не пиши как газетная колонка, аналитик или литератор. "
+        "конкретный subject/action/stake и понятный hook. Стиль не литературный и не газетный: не пиши как "
+        "газетная колонка, аналитик или литератор. "
         "Никаких метафор, образных глаголов, политологической абстракции и красивых формулировок ради красоты. "
     )
     if kind == "headline":
@@ -8880,7 +8882,7 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
             validation.update(
                 candidate_count=len(_cover_word_candidates(raw, kind)),
                 selection_reason=("best supported tabloid hook after editorial quality evaluation"
-                                  if tabloid_mode else "best compact standard candidate after editorial quality evaluation"),
+                                  if tabloid_mode else "best direct standard candidate after editorial quality evaluation"),
                 selection_evidence={
                     "style": "TABLOID" if tabloid_mode else "STANDARD",
                     "naturalness_pass": bool(evidence.get("naturalness_pass")),
@@ -8909,7 +8911,7 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
         validation = dict(validation)
         evidence = dict(validation.get("editorial_evaluation", {}))
         validation.update(
-            candidate_count=0,
+            candidate_count=len(attempts),
             selection_reason="safe grounded local fallback after bounded editorial repairs",
             selection_evidence={
                 "style": "TABLOID" if tabloid_mode else "STANDARD",
