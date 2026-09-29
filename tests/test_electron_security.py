@@ -80,7 +80,7 @@ class ElectronSecurityGateTests(unittest.TestCase):
     def test_known_high_severity_transitive_dependencies_are_pinned_safe(self):
         workspace = (APP_ROOT / "pnpm-workspace.yaml").read_text(encoding="utf-8")
         self.assertIn("js-yaml: 4.3.2", workspace)
-        self.assertIn("fast-uri: 3.1.6", workspace)
+        self.assertIn("fast-uri: 3.1.7", workspace)
 
 
 if __name__ == "__main__":
