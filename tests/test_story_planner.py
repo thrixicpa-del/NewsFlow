@@ -224,9 +224,13 @@ class StoryPlanValidationTests(unittest.TestCase):
             "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
             "content_atoms": [
                 {"id": "C001", "summary": "Высокая цена помидоров вызывает устойчивое раздражение покупателей",
-                 "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED",
+                 "novelty_question": "Почему цена раздражает покупателей?",
+                 "novelty_payload": "Высокая цена помидоров вызывает устойчивое раздражение покупателей."},
                 {"id": "C002", "summary": "Высокая цена помидоров вызывает устойчивое раздражение покупателей снова",
-                 "owner_part_id": "P2", "content_kind": "DRAMATIZED"},
+                 "owner_part_id": "P2", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Почему цена снова раздражает покупателей?",
+                 "novelty_payload": "Высокая цена помидоров вызывает устойчивое раздражение покупателей снова."},
             ],
             "parts": [
                 {"id": "P1", "role": "OPENING", "purpose": "Показать исходный ценовой шок",
@@ -363,7 +367,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         )
 
         self.assertIn("CURRENT ROLE: COMPLETE", prompt)
-        self.assertIn("CURRENT CONTENT ORDER (consume once, in order):", prompt)
+        self.assertIn("CURRENT CONTENT ORDER: consume the following atoms once, in listed order.", prompt)
+        self.assertIn("CURRENT CONTENT:\n", prompt)
         self.assertIn("C001 [SUPPORTED]", prompt)
         self.assertIn("C005 [DRAMATIZED]", prompt)
         self.assertIn("Q=Что произошло первым?", prompt)
@@ -628,7 +633,8 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("CURRENT PART: P2", prompt)
         self.assertIn("CURRENT NOVELTY QUESTION: Как работает новый механизм давления?", prompt)
         self.assertIn("CURRENT NEW INFORMATION: Механизм, участники и реакция", prompt)
-        self.assertIn("CURRENT CONTENT ORDER (consume once, in order):", prompt)
+        self.assertIn("CURRENT CONTENT ORDER: consume the following atoms once, in listed order.", prompt)
+        self.assertIn("CURRENT CONTENT:\n", prompt)
         self.assertIn("Q=", prompt)
         self.assertIn("NEW=", prompt)
         self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Начальное событие уже раскрыто", prompt)
