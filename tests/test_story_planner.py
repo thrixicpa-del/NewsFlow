@@ -405,15 +405,33 @@ class StoryPlanValidationTests(unittest.TestCase):
         """The 6-9k COMPLETE contract needs enough new material inside its single part."""
         atoms = [
             {
-                "id": f"C00{index}",
-                "summary": f"Новый смысловой шаг номер {index}",
-                "owner_part_id": "P1",
-                "content_kind": "DRAMATIZED",
-                "novelty_question": f"Какой новый вопрос раскрывает шаг {index}?",
-                "novelty_payload": f"Зритель узнаёт отдельное развитие номер {index}.",
-                "do_not_repeat": f"Не возвращаться к выводу шага {index - 1}." if index > 1 else "",
-            }
-            for index in range(1, 5)
+                "id": "C001", "summary": "На рынке сохраняется высокий ценник",
+                "owner_part_id": "P1", "content_kind": "SUPPORTED",
+                "novelty_question": "Что изменилось в цене?",
+                "novelty_payload": "Стоимость товара не снизилась после ожидаемого сезонного периода.",
+                "do_not_repeat": "",
+            },
+            {
+                "id": "C002", "summary": "Логистические расходы меняют закупочную схему",
+                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                "novelty_question": "Какой механизм удерживает стоимость?",
+                "novelty_payload": "Поставщики сокращают дешёвые партии из-за новых затрат.",
+                "do_not_repeat": "Не доказывать заново сам факт высокой цены.",
+            },
+            {
+                "id": "C003", "summary": "Покупатели меняют корзину и частоту покупок",
+                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                "novelty_question": "Как люди адаптируют повседневные расходы?",
+                "novelty_payload": "Семьи сокращают объём покупок и переходят на заменители.",
+                "do_not_repeat": "Не повторять механизм поставок.",
+            },
+            {
+                "id": "C004", "summary": "Продавцы реагируют на изменение спроса",
+                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                "novelty_question": "Как рынок отвечает на новое поведение покупателей?",
+                "novelty_payload": "Торговцы меняют ассортимент и объём закупок вслед за спросом.",
+                "do_not_repeat": "Не возвращаться к семейным расходам как к главному выводу.",
+            },
         ]
         response = json.dumps({
             "thesis": "Одна длинная COMPLETE-история.",
