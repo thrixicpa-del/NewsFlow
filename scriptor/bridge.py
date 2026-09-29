@@ -786,9 +786,9 @@ def _cover_portrait_context(item: dict) -> str:
 _COVER_POLITICAL_MARKERS = (
     "президент", "премьер", "министр", "парламент", "правительств", "переговор",
     "санкц", "посол", "выбор", "тариф", "пошлин", "дипломат", "саммит", "кремл",
-    "белый дом", "внешн", "международн", "войн", "военн", "war", "military",
-    "government", "diplomac",
+    "белый дом", "внешн", "международн", "войн", "военн",
 )
+_COVER_ENGLISH_POLITICAL_MARKERS = ("war", "military", "government", "diplomac")
 _COVER_PERSON_ENTITY_TYPES = {"person", "human", "public_figure", "politician", "individual"}
 _COVER_PUBLIC_PERSON_ENTITY_TYPES = {"public_figure", "politician"}
 _COVER_PUBLIC_PERSON_ROLE_MARKERS = (
@@ -796,6 +796,197 @@ _COVER_PUBLIC_PERSON_ROLE_MARKERS = (
     "президент", "премьер", "министр", "лидер", "канцлер", "посол",
 )
 _COVER_IDENTITY_OWNER = "COVERS"
+
+# One centralized, auditable registry is the deterministic second stage of the
+# automatic political-cover contract.  It is deliberately data rather than a
+# collection of place-specific branches in portrait selection: country aliases
+# and a president can be updated in one bounded record.  The registry does not
+# choose a country; ``_cover_resolve_primary_country`` first establishes the
+# current story's acting side from the ProductionItem.
+_COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
+    "russia": {
+        "country": "Russia", "aliases": ("россия", "российск", "кремль", "кремл", "москва", "russia", "russian"),
+        "president": {"name": "Владимир Путин", "aliases": ("путин", "putin")}, "updated": "2026-09",
+    },
+    "ukraine": {
+        "country": "Ukraine", "aliases": ("украина", "украин", "киев", "kyiv", "ukraine", "ukrainian"),
+        "president": {"name": "Владимир Зеленский", "aliases": ("зеленский", "zelensky")}, "updated": "2026-09",
+    },
+    "united-states": {
+        "country": "United States", "aliases": ("сша", "американ", "белый дом", "вашингтон", "united states", "u.s.", "usa"),
+        "president": {"name": "Дональд Трамп", "aliases": ("трамп", "trump")}, "updated": "2026-09",
+    },
+    "azerbaijan": {
+        "country": "Azerbaijan", "aliases": ("азербайджан", "азербайджанск", "azerbaijan"),
+        "president": {"name": "Ильхам Алиев", "aliases": ("алиев", "aliyev")}, "updated": "2026-09",
+    },
+    "armenia": {
+        "country": "Armenia", "aliases": ("армения", "армян", "armenia"),
+        "president": {"name": "Ваагн Хачатурян", "aliases": ("хачатурян", "khachaturyan")}, "updated": "2026-09",
+    },
+    "turkiye": {
+        "country": "Türkiye", "aliases": ("турция", "турецк", "türkiye", "turkey"),
+        "president": {"name": "Реджеп Тайип Эрдоган", "aliases": ("эрдоган", "erdogan")}, "updated": "2026-09",
+    },
+}
+_COVER_ACTOR_ACTIONS = re.compile(
+    r"\b(?:strikes?|attacks?|announces?|responds?|rejects?|pressures?|launches?|imposes?|"
+    r"усилил(?:а|и)?|нан[её]с(?:ла|ли)?|атаковал(?:а|и)?|ответил(?:а|и)?|объявил(?:а|и)?|"
+    r"заявил(?:а|и)?|отверг(?:ла|ли)?|готовит|готовят|изменил(?:а|и)?|принял(?:а|и)?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _cover_registry_aliases(country_id: str, entry: dict[str, object]) -> tuple[str, ...]:
+    aliases = [country_id, str(entry.get("country", "") or "")]
+    aliases.extend(str(value or "") for value in entry.get("aliases", ()) if value)
+    president = entry.get("president")
+    if isinstance(president, dict):
+        aliases.extend(str(value or "") for value in president.get("aliases", ()) if value)
+        aliases.append(str(president.get("name", "") or ""))
+    return tuple(" ".join(alias.split()).casefold() for alias in aliases if alias)
+
+
+def _cover_alias_positions(text: str, registry: dict[str, dict[str, object]]) -> list[tuple[int, str]]:
+    positions: list[tuple[int, str]] = []
+    for country_id, entry in registry.items():
+        for alias in _cover_registry_aliases(country_id, entry):
+            if not alias:
+                continue
+            # English aliases require strict token boundaries ("war" must
+            # never match "award").  Cyrillic aliases additionally accept a
+            # grammatical suffix such as "российская" after a safe stem.
+            suffix = r"[а-яё]*" if re.search(r"[а-яё]", alias, flags=re.IGNORECASE) else ""
+            pattern = rf"(?<!\w){re.escape(alias)}{suffix}(?!\w)"
+            positions.extend((match.start(), country_id) for match in re.finditer(pattern, text, flags=re.IGNORECASE))
+    return sorted(set(positions))
+
+
+def _cover_resolve_primary_country(
+    item: dict, *, registry: dict[str, dict[str, object]] | None = None,
+) -> dict[str, str] | None:
+    """Resolve the main political side from title-first action evidence.
+
+    A passive location is deliberately not enough when a title identifies an
+    actor.  Multiple country mentions without an acting subject stay unresolved
+    rather than silently selecting the first or most famous country.
+    """
+    active_registry = registry or _COVER_PRESIDENT_REGISTRY
+    for field in ("title", "topic", "geography", "entities", "primary_entities", "primary_entity",
+                  "event_context", "supporting_context", "script"):
+        text = _cover_context_values(item.get(field))
+        if not text:
+            continue
+        positions = _cover_alias_positions(text, active_registry)
+        if not positions:
+            continue
+        for action in _COVER_ACTOR_ACTIONS.finditer(text):
+            preceding = [value for value in positions if 0 <= action.start() - value[0] <= 160]
+            if preceding:
+                country_id = preceding[-1][1]
+                entry = active_registry[country_id]
+                return {
+                    "country_id": country_id,
+                    "country": str(entry.get("country", country_id) or country_id),
+                    "source": f"{field}:acting-subject",
+                    "reason": f"{field} identifies {entry.get('country', country_id)} as the acting political side",
+                }
+        unique = {country_id for _position, country_id in positions}
+        if len(unique) == 1:
+            country_id = next(iter(unique))
+            entry = active_registry[country_id]
+            return {
+                "country_id": country_id,
+                "country": str(entry.get("country", country_id) or country_id),
+                "source": f"{field}:single-country",
+                "reason": f"{field} contains one supported political country",
+            }
+        # Title is authoritative.  Do not dilute its unresolved multi-country
+        # meaning with a secondary script/location field.
+        if field == "title":
+            return None
+    return None
+
+
+def _cover_resolve_registry_president(
+    country: dict[str, str] | None, *, registry: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object] | None:
+    """Return the only automatic political identity after country resolution."""
+    active_registry = registry or _COVER_PRESIDENT_REGISTRY
+    country_id = str((country or {}).get("country_id", "") or "")
+    entry = active_registry.get(country_id)
+    president = entry.get("president") if isinstance(entry, dict) else None
+    if not isinstance(president, dict):
+        return None
+    name = _cover_person_name(president.get("name"))
+    if not name:
+        return None
+    return {
+        "name": name,
+        "entity_type": "public_figure",
+        "role_in_story": "president",
+        "relation_to_story": f"president of {country.get('country', country_id)}; resolved from the current story's primary political side",
+        "source": "core-president-registry",
+        "confidence": 1.0,
+        "evidence_type": "COUNTRY_PRESIDENT_REGISTRY",
+        "evidence_summary": str(country.get("reason", "") or "country-president registry"),
+        "cover_identity_owner": _COVER_IDENTITY_OWNER,
+        "country_id": country_id,
+    }
+
+
+def _cover_apply_automatic_political_portrait(
+    item: dict, *, registry: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Persist a canonical president or a controlled country/registry diagnostic."""
+    country = _cover_resolve_primary_country(item, registry=registry)
+    if country is None:
+        item["cover_face_resolution_status"] = "COUNTRY_RESOLUTION_ERROR"
+        item["cover_face_resolution_error"] = "Не удалось определить основную политическую страну/сторону из текущей темы"
+        return {"ok": False, "reason": "COUNTRY_RESOLUTION_ERROR"}
+    candidate = _cover_resolve_registry_president(country, registry=registry)
+    item.update({
+        "primary_country": country["country"],
+        "primary_country_source": country["source"],
+        "primary_country_reason": country["reason"],
+    })
+    if candidate is None:
+        item["cover_face_resolution_status"] = "PRESIDENT_RESOLUTION_ERROR"
+        item["cover_face_resolution_error"] = "Для определённой политической страны нет актуальной записи президента"
+        return {"ok": False, "reason": "PRESIDENT_RESOLUTION_ERROR"}
+    previous_subject = _cover_person_name(item.get("cover_primary_person"))
+    item.update({
+        "cover_primary_person": candidate,
+        "cover_people_candidates": [candidate],
+        "cover_identity_owner": _COVER_IDENTITY_OWNER,
+        "cover_face_resolution_status": "RESOLVED",
+        "cover_face_resolution_attempts": 0,
+    })
+    if previous_subject and previous_subject.casefold() != candidate["name"].casefold():
+        item["portrait_stale_identity_overridden"] = True
+        item["portrait_stale_identity"] = previous_subject
+    else:
+        item["portrait_stale_identity_overridden"] = False
+        item.pop("portrait_stale_identity", None)
+    item.pop("cover_face_resolution_error", None)
+    return {"ok": True, "candidate": candidate, "country": country}
+
+
+def _cover_registry_portrait_candidate(item: dict) -> tuple[str, str, str, float]:
+    """Reuse only the canonical president just written by this Covers flow."""
+    candidate = item.get("cover_primary_person")
+    if not isinstance(candidate, dict):
+        return "", "", "", 0.0
+    if str(candidate.get("cover_identity_owner", "") or "").strip().upper() != _COVER_IDENTITY_OWNER:
+        return "", "", "", 0.0
+    if str(candidate.get("source", "") or "").strip().casefold() != "core-president-registry":
+        return "", "", "", 0.0
+    if not _cover_candidate_is_president(candidate):
+        return "", "", "", 0.0
+    name = _cover_person_name(candidate)
+    if not name:
+        return "", "", "", 0.0
+    return name, "covers-president-registry", str(candidate.get("relation_to_story", "") or ""), 1.0
 
 
 def _cover_entity_is_explicit_person(value: object) -> bool:
@@ -866,10 +1057,19 @@ def _cover_requires_political_portrait(item: dict) -> bool:
     classification = " ".join(_cover_context_values(item.get(key)) for key in (
         "topic_classification", "category", "categories", "topic_type",
     )).casefold()
-    if any(term in classification for term in ("polit", "public figure", "government", "geopolit")):
+    if any(term in classification for term in ("polit", "government", "geopolit")):
         return True
-    context = _cover_portrait_context(item).casefold()
-    return any(marker in context for marker in _COVER_POLITICAL_MARKERS)
+    # Do not classify from selected people/face candidates: a singer marked as
+    # a public figure is not a political subject.  English markers use token
+    # boundaries so ``award`` and ``forward`` never match ``war``.
+    context = " ".join(_cover_context_values(item.get(key)) for key in (
+        "title", "topic", "script", "angle", "event_context", "supporting_context",
+        "primary_entities", "primary_entity", "entities",
+    ) if item.get(key) not in (None, "", [], {})).casefold()
+    return (
+        any(marker in context for marker in _COVER_POLITICAL_MARKERS)
+        or any(re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", context) for marker in _COVER_ENGLISH_POLITICAL_MARKERS)
+    )
 
 
 def _cover_person_name(value: object) -> str:
@@ -1281,8 +1481,10 @@ def _resolve_cover_portrait(
         if item.get("face_reference_source") == "manual" and manual_label:
             subject, source, reason, confidence = manual_label, "manual", "operator selected a portrait for this topic", 1.0
         else:
-            subject, source, reason = _cover_explicit_portrait_candidate(item)
-            confidence = 0.8 if subject else 0.0
+            subject, source, reason, confidence = _cover_registry_portrait_candidate(item)
+            if not subject:
+                subject, source, reason = _cover_explicit_portrait_candidate(item)
+                confidence = 0.8 if subject else 0.0
             if not subject:
                 subject, source, reason, confidence = _cover_revalidated_persisted_candidate(item, settings)
             if not subject:
@@ -10107,6 +10309,30 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 item["error"] = repeat_error
                 _save_cover_state(settings)
                 continue
+        # New automatic political renders have one deterministic identity path:
+        # title/ProductionItem -> main political side -> registry president.
+        # A saved scene, ordinary participant or semantic provider answer can
+        # never pre-empt this.  Manual portraits and explicit no-face mode are
+        # operator choices and therefore remain outside the automatic policy.
+        manual_portrait = (
+            str(item.get("face_reference_source", "") or "").strip().casefold() == "manual"
+            and bool(str(item.get("face_reference_label", "") or "").strip())
+        ) or str(item.get("portrait_source", "") or "").strip().casefold() == "manual"
+        automatic_political = (
+            not repeat_current_contract
+            and face_mode != "without"
+            and not item.get("face_reference_disabled")
+            and not manual_portrait
+            and _cover_requires_political_portrait(item)
+        )
+        if automatic_political:
+            political_resolution = _cover_apply_automatic_political_portrait(item)
+            if not political_resolution["ok"]:
+                detail = str(item.get("cover_face_resolution_error", "") or political_resolution["reason"])
+                _cover_step(item, "Ошибка automatic face resolution", 100, detail)
+                item["error"] = detail
+                _save_cover_state(settings)
+                continue
         # A cover remains reproducible even after the user changes the global
         # controls. "Repeat current" reads this record instead of guessing
         # the current screen defaults.
@@ -10165,11 +10391,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             if repeat_current_contract else
             _resolve_cover_portrait(item, settings, face_mode=face_mode, allow_manual_reference=use_my_face)
         )
-        # Every real ProductionItem needs an accountable public figure before
-        # FastGen. Do not guess a leader from geography/organisation and do
-        # not let an arbitrary visual-reference PNG choose the identity. A
-        # missing Planner primary gets one bounded semantic repair here rather
-        # than becoming a manual Covers stop-state under LOW_CONFIDENCE.
+        # Non-political covers retain their bounded semantic public-figure
+        # repair.  Political automatic covers have already received their
+        # canonical registry president above and never wait for the provider
+        # to volunteer a face identity.
         face_required = bool(item.get("cover_face_required")) or _cover_requires_political_portrait(item)
         if face_mode != "without" and face_required and not portrait["portrait_subject"]:
             if _resolve_missing_cover_primary_person(item, settings):

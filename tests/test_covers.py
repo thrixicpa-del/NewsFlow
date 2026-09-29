@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import patch
 
 from scriptor.bridge import (
@@ -212,7 +213,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
         prompt, references = provider_calls[0]
         self.assertEqual(item["portrait_subject"], "Владимир Путин")
         self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
-        self.assertEqual(item["portrait_source"], "covers-revalidated")
+        self.assertEqual(item["portrait_source"], "covers-president-registry")
         self.assertEqual(item["final_provider_face_label"], "Владимир Путин")
         self.assertEqual(item["cover_primary_person"]["entity_type"], "public_figure")
         self.assertTrue(item["portrait_stale_identity_overridden"])
@@ -395,8 +396,8 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             root = Path(directory)
             sources = root / "sources"
             prepared_root = root / "prepared"
-            source_x = sources / "Марек Новак" / "portrait.jpg"
-            prepared_x = prepared_root / "Марек Новак" / "portrait.png"
+            source_x = sources / "Владимир Путин" / "portrait.jpg"
+            prepared_x = prepared_root / "Владимир Путин" / "portrait.png"
             source_y = sources / "Иван Петров" / "portrait.jpg"
             prepared_y = prepared_root / "Иван Петров" / "portrait.png"
             for path in (source_x, prepared_x, source_y, prepared_y):
@@ -419,7 +420,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
                     "image": [{"id": "reference_image_edit", "inputs": {"min": 0, "max": 2}}],
                 }
                 settings.cover_queue = [{
-                    "title": "Переговоры о соглашении у правительственного здания",
+                    "title": "КРЕМЛЬ ОБСУЖДАЕТ СОГЛАШЕНИЕ У ПРАВИТЕЛЬСТВЕННОГО ЗДАНИЯ",
                     "production_item_id": f"production:my-face:{remove_prepared_x}",
                     "cover_face_required": True,
                     "cover_face_resolution_status": "RESOLVED",
@@ -460,16 +461,16 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             with_png, references, prompt = render_case(remove_prepared_x=False)
             self.assertEqual(references, (str(prepared_x),))
             self.assertNotIn(str(prepared_y), references)
-            self.assertEqual(with_png["portrait_subject"], "Марек Новак")
-            self.assertEqual(with_png["final_provider_face_label"], "Марек Новак")
-            self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+            self.assertEqual(with_png["portrait_subject"], "Владимир Путин")
+            self.assertEqual(with_png["final_provider_face_label"], "Владимир Путин")
+            self.assertIn("SELECTED PEOPLE:\nВладимир Путин", prompt)
             self.assertNotIn("Иван Петров", prompt)
 
             without_png, references, prompt = render_case(remove_prepared_x=True)
             self.assertEqual(references, ())
-            self.assertEqual(without_png["portrait_subject"], "Марек Новак")
-            self.assertEqual(without_png["final_provider_face_label"], "Марек Новак")
-            self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+            self.assertEqual(without_png["portrait_subject"], "Владимир Путин")
+            self.assertEqual(without_png["final_provider_face_label"], "Владимир Путин")
+            self.assertIn("SELECTED PEOPLE:\nВладимир Путин", prompt)
             self.assertNotIn("Иван Петров", prompt)
 
     def test_legacy_core_anchor_from_planner_is_replaced_by_covers_owned_identity(self):
@@ -480,16 +481,16 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             "name": "Старый Петров", "entity_type": "public_figure",
             "role_in_story": "президент", "relation_to_story": "старый выбор Planner",
             "source": "core-anchor-derived", "evidence_type": "ANCHOR_DERIVED",
-            "evidence_summary": "current title: Комиссия обсуждает решение",
+            "evidence_summary": "current title: Кремль вводит ограничения",
             "confidence": 0.91,
             "provider_evidence_claim": {
                 "source": "story-planner/provider", "evidence_type": "ANCHOR_DERIVED",
             },
         }
         item = {
-            "title": "Комиссия вводит новые ограничения после заседания",
-            "event_context": "Комиссия обсуждает решение после консультаций с правительством.",
-            "primary_entities": [{"name": "Комиссия", "type": "organization"}],
+            "title": "КРЕМЛЬ ВВОДИТ НОВЫЕ ОГРАНИЧЕНИЯ ПОСЛЕ ЗАСЕДАНИЯ",
+            "event_context": "Россия обсуждает решение после консультаций с правительством.",
+            "primary_entities": [{"name": "Кремль", "type": "organization"}],
             "cover_face_required": True, "cover_face_resolution_status": "LOW_CONFIDENCE",
             "cover_primary_person": dict(legacy_x),
         }
@@ -515,8 +516,8 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             sources = root / "sources"
             prepared = root / "prepared"
             old_png = prepared / "Старый Петров" / "old.png"
-            new_source = sources / "Новый Иванов" / "portrait.jpg"
-            new_png = prepared / "Новый Иванов" / "portrait.png"
+            new_source = sources / "Владимир Путин" / "portrait.jpg"
+            new_png = prepared / "Владимир Путин" / "portrait.png"
             for path in (old_png, new_source, new_png):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"image")
@@ -535,7 +536,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
                 "production_item_id": "production:legacy-core-anchor",
                 "cover_primary_person": dict(legacy_x),
                 "image_prompt": (
-                    "STORY CONTEXT:\nКомиссия обсуждает ограничения.\n\n"
+                    "STORY CONTEXT:\nКремль обсуждает ограничения.\n\n"
                     "SELECTED PEOPLE:\nСтарый Петров\n\n"
                     "VISIBLE ACTION:\nЗаседание завершается.\n\nENVIRONMENT:\nЗал комиссии."
                 ),
@@ -564,17 +565,17 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
                 })
 
             prompt, references = provider_calls[0]
-            self.assertEqual(render_item["portrait_subject"], "Новый Иванов")
-            self.assertEqual(render_item["final_provider_face_label"], "Новый Иванов")
+            self.assertEqual(render_item["portrait_subject"], "Владимир Путин")
+            self.assertEqual(render_item["final_provider_face_label"], "Владимир Путин")
             self.assertEqual(render_item["cover_primary_person"]["cover_identity_owner"], "COVERS")
             self.assertTrue(render_item["portrait_stale_identity_overridden"])
             self.assertEqual(render_item["portrait_stale_identity"], "Старый Петров")
             self.assertIn(render_item["portrait_side"], {"LEFT", "RIGHT"})
             self.assertEqual(references, (str(new_png),))
             self.assertNotIn(str(old_png), references)
-            self.assertIn("SELECTED PEOPLE:\nНовый Иванов", prompt)
+            self.assertIn("SELECTED PEOPLE:\nВладимир Путин", prompt)
             self.assertNotIn("SELECTED PEOPLE:\nСтарый Петров", prompt)
-            self.assertIn("Новый Иванов", prompt)
+            self.assertIn("Владимир Путин", prompt)
 
     def test_operator_selected_person_remains_explicit_override_even_if_not_president(self):
         from scriptor import bridge
@@ -934,7 +935,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             settings.cover_queue = [
                 {"production_item_id": "production:review", "title": "Городская тема", "image_prompt": "Город",
                  "cover_face_required": True, "cover_face_resolution_status": "NEEDS_REVIEW"},
-                {"production_item_id": "production:resolved", "title": "Переговоры", "image_prompt": "Переговоры",
+                {"production_item_id": "production:resolved", "title": "Городской общественный форум", "image_prompt": "Переговоры",
                  "cover_face_required": True, "cover_people_candidates": [primary], "cover_primary_person": primary,
                  "cover_face_resolution_status": "RESOLVED"},
             ]
@@ -1306,8 +1307,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True,
             })
 
-        create.assert_not_called()
-        self.assertEqual(settings.cover_queue[0]["status"], "Ошибка automatic face resolution")
+        create.assert_called_once()
+        self.assertEqual(settings.cover_queue[0]["portrait_subject"], "Дональд Трамп")
 
     def test_political_topic_without_explicit_person_uses_semantic_error_not_manual_blocker(self):
         """Generic politics cannot silently reach FastGen with an empty portrait subject."""
@@ -1331,9 +1332,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         create.assert_not_called()
         row = settings.cover_queue[0]
-        self.assertEqual(row["portrait_source"], "none")
         self.assertEqual(row["status"], "Ошибка automatic face resolution")
-        self.assertIn("semantic person-resolution", row["error"])
+        self.assertEqual(row["cover_face_resolution_status"], "COUNTRY_RESOLUTION_ERROR")
+        self.assertIn("основную политическую страну", row["error"])
 
     def test_accepted_generation_retry_checks_existing_generation_without_create(self):
         from scriptor import bridge
@@ -3035,7 +3036,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     self.assertIn("prepared face-tree match", settings.cover_queue[0]["faceSelectionReason"])
                 else:
                     self.assertEqual(settings.cover_queue[0]["semantic_face_label"], "Владимир Зеленский")
-                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "structured-selected_people")
+                    self.assertEqual(settings.cover_queue[0]["semantic_face_source"], "covers-president-registry")
                     self.assertEqual(settings.cover_queue[0]["faceSelectionMode"], "semantic-only")
                     self.assertIn("political portrait resolved", settings.cover_queue[0]["faceSelectionReason"])
                     self.assertIn("recognisable editorial portrait of Владимир Зеленский", settings.cover_queue[0]["final_provider_prompt"])
@@ -3214,8 +3215,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 self.assertEqual(calls[0][1], ())
                 self.assertEqual(item["portrait_subject"], "Владимир Путин")
                 self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
-                self.assertEqual(item["portrait_source"], "structured-selected_people")
-                self.assertIn("selected_people", item["portrait_resolver_reason"])
+                self.assertEqual(item["portrait_source"], "covers-president-registry")
+                self.assertIn("president of Russia", item["portrait_resolver_reason"])
                 self.assertIn("Владимир Путин", calls[0][0])
                 self.assertIn("large side portrait", calls[0][0])
                 self.assertEqual(item["face_reference_count"], 0)
@@ -6365,6 +6366,97 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         self.assertEqual(result["operationResult"]["count"], 0)
         self.assertIn("уже выполняется", result["operationResult"]["message"])
         render.assert_not_called()
+
+
+class CoverAutomaticPresidentContractTests(unittest.TestCase):
+    """Deterministic regressions for automatic political portrait selection."""
+
+    PRESIDENT_FIXTURES: ClassVar[dict[str, dict[str, object]]] = {
+        "country-a": {
+            "country": "Country A", "aliases": ("country a",),
+            "president": {"name": "President Alpha", "aliases": ("president alpha",)},
+        },
+        "country-b": {
+            "country": "Country B", "aliases": ("country b",),
+            "president": {"name": "President Bravo", "aliases": ("president bravo",)},
+        },
+    }
+
+    def test_actor_country_beats_passive_target_and_resolves_registry_president(self):
+        """The acting side, not a later attacked location, owns the portrait."""
+        from scriptor import bridge
+
+        item = {"title": "Country A strikes Country B — capital of Country B under attack"}
+        resolved = bridge._cover_resolve_primary_country(item, registry=self.PRESIDENT_FIXTURES)
+        self.assertEqual(resolved["country_id"], "country-a")
+        self.assertEqual(resolved["source"], "title:acting-subject")
+        candidate = bridge._cover_resolve_registry_president(resolved, registry=self.PRESIDENT_FIXTURES)
+        self.assertEqual(candidate["name"], "President Alpha")
+        self.assertTrue(bridge._cover_candidate_is_president(candidate))
+
+    def test_reversed_and_two_president_titles_follow_the_title_actor(self):
+        from scriptor import bridge
+
+        cases = (
+            ("Country B announces response to Country A", "country-b", "President Bravo"),
+            ("President Alpha pressures President Bravo", "country-a", "President Alpha"),
+            ("President Bravo rejects President Alpha's conditions", "country-b", "President Bravo"),
+        )
+        for title, country_id, president in cases:
+            with self.subTest(title=title):
+                resolved = bridge._cover_resolve_primary_country(
+                    {"title": title}, registry=self.PRESIDENT_FIXTURES,
+                )
+                self.assertEqual(resolved["country_id"], country_id)
+                self.assertEqual(
+                    bridge._cover_resolve_registry_president(
+                        resolved, registry=self.PRESIDENT_FIXTURES,
+                    )["name"],
+                    president,
+                )
+
+    def test_known_russia_and_ukraine_titles_are_resolved_without_semantic_person_provider(self):
+        from scriptor import bridge
+
+        cases = (
+            ("РОССИЯ УСИЛИЛА УДАРЫ ПО УКРАИНЕ — КИЕВ СНОВА ПОД АТАКОЙ", "russia", "Владимир Путин"),
+            ("КИЕВ ОТВЕТИЛ НА НОВЫЕ УСЛОВИЯ МОСКВЫ", "ukraine", "Владимир Зеленский"),
+            ("КРЕМЛЬ ИЗМЕНИЛ ПОЗИЦИЮ ПО ПЕРЕГОВОРАМ", "russia", "Владимир Путин"),
+        )
+        for title, country_id, president in cases:
+            with self.subTest(title=title):
+                resolved = bridge._cover_resolve_primary_country({"title": title})
+                self.assertEqual(resolved["country_id"], country_id)
+                self.assertEqual(bridge._cover_resolve_registry_president(resolved)["name"], president)
+
+    def test_country_president_contract_ignores_null_minister_and_ordinary_provider_candidates(self):
+        from scriptor import bridge
+
+        item = {"title": "КРЕМЛЬ ОБСУЖДАЕТ НОВЫЕ САНКЦИИ", "cover_face_required": True}
+        result = bridge._cover_apply_automatic_political_portrait(item)
+        self.assertTrue(result["ok"])
+        self.assertEqual(item["primary_country"], "Russia")
+        self.assertEqual(item["cover_primary_person"]["name"], "Владимир Путин")
+        self.assertEqual(item["cover_primary_person"]["role_in_story"], "president")
+
+    def test_unknown_political_story_has_country_diagnostic_not_random_president(self):
+        from scriptor import bridge
+
+        item = {"title": "ПРАВИТЕЛЬСТВО ОБСУЖДАЕТ САНКЦИИ", "cover_face_required": True}
+        result = bridge._cover_apply_automatic_political_portrait(item, registry=self.PRESIDENT_FIXTURES)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "COUNTRY_RESOLUTION_ERROR")
+        self.assertNotIn("cover_primary_person", item)
+
+    def test_english_marker_uses_word_boundaries_and_public_figure_is_not_political(self):
+        from scriptor import bridge
+
+        self.assertFalse(bridge._cover_requires_political_portrait({
+            "title": "Music Awards 2026 — Amina Diallo wins",
+            "topic_classification": "public figure",
+        }))
+        self.assertTrue(bridge._cover_requires_political_portrait({"title": "War escalates overnight"}))
+        self.assertTrue(bridge._cover_requires_political_portrait({"title": "Military operation expands"}))
 
 
 if __name__ == "__main__":
