@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import math
 import re
@@ -102,6 +103,51 @@ class Job:
     story_plan: dict[str, Any] | None = None
     accepted_story_parts: list[dict[str, Any]] = field(default_factory=list)
     story_planner_status: str = ""
+    # Bounded, non-content diagnostics for a Planner response which exhausted
+    # the accepted schema-recovery path. Provider prose never belongs here.
+    story_planner_failure: dict[str, str] = field(default_factory=dict)
+
+
+def _planner_schema_reason(error: BaseException) -> str:
+    """Map local Story Map validation failures to stable, safe UI codes."""
+    message = " ".join(str(error).casefold().split())
+    known_reasons = (
+        ("requires thesis", "MISSING_THESIS"),
+        ("requires macro_blocks", "MISSING_MACRO_BLOCKS"),
+        ("requires content_atoms", "MISSING_CONTENT_ATOMS"),
+        ("requires exactly", "PART_TOPOLOGY"),
+        ("owner_part_id", "CONTENT_OWNERSHIP"),
+        ("content atom owner", "CONTENT_OWNERSHIP"),
+        ("content atom ownership", "CONTENT_OWNERSHIP"),
+        ("must return strict json", "NON_JSON"),
+        ("response must be an object", "NON_OBJECT_JSON"),
+    )
+    for marker, code in known_reasons:
+        if marker in message:
+            return code
+    return "INVALID_STORY_MAP"
+
+
+def _pause_for_planner_schema_failure(job: Job, response: str, error: BaseException) -> None:
+    """Pause safely after bounded recovery without retaining provider content."""
+    reason = _planner_schema_reason(error)
+    job.story_planner_status = "SCHEMA_RECOVERY_EXHAUSTED"
+    job.story_planner_failure = {
+        "phase": "FRESH_SCHEMA",
+        "reason": reason,
+        "response_chars": str(len(str(response or "").strip())),
+        "response_sha256": hashlib.sha256(
+            str(response or "").encode("utf-8"),
+        ).hexdigest(),
+    }
+    job.state = RunState.PAUSED
+    job.error = (
+        "Планировщик не вернул совместимую карту истории после безопасного восстановления. "
+        f"Код диагностики: FRESH_SCHEMA:{reason}."
+    )
+    job.result = ""
+    job.actual_chars = 0
+    job.length_status = "FAILED"
 
 
 def scenario_length_status(request: ScenarioRequest, text: str) -> tuple[str, int]:
@@ -399,6 +445,10 @@ class ParallelRunner:
                 job.length_status = "PLAN_LENGTH_CHANGED"
                 return False
         else:
+            # A user-triggered retry starts a new bounded Planner attempt. Never
+            # present a previous failure fingerprint as if it described it.
+            job.story_planner_status = ""
+            job.story_planner_failure = {}
             planner_prompt = build_story_planner_prompt(job.request, part_targets)
             planner_budget = max(2048, min(8192, 1024 + len(part_targets) * 350))
             planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
@@ -449,15 +499,14 @@ class ParallelRunner:
                         plan = parse_story_plan_response(
                             fresh_planner_response, part_targets,
                         )
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as fresh_error:
                         # The bounded Planner recovery is exhausted before any
-                        # Writer prose exists. Keep this actionable; raw schema
-                        # exceptions must never become a user-visible ERROR.
-                        job.state = RunState.PAUSED
-                        job.error = "Планировщик сценария не вернул рабочий план"
-                        job.result = ""
-                        job.actual_chars = 0
-                        job.length_status = "FAILED"
+                        # Writer prose exists. Keep a durable, non-content
+                        # diagnostic instead of leaking a raw exception or
+                        # persisting provider text.
+                        _pause_for_planner_schema_failure(
+                            job, fresh_planner_response, fresh_error,
+                        )
                         return False
             job.story_plan = plan.to_dict()
             job.story_plan["length_contract"] = self._story_length_contract(
@@ -465,6 +514,7 @@ class ParallelRunner:
             )
             job.accepted_story_parts = []
             job.story_planner_status = "READY"
+            job.story_planner_failure = {}
             # Persist the complete plan before a prose part is accepted.
             self._notify(job)
 

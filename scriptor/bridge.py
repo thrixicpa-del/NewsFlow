@@ -2578,6 +2578,7 @@ def snapshot() -> dict:
             "storyPartCount": len(job.story_plan.get("parts", [])) if job and isinstance(job.story_plan, dict) else 0,
             "completedStoryParts": len(job.accepted_story_parts) if job else 0,
             "storyPlannerStatus": job.story_planner_status if job else "",
+            "storyPlannerFailure": job.story_planner_failure if job else {},
         })
     cover_rows = [
         {**item, "galleryPaths": cover_gallery_paths(item)}
