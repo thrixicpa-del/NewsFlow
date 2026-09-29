@@ -276,7 +276,11 @@ class ParallelRunner:
             overall_target - len(accepted_text) - remaining_separators,
         )
         quotient, remainder = divmod(remaining_prose, remaining_parts)
-        return max(1, quotient + (1 if remainder else 0))
+        balanced_target = max(1, quotient + (1 if remainder else 0))
+        # Length bounds are advisory for completed prose. If an earlier part
+        # runs long, never starve future planned content just to force the
+        # assembled story back under target; keep at least the planned budget.
+        return max(max(0, int(part.target_chars or 0)), balanced_target)
 
     @staticmethod
     def _assembled_story(plan: StoryPlan, accepted_parts: list[dict[str, Any]]) -> str:
@@ -484,137 +488,6 @@ class ParallelRunner:
                 return False
 
             accepted_text = writer_result.strip()
-            if (
-                len(plan.parts) > 1
-                and part_index < len(plan.parts) - 1
-                and job.request.allowed_max
-            ):
-                prefix_text = self._assembled_story(plan, job.accepted_story_parts)
-                remaining_after = len(plan.parts) - part_index - 1
-                # Reserve the deterministic separators and at least one prose
-                # character for each future planned part. This is only a
-                # feasibility ceiling, not a new target for normal output.
-                reserved_chars = (
-                    (2 if prefix_text else 0)
-                    + 2 * remaining_after
-                    + remaining_after
-                )
-                maximum_current_chars = (
-                    int(job.request.allowed_max)
-                    - len(prefix_text)
-                    - reserved_chars
-                )
-                if maximum_current_chars < 1:
-                    job.state = RunState.PAUSED
-                    job.error = (
-                        "Принятый префикс сценария уже не помещается в выбранный максимум длины; "
-                        "нужен явный перезапуск с новым Story Map"
-                    )
-                    job.result = prefix_text
-                    job.actual_chars = len(prefix_text)
-                    job.length_status = "LONG"
-                    return False
-                if len(accepted_text) > maximum_current_chars:
-                    length_retry_prompt = (
-                        "CURRENT SEGMENT LENGTH RECOVERY. Retry only this same unfinished segment. "
-                        f"Write no more than {maximum_current_chars} characters and aim for {active_target}. "
-                        "Preserve the assigned Story Map content and role; do not restart earlier parts, "
-                        "add labels, JSON or commentary.\n\n"
-                        f"TASK:\n{writer_prompt}"
-                    )
-                    length_retry = await self._generate_fresh_result(
-                        length_retry_prompt,
-                        job.request,
-                        min(active_target, maximum_current_chars),
-                    )
-                    if not self._writer_output_unusable(length_retry):
-                        accepted_text = length_retry.strip()
-                    if len(accepted_text) > maximum_current_chars:
-                        accepted_text = trim_text_to_sentence_boundary(
-                            accepted_text, maximum_current_chars,
-                        )
-
-            if len(plan.parts) == 1:
-                single_status, single_chars = scenario_length_status(job.request, accepted_text)
-                if single_status == "LONG":
-                    accepted_text = trim_text_to_sentence_boundary(
-                        accepted_text, job.request.allowed_max,
-                    )
-                    single_status, single_chars = scenario_length_status(
-                        job.request, accepted_text,
-                    )
-                if single_status == "SHORT":
-                    job.result = accepted_text
-                    job.actual_chars = single_chars
-                    job.length_status = "SHORT"
-                    return False
-            elif part_index == len(plan.parts) - 1:
-                # The final multipart segment is not immutable until the
-                # assembled story satisfies the global length contract.
-                # Otherwise a SHORT/LONG final would be accepted and every
-                # ordinary retry would skip all parts forever.
-                prefix_text = self._assembled_story(plan, job.accepted_story_parts)
-                separator_chars = 2 if prefix_text else 0
-
-                def final_candidate(
-                    text: str,
-                    *,
-                    _part=part,
-                    _active_target=active_target,
-                ) -> tuple[str, str, int]:
-                    record = {
-                        "part_id": _part.id,
-                        "text": text,
-                        "content_ids": list(_part.content_ids),
-                        "target_chars": _active_target,
-                    }
-                    assembled = self._assembled_story(
-                        plan, [*job.accepted_story_parts, record],
-                    )
-                    status, chars = scenario_length_status(job.request, assembled)
-                    return assembled, status, chars
-
-                candidate_result, final_status, final_chars = final_candidate(accepted_text)
-                if final_status == "SHORT":
-                    minimum_final_chars = max(
-                        1,
-                        int(job.request.allowed_min or 0)
-                        - len(prefix_text)
-                        - separator_chars,
-                    )
-                    length_retry_prompt = (
-                        "FINAL SEGMENT LENGTH RECOVERY. Retry only this same unfinished final segment. "
-                        f"The assembled scenario is too short. Write at least {minimum_final_chars} characters "
-                        f"for this segment and aim for {active_target} characters. Preserve the assigned Story Map "
-                        "content and final role; do not restart earlier parts, add labels, JSON or commentary.\n\n"
-                        f"TASK:\n{writer_prompt}"
-                    )
-                    length_retry = await self._generate_fresh_result(
-                        length_retry_prompt, job.request, max(active_target, minimum_final_chars),
-                    )
-                    if not self._writer_output_unusable(length_retry):
-                        accepted_text = length_retry.strip()
-                        candidate_result, final_status, final_chars = final_candidate(accepted_text)
-
-                if final_status == "LONG" and job.request.allowed_max:
-                    maximum_final_chars = max(
-                        1,
-                        int(job.request.allowed_max)
-                        - len(prefix_text)
-                        - separator_chars,
-                    )
-                    accepted_text = trim_text_to_sentence_boundary(
-                        accepted_text, maximum_final_chars,
-                    )
-                    candidate_result, final_status, final_chars = final_candidate(accepted_text)
-
-                if final_status in {"SHORT", "LONG"}:
-                    job.state = RunState.PAUSED
-                    job.error = "Финальная часть сценария не уложилась в выбранный диапазон длины"
-                    job.result = candidate_result
-                    job.actual_chars = final_chars
-                    job.length_status = final_status
-                    return False
 
             job.accepted_story_parts.append({
                 "part_id": part.id,
@@ -628,24 +501,12 @@ class ParallelRunner:
             # Every accepted part is durable before calling the next writer.
             self._notify(job)
 
+        # Length is advisory once valid prose has been produced. Keep the
+        # measured SHORT/LONG/READY diagnostic, but never spend another provider
+        # request, trim prose, or block completion solely because of length.
         job.length_status, job.actual_chars = scenario_length_status(job.request, job.result)
-        if len(plan.parts) == 1 and job.accepted_story_parts:
-            # Heal any persisted single-part prefix created by an older draft:
-            # accepted prose must match the final visible result after trimming.
-            if job.length_status == "LONG":
-                job.result = trim_text_to_sentence_boundary(
-                    job.result, job.request.allowed_max,
-                )
-                job.length_status, job.actual_chars = scenario_length_status(
-                    job.request, job.result,
-                )
-                job.accepted_story_parts[0]["text"] = job.result
-            if job.length_status == "SHORT":
-                # A short COMPLETE part is not accepted: retry must be able to
-                # regenerate P1 from the already persisted Story Map.
-                job.accepted_story_parts = []
         job.length_repair_attempts = 0
-        return job.length_status not in {"SHORT", "LONG"}
+        return True
 
     async def _run_one(self, job: Job) -> Job:
         async with self.semaphore:

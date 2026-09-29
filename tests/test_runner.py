@@ -188,7 +188,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].length_status, "READY")
         self.assertEqual(jobs[0].state, RunState.DONE)
 
-    async def test_early_overlong_part_is_recovered_before_it_can_make_global_max_impossible(self):
+    async def test_early_overlong_part_is_accepted_without_length_retry(self):
         class EarlyLongClient:
             def __init__(self):
                 self.fresh_calls = 0
@@ -203,14 +203,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     return "А" * 12000
                 return "Б" * target
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
-                if "CURRENT SEGMENT LENGTH RECOVERY" not in prompt:
-                    raise AssertionError("unexpected fresh retry")
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                target = int(__import__("re").search(
-                    r"aim for (\d+)", prompt,
-                ).group(1))
-                return "В" * target
+                raise AssertionError("length alone must not trigger another provider request")
 
         client = EarlyLongClient()
         jobs = await ParallelRunner(client, 1).run([
@@ -218,12 +213,13 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                             allowed_min=9000, allowed_max=11000),
         ])
 
-        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertLessEqual(jobs[0].actual_chars, 11000)
+        self.assertEqual(jobs[0].length_status, "LONG")
+        self.assertGreater(jobs[0].actual_chars, 11000)
         self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
 
-    async def test_short_final_multipart_part_retries_before_acceptance(self):
+    async def test_short_final_multipart_part_is_accepted_without_length_retry(self):
         class FinalLengthClient:
             def __init__(self):
                 self.fresh_calls = 0
@@ -238,14 +234,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     return "Б" * 1000
                 return "А" * target
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
-                if "FINAL SEGMENT LENGTH RECOVERY" not in prompt:
-                    raise AssertionError("only final length recovery should use fresh chat")
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                target = int(__import__("re").search(
-                    r"aim for (\d+) characters", prompt,
-                ).group(1))
-                return "В" * target
+                raise AssertionError("SHORT final must not trigger another provider request")
 
         client = FinalLengthClient()
         jobs = await ParallelRunner(client, 1).run([
@@ -253,17 +244,63 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                             allowed_min=10000, allowed_max=10000),
         ])
 
-        self.assertEqual(client.fresh_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(jobs[0].length_status, "SHORT")
+        self.assertLess(jobs[0].actual_chars, 10000)
         self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
 
-    async def test_unresolved_short_final_remains_unaccepted_so_normal_retry_can_repeat_only_final(self):
+    async def test_three_part_short_final_finishes_without_rewriting_prefix_or_extra_calls(self):
+        class ShortFinalClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_parts = []
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(3)
+                part = __import__("re").search(r"CURRENT PART: (P\d+)", prompt).group(1)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                self.writer_parts.append(part)
+                if part == "P1":
+                    return "А" * target
+                if part == "P2":
+                    return "Б" * target
+                return "В" * 500
+
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("length alone must never trigger a fresh request")
+
+        client = ShortFinalClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(
+                0, "Тема", "CONTRACT", target_chars=15000,
+                allowed_min=15000, allowed_max=15000,
+            ),
+        ])
+
+        job = jobs[0]
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.writer_parts, ["P1", "P2", "P3"])
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(job.state, RunState.DONE, job.error)
+        self.assertEqual(job.length_status, "SHORT")
+        self.assertEqual([row["part_id"] for row in job.accepted_story_parts], ["P1", "P2", "P3"])
+        self.assertEqual(job.accepted_story_parts[0]["text"], "А" * 4999)
+        self.assertEqual(job.accepted_story_parts[1]["text"], "Б" * 4999)
+        self.assertEqual(job.accepted_story_parts[2]["text"], "В" * 500)
+
+    async def test_short_final_is_durable_done_and_does_not_require_manual_retry(self):
         class StickyFinalClient:
             def __init__(self):
-                self.allow_final = False
                 self.planner_calls = 0
                 self.final_calls = 0
+                self.fresh_calls = 0
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
@@ -274,38 +311,32 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ).group(1))
                 if "CURRENT PART: P2" in prompt:
                     self.final_calls += 1
-                    return "Б" * (target if self.allow_final else 1000)
+                    return "Б" * 1000
                 return "А" * target
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
-                if "FINAL SEGMENT LENGTH RECOVERY" not in prompt:
-                    raise AssertionError("unexpected fresh retry")
-                return "В" * 1000
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("length alone must not request retry")
 
         client = StickyFinalClient()
-        runner = ParallelRunner(client, 1)
         request = ScenarioRequest(
             0, "Тема", "CONTRACT", target_chars=10000,
             allowed_min=10000, allowed_max=10000,
         )
-        first = (await runner.run([request]))[0]
+        result = (await ParallelRunner(client, 1).run([request]))[0]
 
-        self.assertEqual(first.state, RunState.PAUSED)
-        self.assertEqual(first.length_status, "SHORT")
-        self.assertEqual([row["part_id"] for row in first.accepted_story_parts], ["P1"])
+        self.assertEqual(result.state, RunState.DONE)
+        self.assertEqual(result.length_status, "SHORT")
+        self.assertEqual([row["part_id"] for row in result.accepted_story_parts], ["P1", "P2"])
         self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.final_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
 
-        client.allow_final = True
-        retried = await runner.retry(first)
-
-        self.assertEqual(retried.state, RunState.DONE, retried.error)
-        self.assertEqual(retried.actual_chars, 10000)
-        self.assertEqual([row["part_id"] for row in retried.accepted_story_parts], ["P1", "P2"])
-        self.assertEqual(client.planner_calls, 1)
-        self.assertGreaterEqual(client.final_calls, 2)
-
-    async def test_long_final_multipart_part_is_trimmed_before_acceptance(self):
+    async def test_long_final_multipart_part_is_accepted_without_trim_or_retry(self):
         class LongFinalClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(2)
@@ -316,14 +347,21 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     return "Б" * (target + 2000)
                 return "А" * target
 
-        jobs = await ParallelRunner(LongFinalClient(), 1).run([
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("LONG final must not trigger another provider request")
+
+        client = LongFinalClient()
+        jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
                             allowed_min=10000, allowed_max=10000),
         ])
 
+        self.assertEqual(client.fresh_calls, 0)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual(jobs[0].actual_chars, 10000)
-        self.assertEqual(len(jobs[0].accepted_story_parts[1]["text"]), 4999)
+        self.assertEqual(jobs[0].length_status, "LONG")
+        self.assertGreater(jobs[0].actual_chars, 10000)
+        self.assertEqual(len(jobs[0].accepted_story_parts[1]["text"]), 6999)
 
     async def test_fifty_thousand_story_uses_ten_owned_parts(self):
         class TenPartClient:
@@ -1280,10 +1318,11 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(len(jobs[0].accepted_story_parts), 1)
 
-    async def test_short_single_complete_writer_pauses_without_appending_a_generic_continuation(self):
+    async def test_short_single_complete_writer_is_accepted_without_extra_request(self):
         class ShortClient:
             def __init__(self):
                 self.calls = 0
+                self.fresh_calls = 0
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 self.calls += 1
@@ -1292,66 +1331,77 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 return "мало"
 
             async def generate_fresh(self, *_args, **_kwargs):
-                raise AssertionError("length repair must not request a generic continuation")
+                self.fresh_calls += 1
+                raise AssertionError("SHORT result must not trigger another request")
 
         client = ShortClient()
         jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "S", "P", target_chars=120, allowed_min=100, allowed_max=140),
         ])
         self.assertEqual(client.calls, 2)
-        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(jobs[0].result, "мало")
         self.assertEqual(jobs[0].length_status, "SHORT")
-        self.assertEqual(jobs[0].accepted_story_parts, [])
+        self.assertEqual(len(jobs[0].accepted_story_parts), 1)
 
-    async def test_short_single_complete_writer_retry_regenerates_p1_without_replanning(self):
-        class RetryShortClient:
+    async def test_long_single_complete_writer_is_accepted_without_trim_or_retry(self):
+        class LongClient:
             def __init__(self):
                 self.planner_calls = 0
                 self.writer_calls = 0
+                self.fresh_calls = 0
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
                     self.planner_calls += 1
                     return ParallelRunnerTests._story_plan_json(1)
                 self.writer_calls += 1
-                return "мало" if self.writer_calls == 1 else "а" * 120
+                return "а" * 200
 
-        client = RetryShortClient()
-        runner = ParallelRunner(client, 1)
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("LONG result must not trigger another request")
+
+        client = LongClient()
         request = ScenarioRequest(
             0, "S", "P", target_chars=120, allowed_min=100, allowed_max=140,
         )
-        jobs = await runner.run([request])
-
-        self.assertEqual(jobs[0].state, RunState.PAUSED)
-        self.assertEqual(jobs[0].accepted_story_parts, [])
-        retried = await runner.retry(jobs[0])
+        result = (await ParallelRunner(client, 1).run([request]))[0]
 
         self.assertEqual(client.planner_calls, 1)
-        self.assertEqual(client.writer_calls, 2)
-        self.assertEqual(retried.state, RunState.DONE)
-        self.assertEqual(retried.length_status, "READY")
-        self.assertEqual(len(retried.accepted_story_parts), 1)
+        self.assertEqual(client.writer_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(result.state, RunState.DONE)
+        self.assertEqual(result.length_status, "LONG")
+        self.assertEqual(result.actual_chars, 200)
+        self.assertEqual(len(result.accepted_story_parts), 1)
 
-    async def test_one_sided_maximum_is_trimmed_without_a_rewrite(self):
+    async def test_one_sided_maximum_is_advisory_and_keeps_long_result(self):
         class MaximumClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
             async def generate(self, prompt, on_progress=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
                 return "а" * 12000
 
             async def generate_fresh(self, *_args, **_kwargs):
-                raise AssertionError("long result must be trimmed, not rewritten")
+                self.fresh_calls += 1
+                raise AssertionError("length alone must not trigger another provider request")
 
-        jobs = await ParallelRunner(MaximumClient(), 1).run([
+        client = MaximumClient()
+        jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "S", "P", allowed_max=10000),
         ])
+        self.assertEqual(client.fresh_calls, 0)
         self.assertEqual(jobs[0].state, RunState.DONE)
-        self.assertLessEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(jobs[0].length_status, "LONG")
+        self.assertEqual(jobs[0].actual_chars, 12000)
         self.assertEqual(len(jobs[0].accepted_story_parts), 1)
         self.assertEqual(jobs[0].accepted_story_parts[0]["text"], jobs[0].result)
-        self.assertLessEqual(len(jobs[0].accepted_story_parts[0]["text"]), 10000)
+        self.assertEqual(len(jobs[0].accepted_story_parts[0]["text"]), 12000)
 
     async def test_in_range_script_finishes_after_one_provider_response(self):
         class LengthClient:
