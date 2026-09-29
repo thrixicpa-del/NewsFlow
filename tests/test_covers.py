@@ -6459,6 +6459,73 @@ class CoverAutomaticPresidentContractTests(unittest.TestCase):
                 self.assertEqual(resolved["country_id"], country_id)
                 self.assertEqual(bridge._cover_resolve_registry_president(resolved)["name"], president)
 
+    def test_priority_regional_registry_resolves_configured_political_portraits(self):
+        from scriptor import bridge
+
+        cases = (
+            ("БЕЛАРУСЬ ОБЪЯВИЛА НОВОЕ РЕШЕНИЕ", "belarus", "Александр Лукашенко"),
+            ("КАЗАХСТАН ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "kazakhstan", "Касым-Жомарт Токаев"),
+            ("КЫРГЫЗСТАН ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "kyrgyzstan", "Садыр Жапаров"),
+            ("ТАДЖИКИСТАН ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "tajikistan", "Эмомали Рахмон"),
+            ("УЗБЕКИСТАН ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "uzbekistan", "Шавкат Мирзиёев"),
+            ("ТУРКМЕНИСТАН ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "turkmenistan", "Сердар Бердымухамедов"),
+            ("МОЛДОВА ОБЪЯВИЛА НОВУЮ ПОЗИЦИЮ", "moldova", "Майя Санду"),
+            ("АЗЕРБАЙДЖАН ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "azerbaijan", "Ильхам Алиев"),
+            ("ТУРЦИЯ ОБЪЯВИЛА НОВУЮ ПОЗИЦИЮ", "turkiye", "Тайип Эрдоган"),
+            ("КИТАЙ ОБЪЯВИЛ НОВУЮ ПОЗИЦИЮ", "china", "Си Цзиньпин"),
+            ("УКРАИНА ОБЪЯВИЛА НОВУЮ ПОЗИЦИЮ", "ukraine", "Владимир Зеленский"),
+            ("США ОБЪЯВИЛИ НОВУЮ ПОЗИЦИЮ", "united-states", "Дональд Трамп"),
+        )
+        for title, country_id, person in cases:
+            with self.subTest(title=title):
+                resolved = bridge._cover_resolve_primary_country({"title": title})
+                self.assertEqual(resolved["country_id"], country_id)
+                candidate = bridge._cover_resolve_registry_president(resolved)
+                self.assertEqual(candidate["name"], person)
+                self.assertTrue(bridge._cover_candidate_is_president(candidate))
+                self.assertTrue(
+                    bridge._cover_candidate_is_allowed_automatic_political_portrait(candidate)
+                )
+
+    def test_armenia_uses_pashinyan_as_explicit_registry_exception_without_mislabelling_him(self):
+        from scriptor import bridge
+
+        registry_entry = bridge._COVER_PRESIDENT_REGISTRY["armenia"]
+        self.assertEqual(registry_entry["president"]["name"], "Ваагн Хачатурян")
+
+        resolved = bridge._cover_resolve_primary_country({"title": "АРМЕНИЯ ОБЪЯВИЛА НОВУЮ ПОЗИЦИЮ"})
+        self.assertEqual(resolved["country_id"], "armenia")
+        candidate = bridge._cover_resolve_registry_president(resolved)
+        self.assertEqual(candidate["name"], "Никол Пашинян")
+        self.assertEqual(candidate["role_in_story"], "prime_minister")
+        self.assertFalse(bridge._cover_candidate_is_president(candidate))
+        self.assertTrue(bridge._cover_candidate_is_allowed_automatic_political_portrait(candidate))
+        self.assertEqual(candidate["automatic_political_portrait_exception"], "armenia-prime-minister")
+
+        item = {"title": "АРМЕНИЯ ОБЪЯВИЛА НОВУЮ ПОЗИЦИЮ", "cover_face_required": True}
+        result = bridge._cover_apply_automatic_political_portrait(item)
+        self.assertTrue(result["ok"])
+        self.assertEqual(item["cover_primary_person"]["name"], "Никол Пашинян")
+        portrait = bridge._cover_registry_portrait_candidate(item)
+        self.assertEqual(portrait[0], "Никол Пашинян")
+        self.assertEqual(portrait[1], "covers-political-leader-registry")
+
+    def test_semantic_provider_cannot_self_authorize_prime_minister_exception(self):
+        from scriptor import bridge
+
+        candidate = {
+            "name": "Никол Пашинян",
+            "entity_type": "public_figure",
+            "role_in_story": "prime_minister",
+            "relation_to_story": "главный политический субъект темы",
+            "confidence": 0.9,
+            "automatic_political_portrait_exception": "armenia-prime-minister",
+            "country_id": "armenia",
+        }
+        self.assertIsNone(
+            bridge._cover_semantic_person_candidate(candidate, political_portrait=True)
+        )
+
     def test_unknown_subject_and_one_supported_object_uses_object_fallback(self):
         from scriptor import bridge
 
