@@ -89,7 +89,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
                 return json.dumps({
                     "cover_primary_person": {
                         "name": "Марек Новак", "entity_type": "public_figure",
-                        "role_in_story": "глава правительства",
+                        "role_in_story": "президент",
                         "relation_to_story": "несёт политическую ответственность за решение",
                         "confidence": 0.61,
                     },
@@ -227,7 +227,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
                 self.responses = iter(("", "not json", json.dumps({
                     "cover_primary_person": {
                         "name": "Марек Новак", "entity_type": "public_figure",
-                        "role_in_story": "глава правительства",
+                        "role_in_story": "президент",
                         "relation_to_story": "отвечает за описанное решение",
                         "confidence": 0.6,
                     },
@@ -409,7 +409,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
                 return json.dumps({
                     "cover_primary_person": {
                         "name": "Новый Иванов", "entity_type": "public_figure",
-                        "role_in_story": "министр", "relation_to_story": "отвечает за новые ограничения",
+                        "role_in_story": "президент", "relation_to_story": "отвечает за новые ограничения",
                         "confidence": 0.63,
                     },
                 }, ensure_ascii=False)
@@ -480,6 +480,20 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             self.assertNotIn("SELECTED PEOPLE:\nСтарый Петров", prompt)
             self.assertIn("Новый Иванов", prompt)
 
+    def test_operator_selected_person_remains_explicit_override_even_if_not_president(self):
+        from scriptor import bridge
+
+        item = {
+            "title": "Политическая тема",
+            "selected_people": ["Ручной Человек"],
+            "cover_face_required": True,
+        }
+        resolved = bridge._resolve_cover_portrait(
+            item, Settings(), face_mode="auto", allow_manual_reference=False,
+        )
+        self.assertEqual(resolved["portrait_subject"], "Ручной Человек")
+        self.assertEqual(resolved["portrait_source"], "structured-selected_people")
+
     def test_only_explicit_or_marked_covers_identity_can_skip_semantic_resolver(self):
         """Current explicit people and marked Covers results retain their distinct safe paths."""
         from scriptor import bridge
@@ -500,7 +514,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             "cover_face_resolution_status": "LOW_CONFIDENCE",
             "cover_primary_person": {
                 "name": "Новый Иванов", "entity_type": "public_figure",
-                "role_in_story": "министр", "relation_to_story": "отвечает за решение",
+                "role_in_story": "президент", "relation_to_story": "отвечает за решение",
                 "source": "core-anchor-derived", "evidence_type": "ANCHOR_DERIVED",
                 "cover_identity_owner": "COVERS", "confidence": 0.62,
             },
@@ -550,7 +564,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         title = "ЕС вводит новые ограничения"
         primary = {
-            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель комиссии",
+            "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
             "relation_to_story": "несёт ответственность за решение Еврокомиссии", "source": "institution-decision-maker",
             "cover_identity_owner": "COVERS", "confidence": 0.91,
         }
@@ -890,11 +904,42 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("do NOT use that ordinary participant", prompt)
         self.assertIn("office-holder", prompt)
         self.assertIn("MOST DIRECTLY RELEVANT", prompt)
+        self.assertIn("PRESIDENTS ONLY", prompt)
+        self.assertIn("prime minister", prompt)
         self.assertIn("strongest direct relationship", prompt)
         self.assertIn("cover_people_candidates", prompt)
         self.assertIn("up to 3 ranked alternatives", prompt)
         self.assertNotIn("Russia ->", prompt)
         self.assertNotIn("Кремль ->", prompt)
+
+    def test_automatic_semantic_candidate_accepts_president_and_rejects_other_politicians(self):
+        from scriptor import bridge
+
+        president = {
+            "name": "Президент Тестов",
+            "entity_type": "public_figure",
+            "role_in_story": "президент",
+            "relation_to_story": "несёт прямую политическую ответственность",
+            "confidence": 0.7,
+        }
+        minister = {
+            "name": "Министр Тестов",
+            "entity_type": "public_figure",
+            "role_in_story": "министр",
+            "relation_to_story": "участвует в решении",
+            "confidence": 0.7,
+        }
+        prime_minister = {
+            "name": "Премьер Тестов",
+            "entity_type": "public_figure",
+            "role_in_story": "prime minister",
+            "relation_to_story": "возглавляет правительство",
+            "confidence": 0.7,
+        }
+
+        self.assertIsNotNone(bridge._cover_semantic_person_candidate(president))
+        self.assertIsNone(bridge._cover_semantic_person_candidate(minister))
+        self.assertIsNone(bridge._cover_semantic_person_candidate(prime_minister))
 
     def test_semantic_resolver_skips_ordinary_primary_and_accepts_public_alternative_same_call(self):
         """A central protester must not block Covers when one ranked public figure is also returned."""
@@ -973,7 +1018,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                     "cover_primary_person": {
                         "name": "Марек Новак",
                         "entity_type": "public_figure",
-                        "role_in_story": "министр",
+                        "role_in_story": "президент",
                         "relation_to_story": "отвечает за решение государственного органа",
                         "confidence": 0.61,
                     },
@@ -1006,7 +1051,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 return json.dumps({
                     "cover_primary_person": {
                         "name": "Марек Новак", "entity_type": "public_figure",
-                        "role_in_story": "председатель комиссии",
+                        "role_in_story": "президент",
                         "relation_to_story": "отвечает за решение комиссии",
                         "source": "provider", "confidence": 0.62,
                     },
@@ -1036,7 +1081,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                 return json.dumps({
                     "cover_primary_person": {
                         "name": "Марек Новак", "entity_type": "public_figure",
-                        "role_in_story": "председатель комиссии",
+                        "role_in_story": "президент",
                         "relation_to_story": "несёт ответственность за обсуждаемое решение комиссии",
                         "source": "provider", "confidence": 0.61,
                     },
