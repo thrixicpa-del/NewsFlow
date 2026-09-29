@@ -26,6 +26,30 @@ from scriptor.session import (
 
 
 class SessionTests(unittest.TestCase):
+    def test_planner_failure_diagnostics_round_trip_without_provider_text(self):
+        """Session keeps only bounded Planner diagnostics, never provider prose."""
+        request = ScenarioRequest(0, "Тема", "Промпт")
+        job = Job(
+            request,
+            RunState.PAUSED,
+            error="Планировщик вернул недействительную Story Map. Код: FRESH_SCHEMA:MISSING_THESIS.",
+            story_planner_status="SCHEMA_RECOVERY_EXHAUSTED",
+            story_planner_failure={
+                "phase": "FRESH_SCHEMA",
+                "reason": "MISSING_THESIS",
+                "response_chars": "54",
+                "response_sha256": "a" * 64,
+            },
+        )
+        payload = _session_data(["Тема"], [job])
+        self.assertNotIn("provider response", json.dumps(payload, ensure_ascii=False))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _titles, restored = _read_session(path)
+
+        self.assertEqual(restored[0].story_planner_failure, job.story_planner_failure)
+
     def test_legacy_cover_marker_is_not_restored_as_scenario_status(self):
         """Covers-only r27 status must not leak back into the Scenario table."""
         request = ScenarioRequest(0, "Тема", "Промпт")
