@@ -805,37 +805,111 @@ _COVER_IDENTITY_OWNER = "COVERS"
 # current story's acting side from the ProductionItem.
 _COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
     "russia": {
-        "country": "Russia", "aliases": ("россия", "росси", "российск", "кремль", "кремл", "москва", "russia", "russian"),
-        "president": {"name": "Владимир Путин", "aliases": ("путин", "putin")}, "updated": "2026-09",
+        "country": "Russia",
+        "aliases": ("россия", "росси", "российск", "кремль", "кремл", "москва", "russia", "russian", "moscow"),
+        "president": {"name": "Владимир Путин", "aliases": ("путин", "putin")},
+        "updated": "2026-09",
     },
     "ukraine": {
-        "country": "Ukraine", "aliases": ("украина", "украин", "киев", "kyiv", "ukraine", "ukrainian"),
-        "president": {"name": "Владимир Зеленский", "aliases": ("зеленский", "зеленск", "zelensky")}, "updated": "2026-09",
+        "country": "Ukraine",
+        "aliases": ("украина", "украин", "киев", "kyiv", "ukraine", "ukrainian"),
+        "president": {"name": "Владимир Зеленский", "aliases": ("зеленский", "зеленск", "zelensky", "zelenskyy")},
+        "updated": "2026-09",
     },
     "united-states": {
-        "country": "United States", "aliases": ("сша", "американ", "белый дом", "вашингтон", "united states", "u.s.", "usa"),
-        "president": {"name": "Дональд Трамп", "aliases": ("трамп", "trump")}, "updated": "2026-09",
+        "country": "United States",
+        "aliases": ("сша", "американ", "белый дом", "вашингтон", "united states", "u.s.", "usa", "washington"),
+        "president": {"name": "Дональд Трамп", "aliases": ("трамп", "trump")},
+        "updated": "2026-09",
+    },
+    "belarus": {
+        "country": "Belarus",
+        "aliases": ("беларусь", "белорус", "белорусск", "минск", "belarus", "belarusian", "minsk"),
+        "president": {"name": "Александр Лукашенко", "aliases": ("лукашенко", "lukashenko")},
+        "updated": "2026-09",
+    },
+    "kazakhstan": {
+        "country": "Kazakhstan",
+        "aliases": ("казахстан", "казахстанск", "астана", "kazakhstan", "kazakh", "astana"),
+        "president": {"name": "Касым-Жомарт Токаев", "aliases": ("токаев", "tokayev", "toqaev")},
+        "updated": "2026-09",
+    },
+    "kyrgyzstan": {
+        "country": "Kyrgyzstan",
+        "aliases": ("кыргызстан", "киргизия", "кыргыз", "киргиз", "бишкек", "kyrgyzstan", "kyrgyz", "bishkek"),
+        "president": {"name": "Садыр Жапаров", "aliases": ("жапаров", "japarov", "zhaparov")},
+        "updated": "2026-09",
+    },
+    "tajikistan": {
+        "country": "Tajikistan",
+        "aliases": ("таджикистан", "таджик", "душанбе", "tajikistan", "tajik", "dushanbe"),
+        "president": {"name": "Эмомали Рахмон", "aliases": ("рахмон", "rahmon", "rakhmon")},
+        "updated": "2026-09",
+    },
+    "uzbekistan": {
+        "country": "Uzbekistan",
+        "aliases": ("узбекистан", "узбек", "ташкент", "uzbekistan", "uzbek", "tashkent"),
+        "president": {"name": "Шавкат Мирзиёев", "aliases": ("мирзиёев", "мирзиеев", "mirziyoyev")},
+        "updated": "2026-09",
+    },
+    "turkmenistan": {
+        "country": "Turkmenistan",
+        "aliases": ("туркменистан", "туркмен", "ашхабад", "turkmenistan", "turkmen", "ashgabat"),
+        "president": {"name": "Сердар Бердымухамедов", "aliases": ("бердымухамедов", "berdimuhamedov", "berdymukhamedov")},
+        "updated": "2026-09",
+    },
+    "moldova": {
+        "country": "Moldova",
+        "aliases": ("молдова", "молдав", "кишинев", "кишинёв", "moldova", "moldovan", "chisinau", "chișinău"),
+        "president": {"name": "Майя Санду", "aliases": ("санду", "sandu")},
+        "updated": "2026-09",
     },
     "azerbaijan": {
-        "country": "Azerbaijan", "aliases": ("азербайджан", "азербайджанск", "azerbaijan"),
-        "president": {"name": "Ильхам Алиев", "aliases": ("алиев", "aliyev")}, "updated": "2026-09",
+        "country": "Azerbaijan",
+        "aliases": ("азербайджан", "азербайджанск", "баку", "azerbaijan", "baku"),
+        "president": {"name": "Ильхам Алиев", "aliases": ("алиев", "aliyev")},
+        "updated": "2026-09",
     },
     "armenia": {
-        "country": "Armenia", "aliases": ("армения", "армян", "armenia"),
-        "president": {"name": "Ваагн Хачатурян", "aliases": ("хачатурян", "khachaturyan")}, "updated": "2026-09",
+        "country": "Armenia",
+        "aliases": ("армения", "армян", "ереван", "armenia", "armenian", "yerevan"),
+        "president": {"name": "Ваагн Хачатурян", "aliases": ("хачатурян", "khachaturyan")},
+        # Product-specific explicit exception requested by the operator:
+        # Armenia covers use the head of government Nikol Pashinyan, while
+        # preserving the factual presidential record above.
+        "automatic_portrait": {
+            "name": "Никол Пашинян",
+            "aliases": ("пашинян", "pashinyan"),
+            "role": "prime_minister",
+            "exception": "armenia-prime-minister",
+        },
+        "updated": "2026-09",
     },
     "turkiye": {
-        "country": "Türkiye", "aliases": ("турция", "турецк", "türkiye", "turkey"),
-        "president": {"name": "Реджеп Тайип Эрдоган", "aliases": ("эрдоган", "erdogan")}, "updated": "2026-09",
+        "country": "Türkiye",
+        "aliases": ("турция", "турецк", "анкара", "türkiye", "turkey", "turkish", "ankara"),
+        "president": {"name": "Реджеп Тайип Эрдоган", "aliases": ("эрдоган", "erdogan")},
+        "updated": "2026-09",
+    },
+    "china": {
+        "country": "China",
+        "aliases": ("китай", "китайск", "пекин", "кнр", "china", "chinese", "beijing", "prc"),
+        "president": {"name": "Си Цзиньпин", "aliases": ("си цзиньпин", "цзиньпин", "xi jinping")},
+        "updated": "2026-09",
     },
 }
 def _cover_registry_aliases(country_id: str, entry: dict[str, object], *, include_president: bool = True) -> tuple[str, ...]:
     aliases = [country_id, str(entry.get("country", "") or "")]
     aliases.extend(str(value or "") for value in entry.get("aliases", ()) if value)
-    president = entry.get("president")
-    if include_president and isinstance(president, dict):
-        aliases.extend(str(value or "") for value in president.get("aliases", ()) if value)
-        aliases.append(str(president.get("name", "") or ""))
+    if include_president:
+        # Historical parameter name retained for compatibility. It includes
+        # the factual president plus an explicitly configured portrait
+        # exception, if a country has one.
+        for person_key in ("president", "automatic_portrait"):
+            person = entry.get(person_key)
+            if isinstance(person, dict):
+                aliases.extend(str(value or "") for value in person.get("aliases", ()) if value)
+                aliases.append(str(person.get("name", "") or ""))
     return tuple(" ".join(alias.split()).casefold() for alias in aliases if alias)
 
 
@@ -930,28 +1004,47 @@ def _cover_resolve_primary_country(
 def _cover_resolve_registry_president(
     country: dict[str, str] | None, *, registry: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object] | None:
-    """Return the only automatic political identity after country resolution."""
+    """Return the configured automatic political portrait after country resolution.
+
+    Normal entries resolve to the factual president. A country may define one
+    explicit product-level ``automatic_portrait`` exception; Armenia currently
+    uses this to select Prime Minister Nikol Pashinyan without mislabelling him
+    as president.
+    """
     active_registry = registry or _COVER_PRESIDENT_REGISTRY
     country_id = str((country or {}).get("country_id", "") or "")
     entry = active_registry.get(country_id)
-    president = entry.get("president") if isinstance(entry, dict) else None
-    if not isinstance(president, dict):
+    if not isinstance(entry, dict):
         return None
-    name = _cover_person_name(president.get("name"))
+    configured = entry.get("automatic_portrait")
+    president = entry.get("president")
+    person = configured if isinstance(configured, dict) else president
+    if not isinstance(person, dict):
+        return None
+    name = _cover_person_name(person.get("name"))
     if not name:
         return None
-    return {
+    role = str(person.get("role", "president") or "president").strip().casefold()
+    exception = str(person.get("exception", "") or "").strip()
+    is_president = role == "president"
+    candidate: dict[str, object] = {
         "name": name,
         "entity_type": "public_figure",
-        "role_in_story": "president",
-        "relation_to_story": f"president of {country.get('country', country_id)}; resolved from the current story's primary political side",
-        "source": "core-president-registry",
+        "role_in_story": role,
+        "relation_to_story": (
+            f"{'president' if is_president else role.replace('_', ' ')} of "
+            f"{country.get('country', country_id)}; resolved from the current story's primary political side"
+        ),
+        "source": "core-president-registry" if is_president else "core-political-leader-registry",
         "confidence": 1.0,
-        "evidence_type": "COUNTRY_PRESIDENT_REGISTRY",
-        "evidence_summary": str(country.get("reason", "") or "country-president registry"),
+        "evidence_type": "COUNTRY_PRESIDENT_REGISTRY" if is_president else "COUNTRY_POLITICAL_LEADER_REGISTRY",
+        "evidence_summary": str(country.get("reason", "") or "country political-leader registry"),
         "cover_identity_owner": _COVER_IDENTITY_OWNER,
         "country_id": country_id,
     }
+    if exception:
+        candidate["automatic_political_portrait_exception"] = exception
+    return candidate
 
 
 def _cover_apply_automatic_political_portrait(
@@ -998,20 +1091,26 @@ def _cover_apply_automatic_political_portrait(
 
 
 def _cover_registry_portrait_candidate(item: dict) -> tuple[str, str, str, float]:
-    """Reuse only the canonical president just written by this Covers flow."""
+    """Reuse only the canonical trusted registry portrait written by Covers."""
     candidate = item.get("cover_primary_person")
     if not isinstance(candidate, dict):
         return "", "", "", 0.0
     if str(candidate.get("cover_identity_owner", "") or "").strip().upper() != _COVER_IDENTITY_OWNER:
         return "", "", "", 0.0
-    if str(candidate.get("source", "") or "").strip().casefold() != "core-president-registry":
+    source = str(candidate.get("source", "") or "").strip().casefold()
+    if source not in {"core-president-registry", "core-political-leader-registry"}:
         return "", "", "", 0.0
-    if not _cover_candidate_is_president(candidate):
+    if not _cover_candidate_is_allowed_automatic_political_portrait(candidate):
         return "", "", "", 0.0
     name = _cover_person_name(candidate)
     if not name:
         return "", "", "", 0.0
-    return name, "covers-president-registry", str(candidate.get("relation_to_story", "") or ""), 1.0
+    portrait_source = (
+        "covers-president-registry"
+        if _cover_candidate_is_president(candidate)
+        else "covers-political-leader-registry"
+    )
+    return name, portrait_source, str(candidate.get("relation_to_story", "") or ""), 1.0
 
 
 def _cover_entity_is_explicit_person(value: object) -> bool:
@@ -1039,6 +1138,23 @@ def _cover_candidate_is_president(value: object) -> bool:
         "role_in_story", "role", "position", "title",
     )).casefold()
     return bool(re.search(r"(?<!\w)(?:president|президент)(?!\w)", role))
+
+
+def _cover_candidate_is_allowed_automatic_political_portrait(value: object) -> bool:
+    """Allow presidents plus only explicit trusted registry exceptions."""
+    if _cover_candidate_is_president(value):
+        return True
+    if not isinstance(value, dict):
+        return False
+    role = " ".join(str(value.get(key, "") or "") for key in (
+        "role_in_story", "role", "position", "title",
+    )).casefold()
+    return (
+        str(value.get("country_id", "") or "").strip().casefold() == "armenia"
+        and str(value.get("automatic_political_portrait_exception", "") or "").strip()
+        == "armenia-prime-minister"
+        and bool(re.search(r"(?<!\w)(?:prime[_ -]?minister|премьер(?:-министр)?)(?!\w)", role))
+    )
 
 
 def _cover_candidate_is_public_figure(value: object) -> bool:
@@ -1156,7 +1272,7 @@ def _cover_revalidated_persisted_candidate(item: dict, settings: Settings) -> tu
     political_portrait = _cover_requires_political_portrait(item)
     if not _cover_candidate_is_public_figure(candidate):
         return "", "", "", 0.0
-    if political_portrait and not _cover_candidate_is_president(candidate):
+    if political_portrait and not _cover_candidate_is_allowed_automatic_political_portrait(candidate):
         return "", "", "", 0.0
     # ``core-*`` records only say that Core derived evidence; r26/r27
     # Scenario Planner records were persisted with the same spelling.  Owner
@@ -1176,7 +1292,7 @@ def _cover_revalidated_persisted_candidate(item: dict, settings: Settings) -> tu
     if (
         derived is None
         or not _cover_candidate_is_public_figure(derived)
-        or (political_portrait and not _cover_candidate_is_president(derived))
+        or (political_portrait and not _cover_candidate_is_allowed_automatic_political_portrait(derived))
     ):
         return "", "", "", 0.0
     item["cover_primary_person"] = derived
@@ -10152,12 +10268,12 @@ def _cover_repeat_political_contract_error(item: dict, face_mode: str) -> str:
     candidate = item.get("cover_primary_person")
     if (
         subject
-        and _cover_candidate_is_president(candidate)
+        and _cover_candidate_is_allowed_automatic_political_portrait(candidate)
         and subject.casefold() == _cover_person_name(candidate).casefold()
     ):
         return ""
     return (
-        "Сохранённый автоматический портрет для политической темы не подтверждён как президент. "
+        "Сохранённый автоматический портрет для политической темы не соответствует текущему правилу выбора лидера. "
         "«Повторить текущие» не изменяет неизменяемый контракт; используйте «Создать новые промпты»."
     )
 
