@@ -1377,24 +1377,31 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.actual_chars, 200)
         self.assertEqual(len(result.accepted_story_parts), 1)
 
-    async def test_one_sided_maximum_is_trimmed_without_a_rewrite(self):
+    async def test_one_sided_maximum_is_advisory_and_keeps_long_result(self):
         class MaximumClient:
+            def __init__(self):
+                self.fresh_calls = 0
+
             async def generate(self, prompt, on_progress=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
                 return "а" * 12000
 
             async def generate_fresh(self, *_args, **_kwargs):
-                raise AssertionError("long result must be trimmed, not rewritten")
+                self.fresh_calls += 1
+                raise AssertionError("length alone must not trigger another provider request")
 
-        jobs = await ParallelRunner(MaximumClient(), 1).run([
+        client = MaximumClient()
+        jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "S", "P", allowed_max=10000),
         ])
+        self.assertEqual(client.fresh_calls, 0)
         self.assertEqual(jobs[0].state, RunState.DONE)
-        self.assertLessEqual(jobs[0].actual_chars, 10000)
+        self.assertEqual(jobs[0].length_status, "LONG")
+        self.assertEqual(jobs[0].actual_chars, 12000)
         self.assertEqual(len(jobs[0].accepted_story_parts), 1)
         self.assertEqual(jobs[0].accepted_story_parts[0]["text"], jobs[0].result)
-        self.assertLessEqual(len(jobs[0].accepted_story_parts[0]["text"]), 10000)
+        self.assertEqual(len(jobs[0].accepted_story_parts[0]["text"]), 12000)
 
     async def test_in_range_script_finishes_after_one_provider_response(self):
         class LengthClient:
