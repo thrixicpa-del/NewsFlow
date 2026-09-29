@@ -117,6 +117,8 @@ def _planner_schema_reason(error: BaseException) -> str:
         ("requires content_atoms", "MISSING_CONTENT_ATOMS"),
         ("requires exactly", "PART_TOPOLOGY"),
         ("owner_part_id", "CONTENT_OWNERSHIP"),
+        ("content atom owner", "CONTENT_OWNERSHIP"),
+        ("content atom ownership", "CONTENT_OWNERSHIP"),
         ("must return strict json", "NON_JSON"),
         ("response must be an object", "NON_OBJECT_JSON"),
     )

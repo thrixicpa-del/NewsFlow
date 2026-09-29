@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import unittest
+from hashlib import sha256
 
 from scriptor.core import ScenarioRequest
 from scriptor.runner import (
@@ -667,6 +668,63 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].story_planner_failure["reason"], "MISSING_THESIS")
         self.assertEqual(jobs[0].story_planner_failure["response_chars"], "54")
         self.assertRegex(jobs[0].story_planner_failure["response_sha256"], r"^[0-9a-f]{64}$")
+
+    async def test_real_parser_ownership_failure_has_content_ownership_diagnostic(self):
+        """The runner maps the actual Story Map ownership validator, not a synthetic error."""
+        invalid_plan = json.loads(self._story_plan_json(2))
+        invalid_plan["content_atoms"][0]["owner_part_id"] = "P3"
+
+        class OwnershipFailureClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    return json.dumps({"parts": []})
+                return json.dumps(invalid_plan, ensure_ascii=False)
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                return json.dumps(invalid_plan, ensure_ascii=False)
+
+        jobs = await ParallelRunner(OwnershipFailureClient(), 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].story_planner_failure["reason"], "CONTENT_OWNERSHIP")
+        self.assertIn("FRESH_SCHEMA:CONTENT_OWNERSHIP", jobs[0].error)
+        self.assertEqual(jobs[0].accepted_story_parts, [])
+
+    async def test_exhausted_planner_never_persists_raw_fresh_provider_payload(self):
+        """Actual Runner diagnostics retain only a fingerprint of invalid provider prose."""
+        from scriptor.session import _session_data
+
+        marker = "UNIQUE_PROVIDER_PAYLOAD_MARKER_290_sk_test_never_persist"
+        fresh_response = f"not valid Story Map {marker}"
+
+        class PrivateInvalidPlannerClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    return json.dumps({"parts": []})
+                return json.dumps({"macro_blocks": [], "content_atoms": [], "parts": []})
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                return fresh_response
+
+        jobs = await ParallelRunner(PrivateInvalidPlannerClient(), 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+        persisted = _session_data(["Тема"], jobs)
+        serialized = json.dumps(persisted, ensure_ascii=False)
+        diagnostics = persisted["jobs"][0]["story_planner_failure"]
+
+        self.assertEqual(jobs[0].story_planner_status, "SCHEMA_RECOVERY_EXHAUSTED")
+        self.assertNotIn(marker, serialized)
+        self.assertNotIn("sk_test_never_persist", serialized)
+        self.assertEqual(set(diagnostics), {
+            "phase", "reason", "response_chars", "response_sha256",
+        })
+        self.assertEqual(diagnostics["response_chars"], str(len(fresh_response)))
+        self.assertEqual(diagnostics["response_sha256"], sha256(fresh_response.encode("utf-8")).hexdigest())
 
     async def test_missing_thesis_uses_one_bounded_fresh_planner_recovery(self):
         """The live failure class gets a usable Story Map before Writer starts."""
