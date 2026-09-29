@@ -888,7 +888,7 @@ _COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
     "turkiye": {
         "country": "Türkiye",
         "aliases": ("турция", "турецк", "анкара", "türkiye", "turkey", "turkish", "ankara"),
-        "president": {"name": "Реджеп Тайип Эрдоган", "aliases": ("эрдоган", "erdogan")},
+        "president": {"name": "Реджеп Эрдоган", "aliases": ("эрдоган", "реджеп тайип эрдоган", "erdogan", "recep tayyip erdogan")},
         "updated": "2026-09",
     },
     "china": {
