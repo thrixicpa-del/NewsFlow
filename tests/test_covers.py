@@ -153,11 +153,16 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             async def generate(self, _prompt, **_kwargs):
                 return json.dumps({
                     "cover_primary_person": {
-                        "name": "Марек Новак", "entity_type": "public_figure",
-                        "role_in_story": "президент",
-                        "relation_to_story": "центральный политический actor текущего конфликта",
-                        "confidence": 0.62,
+                        "name": "Иван Петров", "entity_type": "person",
+                        "role_in_story": "участник протеста",
+                        "relation_to_story": "вышел на Красную площадь", "confidence": 0.95,
                     },
+                    "cover_people_candidates": [{
+                        "name": "Владимир Путин", "entity_type": "public_figure",
+                        "role_in_story": "президент",
+                        "relation_to_story": "несёт прямую политическую ответственность за Кремль и государственный контекст истории",
+                        "confidence": 0.62,
+                    }],
                 }, ensure_ascii=False)
 
         scene = (
@@ -205,16 +210,16 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
 
         item = settings.cover_queue[0]
         prompt, references = provider_calls[0]
-        self.assertEqual(item["portrait_subject"], "Марек Новак")
+        self.assertEqual(item["portrait_subject"], "Владимир Путин")
         self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
         self.assertEqual(item["portrait_source"], "covers-revalidated")
-        self.assertEqual(item["final_provider_face_label"], "Марек Новак")
+        self.assertEqual(item["final_provider_face_label"], "Владимир Путин")
         self.assertEqual(item["cover_primary_person"]["entity_type"], "public_figure")
         self.assertTrue(item["portrait_stale_identity_overridden"])
         self.assertEqual(item["portrait_stale_identity"], "Иван Петров")
         self.assertEqual(references, ())
         self.assertEqual(item["final_provider_face_reference_count"], 0)
-        self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+        self.assertIn("SELECTED PEOPLE:\nВладимир Путин", prompt)
         self.assertNotIn("Иван Петров", prompt)
         self.assertIn("large side portrait", prompt)
 
@@ -279,6 +284,97 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
         self.assertEqual(item["cover_face_resolution_status"], "FACE_RESOLUTION_ERROR")
         self.assertEqual(item["cover_face_resolution_attempts"], 3)
         self.assertNotIn("cover_primary_person", item)
+
+    def test_political_resolver_retries_null_and_minister_until_president(self):
+        """Healthy political transport must treat null/non-president as retryable invalid answers."""
+        from scriptor import bridge
+
+        class SequencedSemanticPool:
+            def __init__(self):
+                self.prompts: list[str] = []
+                self.responses = iter((
+                    {"cover_primary_person": None, "cover_people_candidates": []},
+                    {"cover_primary_person": {
+                        "name": "Алексей Министров", "entity_type": "public_figure",
+                        "role_in_story": "министр", "relation_to_story": "ведёт переговоры", "confidence": 0.8,
+                    }},
+                    {"cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "президент", "relation_to_story": "несёт прямую ответственность за санкционное решение", "confidence": 0.6,
+                    }},
+                ))
+
+            async def generate(self, prompt, **_kwargs):
+                self.prompts.append(prompt)
+                return json.dumps(next(self.responses), ensure_ascii=False)
+
+        pool = SequencedSemanticPool()
+        item = {
+            "title": "ПРАВИТЕЛЬСТВО ОБСУЖДАЕТ НОВЫЕ САНКЦИИ",
+            "event_context": "Переговоры о внешнеполитическом решении.",
+            "cover_face_required": True,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="text", secret="test")])
+        with patch.object(bridge, "HybridTextPool", return_value=pool):
+            self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(len(pool.prompts), 3)
+        self.assertNotIn('"cover_primary_person": null', pool.prompts[0])
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_face_resolution_attempts"], 3)
+        self.assertNotEqual(item["cover_face_resolution_status"], "FACE_RESOLUTION_ERROR")
+
+    def test_non_political_public_figure_is_not_forced_to_be_president(self):
+        """The automatic president policy belongs to political Covers only."""
+        from scriptor import bridge
+
+        item = {
+            "title": "ПЕВИЦА АМИНА ДИАЛЛО ОТКРЫЛА БЛАГОТВОРИТЕЛЬНЫЙ КОНЦЕРТ",
+            "entities": [{"name": "Amina Diallo", "type": "public_figure"}],
+        }
+        resolved = bridge._resolve_cover_portrait(
+            item, Settings(), face_mode="auto", allow_manual_reference=False,
+        )
+
+        self.assertFalse(bridge._cover_requires_political_portrait(item))
+        self.assertEqual(resolved["portrait_subject"], "Amina Diallo")
+
+    def test_war_topic_without_legacy_face_flag_requires_political_portrait(self):
+        """Legacy/imported war rows cannot bypass political resolution by omitting a flag."""
+        from scriptor import bridge
+
+        self.assertTrue(bridge._cover_requires_political_portrait({
+            "title": "ВОЕННЫЕ ДЕЙСТВИЯ УСИЛИЛИСЬ НА ФРОНТЕ",
+        }))
+
+    def test_ukraine_kyiv_semantic_response_keeps_provider_ranked_relevant_president(self):
+        """Covers uses current-story grounding and provider rank, never a city-to-leader table."""
+        from scriptor import bridge
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Владимир Зеленский", "entity_type": "public_figure",
+                        "role_in_story": "президент", "relation_to_story": "несёт прямую ответственность за решения правительства Украины в истории", "confidence": 0.66,
+                    },
+                    "cover_people_candidates": [{
+                        "name": "Владимир Путин", "entity_type": "public_figure",
+                        "role_in_story": "президент", "relation_to_story": "связан с другой стороной конфликта", "confidence": 0.65,
+                    }],
+                }, ensure_ascii=False)
+
+        item = {
+            "title": "КИЕВ ГОТОВИТ НОВЫЕ РЕШЕНИЯ ПОСЛЕ ВОЕННЫХ ДЕЙСТВИЙ",
+            "script": "Правительство Украины обсуждает дальнейшие шаги после атаки.",
+            "cover_face_required": True,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="text", secret="test")])
+        with patch.object(bridge, "HybridTextPool", return_value=SemanticPool()):
+            self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(item["cover_primary_person"]["name"], "Владимир Зеленский")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
 
     def test_fastgen_my_face_uses_only_resolved_person_png_or_zero_png(self):
         """A real resolver keeps Person X across prompt and prepared-PNG transport."""
@@ -902,7 +998,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
 
         self.assertIn("ordinary protester", prompt)
         self.assertIn("do NOT use that ordinary participant", prompt)
-        self.assertIn("office-holder", prompt)
+        self.assertIn("Never return null", prompt)
         self.assertIn("MOST DIRECTLY RELEVANT", prompt)
         self.assertIn("PRESIDENTS ONLY", prompt)
         self.assertIn("prime minister", prompt)
@@ -937,9 +1033,9 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             "confidence": 0.7,
         }
 
-        self.assertIsNotNone(bridge._cover_semantic_person_candidate(president))
-        self.assertIsNone(bridge._cover_semantic_person_candidate(minister))
-        self.assertIsNone(bridge._cover_semantic_person_candidate(prime_minister))
+        self.assertIsNotNone(bridge._cover_semantic_person_candidate(president, political_portrait=True))
+        self.assertIsNone(bridge._cover_semantic_person_candidate(minister, political_portrait=True))
+        self.assertIsNone(bridge._cover_semantic_person_candidate(prime_minister, political_portrait=True))
 
     def test_semantic_resolver_skips_ordinary_primary_and_accepts_public_alternative_same_call(self):
         """A central protester must not block Covers when one ranked public figure is also returned."""
@@ -1173,7 +1269,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
     def test_portrait_resolver_accepts_an_arbitrary_typed_public_figure_from_current_context(self):
         from scriptor import bridge
 
-        item = {"title": "Переговоры о торговле", "entities": [{"name": "Amina Diallo", "type": "public_figure"}]}
+        item = {"title": "Музыкальная премия года", "entities": [{"name": "Amina Diallo", "type": "public_figure"}]}
         resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
 
         self.assertEqual(resolved["portrait_subject"], "Amina Diallo")
@@ -3708,6 +3804,82 @@ class CoverLocalCompositorTests(unittest.TestCase):
                 settings.cover_queue[0]["render_profile"]["operation"],
                 "saved-reference-operation",
             )
+
+    def test_political_repeat_blocks_stale_automatic_non_president_without_fastgen(self):
+        """Exact repeat cannot silently send an old automatic minister portrait."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            settings = Settings(cover_output_folder=temporary, cover_variant_count=1)
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.cover_queue = [{
+                "production_item_id": "production:repeat-stale", "title": "ПРАВИТЕЛЬСТВО ОБСУЖДАЕТ САНКЦИИ",
+                "image_prompt": "saved scene", "final_provider_prompt": "SAVED FINAL PROMPT",
+                "final_provider_prompt_options": ["SAVED FINAL PROMPT"],
+                "portrait_subject": "Алексей Министров", "portrait_source": "covers-revalidated",
+                "cover_primary_person": {
+                    "name": "Алексей Министров", "entity_type": "public_figure",
+                    "role_in_story": "министр", "relation_to_story": "участвует в санкционном решении",
+                    "cover_identity_owner": "COVERS", "source": "core-anchor-derived",
+                },
+                "render_profile": {
+                    "build_mode": "fastgen-full", "face_mode": "auto", "text_mode": "fastgen",
+                    "local_face_only": False, "operation": "flower_image_generate",
+                },
+            }]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media") as render:
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:repeat-stale"],
+                    "_parallel_cover_worker": True, "repeatCurrentContract": True,
+                })
+
+        render.assert_not_called()
+        self.assertIn("Создать новые промпты", settings.cover_queue[0]["error"])
+
+    def test_political_repeat_keeps_a_saved_president_contract_unchanged(self):
+        """A valid saved presidential contract stays byte-for-byte reusable."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as temporary:
+            settings = Settings(cover_output_folder=temporary, cover_variant_count=1)
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.cover_queue = [{
+                "production_item_id": "production:repeat-president", "title": "ПРАВИТЕЛЬСТВО ОБСУЖДАЕТ САНКЦИИ",
+                "image_prompt": "saved scene", "final_provider_prompt": "SAVED PRESIDENT PROMPT",
+                "final_provider_prompt_options": ["SAVED PRESIDENT PROMPT"],
+                "portrait_subject": "Марек Новак", "portrait_source": "covers-revalidated",
+                "cover_primary_person": {
+                    "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
+                    "relation_to_story": "несёт ответственность за санкционное решение",
+                    "cover_identity_owner": "COVERS", "source": "core-anchor-derived",
+                },
+                "render_profile": {
+                    "build_mode": "fastgen-full", "face_mode": "auto", "text_mode": "fastgen",
+                    "local_face_only": False, "operation": "flower_image_generate",
+                },
+            }]
+            def render(_prompt, output, _stem, _operation, _ratio, **_kwargs):
+                generated = output / "president-repeat.png"
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_bytes(b"image")
+                return [generated]
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render) as provider:
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:repeat-president"],
+                    "_parallel_cover_worker": True, "repeatCurrentContract": True,
+                })
+
+        provider.assert_called_once()
+        self.assertEqual(settings.cover_queue[0]["portrait_subject"], "Марек Новак")
+        self.assertEqual(settings.cover_queue[0]["final_provider_prompt"], "SAVED PRESIDENT PROMPT")
 
     def test_repeat_current_rejects_legacy_row_before_deleting_existing_image(self):
         """Without a saved provider prompt, Repeat Current must not destroy the current image."""
