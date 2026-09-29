@@ -8081,9 +8081,17 @@ _COVER_WORD_UNNATURAL_PATTERNS = (
 # STANDARD and TABLOID.  TABLOID becomes stronger through a supported conflict,
 # consequence or emotion, never through prettier figurative language.
 _COVER_WORD_METAPHORICAL_MARKERS = (
-    "буксу", "застр", "трещ", "штопор", "набирает оборот", "гаснет",
-    "качается", "раскач", "на нерве", "градус", "держит курс",
+    "трещит по швам", "входит в штопор", "набирает оборот",
+    "на нерве", "градус раст", "держит курс",
 )
+_COVER_WORD_ABSTRACT_METAPHOR_SUBJECTS = (
+    "мир", "переговор", "сделк", "процесс", "диалог", "отношен", "ситуац",
+)
+_COVER_WORD_ABSTRACT_METAPHOR_ACTIONS = (
+    "буксу", "застр", "гасн", "кача", "раскач",
+)
+_COVER_WORD_MARKET_METAPHOR_SUBJECTS = ("цен", "нефт", "газ", "рынок", "тариф")
+_COVER_WORD_MARKET_METAPHOR_ACTIONS = ("рван", "взлет")
 _COVER_WORD_EDITORIAL_MARKERS = (
     "сигнал о ", "без разрядк", "проверка границ", "политическая архитектур",
     "архитектура конфликт", "динамика недоволь", "контуры ", "вектор ",
@@ -8294,7 +8302,9 @@ def _cover_word_editorial_evaluation(
     text = " ".join(str(value or "").casefold().split())
     words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
     stems = _cover_meaningful_word_stems(text)
-    source_stems = _cover_meaningful_word_stems(_cover_word_source_text(item))
+    source_text = _cover_word_source_text(item)
+    source_stems = _cover_meaningful_word_stems(source_text)
+    source_words = set(re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", source_text.casefold()))
     source_matches = {stem for stem in stems if stem in source_stems}
     unknown_stems = stems - source_stems
     # Finite verbs invented by the model are a reliable, context-independent
@@ -8306,13 +8316,25 @@ def _cover_word_editorial_evaluation(
         "обсуж", "повыш", "усил", "дави", "давл", "отвеч", "заяв", "ввод",
         "реша", "соглас", "отказ", "треб", "сниж", "раст", "постав", "закры",
     }
+    explicit_action_stems = ("держ",)
     unknown_action = any(
-        word[:4] in unknown_stems
-        and not any(word.startswith(stem) for stem in neutral_action_stems)
-        and re.search(
-            r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али|"
-            r"ется|ются|ится|атся|ятся|лся|лась|лись|ался|алась|ались|ился|илась|ились)$",
-            word,
+        (
+            word[:4] in unknown_stems
+            and (
+                word.startswith(explicit_action_stems)
+                or (
+                    not any(word.startswith(stem) for stem in neutral_action_stems)
+                    and re.search(
+                        r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али|"
+                        r"ется|ются|ится|атся|ятся|лся|лась|лись|ался|алась|ались|ился|илась|ились)$",
+                        word,
+                    )
+                )
+            )
+        )
+        or (
+            word.startswith(explicit_action_stems)
+            and word not in source_words
         )
         for word in words
     )
@@ -8321,11 +8343,23 @@ def _cover_word_editorial_evaluation(
         and "на" in text.split()
         and len(source_matches) < max(2, len(stems))
     )
-    metaphorical_language = any(marker in text for marker in _COVER_WORD_METAPHORICAL_MARKERS)
+    abstract_metaphor = (
+        any(subject in text for subject in _COVER_WORD_ABSTRACT_METAPHOR_SUBJECTS)
+        and any(action in text for action in _COVER_WORD_ABSTRACT_METAPHOR_ACTIONS)
+    )
+    market_metaphor = (
+        any(subject in text for subject in _COVER_WORD_MARKET_METAPHOR_SUBJECTS)
+        and any(action in text for action in _COVER_WORD_MARKET_METAPHOR_ACTIONS)
+    )
+    metaphorical_language = (
+        any(marker in text for marker in _COVER_WORD_METAPHORICAL_MARKERS)
+        or abstract_metaphor
+        or market_metaphor
+    )
     editorial_language = any(marker in text for marker in _COVER_WORD_EDITORIAL_MARKERS)
     incomplete_action = any(text.endswith(marker) for marker in _COVER_WORD_INCOMPLETE_ACTION_ENDINGS)
     list_like_nominal = (
-        len(words) >= 4
+        len(words) >= 3
         and " и " in f" {text} "
         and "?" not in text
         and not any(
@@ -8369,6 +8403,8 @@ def _cover_word_editorial_evaluation(
         + int(not metaphorical_language)
         + int(not editorial_language),
     )
+    literal_matches = sum(word in source_words for word in words)
+    literalness_score = int(100 * literal_matches / max(1, len(words)))
     # Historical negative examples raise an audit signal, but never form a
     # standalone rejection path.  The contextual coherence/clarity checks
     # above must independently explain why a phrase is unsuitable.
@@ -8403,6 +8439,7 @@ def _cover_word_editorial_evaluation(
         "hook_score": hook_score,
         "emotion_score": emotion_score,
         "directness_score": directness_score,
+        "literalness_score": literalness_score,
         "factual_pass": factual_pass,
         "grounding_pass": grounding_pass,
         "duplicate_pass": duplicate_pass,
@@ -8777,12 +8814,13 @@ def _cover_word_editorial_selection_score(
     hook = int(evaluation.get("hook_score", 0) or 0)
     emotion = int(evaluation.get("emotion_score", 0) or 0)
     directness = int(evaluation.get("directness_score", 0) or 0)
+    literalness = int(evaluation.get("literalness_score", 0) or 0)
     # Both modes prefer plain, factual, direct copy over mere shortness.
     # TABLOID then promotes the strongest supported emotional/hook angle.
     return (
-        (natural, factual, directness, emotion, hook, specificity, -len(value))
+        (natural, factual, directness, emotion, hook, specificity, literalness, -len(value))
         if tabloid_mode else
-        (natural, factual, directness, specificity, hook, emotion, -len(value))
+        (natural, factual, directness, literalness, specificity, hook, emotion, -len(value))
     )
 
 
@@ -8848,12 +8886,10 @@ def _cover_word_source_fallback(
             validated.append((candidate, validation))
     if not validated:
         return None
-    return max(
-        validated,
-        key=lambda pair: _cover_word_editorial_selection_score(
-            pair[0], pair[1], tabloid_mode=tabloid_mode,
-        ),
-    )
+    # Title segments are already ordered by editorial importance; for a
+    # fail-soft path prefer the first valid source phrase over inventing a
+    # stronger local rewrite.
+    return validated[0]
 
 
 async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, template: str,
@@ -8894,6 +8930,7 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
                     "hook_score": int(evidence.get("hook_score", 0) or 0),
                     "emotion_score": int(evidence.get("emotion_score", 0) or 0),
                     "directness_score": int(evidence.get("directness_score", 0) or 0),
+                    "literalness_score": int(evidence.get("literalness_score", 0) or 0),
                     "factual_pass": bool(evidence.get("factual_pass")),
                 },
             )
@@ -8925,6 +8962,7 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
                 "hook_score": int(evidence.get("hook_score", 0) or 0),
                 "emotion_score": int(evidence.get("emotion_score", 0) or 0),
                 "directness_score": int(evidence.get("directness_score", 0) or 0),
+                "literalness_score": int(evidence.get("literalness_score", 0) or 0),
                 "factual_pass": bool(evidence.get("factual_pass")),
             },
         )
