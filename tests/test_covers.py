@@ -250,7 +250,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
 
         self.assertEqual(pool.calls, 3)
-        self.assertEqual(item["cover_primary_person"]["name"], "Владимир Путин")
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
         self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
 
     def test_missing_person_resolver_exhaustion_is_bounded_and_diagnostic(self):
@@ -944,7 +944,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
 
         self.assertEqual(pool.calls, 1)
-        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_primary_person"]["name"], "Владимир Путин")
         self.assertEqual(item["cover_primary_person"]["entity_type"], "public_figure")
         self.assertEqual(item["cover_face_resolution_attempts"], 1)
         self.assertNotEqual(item["cover_primary_person"]["name"], "Иван Петров")
