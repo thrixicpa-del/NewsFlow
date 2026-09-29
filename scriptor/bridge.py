@@ -1216,7 +1216,12 @@ def _cover_requires_political_portrait(item: dict) -> bool:
 def _cover_person_name(value: object) -> str:
     if isinstance(value, dict):
         value = " ".join(str(value.get(key, "") or "") for key in ("name", "label", "title", "person"))
-    words = re.findall(r"(?:[А-ЯЁ][а-яё-]+|[A-Z][a-z-]+)", " ".join(str(value or "").split()))
+    # Preserve compound given names such as «Касым-Жомарт» as one token
+    # instead of splitting them at the internal capital after the hyphen.
+    words = re.findall(
+        r"(?:[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)*|[A-Z][a-z]+(?:-[A-Z][a-z]+)*)",
+        " ".join(str(value or "").split()),
+    )
     return " ".join(words[-2:]) if len(words) >= 2 else ""
 
 
