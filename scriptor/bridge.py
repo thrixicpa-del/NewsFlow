@@ -8309,7 +8309,11 @@ def _cover_word_editorial_evaluation(
     unknown_action = any(
         word[:4] in unknown_stems
         and not any(word.startswith(stem) for stem in neutral_action_stems)
-        and re.search(r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али)$", word)
+        and re.search(
+            r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али|"
+            r"ется|ются|ится|атся|ятся|лся|лась|лись|ался|алась|ались|ился|илась|ились)$",
+            word,
+        )
         for word in words
     )
     bare_abstract_state = (
