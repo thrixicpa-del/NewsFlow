@@ -6421,6 +6421,16 @@ class CoverAutomaticPresidentContractTests(unittest.TestCase):
         self.assertEqual(resolved["country_id"], "country-a")
         self.assertEqual(resolved["source"], "title:subject")
 
+    def test_multiple_countries_before_one_action_defer_to_semantic_stage(self):
+        """Stage 1 must not mistake the last of several actors for the subject."""
+        from scriptor import bridge
+
+        item = {"title": "Russia and United States attack Ukraine"}
+        self.assertIsNone(bridge._cover_resolve_primary_country(item))
+        fallback = bridge._cover_apply_automatic_political_portrait(item)
+        self.assertFalse(fallback["ok"])
+        self.assertEqual(fallback["reason"], "SEMANTIC_COUNTRY_FALLBACK")
+
     def test_two_president_titles_defer_to_semantic_stage(self):
         from scriptor import bridge
 

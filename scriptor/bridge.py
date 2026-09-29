@@ -888,8 +888,9 @@ def _cover_resolve_primary_country(
             for cue in _COVER_SUBJECT_OBJECT_CUE.finditer(text):
                 before = [value for value in literal_positions if value[0] < cue.start()]
                 after = [value for value in positions if value[0] > cue.end()]
-                if before and after:
-                    country_id = before[-1][1]
+                subject_country_ids = {country_id for _position, country_id in before}
+                if len(subject_country_ids) == 1 and after:
+                    country_id = next(iter(subject_country_ids))
                     entry = active_registry[country_id]
                     return {
                         "country_id": country_id,
@@ -897,6 +898,11 @@ def _cover_resolve_primary_country(
                         "source": "title:subject",
                         "reason": f"title identifies {entry.get('country', country_id)} as the acting political side",
                     }
+                if len(subject_country_ids) > 1 and after:
+                    # Multiple literal countries before the same action are
+                    # competing actors, not an ordered subject list.  Stage 1
+                    # must not turn their last textual mention into identity.
+                    return None
             return None
         if len(unique) == 1:
             country_id = next(iter(unique))
