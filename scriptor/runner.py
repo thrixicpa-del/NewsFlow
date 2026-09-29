@@ -551,8 +551,8 @@ class ParallelRunner:
             elif part_index == len(plan.parts) - 1:
                 # The final multipart segment is not immutable until the
                 # assembled story satisfies the global length contract.
-                # Otherwise a SHORT/LONG final would be accepted and every
-                # ordinary retry would skip all parts forever.
+                # Keep the accepted prefix fixed and recover only this FINAL
+                # segment a bounded number of times before asking the operator.
                 prefix_text = self._assembled_story(plan, job.accepted_story_parts)
                 separator_chars = 2 if prefix_text else 0
 
@@ -575,38 +575,89 @@ class ParallelRunner:
                     return assembled, status, chars
 
                 candidate_result, final_status, final_chars = final_candidate(accepted_text)
-                if final_status == "SHORT":
-                    minimum_final_chars = max(
-                        1,
-                        int(job.request.allowed_min or 0)
-                        - len(prefix_text)
-                        - separator_chars,
+                final_recovery_limit = 3
+                for recovery_attempt in range(1, final_recovery_limit + 1):
+                    if final_status not in {"SHORT", "LONG"}:
+                        break
+
+                    minimum_final_chars = (
+                        max(
+                            1,
+                            int(job.request.allowed_min or 0)
+                            - len(prefix_text)
+                            - separator_chars,
+                        )
+                        if job.request.allowed_min
+                        else 1
+                    )
+                    maximum_final_chars = (
+                        max(
+                            1,
+                            int(job.request.allowed_max or 0)
+                            - len(prefix_text)
+                            - separator_chars,
+                        )
+                        if job.request.allowed_max
+                        else 0
+                    )
+
+                    # An overlong FINAL can often be repaired locally without
+                    # another provider call. If sentence-boundary trimming
+                    # undershoots the minimum, the same loop continues with a
+                    # fresh retry of FINAL only.
+                    if final_status == "LONG" and maximum_final_chars:
+                        accepted_text = trim_text_to_sentence_boundary(
+                            accepted_text, maximum_final_chars,
+                        )
+                        candidate_result, final_status, final_chars = final_candidate(
+                            accepted_text,
+                        )
+                        if final_status not in {"SHORT", "LONG"}:
+                            break
+
+                    if final_status != "SHORT":
+                        break
+
+                    preferred_final_chars = max(active_target, minimum_final_chars)
+                    if maximum_final_chars:
+                        preferred_final_chars = min(
+                            preferred_final_chars, maximum_final_chars,
+                        )
+                    range_instruction = (
+                        f"between {minimum_final_chars} and {maximum_final_chars} characters"
+                        if maximum_final_chars
+                        else f"at least {minimum_final_chars} characters"
                     )
                     length_retry_prompt = (
-                        "FINAL SEGMENT LENGTH RECOVERY. Retry only this same unfinished final segment. "
-                        f"The assembled scenario is too short. Write at least {minimum_final_chars} characters "
-                        f"for this segment and aim for {active_target} characters. Preserve the assigned Story Map "
-                        "content and final role; do not restart earlier parts, add labels, JSON or commentary.\n\n"
+                        f"FINAL SEGMENT LENGTH RECOVERY {recovery_attempt}/{final_recovery_limit}. "
+                        "Retry only this same unfinished final segment. "
+                        "The assembled scenario is outside its Python-checked length contract. "
+                        f"Write {range_instruction} for this segment and aim for "
+                        f"{preferred_final_chars} characters. "
+                        "Preserve the assigned Story Map content and FINAL role; do not restart or rewrite "
+                        "earlier accepted parts, add labels, JSON or commentary. Return one replacement FINAL "
+                        "segment only.\n\n"
                         f"TASK:\n{writer_prompt}"
                     )
+                    job.length_repair_attempts = recovery_attempt
                     length_retry = await self._generate_fresh_result(
-                        length_retry_prompt, job.request, max(active_target, minimum_final_chars),
+                        length_retry_prompt,
+                        job.request,
+                        preferred_final_chars,
                     )
-                    if not self._writer_output_unusable(length_retry):
-                        accepted_text = length_retry.strip()
-                        candidate_result, final_status, final_chars = final_candidate(accepted_text)
-
-                if final_status == "LONG" and job.request.allowed_max:
-                    maximum_final_chars = max(
-                        1,
-                        int(job.request.allowed_max)
-                        - len(prefix_text)
-                        - separator_chars,
+                    if self._writer_output_unusable(length_retry):
+                        continue
+                    accepted_text = length_retry.strip()
+                    candidate_result, final_status, final_chars = final_candidate(
+                        accepted_text,
                     )
-                    accepted_text = trim_text_to_sentence_boundary(
-                        accepted_text, maximum_final_chars,
-                    )
-                    candidate_result, final_status, final_chars = final_candidate(accepted_text)
+                    if final_status == "LONG" and maximum_final_chars:
+                        accepted_text = trim_text_to_sentence_boundary(
+                            accepted_text, maximum_final_chars,
+                        )
+                        candidate_result, final_status, final_chars = final_candidate(
+                            accepted_text,
+                        )
 
                 if final_status in {"SHORT", "LONG"}:
                     job.state = RunState.PAUSED
