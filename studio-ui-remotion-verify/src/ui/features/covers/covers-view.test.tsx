@@ -681,6 +681,92 @@ describe("Covers Light view", () => {
     expect(screen.getByRole("dialog", { name: "Инспектор результата обложки" })).toBeTruthy();
   });
 
+  it("routes Gallery repeat-with-new-prompts through a new render contract", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:new",
+        title: "Новый промпт",
+        image_prompt: "fresh scene prompt",
+        status: "Новые промпты созданы",
+        paths: ["new.png"],
+      }],
+      coverSettings: {
+        ...fallback.coverSettings,
+        operation: "new_operation",
+        buildMode: "fastgen-full-my-face" as const,
+      },
+    };
+    render(<CoverGallery data={data} command={command} />);
+
+    fireEvent.click(
+      screen.getByTitle("Клик — увеличить; Ctrl+клик — выбрать несколько"),
+      { ctrlKey: true },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Повторить с новыми (1)" }));
+
+    expect(command).toHaveBeenCalledWith("regenerate-covers", {
+      indices: [0],
+      productionItemIds: ["production:new"],
+      currentProfile: false,
+      useBuildModeRanges: true,
+      operation: "new_operation",
+      buildMode: "fastgen-full-my-face",
+      faceMode: "auto",
+      textMode: "fastgen",
+      localFaceOnly: false,
+    });
+
+    command.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Повторить текущие (1)" }));
+    expect(command).toHaveBeenCalledWith("regenerate-covers", {
+      indices: [0],
+      productionItemIds: ["production:new"],
+      currentProfile: true,
+      operation: "new_operation",
+    });
+  });
+
+  it("uses a new render contract for the inspector action labelled repeat-with-new", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:inspector-new",
+        title: "Новый промпт инспектора",
+        image_prompt: "fresh inspector scene",
+        status: "Новые промпты созданы",
+        paths: [],
+      }],
+      coverSettings: {
+        ...fallback.coverSettings,
+        operation: "inspector_operation",
+        buildMode: "fastgen-full" as const,
+      },
+    };
+    render(<CoverGallery data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Новый промпт инспектора" }));
+    fireEvent.click(screen.getByRole("button", { name: "Повторить с новыми" }));
+
+    expect(command).toHaveBeenCalledWith("regenerate-covers", {
+      indices: [0],
+      productionItemIds: ["production:inspector-new"],
+      currentProfile: false,
+      useBuildModeRanges: true,
+      operation: "inspector_operation",
+      buildMode: "fastgen-full",
+      faceMode: "auto",
+      textMode: "fastgen",
+      localFaceOnly: false,
+    });
+    expect(command).not.toHaveBeenCalledWith(
+      "regenerate-covers",
+      expect.objectContaining({ currentProfile: true }),
+    );
+  });
+
   it("keeps gallery context and metrics readable beside the workstation inspector", () => {
     expect(coverStyles).toContain(".cover-gallery-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,360px)");
     expect(coverStyles).toContain(".cover-gallery-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))");
