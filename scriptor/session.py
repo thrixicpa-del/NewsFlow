@@ -297,7 +297,11 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
             raw_planner_failure = item.get("story_planner_failure")
             planner_failure = {
                 key: str(raw_planner_failure[key])
-                for key in ("phase", "reason", "response_chars", "response_sha256")
+                for key in (
+                    "phase", "reason", "initial_reason", "recovery_route",
+                    "fresh_reason", "structural_repair_reason", "response_chars",
+                    "response_sha256",
+                )
                 if isinstance(raw_planner_failure, dict)
                 and isinstance(raw_planner_failure.get(key), str)
                 and len(raw_planner_failure[key]) <= 128

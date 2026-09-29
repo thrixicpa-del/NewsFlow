@@ -37,6 +37,10 @@ class SessionTests(unittest.TestCase):
             story_planner_failure={
                 "phase": "FRESH_SCHEMA",
                 "reason": "MISSING_THESIS",
+                "initial_reason": "MISSING_TRANSITION_FIELDS",
+                "recovery_route": "FRESH_DIRECT",
+                "fresh_reason": "MISSING_THESIS",
+                "structural_repair_reason": "",
                 "response_chars": "54",
                 "response_sha256": "a" * 64,
             },

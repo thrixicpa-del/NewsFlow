@@ -145,12 +145,13 @@ def _planner_schema_reason(error: BaseException) -> str:
         ("content atom owner", "CONTENT_OWNERSHIP"),
         ("content atom ownership", "CONTENT_OWNERSHIP"),
         ("content atom is assigned more than once", "CONTENT_OWNERSHIP"),
-        ("requires exactly", "PART_TOPOLOGY"),
-        ("part ids must be ordered", "PART_TOPOLOGY"),
-        ("part must be an object", "PART_TOPOLOGY"),
-        ("references unknown macro block", "PART_TOPOLOGY"),
-        (" role must be ", "PART_TOPOLOGY"),
-        (" requires content_ids", "PART_TOPOLOGY"),
+        ("structural repair must assign every existing atom exactly once", "CONTENT_OWNERSHIP"),
+        ("requires exactly", "PART_COUNT"),
+        ("part ids must be ordered", "PART_ID_ORDER"),
+        ("part must be an object", "PART_CONTENT_IDS"),
+        ("references unknown macro block", "PART_MACRO_REF"),
+        (" role must be ", "PART_ROLE"),
+        (" requires content_ids", "PART_CONTENT_IDS"),
         (" duplicates content ids", "CONTENT_OWNERSHIP"),
         ("macro block", "MISSING_MACRO_BLOCKS"),
     )
@@ -163,7 +164,10 @@ def _planner_schema_reason(error: BaseException) -> str:
     return "MISSING_CONTENT_ATOMS"
 
 
-_PARTS_ONLY_PLANNER_REASONS = frozenset({"PART_TOPOLOGY", "CONTENT_OWNERSHIP"})
+_PARTS_ONLY_PLANNER_REASONS = frozenset({
+    "PART_COUNT", "PART_ID_ORDER", "PART_ROLE", "PART_MACRO_REF",
+    "PART_CONTENT_IDS", "CONTENT_OWNERSHIP",
+})
 
 _FRESH_PLANNER_REASON_GUIDANCE = {
     "INVALID_TRANSITION_CONTRACT": "Include the exact BEFORE_DEVELOPMENT_AFTER transition contract.",
@@ -172,7 +176,11 @@ _FRESH_PLANNER_REASON_GUIDANCE = {
     "ATOM_SEMANTIC_DUPLICATE": "Keep every content atom materially distinct from the others.",
     "PART_SEMANTIC_DUPLICATE": "Give every part distinct semantic ownership and novelty.",
     "SEMANTIC_DENSITY": "Provide enough distinct concrete developments for each part's target.",
-    "PART_TOPOLOGY": "Use the required ordered part count, IDs, roles, macro references and ownership.",
+    "PART_COUNT": "Use the exact runtime part count from the technical skeleton.",
+    "PART_ID_ORDER": "Use the exact ordered part IDs from the technical skeleton.",
+    "PART_ROLE": "Use the exact runtime roles from the technical skeleton.",
+    "PART_MACRO_REF": "Reference only an existing macro block from each technical part.",
+    "PART_CONTENT_IDS": "Give every technical part a valid, non-empty list of content IDs.",
     "CONTENT_OWNERSHIP": "Assign every existing content atom exactly once to a matching planned part.",
     "INVALID_CONTENT_KIND": "Use only SUPPORTED or DRAMATIZED as content_kind values.",
     "MISSING_THESIS": "Include one compact thesis.",
@@ -203,6 +211,7 @@ def _pause_for_planner_schema_failure(
     *,
     initial_reason: str,
     recovery_route: str,
+    structural_repair_reason: str = "",
 ) -> None:
     """Pause safely after bounded recovery without retaining provider content."""
     reason = _planner_schema_reason(error)
@@ -213,6 +222,7 @@ def _pause_for_planner_schema_failure(
         "initial_reason": initial_reason,
         "recovery_route": recovery_route,
         "fresh_reason": reason,
+        "structural_repair_reason": structural_repair_reason,
         "response_chars": str(len(str(response or "").strip())),
         "response_sha256": hashlib.sha256(
             str(response or "").encode("utf-8"),
@@ -636,6 +646,7 @@ class ParallelRunner:
             except (TypeError, ValueError) as initial_error:
                 initial_reason = _planner_schema_reason(initial_error)
                 recovery_route = "FRESH_DIRECT"
+                structural_repair_reason = ""
                 needs_fresh_planner = True
 
                 # Parts-only repair is deliberately narrow. It preserves the
@@ -661,10 +672,10 @@ class ParallelRunner:
                             require_state_transitions=True,
                         )
                         needs_fresh_planner = False
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as repair_error:
                         # The original map is still unaccepted and no Writer
                         # prose exists. Fall through to one fresh Planner call.
-                        pass
+                        structural_repair_reason = _planner_schema_reason(repair_error)
 
                 if needs_fresh_planner:
                     fresh_planner_prompt = _fresh_planner_retry_prompt(
@@ -697,6 +708,7 @@ class ParallelRunner:
                             fresh_error,
                             initial_reason=initial_reason,
                             recovery_route=recovery_route,
+                            structural_repair_reason=structural_repair_reason,
                         )
                         return False
             job.story_plan = plan.to_dict()

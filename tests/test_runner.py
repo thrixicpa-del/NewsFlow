@@ -76,7 +76,11 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             "story plan content atoms must be materially distinct": "ATOM_SEMANTIC_DUPLICATE",
             "story plan parts must own materially distinct semantic content": "PART_SEMANTIC_DUPLICATE",
             "story plan part P1 requires at least 3 distinct content atoms for semantic density": "SEMANTIC_DENSITY",
-            "story plan requires exactly 2 parts": "PART_TOPOLOGY",
+            "story plan requires exactly 2 parts": "PART_COUNT",
+            "story plan part IDs must be ordered as P2": "PART_ID_ORDER",
+            "story plan part P1 role must be OPENING": "PART_ROLE",
+            "story plan part P1 references unknown macro block": "PART_MACRO_REF",
+            "story plan part P1 requires content_ids": "PART_CONTENT_IDS",
             "story plan content atom ownership must cover every planned atom exactly once": "CONTENT_OWNERSHIP",
             "story plan content_kind must be SUPPORTED or DRAMATIZED": "INVALID_CONTENT_KIND",
             "story plan requires thesis": "MISSING_THESIS",
@@ -611,6 +615,42 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.writer_calls, 2)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
 
+    async def test_invalid_atom_precedes_wrong_part_count_and_skips_structural_repair(self):
+        """The Runner must classify atoms before topology from the same malformed map."""
+        class OrderedValidationClient:
+            def __init__(self):
+                self.structural_calls = 0
+                self.fresh_prompt = ""
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    self.structural_calls += 1
+                    raise AssertionError("invalid atoms must not be hidden by part-count repair")
+                if "NewsFlow Story Planner" in prompt:
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(3))
+                    raw["parts"] = raw["parts"][:1]
+                    raw["content_atoms"][0].pop("state_after")
+                    return json.dumps(raw, ensure_ascii=False)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_prompt = prompt
+                return ParallelRunnerTests._story_plan_json(3)
+
+        client = OrderedValidationClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=12000,
+                            allowed_min=11000, allowed_max=13000),
+        ])
+
+        self.assertEqual(client.structural_calls, 0)
+        self.assertIn("MISSING_TRANSITION_FIELDS", client.fresh_prompt)
+        self.assertIn("EXACT_PART_COUNT=3; P1=OPENING; P2=MIDDLE; P3=FINAL", client.fresh_prompt)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+
     async def test_abstract_transition_skips_structural_repair_without_reusing_provider_payload(self):
         """The retry receives a code, never the invalid Planner text or its marker."""
         marker = "UNIQUE_ABSTRACT_PLANNER_PAYLOAD_293"
@@ -858,11 +898,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sk_test_never_persist", serialized)
         self.assertEqual(set(diagnostics), {
             "phase", "reason", "initial_reason", "recovery_route", "fresh_reason",
-            "response_chars", "response_sha256",
+            "structural_repair_reason", "response_chars", "response_sha256",
         })
         self.assertEqual(diagnostics["initial_reason"], "MISSING_THESIS")
         self.assertEqual(diagnostics["recovery_route"], "FRESH_DIRECT")
         self.assertEqual(diagnostics["fresh_reason"], "NON_JSON")
+        self.assertEqual(diagnostics["structural_repair_reason"], "")
         self.assertEqual(diagnostics["response_chars"], str(len(fresh_response)))
         self.assertEqual(diagnostics["response_sha256"], sha256(fresh_response.encode("utf-8")).hexdigest())
 
@@ -927,6 +968,33 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([part["part_id"] for part in jobs[0].accepted_story_parts], ["P1", "P2"])
         self.assertEqual(sum("NewsFlow Story Planner" in prompt for prompt in client.prompts), 1)
         self.assertEqual(sum("structural repairer" in prompt for prompt in client.prompts), 1)
+
+    async def test_failed_structural_repair_persists_only_safe_repair_reason_before_fresh_failure(self):
+        """A failed parts-only repair exposes its code, never either provider payload."""
+        class FailedRepairClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    return json.dumps({"parts": []})
+                raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                raw["parts"] = raw["parts"][:1]
+                return json.dumps(raw, ensure_ascii=False)
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                raw["parts"] = raw["parts"][:1]
+                return json.dumps(raw, ensure_ascii=False)
+
+        jobs = await ParallelRunner(FailedRepairClient(), 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        failure = jobs[0].story_planner_failure
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(failure["initial_reason"], "PART_COUNT")
+        self.assertEqual(failure["recovery_route"], "STRUCTURAL_REPAIR")
+        self.assertEqual(failure["structural_repair_reason"], "CONTENT_OWNERSHIP")
+        self.assertEqual(failure["fresh_reason"], "PART_COUNT")
 
     async def test_structural_repair_reassigns_one_or_three_part_atoms_before_writers_finish(self):
         """Bounded topology repair fixes realistic 1→2 and 3→2 ownership before prose starts."""

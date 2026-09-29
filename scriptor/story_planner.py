@@ -236,6 +236,15 @@ def _expected_roles(part_count: int) -> tuple[str, ...]:
     return ("OPENING",) + ("MIDDLE",) * (part_count - 2) + ("FINAL",)
 
 
+def story_part_skeleton(part_targets: tuple[int, ...]) -> str:
+    """Return the runtime-owned immutable technical part topology."""
+    targets = tuple(part_targets) or (0,)
+    roles = _expected_roles(len(targets))
+    rows = [f"EXACT_PART_COUNT={len(targets)}"]
+    rows.extend(f"P{index}={role}" for index, role in enumerate(roles, start=1))
+    return "; ".join(rows)
+
+
 def _minimum_semantic_atoms(target_chars: int, role: str) -> int:
     """Return a conservative material floor for a fresh novelty-aware Story Map.
 
@@ -347,6 +356,99 @@ def parse_story_plan_response(
             }
         )
 
+    raw_atoms = raw.get("content_atoms")
+    if not isinstance(raw_atoms, list) or not raw_atoms:
+        raise ValueError("story plan requires content_atoms")
+    explicit_atom_novelty = all(
+        isinstance(raw_atom, dict)
+        and _optional_text(raw_atom.get("novelty_question"))
+        and _optional_text(raw_atom.get("novelty_payload"))
+        for raw_atom in raw_atoms
+    )
+    atoms: list[StoryContentAtom] = []
+    atom_by_id: dict[str, StoryContentAtom] = {}
+    for index, raw_atom in enumerate(raw_atoms, start=1):
+        if not isinstance(raw_atom, dict):
+            raise TypeError("story plan content atom must be an object")
+        content_kind = _clean_text(
+            raw_atom.get("content_kind"),
+            f"content_atoms[{index}].content_kind",
+        ).upper()
+        if content_kind not in _CONTENT_KINDS:
+            raise ValueError("story plan content_kind must be SUPPORTED or DRAMATIZED")
+        summary = _clean_text(
+            raw_atom.get("summary"), f"content_atoms[{index}].summary"
+        )
+        atom = StoryContentAtom(
+            id=_clean_text(raw_atom.get("id"), f"content_atoms[{index}].id"),
+            summary=summary,
+            owner_part_id=_clean_text(
+                raw_atom.get("owner_part_id"), f"content_atoms[{index}].owner_part_id"
+            ),
+            content_kind=content_kind,
+            novelty_question=_optional_text(raw_atom.get("novelty_question")) or summary,
+            novelty_payload=_optional_text(raw_atom.get("novelty_payload")) or summary,
+            do_not_repeat=_optional_text(raw_atom.get("do_not_repeat")),
+            state_before=_optional_text(raw_atom.get("state_before")),
+            state_after=_optional_text(raw_atom.get("state_after")),
+            changed_subject=_optional_text(raw_atom.get("changed_subject")),
+            development=_optional_text(raw_atom.get("development")),
+            resulting_state=_optional_text(raw_atom.get("resulting_state")),
+        )
+        if atom.id in atom_by_id:
+            raise ValueError("story plan content atom IDs must be unique")
+        atom_by_id[atom.id] = atom
+        atoms.append(atom)
+
+    if require_state_transitions and state_transition_contract != _STATE_TRANSITION_CONTRACT:
+        raise ValueError("story plan requires BEFORE_DEVELOPMENT_AFTER state transition contract")
+    validate_state_transitions = (
+        require_state_transitions or state_transition_contract == _STATE_TRANSITION_CONTRACT
+    )
+    if validate_state_transitions:
+        for atom in atoms:
+            if not (
+                atom.state_before
+                and atom.state_after
+                and atom.changed_subject
+                and atom.development
+                and atom.resulting_state
+            ):
+                raise ValueError("story plan atom requires structured concrete change")
+            if not _has_concrete_story_development(atom):
+                raise ValueError("story plan atom must describe an observable concrete change")
+
+    # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
+    # persisted maps stay readable even if an older Planner used repetitive
+    # summaries; accepted prose must never be invalidated by a new validator.
+    if validate_semantic_novelty and explicit_atom_novelty:
+        for atom_index, atom in enumerate(atoms):
+            atom_contract = f"{atom.novelty_question} {atom.novelty_payload}"
+            for previous in atoms[:atom_index]:
+                previous_contract = (
+                    f"{previous.novelty_question} {previous.novelty_payload}"
+                )
+                if (
+                    _obvious_semantic_duplicate(atom.novelty_payload, previous.novelty_payload)
+                    or _obvious_semantic_duplicate(atom_contract, previous_contract)
+                ):
+                    raise ValueError(
+                        "story plan content atoms must be materially distinct"
+                    )
+
+    # A state-transition map may still include interpretation, but its atoms
+    # must carry actual before/development/after changes. This belongs to the
+    # atom layer and deliberately precedes every part/topology decision.
+    if validate_semantic_novelty and validate_state_transitions and len(atoms) >= 2:
+        concrete_atoms = sum(_has_concrete_story_development(atom) for atom in atoms)
+        if concrete_atoms * 2 < len(atoms):
+            raise ValueError(
+                "story plan requires concrete story developments, not only analytical interpretations"
+            )
+
+    # Only after all atom fields, transitions and atom novelty are valid may
+    # the runtime assess technical parts. The runtime knows this skeleton; it
+    # is not a model-owned narrative choice.
     raw_parts = raw.get("parts")
     if not isinstance(raw_parts, list) or len(raw_parts) != part_count:
         raise ValueError(f"story plan requires exactly {part_count} parts")
@@ -392,97 +494,15 @@ def parse_story_plan_response(
                 target_chars=target,
                 opens=_id_list(raw_part.get("opens"), f"parts[{index}].opens"),
                 closes=_id_list(raw_part.get("closes"), f"parts[{index}].closes"),
-                transition_direction=_optional_text(
-                    raw_part.get("transition_direction")
-                ),
+                transition_direction=_optional_text(raw_part.get("transition_direction")),
                 novelty_question=_optional_text(raw_part.get("novelty_question")),
                 novelty_payload=_optional_text(raw_part.get("novelty_payload")),
             )
         )
 
-    raw_atoms = raw.get("content_atoms")
-    if not isinstance(raw_atoms, list) or not raw_atoms:
-        raise ValueError("story plan requires content_atoms")
-    explicit_atom_novelty = all(
-        isinstance(raw_atom, dict)
-        and _optional_text(raw_atom.get("novelty_question"))
-        and _optional_text(raw_atom.get("novelty_payload"))
-        for raw_atom in raw_atoms
-    )
-    atoms: list[StoryContentAtom] = []
-    atom_by_id: dict[str, StoryContentAtom] = {}
-    for index, raw_atom in enumerate(raw_atoms, start=1):
-        if not isinstance(raw_atom, dict):
-            raise TypeError("story plan content atom must be an object")
-        content_kind = _clean_text(
-            raw_atom.get("content_kind"),
-            f"content_atoms[{index}].content_kind",
-        ).upper()
-        if content_kind not in _CONTENT_KINDS:
-            raise ValueError("story plan content_kind must be SUPPORTED or DRAMATIZED")
-        summary = _clean_text(
-            raw_atom.get("summary"), f"content_atoms[{index}].summary"
-        )
-        atom = StoryContentAtom(
-            id=_clean_text(raw_atom.get("id"), f"content_atoms[{index}].id"),
-            summary=summary,
-            owner_part_id=_clean_text(
-                raw_atom.get("owner_part_id"), f"content_atoms[{index}].owner_part_id"
-            ),
-            content_kind=content_kind,
-            novelty_question=_optional_text(raw_atom.get("novelty_question")) or summary,
-            novelty_payload=_optional_text(raw_atom.get("novelty_payload")) or summary,
-            do_not_repeat=_optional_text(raw_atom.get("do_not_repeat")),
-            state_before=_optional_text(raw_atom.get("state_before")),
-            state_after=_optional_text(raw_atom.get("state_after")),
-            changed_subject=_optional_text(raw_atom.get("changed_subject")),
-            development=_optional_text(raw_atom.get("development")),
-            resulting_state=_optional_text(raw_atom.get("resulting_state")),
-        )
-        if atom.id in atom_by_id:
-            raise ValueError("story plan content atom IDs must be unique")
+    for atom in atoms:
         if atom.owner_part_id not in expected_ids:
-            raise ValueError(
-                "story plan content atom owner must reference a planned part"
-            )
-        atom_by_id[atom.id] = atom
-        atoms.append(atom)
-
-    if require_state_transitions and state_transition_contract != _STATE_TRANSITION_CONTRACT:
-        raise ValueError("story plan requires BEFORE_DEVELOPMENT_AFTER state transition contract")
-    validate_state_transitions = (
-        require_state_transitions or state_transition_contract == _STATE_TRANSITION_CONTRACT
-    )
-    if validate_state_transitions:
-        for atom in atoms:
-            if not (
-                atom.state_before
-                and atom.state_after
-                and atom.changed_subject
-                and atom.development
-                and atom.resulting_state
-            ):
-                raise ValueError("story plan atom requires structured concrete change")
-            if not _has_concrete_story_development(atom):
-                raise ValueError("story plan atom must describe an observable concrete change")
-
-    # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
-    # persisted maps stay readable even if an older Planner used repetitive
-    # summaries; accepted prose must never be invalidated by a new validator.
-    if validate_semantic_novelty and explicit_atom_novelty:
-        for atom_index, atom in enumerate(atoms):
-            atom_contract = f"{atom.novelty_question} {atom.novelty_payload}"
-            for previous in atoms[:atom_index]:
-                previous_contract = (
-                    f"{previous.novelty_question} {previous.novelty_payload}"
-                )
-                if (
-                    _obvious_semantic_duplicate(atom.novelty_payload, previous.novelty_payload)
-                    or _obvious_semantic_duplicate(atom_contract, previous_contract)
-                ):
-                    raise ValueError(
-                        "story plan content atoms must be materially distinct"
-                    )
+            raise ValueError("story plan content atom owner must reference a planned part")
 
     if validate_semantic_novelty and explicit_atom_novelty:
         for part in parts:
@@ -491,18 +511,6 @@ def parse_story_plan_response(
                 raise ValueError(
                     f"story plan part {part.id} requires at least {minimum_atoms} "
                     "distinct content atoms for semantic density"
-                )
-
-        # A state-transition map may still include interpretation, but its
-        # atoms must carry actual before/development/after changes. Persisted
-        # legacy maps do not opt into this contract and remain resumable.
-        if validate_state_transitions and len(atoms) >= 2:
-            concrete_atoms = sum(
-                _has_concrete_story_development(atom) for atom in atoms
-            )
-            if concrete_atoms * 2 < len(atoms):
-                raise ValueError(
-                    "story plan requires concrete story developments, not only analytical interpretations"
                 )
 
     assigned_ids = [content_id for part in parts for content_id in part.content_ids]
@@ -682,6 +690,7 @@ def _compact(value: object, limit: int) -> str:
 def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> str:
     """Build one strict-JSON organizer request without replacing the writing contract."""
     roles = _expected_roles(len(part_targets))
+    skeleton = story_part_skeleton(part_targets)
     part_rows = ", ".join(
         (
             (
@@ -748,6 +757,8 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "empty opens/closes arrays.\n\n"
         f"TOPIC: {request.title}\n"
         f"TARGET: {request.target_chars}; MIN: {request.allowed_min}; MAX: {request.allowed_max}\n"
+        f"RUNTIME TECHNICAL SKELETON: {skeleton}. Return exactly these parts. Do not add or remove parts. "
+        "Do not rename part IDs. Do not change roles. Do not use COMPLETE when EXACT_PART_COUNT is greater than 1.\n"
         f"PARTS: {part_rows}\n\n"
         "OPERATOR WRITING CONTRACT AND AVAILABLE CONTEXT:\n"
         f"{request.prompt}"
@@ -755,8 +766,7 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
 
 def build_story_plan_structure_repair_prompt(request: Any, original_response: str, part_targets: tuple[int, ...]) -> str:
     """Repair only invalid part topology, never narrative substance or cover metadata."""
-    roles = _expected_roles(len(part_targets))
-    required = ", ".join(f"P{index + 1}={role}" for index, role in enumerate(roles))
+    skeleton = story_part_skeleton(part_targets)
     return (
         "You are the NewsFlow Story Plan structural repairer. The original Story Map's thesis, macro_blocks and "
         "content_atoms are immutable. Return strict JSON with ONLY a corrected parts list. "
@@ -764,8 +774,10 @@ def build_story_plan_structure_repair_prompt(request: Any, original_response: st
         "the repaired owner_part_id. Use only existing macro IDs, "
         "and fix only part count, IDs, roles and content ownership. opens/closes are advisory; set them to [] unless "
         "an exact short loop ID is deliberately paired from an earlier part to a later part. Do not write scenario prose, "
-        "do not add atoms, and do not regenerate the story. Required ordered parts: "
-        f"{required}.\n\nTITLE: {request.title}\nORIGINAL MAP:\n{_compact(original_response, 12000)}"
+        "do not add atoms, and do not regenerate the story. Runtime technical skeleton: "
+        f"{skeleton}. Return exactly these parts. Do not add or remove parts. Do not rename part IDs. "
+        "Do not change roles.\n\n"
+        f"TITLE: {request.title}\nORIGINAL MAP:\n{_compact(original_response, 12000)}"
     )
 
 

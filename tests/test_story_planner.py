@@ -5,12 +5,14 @@ from scriptor.core import ScenarioRequest
 from scriptor.story_planner import (
     StoryContentAtom,
     _has_concrete_story_development,
+    build_story_plan_structure_repair_prompt,
     build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
     repair_story_plan_parts_response,
     seam_tail,
+    story_part_skeleton,
     story_plan_from_dict,
 )
 
@@ -32,6 +34,22 @@ class StoryPartSizingTests(unittest.TestCase):
         targets = calculate_story_part_targets(15123)
         self.assertEqual(sum(targets) + 2 * (len(targets) - 1), 15123)
         self.assertLessEqual(max(targets) - min(targets), 1)
+
+    def test_runtime_part_skeleton_is_exact_for_all_supported_part_counts(self):
+        self.assertEqual(
+            story_part_skeleton(calculate_story_part_targets(6000)),
+            "EXACT_PART_COUNT=1; P1=COMPLETE",
+        )
+        self.assertEqual(
+            story_part_skeleton(calculate_story_part_targets(10000)),
+            "EXACT_PART_COUNT=2; P1=OPENING; P2=FINAL",
+        )
+        self.assertEqual(
+            story_part_skeleton(calculate_story_part_targets(12000)),
+            "EXACT_PART_COUNT=3; P1=OPENING; P2=MIDDLE; P3=FINAL",
+        )
+        self.assertIn("EXACT_PART_COUNT=10", story_part_skeleton(calculate_story_part_targets(50000)))
+        self.assertIn("P30=FINAL", story_part_skeleton(calculate_story_part_targets(150000)))
 
     def test_exact_overall_target_includes_deterministic_assembly_separators(self):
         targets = calculate_story_part_targets(10000)
@@ -63,6 +81,43 @@ class StoryPlanValidationTests(unittest.TestCase):
                 plan = parse_story_plan_response(wrapped, (5000,))
                 self.assertEqual(plan.parts[0].id, "P1")
                 self.assertEqual(plan.thesis, "Проверяемая история.")
+
+    def test_atom_transition_error_precedes_wrong_part_count(self):
+        """A parts-only repair must never hide the first invalid atom contract."""
+        raw = {
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Проверяемая история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [{
+                "id": "C001", "summary": "Новое действие", "owner_part_id": "P1",
+                "content_kind": "SUPPORTED", "state_before": "До действия.",
+                "changed_subject": "Сторона", "development": "приняла решение",
+                "resulting_state": "решение изменило статус",
+            }],
+            "parts": [{
+                "id": "P1", "role": "OPENING", "purpose": "Вход", "macro_id": "M1",
+                "content_ids": ["C001"],
+            }],
+        }
+
+        with self.assertRaisesRegex(ValueError, "structured concrete change"):
+            parse_story_plan_response(
+                json.dumps(raw, ensure_ascii=False), (4000, 4000, 4000),
+                require_state_transitions=True,
+            )
+
+    def test_exact_runtime_skeleton_is_embedded_in_planner_and_repair_prompts(self):
+        request = ScenarioRequest(0, "Тема", "Контекст", target_chars=12000)
+        targets = calculate_story_part_targets(12000)
+        expected = "EXACT_PART_COUNT=3; P1=OPENING; P2=MIDDLE; P3=FINAL"
+
+        planner = build_story_planner_prompt(request, targets)
+        repair = build_story_plan_structure_repair_prompt(request, "{}", targets)
+
+        self.assertIn(expected, planner)
+        self.assertIn(expected, repair)
+        self.assertIn("Do not add or remove parts", planner)
+        self.assertIn("Do not rename part IDs", planner)
 
     def test_cover_metadata_is_inert_for_a_scenario_story_map(self):
         """A valid story neither requires nor persists Covers-only fields."""
