@@ -2205,13 +2205,13 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
         self.assertFalse(validation["editorial_evaluation"]["semantic_coherence_pass"])
 
-    def test_editorial_quality_does_not_reject_natural_contextual_word_by_legacy_substring(self):
+    def test_editorial_quality_rejects_newspaper_style_even_when_source_uses_it(self):
         item = {"title": "Россия нагнетает давление в переговорах"}
 
         validation = _validate_cover_word("headline", "Россия нагнетает давление", item)
 
-        self.assertTrue(validation["valid"], validation)
-        self.assertTrue(validation["editorial_evaluation"]["naturalness_pass"])
+        self.assertFalse(validation["valid"], validation)
+        self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
 
     def test_editorial_evaluation_is_compact_and_structured(self):
         item = {"title": "Трамп повысил тарифы для Китая"}
