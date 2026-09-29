@@ -2262,13 +2262,13 @@ class CoverHeadlineGuardTests(unittest.TestCase):
 
     def test_real_simple_hooks_remain_valid(self):
         cases = (
-            ("Границы закрыты?", "ГРАНИЦЫ ЗАКРЫТЫ? — ПРОБЛЕМЫ В БЕЛАРУСИ С ФУРАМИ — МИТИНГ ИЗ-ЗА ЗАКРЫТЫХ ГРАНИЦ"),
-            ("Киев под новой атакой", "МИР ОПЯТЬ ОТКЛАДЫВАЕТСЯ — РОССИЯ УСИЛИЛА УДАРЫ ПО УКРАИНЕ — КИЕВ СНОВА ОКАЗАЛСЯ ПОД МАССИРОВАННОЙ АТАКОЙ"),
-            ("Мир или новый удар", "ПЕРЕГОВОРЫ ИЛИ НОВАЯ ЭСКАЛАЦИЯ — ПРЕДЛОЖЕНИЯ О МИРЕ ОСТАЮТСЯ НА СТОЛЕ — СТОРОНЫ ГОТОВЯТСЯ К НОВЫМ УДАРАМ"),
+            ("Границы закрыты?", {"title": "Границы закрыты, перевозчики ждут решения"}),
+            ("Киев под новой атакой", {"title": "Киев снова оказался под массированной атакой", "primary_entities": ["Киев"]}),
+            ("Мир или новый удар", {"title": "Переговоры продолжаются, стороны готовятся к новым ударам"}),
         )
-        for value, title in cases:
+        for value, item in cases:
             with self.subTest(value=value):
-                validation = _validate_cover_word("headline", value, {"title": title, "topic": title})
+                validation = _validate_cover_word("headline", value, item)
                 self.assertTrue(validation["valid"], validation)
 
     def test_tabloid_prompt_demands_simple_emotional_mass_audience_language(self):
