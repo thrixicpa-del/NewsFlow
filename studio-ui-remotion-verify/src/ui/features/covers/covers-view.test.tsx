@@ -37,7 +37,8 @@ describe("Covers Light view", () => {
     const command = vi.fn(async () => undefined);
     render(<Covers data={fallback} command={command} />);
 
-    const toggle = screen.getByLabelText("Жёлтая пресса / максимально кликбейтный стиль");
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    const toggle = await screen.findByLabelText("Жёлтая пресса / максимально кликбейтный стиль");
     expect(toggle.closest("label")?.textContent).toContain("STANDARD");
     expect(coverStyles).toContain(".cover-tabloid-toggle");
 
