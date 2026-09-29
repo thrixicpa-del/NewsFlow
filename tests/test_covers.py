@@ -59,6 +59,454 @@ from scriptor.covers import (
     reference_mime_type,
 )
 from scriptor.runner import RunState
+from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+
+class CoverPortraitIdentityRegressionTests(unittest.TestCase):
+    def test_legacy_ordinary_person_is_not_a_political_portrait(self):
+        """Covers must replace a legacy participant with a real public figure."""
+        from scriptor import bridge
+
+        stale_participant = {
+            "name": "Иван Петров", "entity_type": "person",
+            "role_in_story": "участник протеста", "relation_to_story": "вышел на площадь",
+            "source": "story-planner", "confidence": 0.99,
+        }
+        topics = (
+            "ПЕРЕГОВОРЫ О ПЕРЕМИРИИ — ПОСРЕДНИК ВЫШЕЛ К ПРЕССЕ",
+            "ВЫБОРЫ В ПАРЛАМЕНТ — ВОЛОНТ РАЗДАВАЛ ЛИСТОВКИ",
+            "САНКЦИИ И НОВЫЕ ПОШЛИНЫ — ПРЕДПРИНИМАТЕЛЬ ДАЛ КОММЕНТАРИЙ",
+            "ВОЕННАЯ ОПЕРАЦИЯ — ОЧЕВИДЕЦ РАССКАЗАЛ О СОБЫТИЯХ",
+            "ПРОТЕСТ ПРОРВАЛСЯ К САМОМУ КРЕМЛЮ — МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ",
+            "МЕЖДУНАРОДНАЯ ОРГАНИЗАЦИЯ ОБСУЖДАЕТ РЕШЕНИЕ — СОТРУДНИК ВСТРЕТИЛ ДЕЛЕГАЦИЮ",
+            "ПРАВИТЕЛЬСТВО ГОТОВИТ РЕФОРМУ — УЧАСТНИК СЛУШАНИЙ ВЫСТУПИЛ",
+            "ДВА МИНИСТРА ПРОВЕЛИ ВСТРЕЧУ — ПОМОЩНИК ПОКИНУЛ ЗАЛ",
+            "ГОСУДАРСТВО ОБСУЖДАЕТ НОВУЮ ПОЛИТИКУ БЕЗ НАЗВАННОГО ПОЛИТИКА",
+        )
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "глава правительства",
+                        "relation_to_story": "несёт политическую ответственность за решение",
+                        "confidence": 0.61,
+                    },
+                }, ensure_ascii=False)
+
+        for title in topics:
+            with self.subTest(title=title):
+                item = {
+                    "title": title,
+                    "cover_face_required": True,
+                    "cover_face_resolution_status": "RESOLVED",
+                    "cover_primary_person": dict(stale_participant),
+                }
+                settings = Settings(openai_api_keys=[OpenAIKey(label="test", secret="test")])
+                initial = bridge._resolve_cover_portrait(
+                    item, settings, face_mode="auto", allow_manual_reference=False,
+                )
+                self.assertEqual(initial["portrait_subject"], "")
+                with patch.object(bridge, "HybridTextPool", return_value=SemanticPool()):
+                    self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+                portrait = bridge._resolve_cover_portrait(
+                    item, settings, face_mode="auto", allow_manual_reference=False,
+                )
+                self.assertEqual(portrait["portrait_subject"], "Марек Новак")
+                self.assertNotEqual(portrait["portrait_subject"], "Иван Петров")
+                self.assertIn(portrait["portrait_side"], {"LEFT", "RIGHT"})
+                self.assertEqual(portrait["portrait_source"], "covers-revalidated")
+
+    def test_final_prompt_current_portrait_wins_over_stale_scene_selected_people(self):
+        """The current Covers identity must replace any old V2 SELECTED PEOPLE slot."""
+        scene = (
+            "STORY CONTEXT:\nПереговоры проходят у правительственного здания.\n\n"
+            "SELECTED PEOPLE:\nИван Петров\n\n"
+            "VISIBLE ACTION:\nДелегации выходят к камерам.\n\n"
+            "ENVIRONMENT:\nГородская площадь."
+        )
+        prompt = build_final_provider_prompt(
+            scene,
+            {
+                "title": "Переговоры меняют тон",
+                "portrait_subject": "Марек Новак",
+                "selected_people": "Марек Новак",
+                "cover_headline": "ПЕРЕГОВОРЫ",
+            },
+            identity_notes="Render only Марек Новак as the named public figure.",
+        )
+
+        self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+        self.assertNotIn("Иван Петров", prompt)
+
+    def test_fastgen_full_uses_one_repaired_covers_identity_without_png(self):
+        """The real Covers resolver reaches FastGen with one canonical identity."""
+        from scriptor import bridge
+
+        stale_person = {
+            "name": "Иван Петров", "entity_type": "person",
+            "role_in_story": "участник протеста", "relation_to_story": "вышел на площадь",
+            "source": "story-planner", "confidence": 0.99,
+        }
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "президент",
+                        "relation_to_story": "центральный политический actor текущего конфликта",
+                        "confidence": 0.62,
+                    },
+                }, ensure_ascii=False)
+
+        scene = (
+            "STORY CONTEXT:\nПротест у правительственного здания.\n\n"
+            "SELECTED PEOPLE:\nИван Петров\n\n"
+            "VISIBLE ACTION:\nТолпа движется к барьерам.\n\n"
+            "ENVIRONMENT:\nГородская площадь."
+        )
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory, cover_variant_count=1,
+                cover_operation="reference_image_edit",
+                openai_api_keys=[OpenAIKey(label="text", secret="test")],
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.fastgen_capabilities_cache = {
+                "image": [{"id": "reference_image_edit", "inputs": {"min": 0, "max": 2}}],
+            }
+            settings.cover_queue = [{
+                "title": "ПРОТЕСТ ПРОРВАЛСЯ К САМОМУ КРЕМЛЮ — МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ",
+                "production_item_id": "production:identity-regression", "scenario_index": 1,
+                "cover_face_required": True, "cover_face_resolution_status": "RESOLVED",
+                "cover_primary_person": stale_person,
+                "image_prompt": scene, "cover_headline": "ПРОТЕСТЫ", "paths": [],
+            }]
+            provider_calls: list[tuple[str, tuple[str, ...]]] = []
+
+            def render(prompt, output, _stem, _operation, _ratio, **kwargs):
+                provider_calls.append((prompt, tuple(kwargs.get("references") or ())))
+                generated = output / "identity-regression.png"
+                generated.write_bytes(b"generated")
+                return [generated]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:identity-regression"],
+                    "_parallel_cover_worker": True, "buildMode": "fastgen-full",
+                    "faceMode": "auto", "textMode": "fastgen", "operation": "reference_image_edit",
+                })
+
+        item = settings.cover_queue[0]
+        prompt, references = provider_calls[0]
+        self.assertEqual(item["portrait_subject"], "Марек Новак")
+        self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
+        self.assertEqual(item["portrait_source"], "covers-revalidated")
+        self.assertEqual(item["final_provider_face_label"], "Марек Новак")
+        self.assertEqual(item["cover_primary_person"]["entity_type"], "public_figure")
+        self.assertTrue(item["portrait_stale_identity_overridden"])
+        self.assertEqual(item["portrait_stale_identity"], "Иван Петров")
+        self.assertEqual(references, ())
+        self.assertEqual(item["final_provider_face_reference_count"], 0)
+        self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+        self.assertNotIn("Иван Петров", prompt)
+        self.assertIn("large side portrait", prompt)
+
+    def test_missing_person_resolver_retries_malformed_then_uses_grounded_candidate(self):
+        """Resolver retries bounded malformed/blank transport before a controlled failure."""
+        from scriptor import bridge
+
+        class SequencedSemanticPool:
+            def __init__(self):
+                self.responses = iter(("", "not json", json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "глава правительства",
+                        "relation_to_story": "отвечает за описанное решение",
+                        "confidence": 0.6,
+                    },
+                }, ensure_ascii=False)))
+                self.calls = 0
+
+            async def generate(self, _prompt, **_kwargs):
+                self.calls += 1
+                return next(self.responses)
+
+        item = {
+            "title": "Правительство обсуждает новые ограничения",
+            "script": "После заседания правительство подготовило проект решения.",
+            "cover_face_required": True,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="text", secret="test")])
+        pool = SequencedSemanticPool()
+
+        with patch.object(bridge, "HybridTextPool", return_value=pool):
+            self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(pool.calls, 3)
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
+
+    def test_missing_person_resolver_exhaustion_is_bounded_and_diagnostic(self):
+        """No legitimate semantic capacity means a controlled diagnostic, never a random face."""
+        from scriptor import bridge
+
+        class BlankSemanticPool:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, _prompt, **_kwargs):
+                self.calls += 1
+                return ""
+
+        item = {
+            "title": "Правительство обсуждает новые ограничения",
+            "cover_face_required": True,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="text", secret="test")])
+        pool = BlankSemanticPool()
+
+        with patch.object(bridge, "HybridTextPool", return_value=pool):
+            self.assertFalse(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(pool.calls, 3)
+        self.assertEqual(item["cover_face_resolution_status"], "FACE_RESOLUTION_ERROR")
+        self.assertEqual(item["cover_face_resolution_attempts"], 3)
+        self.assertNotIn("cover_primary_person", item)
+
+    def test_fastgen_my_face_uses_only_resolved_person_png_or_zero_png(self):
+        """A real resolver keeps Person X across prompt and prepared-PNG transport."""
+        from scriptor import bridge
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак", "entity_type": "public_figure",
+                        "role_in_story": "президент",
+                        "relation_to_story": "ведёт описанные переговоры",
+                        "confidence": 0.62,
+                    },
+                }, ensure_ascii=False)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "sources"
+            prepared_root = root / "prepared"
+            source_x = sources / "Марек Новак" / "portrait.jpg"
+            prepared_x = prepared_root / "Марек Новак" / "portrait.png"
+            source_y = sources / "Иван Петров" / "portrait.jpg"
+            prepared_y = prepared_root / "Иван Петров" / "portrait.png"
+            for path in (source_x, prepared_x, source_y, prepared_y):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+
+            def render_case(*, remove_prepared_x: bool) -> tuple[dict, tuple[str, ...], str]:
+                if remove_prepared_x:
+                    prepared_x.unlink(missing_ok=True)
+                settings = Settings(
+                    cover_output_folder=directory, cover_variant_count=1,
+                    cover_operation="reference_image_edit",
+                    cover_face_library_enabled=True,
+                    cover_face_library_folder=str(sources),
+                    cover_face_prepared_folder=str(prepared_root),
+                    openai_api_keys=[OpenAIKey(label="text", secret="test")],
+                )
+                settings.cover_api_keys = [FastGenKey(label="image", secret="test")]
+                settings.fastgen_capabilities_cache = {
+                    "image": [{"id": "reference_image_edit", "inputs": {"min": 0, "max": 2}}],
+                }
+                settings.cover_queue = [{
+                    "title": "Переговоры о соглашении у правительственного здания",
+                    "production_item_id": f"production:my-face:{remove_prepared_x}",
+                    "cover_face_required": True,
+                    "cover_face_resolution_status": "RESOLVED",
+                    "cover_primary_person": {
+                        "name": "Иван Петров", "entity_type": "person",
+                        "role_in_story": "случайный участник", "relation_to_story": "виден в кадре",
+                        "source": "story-planner", "confidence": 0.99,
+                    },
+                    "image_prompt": (
+                        "STORY CONTEXT:\nПереговоры.\n\nSELECTED PEOPLE:\nИван Петров\n\n"
+                        "VISIBLE ACTION:\nДелегации выходят.\n\nENVIRONMENT:\nПлощадь."
+                    ),
+                    "cover_headline": "ПЕРЕГОВОРЫ", "paths": [],
+                }]
+                calls: list[tuple[str, tuple[str, ...]]] = []
+
+                def render(prompt, output, _stem, _operation, _ratio, **kwargs):
+                    refs = tuple(str(path) for path in kwargs.get("references") or ())
+                    calls.append((prompt, refs))
+                    generated = output / f"my-face-{remove_prepared_x}.png"
+                    generated.write_bytes(b"generated")
+                    return [generated]
+
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                     patch.object(bridge, "_save_cover_state"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
+                     patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                    bridge.generate_covers({
+                        "indices": [0], "productionItemIds": [settings.cover_queue[0]["production_item_id"]],
+                        "_parallel_cover_worker": True, "buildMode": "fastgen-full-my-face",
+                        "faceMode": "auto", "textMode": "fastgen", "operation": "reference_image_edit",
+                    })
+                prompt, references = calls[0]
+                return settings.cover_queue[0], references, prompt
+
+            with_png, references, prompt = render_case(remove_prepared_x=False)
+            self.assertEqual(references, (str(prepared_x),))
+            self.assertNotIn(str(prepared_y), references)
+            self.assertEqual(with_png["portrait_subject"], "Марек Новак")
+            self.assertEqual(with_png["final_provider_face_label"], "Марек Новак")
+            self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+            self.assertNotIn("Иван Петров", prompt)
+
+            without_png, references, prompt = render_case(remove_prepared_x=True)
+            self.assertEqual(references, ())
+            self.assertEqual(without_png["portrait_subject"], "Марек Новак")
+            self.assertEqual(without_png["final_provider_face_label"], "Марек Новак")
+            self.assertIn("SELECTED PEOPLE:\nМарек Новак", prompt)
+            self.assertNotIn("Иван Петров", prompt)
+
+    def test_legacy_core_anchor_from_planner_is_replaced_by_covers_owned_identity(self):
+        """A pre-#273 core-* Planner record cannot masquerade as Covers provenance."""
+        from scriptor import bridge
+
+        legacy_x = {
+            "name": "Старый Петров", "entity_type": "public_figure",
+            "role_in_story": "президент", "relation_to_story": "старый выбор Planner",
+            "source": "core-anchor-derived", "evidence_type": "ANCHOR_DERIVED",
+            "evidence_summary": "current title: Комиссия обсуждает решение",
+            "confidence": 0.91,
+            "provider_evidence_claim": {
+                "source": "story-planner/provider", "evidence_type": "ANCHOR_DERIVED",
+            },
+        }
+        item = {
+            "title": "Комиссия вводит новые ограничения после заседания",
+            "event_context": "Комиссия обсуждает решение после консультаций с правительством.",
+            "primary_entities": [{"name": "Комиссия", "type": "organization"}],
+            "cover_face_required": True, "cover_face_resolution_status": "LOW_CONFIDENCE",
+            "cover_primary_person": dict(legacy_x),
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="text", secret="test")])
+
+        self.assertEqual(
+            bridge._cover_revalidated_persisted_candidate(item, settings),
+            ("", "", "", 0.0),
+        )
+
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Новый Иванов", "entity_type": "public_figure",
+                        "role_in_story": "министр", "relation_to_story": "отвечает за новые ограничения",
+                        "confidence": 0.63,
+                    },
+                }, ensure_ascii=False)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "sources"
+            prepared = root / "prepared"
+            old_png = prepared / "Старый Петров" / "old.png"
+            new_source = sources / "Новый Иванов" / "portrait.jpg"
+            new_png = prepared / "Новый Иванов" / "portrait.png"
+            for path in (old_png, new_source, new_png):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+            render_settings = Settings(
+                cover_output_folder=directory, cover_variant_count=1,
+                cover_operation="reference_image_edit", cover_face_library_enabled=True,
+                cover_face_library_folder=str(sources), cover_face_prepared_folder=str(prepared),
+                openai_api_keys=[OpenAIKey(label="text", secret="test")],
+            )
+            render_settings.cover_api_keys = [FastGenKey(label="image", secret="test")]
+            render_settings.fastgen_capabilities_cache = {
+                "image": [{"id": "reference_image_edit", "inputs": {"min": 0, "max": 2}}],
+            }
+            render_item = {
+                **item,
+                "production_item_id": "production:legacy-core-anchor",
+                "cover_primary_person": dict(legacy_x),
+                "image_prompt": (
+                    "STORY CONTEXT:\nКомиссия обсуждает ограничения.\n\n"
+                    "SELECTED PEOPLE:\nСтарый Петров\n\n"
+                    "VISIBLE ACTION:\nЗаседание завершается.\n\nENVIRONMENT:\nЗал комиссии."
+                ),
+                "cover_headline": "НОВЫЕ ОГРАНИЧЕНИЯ", "paths": [],
+            }
+            render_settings.cover_queue = [render_item]
+            provider_calls: list[tuple[str, tuple[str, ...]]] = []
+
+            def render(prompt, output, _stem, _operation, _ratio, **kwargs):
+                references = tuple(str(path) for path in kwargs.get("references") or ())
+                provider_calls.append((prompt, references))
+                generated = output / "legacy-core-anchor.png"
+                generated.write_bytes(b"generated")
+                return [generated]
+
+            with patch.object(bridge, "load_settings", return_value=render_settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:legacy-core-anchor"],
+                    "_parallel_cover_worker": True, "buildMode": "fastgen-full-my-face",
+                    "faceMode": "auto", "textMode": "fastgen", "operation": "reference_image_edit",
+                })
+
+            prompt, references = provider_calls[0]
+            self.assertEqual(render_item["portrait_subject"], "Новый Иванов")
+            self.assertEqual(render_item["final_provider_face_label"], "Новый Иванов")
+            self.assertEqual(render_item["cover_primary_person"]["cover_identity_owner"], "COVERS")
+            self.assertTrue(render_item["portrait_stale_identity_overridden"])
+            self.assertEqual(render_item["portrait_stale_identity"], "Старый Петров")
+            self.assertIn(render_item["portrait_side"], {"LEFT", "RIGHT"})
+            self.assertEqual(references, (str(new_png),))
+            self.assertNotIn(str(old_png), references)
+            self.assertIn("SELECTED PEOPLE:\nНовый Иванов", prompt)
+            self.assertNotIn("SELECTED PEOPLE:\nСтарый Петров", prompt)
+            self.assertIn("Новый Иванов", prompt)
+
+    def test_only_explicit_or_marked_covers_identity_can_skip_semantic_resolver(self):
+        """Current explicit people and marked Covers results retain their distinct safe paths."""
+        from scriptor import bridge
+
+        explicit = {
+            "title": "Новый Иванов объявил о решении",
+            "selected_people": ["Новый Иванов"],
+            "cover_face_required": True,
+        }
+        explicit_portrait = bridge._resolve_cover_portrait(
+            explicit, Settings(), face_mode="auto", allow_manual_reference=False,
+        )
+        self.assertEqual(explicit_portrait["portrait_subject"], "Новый Иванов")
+
+        covers_owned = {
+            "title": "Комиссия вводит новые ограничения",
+            "event_context": "Комиссия обсуждает решение после консультаций.",
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
+            "cover_primary_person": {
+                "name": "Новый Иванов", "entity_type": "public_figure",
+                "role_in_story": "министр", "relation_to_story": "отвечает за решение",
+                "source": "core-anchor-derived", "evidence_type": "ANCHOR_DERIVED",
+                "cover_identity_owner": "COVERS", "confidence": 0.62,
+            },
+        }
+        reused = bridge._cover_revalidated_persisted_candidate(covers_owned, Settings())
+        self.assertEqual(reused[0], "Новый Иванов")
 
 
 class CoverGalleryFileStateTests(unittest.TestCase):
@@ -97,14 +545,14 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("Еврокомиссия", prompt)
         self.assertIn("Брюссель", prompt)
 
-    def test_planner_resolved_institution_decision_maker_reaches_covers_as_real_person(self):
+    def test_marked_covers_institution_decision_maker_reaches_covers_as_real_person(self):
         from scriptor import bridge
 
         title = "ЕС вводит новые ограничения"
         primary = {
             "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель комиссии",
             "relation_to_story": "несёт ответственность за решение Еврокомиссии", "source": "institution-decision-maker",
-            "confidence": 0.91,
+            "cover_identity_owner": "COVERS", "confidence": 0.91,
         }
         settings = Settings(
             idea_production_items=[{"id": "production:institution", "title": title}],
@@ -298,7 +746,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertEqual(stored["cover_primary_person"]["evidence_type"], "VERIFIED_LOCAL_IDENTITY")
         self.assertEqual(stored["cover_primary_person"]["name"], "Марек Новак")
 
-    def test_story_planner_primary_person_wins_over_face_tree_and_is_persisted_to_cover(self):
+    def test_current_structured_person_wins_over_legacy_primary_and_is_persisted_to_cover(self):
         from scriptor import bridge
 
         title = "Переговоры о соглашении"
@@ -324,7 +772,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         resolved = bridge._resolve_cover_portrait(settings.cover_queue[0], settings, face_mode="auto", allow_manual_reference=False)
 
         self.assertEqual(resolved["portrait_subject"], "Марек Новак")
-        self.assertEqual(resolved["portrait_source"], "story-planner")
+        self.assertEqual(resolved["portrait_source"], "structured-selected_people")
         self.assertEqual(settings.cover_queue[0]["cover_primary_person"]["name"], "Марек Новак")
 
     def test_org_or_place_never_become_primary_portrait_and_no_subject_needs_review(self):
@@ -370,7 +818,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
             primary = {
                 "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
-                "relation_to_story": "ведёт переговоры", "source": "story-planner", "confidence": 0.94,
+                "relation_to_story": "ведёт переговоры", "source": "core-anchor-derived",
+                "cover_identity_owner": "COVERS", "confidence": 0.94,
             }
             settings.cover_queue = [
                 {"production_item_id": "production:review", "title": "Городская тема", "image_prompt": "Город",
@@ -390,7 +839,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             def resolve_missing(item, _settings):
                 item.update(
                     cover_people_candidates=[primary], cover_primary_person=primary,
-                    cover_face_resolution_status="LOW_CONFIDENCE",
+                    cover_face_resolution_status="LOW_CONFIDENCE", cover_identity_owner="COVERS",
                 )
                 return True
 
@@ -419,7 +868,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             "cover_face_resolution_status": "LOW_CONFIDENCE",
             "cover_primary_person": {"name": "Марек Новак", "entity_type": "public_figure",
                                      "role_in_story": "председатель", "relation_to_story": "ответственный actor",
-                                     "source": "institution-decision-maker", "confidence": 0.62},
+                                     "source": "core-anchor-derived", "cover_identity_owner": "COVERS",
+                                     "confidence": 0.62},
         }
         resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
 
@@ -554,10 +1004,10 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn(resolved["portrait_side"], {"LEFT", "RIGHT"})
         self.assertNotEqual(resolved["portrait_source"], "none")
 
-    def test_portrait_resolver_accepts_an_arbitrary_typed_person_entity_from_current_context(self):
+    def test_portrait_resolver_accepts_an_arbitrary_typed_public_figure_from_current_context(self):
         from scriptor import bridge
 
-        item = {"title": "Переговоры о торговле", "entities": [{"name": "Amina Diallo", "type": "person"}]}
+        item = {"title": "Переговоры о торговле", "entities": [{"name": "Amina Diallo", "type": "public_figure"}]}
         resolved = bridge._resolve_cover_portrait(item, Settings(), face_mode="auto", allow_manual_reference=False)
 
         self.assertEqual(resolved["portrait_subject"], "Amina Diallo")
@@ -2043,7 +2493,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
 
 
 class CoverFaceLibraryTests(unittest.TestCase):
-    def test_face_tree_matches_only_story_planner_primary_not_another_visual_person(self):
+    def test_face_tree_matches_only_revalidated_primary_not_another_visual_person(self):
         from scriptor import bridge
 
         with TemporaryDirectory() as directory:
@@ -2061,7 +2511,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 "cover_face_resolution_status": "RESOLVED",
                 "cover_primary_person": {
                     "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
-                    "relation_to_story": "принял решение", "source": "story-planner", "confidence": 0.94,
+                    "relation_to_story": "принял решение", "source": "core-anchor-derived",
+                    "cover_identity_owner": "COVERS", "confidence": 0.94,
                 },
                 "visual_reference_path": str(other),
             }
@@ -2074,7 +2525,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
         self.assertEqual(label, "Марек Новак")
         self.assertEqual(source, "auto")
 
-    def test_missing_planner_person_png_keeps_same_subject_with_zero_reference(self):
+    def test_missing_revalidated_person_png_keeps_same_subject_with_zero_reference(self):
         from scriptor import bridge
 
         item = {
@@ -2082,7 +2533,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
             "cover_face_resolution_status": "RESOLVED",
             "cover_primary_person": {
                 "name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
-                "relation_to_story": "выступил", "source": "story-planner", "confidence": 0.94,
+                "relation_to_story": "выступил", "source": "core-anchor-derived",
+                "cover_identity_owner": "COVERS", "confidence": 0.94,
             },
         }
         settings = Settings(cover_face_library_enabled=True, cover_face_library_folder="missing-face-tree")

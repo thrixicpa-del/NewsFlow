@@ -21,20 +21,6 @@ def _story_plan(part_count: int = 2) -> str:
     roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
     return json.dumps({
         "thesis": "Одна история",
-        "cover_face_required": True,
-        "cover_people_candidates": [{
-            "name": "Алексей Петров", "entity_type": "public_figure",
-            "role_in_story": "ответственный представитель",
-            "relation_to_story": "связан с центральным решением тестовой истории",
-            "source": "test-fixture", "confidence": 0.62,
-        }],
-        "cover_primary_person": {
-            "name": "Алексей Петров", "entity_type": "public_figure",
-            "role_in_story": "ответственный представитель",
-            "relation_to_story": "связан с центральным решением тестовой истории",
-            "source": "test-fixture", "confidence": 0.62,
-        },
-        "cover_face_resolution_status": "LOW_CONFIDENCE",
         "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
         "content_atoms": [
             {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}",
@@ -51,6 +37,41 @@ def _story_plan(part_count: int = 2) -> str:
 
 
 class ScenarioGenerationTests(unittest.TestCase):
+    def test_scenario_generation_does_not_project_cover_face_state(self):
+        """Generating prose leaves ProductionItem face data for the Covers stage."""
+        title = "Сценарий без обложки"
+        settings = Settings(
+            scenario_provider="openai",
+            template="Напиши сценарий {title}",
+            prompt_ranges=[],
+            scenario_target_chars=6000,
+            scenario_allowed_min=5000,
+            scenario_allowed_max=7000,
+            idea_production_items=[{"id": "item-1", "title": title}],
+            idea_scenario_context={title: {"id": "item-1", "title": title}},
+        )
+
+        class ScenarioPool:
+            concurrency = 1
+
+            async def generate(self, prompt):
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
+                target = int(re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt).group(1))
+                return "Т" * target
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([
+                 title,
+             ], [Job(ScenarioRequest(0, title, "", "item-1"), RunState.WAITING)])), \
+             patch.object(bridge, "save_session"), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=ScenarioPool()):
+            bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+
+        item = settings.idea_production_items[0]
+        self.assertFalse(any(key.startswith("cover_") for key in item))
     def test_explicit_reconcile_recovers_only_interrupted_scenarios_without_losing_recovery_data(self):
         """Explicit recovery makes an interrupted row retryable without changing its saved work."""
         title = "Прерванный сценарий"
