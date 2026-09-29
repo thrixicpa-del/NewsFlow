@@ -28,6 +28,8 @@ class StoryContentAtom:
     summary: str
     owner_part_id: str
     content_kind: str
+    novelty_question: str = ""
+    novelty_payload: str = ""
 
 
 @dataclass(frozen=True)
@@ -146,12 +148,24 @@ def _semantic_tokens(value: object) -> frozenset[str]:
     return frozenset(tokens)
 
 
-def _semantic_overlap(left: object, right: object) -> float:
+def _obvious_semantic_duplicate(left: object, right: object) -> bool:
+    """Catch only obvious near-copies, never merely related story material.
+
+    The guard is intentionally stricter than a containment score. Two rows may
+    share topic words while adding a different actor/mechanism/consequence.
+    Reject only when their compact signatures are effectively the same.
+    """
     first = _semantic_tokens(left)
     second = _semantic_tokens(right)
     if min(len(first), len(second)) < 4:
-        return 0.0
-    return len(first & second) / min(len(first), len(second))
+        return False
+    if first == second:
+        return True
+    intersection = len(first & second)
+    containment = intersection / min(len(first), len(second))
+    union = len(first | second)
+    jaccard = intersection / union if union else 0.0
+    return containment >= 0.95 and jaccard >= 0.82
 
 
 def _id_list(value: object, _field: str) -> tuple[str, ...]:
@@ -221,8 +235,18 @@ def _normalise_advisory_loops(parts: list[StoryPartPlan]) -> list[StoryPartPlan]
     ]
 
 
-def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> StoryPlan:
-    """Parse and validate the complete planner map before any writer starts."""
+def parse_story_plan_response(
+    text: str,
+    part_targets: tuple[int, ...],
+    *,
+    validate_semantic_novelty: bool = True,
+) -> StoryPlan:
+    """Parse and validate the complete planner map before any writer starts.
+
+    Fresh Planner responses validate obvious semantic near-copies. Persisted
+    legacy maps may opt out of that new validation so an old accepted prefix
+    never becomes unreadable after an upgrade.
+    """
     raw = _load_json_object(
         text,
         invalid_message="story planner must return strict JSON",
@@ -317,15 +341,18 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
         ).upper()
         if content_kind not in _CONTENT_KINDS:
             raise ValueError("story plan content_kind must be SUPPORTED or DRAMATIZED")
+        summary = _clean_text(
+            raw_atom.get("summary"), f"content_atoms[{index}].summary"
+        )
         atom = StoryContentAtom(
             id=_clean_text(raw_atom.get("id"), f"content_atoms[{index}].id"),
-            summary=_clean_text(
-                raw_atom.get("summary"), f"content_atoms[{index}].summary"
-            ),
+            summary=summary,
             owner_part_id=_clean_text(
                 raw_atom.get("owner_part_id"), f"content_atoms[{index}].owner_part_id"
             ),
             content_kind=content_kind,
+            novelty_question=_optional_text(raw_atom.get("novelty_question")) or summary,
+            novelty_payload=_optional_text(raw_atom.get("novelty_payload")) or summary,
         )
         if atom.id in atom_by_id:
             raise ValueError("story plan content atom IDs must be unique")
@@ -336,13 +363,23 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
         atom_by_id[atom.id] = atom
         atoms.append(atom)
 
-    # Reject only obvious near-copy semantic atoms locally. This guard is
-    # intentionally conservative; it prevents duplicate meaning from becoming
-    # separate ownership units without adding a post-generation LLM review.
-    for atom_index, atom in enumerate(atoms):
-        for previous in atoms[:atom_index]:
-            if _semantic_overlap(atom.summary, previous.summary) >= 0.9:
-                raise ValueError("story plan content atoms must be materially distinct")
+    # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
+    # persisted maps stay readable even if an older Planner used repetitive
+    # summaries; accepted prose must never be invalidated by a new validator.
+    if validate_semantic_novelty:
+        for atom_index, atom in enumerate(atoms):
+            atom_contract = f"{atom.novelty_question} {atom.novelty_payload}"
+            for previous in atoms[:atom_index]:
+                previous_contract = (
+                    f"{previous.novelty_question} {previous.novelty_payload}"
+                )
+                if (
+                    _obvious_semantic_duplicate(atom.novelty_payload, previous.novelty_payload)
+                    or _obvious_semantic_duplicate(atom_contract, previous_contract)
+                ):
+                    raise ValueError(
+                        "story plan content atoms must be materially distinct"
+                    )
 
     assigned_ids = [content_id for part in parts for content_id in part.content_ids]
     if len(set(assigned_ids)) != len(assigned_ids):
@@ -383,29 +420,20 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
         )
     parts = enriched_parts
 
-    # A part may deepen an earlier subject, but its combined semantic contract
-    # must not be an obvious near-copy of an earlier part.
-    for part_index, part in enumerate(parts):
-        material = " ".join((
-            part.purpose,
-            part.novelty_question,
-            part.novelty_payload,
-            *(atom_by_id[content_id].summary for content_id in part.content_ids),
-        ))
-        contract = f"{part.novelty_question} {part.novelty_payload}"
-        for previous in parts[:part_index]:
-            previous_material = " ".join((
-                previous.purpose,
-                previous.novelty_question,
-                previous.novelty_payload,
-                *(atom_by_id[content_id].summary for content_id in previous.content_ids),
-            ))
-            previous_contract = f"{previous.novelty_question} {previous.novelty_payload}"
-            if (
-                _semantic_overlap(contract, previous_contract) >= 0.9
-                or _semantic_overlap(material, previous_material) >= 0.9
-            ):
-                raise ValueError("story plan parts must own materially distinct semantic content")
+    # A part may stay on the same topic, but on a fresh plan it must not carry
+    # an effectively identical novelty contract. Related vocabulary alone is
+    # never a failure: this guard exists only for obvious near-copies.
+    if validate_semantic_novelty:
+        for part_index, part in enumerate(parts):
+            contract = f"{part.novelty_question} {part.novelty_payload}"
+            for previous in parts[:part_index]:
+                previous_contract = (
+                    f"{previous.novelty_question} {previous.novelty_payload}"
+                )
+                if _obvious_semantic_duplicate(contract, previous_contract):
+                    raise ValueError(
+                        "story plan parts must own materially distinct semantic content"
+                    )
 
     # opens/closes are continuity hints, not story ownership. Keep strict
     # validation for parts/macros/atoms above, then locally discard malformed
@@ -493,7 +521,11 @@ def story_plan_from_dict(value: dict[str, Any]) -> StoryPlan:
     for key in tuple(persisted):
         if key.startswith("cover_"):
             persisted.pop(key, None)
-    return parse_story_plan_response(json.dumps(persisted, ensure_ascii=False), targets)
+    return parse_story_plan_response(
+        json.dumps(persisted, ensure_ascii=False),
+        targets,
+        validate_semantic_novelty=False,
+    )
 
 
 def seam_tail(text: str, limit: int = 500) -> str:
@@ -534,12 +566,17 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "position, consequence, causal step, scene detail or turning point. Return strict JSON with thesis, "
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
-        "content atoms. Every atom needs id, summary, owner_part_id and content_kind SUPPORTED or DRAMATIZED. "
-        "SUPPORTED atoms must rely on provided NewsFlow context. DRAMATIZED atoms may extend the narrative, but must "
-        "still be materially distinct. Do not fill parts by paraphrasing one meaning. A synonym swap, a summary of an "
+        "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
+        "novelty_question and novelty_payload. novelty_question is the concrete question that atom answers; "
+        "novelty_payload is the one-sentence information the viewer learns for the first time from that atom. "
+        "No two atoms may answer the same question or carry the same new information. SUPPORTED atoms must rely on "
+        "provided NewsFlow context. DRAMATIZED atoms may extend the narrative, but must still be materially distinct. "
+        "Do not fill parts by paraphrasing one meaning. A synonym swap, a summary of an "
         "earlier conclusion, or another explanation of the same thesis is NOT new story material. Keep thesis, purposes "
         "and atom summaries compact. Plan enough distinct developments for the requested long-form volume: for a roughly "
-        "5k-character part prefer 2-4 genuinely different atoms; for a 6-9k COMPLETE part prefer 3-5. If supplied facts "
+        "5k-character part prefer 3-5 genuinely different atoms; for a 6-9k COMPLETE part prefer 5-7. Treat content_ids "
+        "as a one-way story progression: event -> actor/mechanism -> reaction/countermove -> consequence/turning point "
+        "as appropriate to the topic, without forcing categories that do not fit. If supplied facts "
         "are thin, add distinct DRAMATIZED actions, reactions, mechanisms, consequences, actors, scene developments or "
         "turning points instead of stretching one conclusion. Every part purpose must name a concrete distinct "
         "responsibility; never use generic purposes like 'continue' or 'develop further' without saying what new "
@@ -598,7 +635,12 @@ def build_story_writer_prompt(
 
     def format_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
-        return f"{atom_id} [{atom.content_kind}]: {_compact(atom.summary, _COMPACT_ATOM_CHARS)}"
+        return (
+            f"{atom_id} [{atom.content_kind}]: "
+            f"{_compact(atom.summary, _COMPACT_ATOM_CHARS)} "
+            f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
+            f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
+        )
 
     current_atoms = "\n".join(
         f"- {format_atom(atom_id)}" for atom_id in part.content_ids
@@ -711,9 +753,12 @@ def build_story_writer_prompt(
         "development, or a new causal question with its answer. PARAPHRASE DOES NOT COUNT AS NEW INFORMATION. "
         "Do not restate the thesis, re-summarize an earlier conclusion, or repeat USED SEMANTIC MEANINGS with synonyms. "
         "Use the requested volume to deepen sequence, mechanism, actors, reactions and consequences inside the current "
-        "owned atoms. If DRAMATIZED atoms are available, create distinct concrete developments inside those atoms rather "
-        "than padding with another explanation of the same point. A paragraph that adds no new story information should "
-        "not be written.\n"
+        "owned atoms. CURRENT CONTENT is an ordered one-way progression: consume its atoms in listed order. Once an "
+        "atom's question/new information has been explained, move forward and do not reopen that atom as filler; only "
+        "a short connective reference is allowed. This one-pass rule also applies to a single COMPLETE 6-9k story, where "
+        "cross-part memory does not exist. If DRAMATIZED atoms are available, create distinct concrete developments "
+        "inside those atoms rather than padding with another explanation of the same point. A paragraph that adds no "
+        "new story information should not be written.\n"
     )
 
     return (
@@ -743,7 +788,7 @@ def build_story_writer_prompt(
         f"CURRENT NOVELTY QUESTION: {_compact(part.novelty_question, _COMPACT_PURPOSE_CHARS)}\n"
         f"CURRENT NEW INFORMATION: {_compact(part.novelty_payload, _COMPACT_ATOM_CHARS)}\n"
         f"{length_instruction}"
-        f"CURRENT CONTENT:\n{current_atoms}\n"
+        f"CURRENT CONTENT ORDER (consume once, in order):\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
         f"USED SEMANTIC MEANINGS (forbidden to restate): {used_semantic_meanings}\n"
         f"OPEN LOOPS BEFORE THIS PART: {', '.join(opened) or 'none'}\n"
