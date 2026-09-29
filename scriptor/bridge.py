@@ -805,7 +805,7 @@ _COVER_IDENTITY_OWNER = "COVERS"
 # current story's acting side from the ProductionItem.
 _COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
     "russia": {
-        "country": "Russia", "aliases": ("россия", "российск", "кремль", "кремл", "москва", "russia", "russian"),
+        "country": "Russia", "aliases": ("россия", "росси", "российск", "кремль", "кремл", "москва", "russia", "russian"),
         "president": {"name": "Владимир Путин", "aliases": ("путин", "putin")}, "updated": "2026-09",
     },
     "ukraine": {
@@ -829,20 +829,22 @@ _COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
         "president": {"name": "Реджеп Тайип Эрдоган", "aliases": ("эрдоган", "erdogan")}, "updated": "2026-09",
     },
 }
-def _cover_registry_aliases(country_id: str, entry: dict[str, object]) -> tuple[str, ...]:
+def _cover_registry_aliases(country_id: str, entry: dict[str, object], *, include_president: bool = True) -> tuple[str, ...]:
     aliases = [country_id, str(entry.get("country", "") or "")]
     aliases.extend(str(value or "") for value in entry.get("aliases", ()) if value)
     president = entry.get("president")
-    if isinstance(president, dict):
+    if include_president and isinstance(president, dict):
         aliases.extend(str(value or "") for value in president.get("aliases", ()) if value)
         aliases.append(str(president.get("name", "") or ""))
     return tuple(" ".join(alias.split()).casefold() for alias in aliases if alias)
 
 
-def _cover_alias_positions(text: str, registry: dict[str, dict[str, object]]) -> list[tuple[int, str]]:
+def _cover_alias_positions(
+    text: str, registry: dict[str, dict[str, object]], *, include_president: bool = True,
+) -> list[tuple[int, str]]:
     positions: list[tuple[int, str]] = []
     for country_id, entry in registry.items():
-        for alias in _cover_registry_aliases(country_id, entry):
+        for alias in _cover_registry_aliases(country_id, entry, include_president=include_president):
             if not alias:
                 continue
             # English aliases require strict token boundaries ("war" must
@@ -854,13 +856,12 @@ def _cover_alias_positions(text: str, registry: dict[str, dict[str, object]]) ->
     return sorted(set(positions))
 
 
-def _cover_title_has_unknown_country_label(text: str, registry: dict[str, dict[str, object]]) -> bool:
-    """Keep Stage 1 from treating the sole known side as an unambiguous one."""
-    for match in re.finditer(r"(?<!\w)country\s+[a-z](?!\w)", text, flags=re.IGNORECASE):
-        label = match.group(0).casefold()
-        if not any(label in _cover_registry_aliases(country_id, entry) for country_id, entry in registry.items()):
-            return True
-    return False
+_COVER_SUBJECT_OBJECT_CUE = re.compile(
+    r"\b(?:pressures?|strikes?|attacks?|responds?|rejects?|announces?|"
+    r"усилил(?:а|и)?|нан[её]с(?:ла|ли)?|атаковал(?:а|и)?|ответил(?:а|и)?|"
+    r"отверг(?:ла|ли)?|поставлены|поставил(?:а|и)?)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _cover_resolve_primary_country(
@@ -868,9 +869,9 @@ def _cover_resolve_primary_country(
 ) -> dict[str, str] | None:
     """Resolve only unambiguous current-topic country evidence for Stage 1.
 
-    This intentionally does not parse a growing grammar of political verbs.
-    When a title names multiple sides, or an unsupported side alongside a
-    supported one, Stage 2 semantic resolution owns the subject/target choice.
+    A small, explicit subject/object cue is used only when it establishes a
+    literal registered country as the actor.  All other multi-side headlines
+    remain for Stage 2 rather than expanding a fragile verb grammar.
     """
     active_registry = registry or _COVER_PRESIDENT_REGISTRY
     for field in ("title", "topic", "geography", "entities", "primary_entities", "primary_entity",
@@ -882,14 +883,36 @@ def _cover_resolve_primary_country(
         if not positions:
             continue
         unique = {country_id for _position, country_id in positions}
-        if len(unique) == 1 and not (field == "title" and _cover_title_has_unknown_country_label(text, active_registry)):
+        literal_positions = _cover_alias_positions(text, active_registry, include_president=False)
+        if field == "title" and len(unique) > 1:
+            for cue in _COVER_SUBJECT_OBJECT_CUE.finditer(text):
+                before = [value for value in literal_positions if value[0] < cue.start()]
+                after = [value for value in positions if value[0] > cue.end()]
+                if before and after:
+                    country_id = before[-1][1]
+                    entry = active_registry[country_id]
+                    return {
+                        "country_id": country_id,
+                        "country": str(entry.get("country", country_id) or country_id),
+                        "source": "title:subject",
+                        "reason": f"title identifies {entry.get('country', country_id)} as the acting political side",
+                    }
+            return None
+        if len(unique) == 1:
             country_id = next(iter(unique))
             entry = active_registry[country_id]
+            object_fallback = field == "title" and any(
+                value.start() < next(position for position, candidate in positions if candidate == country_id)
+                for value in _COVER_SUBJECT_OBJECT_CUE.finditer(text)
+            )
             return {
                 "country_id": country_id,
                 "country": str(entry.get("country", country_id) or country_id),
-                "source": f"{field}:deterministic",
-                "reason": f"{field} contains one unambiguous supported political country",
+                "source": "title:object-fallback" if object_fallback else f"{field}:deterministic",
+                "reason": (
+                    f"title identifies {entry.get('country', country_id)} as the only clear affected political side"
+                    if object_fallback else f"{field} contains one unambiguous supported political country"
+                ),
             }
         # Title is authoritative.  Do not dilute an unresolved multi-country
         # title with a secondary script/location field.

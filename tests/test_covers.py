@@ -3245,8 +3245,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 self.assertEqual(calls[0][1], ())
                 self.assertEqual(item["portrait_subject"], "Владимир Путин")
                 self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
-                self.assertEqual(item["portrait_source"], "covers-revalidated")
-                self.assertIn("главный политический субъект", item["portrait_resolver_reason"])
+                self.assertEqual(item["portrait_source"], "covers-president-registry")
+                self.assertIn("primary political side", item["portrait_resolver_reason"])
                 self.assertIn("Владимир Путин", calls[0][0])
                 self.assertIn("large side portrait", calls[0][0])
                 self.assertEqual(item["face_reference_count"], 0)
@@ -6412,19 +6412,19 @@ class CoverAutomaticPresidentContractTests(unittest.TestCase):
         },
     }
 
-    def test_multi_country_actor_target_defers_to_semantic_stage_instead_of_verb_grammar(self):
-        """Stage 1 must not guess a title actor with an ad-hoc verb grammar."""
+    def test_known_subject_wins_over_known_object_with_a_conservative_relation_cue(self):
+        """Stage 1 prefers an unambiguous acting side over the affected side."""
         from scriptor import bridge
 
         item = {"title": "Country A strikes Country B — capital of Country B under attack"}
         resolved = bridge._cover_resolve_primary_country(item, registry=self.PRESIDENT_FIXTURES)
-        self.assertIsNone(resolved)
+        self.assertEqual(resolved["country_id"], "country-a")
+        self.assertEqual(resolved["source"], "title:subject")
 
     def test_two_president_titles_defer_to_semantic_stage(self):
         from scriptor import bridge
 
         cases = (
-            "Country B announces response to Country A",
             "President Alpha pressures President Bravo",
             "President Bravo rejects President Alpha's conditions",
         )
@@ -6449,16 +6449,36 @@ class CoverAutomaticPresidentContractTests(unittest.TestCase):
                 self.assertEqual(resolved["country_id"], country_id)
                 self.assertEqual(bridge._cover_resolve_registry_president(resolved)["name"], president)
 
-    def test_unsupported_actor_and_supported_target_never_selects_the_passive_target(self):
+    def test_unknown_subject_and_one_supported_object_uses_object_fallback(self):
         from scriptor import bridge
 
         registry = {"country-b": self.PRESIDENT_FIXTURES["country-b"]}
         item = {"title": "Country A strikes Country B"}
-        self.assertIsNone(bridge._cover_resolve_primary_country(item, registry=registry))
-        fallback = bridge._cover_apply_automatic_political_portrait(item, registry=registry)
-        self.assertFalse(fallback["ok"])
-        self.assertEqual(fallback["reason"], "SEMANTIC_COUNTRY_FALLBACK")
-        self.assertNotIn("cover_primary_person", item)
+        resolved = bridge._cover_resolve_primary_country(item, registry=registry)
+        self.assertEqual(resolved["country_id"], "country-b")
+        self.assertEqual(resolved["source"], "title:object-fallback")
+        self.assertTrue(bridge._cover_apply_automatic_political_portrait(item, registry=registry)["ok"])
+        self.assertEqual(item["cover_primary_person"]["name"], "President Bravo")
+
+    def test_passive_ukraine_or_russia_object_resolves_its_president(self):
+        from scriptor import bridge
+
+        cases = (
+            ("Новые условия поставлены Украине", "ukraine", "Владимир Зеленский"),
+            ("Новые условия поставлены России", "russia", "Владимир Путин"),
+        )
+        for title, country_id, president in cases:
+            with self.subTest(title=title):
+                resolved = bridge._cover_resolve_primary_country({"title": title})
+                self.assertEqual(resolved["country_id"], country_id)
+                self.assertEqual(resolved["source"], "title:object-fallback")
+                self.assertEqual(bridge._cover_resolve_registry_president(resolved)["name"], president)
+
+    def test_multiple_objects_without_a_clear_subject_defer_to_semantic_stage(self):
+        from scriptor import bridge
+
+        item = {"title": "Country A and Country B face new conditions"}
+        self.assertIsNone(bridge._cover_resolve_primary_country(item, registry=self.PRESIDENT_FIXTURES))
 
     def test_generated_cover_words_never_change_title_owned_political_identity(self):
         from scriptor import bridge
