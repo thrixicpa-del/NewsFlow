@@ -14,6 +14,7 @@ from typing import Any
 PREFERRED_PART_CHARS = 5_000
 _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
+_COMPACT_AVOID_CHARS = 140
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
@@ -30,6 +31,7 @@ class StoryContentAtom:
     content_kind: str
     novelty_question: str = ""
     novelty_payload: str = ""
+    do_not_repeat: str = ""
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,24 @@ def _expected_roles(part_count: int) -> tuple[str, ...]:
     if part_count == 1:
         return ("COMPLETE",)
     return ("OPENING",) + ("MIDDLE",) * (part_count - 2) + ("FINAL",)
+
+
+def _minimum_semantic_atoms(target_chars: int, role: str) -> int:
+    """Return a conservative material floor for a fresh novelty-aware Story Map.
+
+    This does not prescribe fixed story roles. It only prevents one broad idea
+    from being stretched across several thousand characters.
+    """
+    target = max(0, int(target_chars or 0))
+    if not target:
+        return 1
+    if role == "COMPLETE" and target >= 6_000:
+        return 5
+    if target >= 4_500:
+        return 3
+    if target >= 2_500:
+        return 2
+    return 1
 
 
 def _normalise_advisory_loops(parts: list[StoryPartPlan]) -> list[StoryPartPlan]:
@@ -365,6 +385,7 @@ def parse_story_plan_response(
             content_kind=content_kind,
             novelty_question=_optional_text(raw_atom.get("novelty_question")) or summary,
             novelty_payload=_optional_text(raw_atom.get("novelty_payload")) or summary,
+            do_not_repeat=_optional_text(raw_atom.get("do_not_repeat")),
         )
         if atom.id in atom_by_id:
             raise ValueError("story plan content atom IDs must be unique")
@@ -392,6 +413,15 @@ def parse_story_plan_response(
                     raise ValueError(
                         "story plan content atoms must be materially distinct"
                     )
+
+    if validate_semantic_novelty and explicit_atom_novelty:
+        for part in parts:
+            minimum_atoms = _minimum_semantic_atoms(part.target_chars, part.role)
+            if len(part.content_ids) < minimum_atoms:
+                raise ValueError(
+                    f"story plan part {part.id} requires at least {minimum_atoms} "
+                    "distinct content atoms for semantic density"
+                )
 
     assigned_ids = [content_id for part in parts for content_id in part.content_ids]
     if len(set(assigned_ids)) != len(assigned_ids):
@@ -559,11 +589,15 @@ def _compact(value: object, limit: int) -> str:
 
 def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> str:
     """Build one strict-JSON organizer request without replacing the writing contract."""
+    roles = _expected_roles(len(part_targets))
     part_rows = ", ".join(
         (
-            f"P{index + 1}≈{target} chars"
+            (
+                f"P{index + 1}≈{target} chars; "
+                f"minimum {_minimum_semantic_atoms(target, roles[index])} distinct atoms"
+            )
             if target
-            else f"P{index + 1}=natural complete length"
+            else f"P{index + 1}=natural complete length; minimum 1 distinct atom"
         )
         for index, target in enumerate(part_targets)
     )
@@ -579,14 +613,17 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
-        "novelty_question and novelty_payload. novelty_question is the concrete question that atom answers; "
-        "novelty_payload is the one-sentence information the viewer learns for the first time from that atom. "
+        "novelty_question, novelty_payload and do_not_repeat. novelty_question is the concrete question that atom "
+        "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
+        "do_not_repeat names the already-established conclusion/meaning this atom may reference briefly but must not "
+        "explain again (use an empty string when there is no earlier meaning to protect). "
         "No two atoms may answer the same question or carry the same new information. SUPPORTED atoms must rely on "
         "provided NewsFlow context. DRAMATIZED atoms may extend the narrative, but must still be materially distinct. "
         "Do not fill parts by paraphrasing one meaning. A synonym swap, a summary of an "
         "earlier conclusion, or another explanation of the same thesis is NOT new story material. Keep thesis, purposes "
         "and atom summaries compact. Plan enough distinct developments for the requested long-form volume: for a roughly "
-        "5k-character part prefer 3-5 genuinely different atoms; for a 6-9k COMPLETE part prefer 5-7. Treat content_ids "
+        "5k-character part use at least 3 and normally 3-5 genuinely different atoms; for a 6-9k COMPLETE part use "
+        "at least 5 and normally 5-7. These are semantic-density requirements, not fixed story templates. Treat content_ids "
         "as a one-way story progression: event -> actor/mechanism -> reaction/countermove -> consequence/turning point "
         "as appropriate to the topic, without forcing categories that do not fit. If supplied facts "
         "are thin, add distinct DRAMATIZED actions, reactions, mechanisms, consequences, actors, scene developments or "
@@ -603,7 +640,10 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "ordered content_ids/content atoms inside P1. Otherwise use P1 as OPENING, all internal parts as MIDDLE, and "
         "only the last part as FINAL. Reserve every atom exactly once. A later part may deepen an "
         "earlier subject only by answering a different concrete question; paraphrasing the same conclusion is not a "
-        "new content atom. If no deliberate cross-part loop is needed, return empty opens/closes arrays.\n\n"
+        "new content atom. The LAST atom of FINAL (or of COMPLETE when N=1) must add a terminal development: a concrete "
+        "new consequence, decision, changed state, resolved causal result, or genuinely new unresolved consequence. "
+        "It must not merely summarize why the story was important. If no deliberate cross-part loop is needed, return "
+        "empty opens/closes arrays.\n\n"
         f"TOPIC: {request.title}\n"
         f"TARGET: {request.target_chars}; MIN: {request.allowed_min}; MAX: {request.allowed_max}\n"
         f"PARTS: {part_rows}\n\n"
@@ -651,10 +691,12 @@ def build_story_writer_prompt(
 
     def format_current_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
+        avoid = _compact(atom.do_not_repeat, _COMPACT_AVOID_CHARS)
         return (
             f"{format_atom(atom_id)} "
             f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
             f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
+            f"{f' | DO_NOT_REPEAT={avoid}' if avoid else ''}"
         )
 
     current_atoms = "\n".join(
@@ -770,10 +812,13 @@ def build_story_writer_prompt(
         "Use the requested volume to deepen sequence, mechanism, actors, reactions and consequences inside the current "
         "owned atoms. CURRENT CONTENT is an ordered one-way progression: consume its atoms in listed order. Once an "
         "atom's question/new information has been explained, move forward and do not reopen that atom as filler; only "
-        "a short connective reference is allowed. This one-pass rule also applies to a single COMPLETE 6-9k story, where "
-        "cross-part memory does not exist. If DRAMATIZED atoms are available, create distinct concrete developments "
+        "a short connective reference is allowed. Obey each atom's DO_NOT_REPEAT boundary: do not create a fresh paragraph "
+        "whose only purpose is to restate that protected conclusion using stronger wording, symbolism, or another "
+        "analytical angle. This one-pass rule also applies to a single COMPLETE 6-9k story, where cross-part memory does "
+        "not exist. If DRAMATIZED atoms are available, create distinct concrete developments "
         "inside those atoms rather than padding with another explanation of the same point. A paragraph that adds no "
-        "new story information should not be written.\n"
+        "new story information should not be written. In FINAL, or at the end of COMPLETE, the last owned atom must be "
+        "written as a genuinely new terminal development rather than a recap of the thesis or a final paraphrase.\n"
     )
 
     return (
