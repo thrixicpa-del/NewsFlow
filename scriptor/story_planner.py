@@ -647,15 +647,18 @@ def build_story_writer_prompt(
 
     def format_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
+        return f"{atom_id} [{atom.content_kind}]: {_compact(atom.summary, _COMPACT_ATOM_CHARS)}"
+
+    def format_current_atom(atom_id: str) -> str:
+        atom = atoms[atom_id]
         return (
-            f"{atom_id} [{atom.content_kind}]: "
-            f"{_compact(atom.summary, _COMPACT_ATOM_CHARS)} "
+            f"{format_atom(atom_id)} "
             f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
             f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
         )
 
     current_atoms = "\n".join(
-        f"- {format_atom(atom_id)}" for atom_id in part.content_ids
+        f"- {format_current_atom(atom_id)}" for atom_id in part.content_ids
     )
     used_ids = [
         str(content_id)
