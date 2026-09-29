@@ -2358,6 +2358,40 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             tabloid_evidence["editorial_evaluation"]["hook_score"],
         )
 
+    def test_bounded_editorial_exhaustion_uses_grounded_local_fallback_without_extra_call(self):
+        from scriptor import bridge
+
+        item = {"title": "Границы закрыты? — перевозчики ждут решения"}
+        calls = 0
+
+        async def generate(_prompt, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return json.dumps({"candidates": [
+                "Сигнал границ без разрядки",
+                "Границы снова буксуют",
+            ]}, ensure_ascii=False)
+
+        value, validation, attempts = asyncio.run(bridge._generate_cover_word_v2(
+            SimpleNamespace(generate=generate), "headline", item, "", _cover_word_structure_pair(item),
+            tabloid_mode=True,
+        ))
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(value, "Границы закрыты?")
+        self.assertTrue(validation["valid"], validation)
+        self.assertTrue(validation["selection_evidence"]["fallback"])
+        self.assertIn("local fallback", validation["selection_reason"])
+        self.assertGreaterEqual(len(attempts), 3)
+
+    def test_tabloid_and_standard_both_reject_metaphorical_language(self):
+        item = {"title": "Переговоры продолжаются без результата"}
+        for candidate in ("Переговоры буксуют", "Мир снова застрял"):
+            with self.subTest(candidate=candidate):
+                validation = _validate_cover_word("headline", candidate, item)
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
+
     def test_headline_is_limited_to_five_words(self):
         self.assertEqual(
             _clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС НОЧЬЮ"),
