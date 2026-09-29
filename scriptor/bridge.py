@@ -938,12 +938,18 @@ def _cover_resolve_registry_president(
 def _cover_apply_automatic_political_portrait(
     item: dict, *, registry: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Persist a canonical president or a controlled country/registry diagnostic."""
+    """Persist a canonical president or request bounded semantic country repair."""
     country = _cover_resolve_primary_country(item, registry=registry)
     if country is None:
-        item["cover_face_resolution_status"] = "COUNTRY_RESOLUTION_ERROR"
-        item["cover_face_resolution_error"] = "Не удалось определить основную политическую страну/сторону из текущей темы"
-        return {"ok": False, "reason": "COUNTRY_RESOLUTION_ERROR"}
+        # This is an internal hand-off, not an operational error.  The
+        # bounded semantic resolver below must still identify the most
+        # relevant president from the current political story.
+        item["cover_face_resolution_status"] = "LOW_CONFIDENCE"
+        item["primary_country"] = ""
+        item["primary_country_source"] = "semantic-fallback"
+        item["primary_country_reason"] = "title did not deterministically identify one political side"
+        item.pop("cover_face_resolution_error", None)
+        return {"ok": False, "reason": "SEMANTIC_COUNTRY_FALLBACK"}
     candidate = _cover_resolve_registry_president(country, registry=registry)
     item.update({
         "primary_country": country["country"],
@@ -10328,11 +10334,24 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         if automatic_political:
             political_resolution = _cover_apply_automatic_political_portrait(item)
             if not political_resolution["ok"]:
-                detail = str(item.get("cover_face_resolution_error", "") or political_resolution["reason"])
-                _cover_step(item, "Ошибка automatic face resolution", 100, detail)
-                item["error"] = detail
-                _save_cover_state(settings)
-                continue
+                # An ambiguous country is never exposed as a Covers blocker:
+                # use the existing bounded person resolver to choose the most
+                # relevant president from the full current story.  Registry
+                # misses remain explicit infrastructure diagnostics because a
+                # name cannot safely be invented without a valid entry.
+                if political_resolution["reason"] == "SEMANTIC_COUNTRY_FALLBACK":
+                    if not _resolve_missing_cover_primary_person(item, settings):
+                        detail = str(item.get("cover_face_resolution_error", "") or "Не удалось определить релевантного президента")
+                        _cover_step(item, "Ошибка automatic face resolution", 100, detail)
+                        item["error"] = detail
+                        _save_cover_state(settings)
+                        continue
+                else:
+                    detail = str(item.get("cover_face_resolution_error", "") or political_resolution["reason"])
+                    _cover_step(item, "Ошибка automatic face resolution", 100, detail)
+                    item["error"] = detail
+                    _save_cover_state(settings)
+                    continue
         # A cover remains reproducible even after the user changes the global
         # controls. "Repeat current" reads this record instead of guessing
         # the current screen defaults.

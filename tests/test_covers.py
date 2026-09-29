@@ -1310,31 +1310,51 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         create.assert_called_once()
         self.assertEqual(settings.cover_queue[0]["portrait_subject"], "Дональд Трамп")
 
-    def test_political_topic_without_explicit_person_uses_semantic_error_not_manual_blocker(self):
-        """Generic politics cannot silently reach FastGen with an empty portrait subject."""
+    def test_ambiguous_political_topic_uses_semantic_president_fallback_not_country_error(self):
+        """Ambiguous political stories still proceed with the bounded president resolver."""
         from scriptor import bridge
 
-        settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
-        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
-        settings.cover_queue = [{
-            "production_item_id": "production:politics", "title": "Парламент обсуждает санкции",
-            "image_prompt": "Парламентская сцена", "status": "Ожидает",
-        }]
-        with patch.object(bridge, "load_settings", return_value=settings), \
-             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
-             patch.object(bridge, "_save_cover_state"), \
-             patch.object(bridge, "snapshot", return_value={}), \
-             patch.object(bridge.FastGenPool, "generate_media") as create:
-            bridge.generate_covers({
-                "indices": [0], "productionItemIds": ["production:politics"],
-                "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True,
-            })
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({"cover_primary_person": {
+                    "name": "Президент Тестов", "entity_type": "public_figure",
+                    "role_in_story": "президент", "relation_to_story": "возглавляет сторону переговоров",
+                    "confidence": 0.6,
+                }}, ensure_ascii=False)
 
-        create.assert_not_called()
+        with TemporaryDirectory() as directory:
+            settings = Settings(
+                cover_output_folder=directory, cover_auto_overlay_text=False, cover_variant_count=1,
+                openai_api_keys=[OpenAIKey(label="text", secret="test")],
+            )
+            settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+            settings.cover_queue = [{
+                "production_item_id": "production:politics", "title": "Парламент обсуждает санкции",
+                "image_prompt": "Парламентская сцена", "status": "Ожидает",
+            }]
+
+            def render(_prompt, output, _stem, _operation, _ratio, **_kwargs):
+                generated = output / "semantic-president.png"
+                generated.write_bytes(b"image")
+                return [generated]
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
+                 patch.object(bridge.FastGenPool, "generate_media", side_effect=render) as create:
+                bridge.generate_covers({
+                    "indices": [0], "productionItemIds": ["production:politics"],
+                    "_parallel_cover_worker": True, "buildMode": "fastgen-full", "forceRegenerate": True,
+                })
+
+        create.assert_called_once()
         row = settings.cover_queue[0]
-        self.assertEqual(row["status"], "Ошибка automatic face resolution")
-        self.assertEqual(row["cover_face_resolution_status"], "COUNTRY_RESOLUTION_ERROR")
-        self.assertIn("основную политическую страну", row["error"])
+        self.assertEqual(row["status"], "Готово")
+        self.assertEqual(row["cover_primary_person"]["name"], "Президент Тестов")
+        self.assertEqual(row["primary_country_source"], "semantic-fallback")
+        self.assertNotEqual(row["cover_face_resolution_status"], "COUNTRY_RESOLUTION_ERROR")
 
     def test_accepted_generation_retry_checks_existing_generation_without_create(self):
         from scriptor import bridge
@@ -6439,13 +6459,14 @@ class CoverAutomaticPresidentContractTests(unittest.TestCase):
         self.assertEqual(item["cover_primary_person"]["name"], "Владимир Путин")
         self.assertEqual(item["cover_primary_person"]["role_in_story"], "president")
 
-    def test_unknown_political_story_has_country_diagnostic_not_random_president(self):
+    def test_ambiguous_country_requests_semantic_president_fallback_without_country_error(self):
         from scriptor import bridge
 
         item = {"title": "ПРАВИТЕЛЬСТВО ОБСУЖДАЕТ САНКЦИИ", "cover_face_required": True}
         result = bridge._cover_apply_automatic_political_portrait(item, registry=self.PRESIDENT_FIXTURES)
         self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "COUNTRY_RESOLUTION_ERROR")
+        self.assertEqual(result["reason"], "SEMANTIC_COUNTRY_FALLBACK")
+        self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
         self.assertNotIn("cover_primary_person", item)
 
     def test_english_marker_uses_word_boundaries_and_public_figure_is_not_political(self):
