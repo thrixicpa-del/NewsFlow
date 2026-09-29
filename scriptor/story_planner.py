@@ -139,9 +139,10 @@ def _semantic_tokens(value: object) -> frozenset[str]:
     """
     tokens: set[str] = set()
     for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", str(value or "").casefold()):
-        if len(word) < 4 or word in _SEMANTIC_STOPWORDS:
+        stem = word[:6] if len(word) > 6 else word
+        if len(word) < 4 or word in _SEMANTIC_STOPWORDS or stem in _SEMANTIC_STOPWORDS:
             continue
-        tokens.add(word[:6] if len(word) > 6 else word)
+        tokens.add(stem)
     return frozenset(tokens)
 
 
@@ -391,6 +392,7 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
             part.novelty_payload,
             *(atom_by_id[content_id].summary for content_id in part.content_ids),
         ))
+        contract = f"{part.novelty_question} {part.novelty_payload}"
         for previous in parts[:part_index]:
             previous_material = " ".join((
                 previous.purpose,
@@ -398,7 +400,11 @@ def parse_story_plan_response(text: str, part_targets: tuple[int, ...]) -> Story
                 previous.novelty_payload,
                 *(atom_by_id[content_id].summary for content_id in previous.content_ids),
             ))
-            if _semantic_overlap(material, previous_material) >= 0.9:
+            previous_contract = f"{previous.novelty_question} {previous.novelty_payload}"
+            if (
+                _semantic_overlap(contract, previous_contract) >= 0.9
+                or _semantic_overlap(material, previous_material) >= 0.9
+            ):
                 raise ValueError("story plan parts must own materially distinct semantic content")
 
     # opens/closes are continuity hints, not story ownership. Keep strict
