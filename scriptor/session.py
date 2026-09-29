@@ -51,6 +51,7 @@ def remove_scenarios(titles: list[str], jobs: list[Job], indices: set[int]) -> t
             request, job.state, job.result, job.error,
             job.actual_chars, job.length_status, job.length_repair_attempts,
             job.story_plan, job.accepted_story_parts, job.story_planner_status,
+            job.story_planner_failure,
         ))
     return new_titles, new_jobs
 
@@ -70,6 +71,7 @@ def rename_scenario(titles: list[str], jobs: list[Job], index: int, new_title: s
                 request, job.state, job.result, job.error,
                 job.actual_chars, job.length_status, job.length_repair_attempts,
                 job.story_plan, job.accepted_story_parts, job.story_planner_status,
+                job.story_planner_failure,
             ))
         else:
             updated_jobs.append(job)
@@ -98,6 +100,7 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
                 "story_plan": job.story_plan,
                 "accepted_story_parts": job.accepted_story_parts,
                 "story_planner_status": job.story_planner_status,
+                "story_planner_failure": job.story_planner_failure,
             }
             # Keep in-progress jobs too: the Electron UI reads this file from
             # a separate lightweight snapshot process and can therefore show
@@ -291,6 +294,14 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
             story_plan = item.get("story_plan")
             accepted_parts = item.get("accepted_story_parts")
             planner_status = str(item.get("story_planner_status", "") or "")
+            raw_planner_failure = item.get("story_planner_failure")
+            planner_failure = {
+                key: str(raw_planner_failure[key])
+                for key in ("phase", "reason", "response_chars", "response_sha256")
+                if isinstance(raw_planner_failure, dict)
+                and isinstance(raw_planner_failure.get(key), str)
+                and len(raw_planner_failure[key]) <= 128
+            }
             # r27 persisted a Covers-only marker beside scenario progress.
             # It is intentionally discarded when reading a scenario session.
             if planner_status == "FACE_REPAIR_DEFERRED":
@@ -306,6 +317,7 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
                 story_plan if isinstance(story_plan, dict) else None,
                 accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
                 planner_status,
+                planner_failure,
             ))
     except (ValueError, TypeError, KeyError, UnicodeDecodeError) as error:
         raise _SessionSnapshotReadError(error, revision) from error
@@ -478,6 +490,7 @@ def _recover_legacy_jobs(current_titles: list[str]) -> list[Job]:
             by_title[_title_key(title)].story_plan,
             by_title[_title_key(title)].accepted_story_parts,
             by_title[_title_key(title)].story_planner_status,
+            by_title[_title_key(title)].story_planner_failure,
         )
         for index, title in enumerate(current_titles)
     ]

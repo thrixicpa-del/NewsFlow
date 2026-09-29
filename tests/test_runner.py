@@ -644,8 +644,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             for prompt in client.prompts
         ))
 
-    async def test_exhausted_planner_schema_recovery_pauses_without_raw_schema_error(self):
-        """Repeated invalid Planner replies are actionable, not a leaked ValueError."""
+    async def test_exhausted_planner_schema_recovery_persists_safe_diagnostics(self):
+        """Repeated invalid Planner replies expose a safe, durable recovery code."""
         class InvalidPlannerClient:
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 return json.dumps({"macro_blocks": [], "content_atoms": [], "parts": []})
@@ -659,9 +659,14 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
 
         self.assertEqual(jobs[0].state, RunState.PAUSED)
-        self.assertEqual(jobs[0].error, "Планировщик сценария не вернул рабочий план")
+        self.assertEqual(jobs[0].story_planner_status, "SCHEMA_RECOVERY_EXHAUSTED")
+        self.assertIn("FRESH_SCHEMA:MISSING_THESIS", jobs[0].error)
         self.assertNotIn("story plan requires", jobs[0].error)
         self.assertEqual(jobs[0].accepted_story_parts, [])
+        self.assertEqual(jobs[0].story_planner_failure["phase"], "FRESH_SCHEMA")
+        self.assertEqual(jobs[0].story_planner_failure["reason"], "MISSING_THESIS")
+        self.assertEqual(jobs[0].story_planner_failure["response_chars"], "54")
+        self.assertRegex(jobs[0].story_planner_failure["response_sha256"], r"^[0-9a-f]{64}$")
 
     async def test_missing_thesis_uses_one_bounded_fresh_planner_recovery(self):
         """The live failure class gets a usable Story Map before Writer starts."""
