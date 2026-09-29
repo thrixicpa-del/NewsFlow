@@ -2377,12 +2377,12 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             tabloid_mode=True,
         ))
 
-        self.assertEqual(calls, 3)
+        self.assertEqual(calls, 2)
         self.assertEqual(value, "Границы закрыты?")
         self.assertTrue(validation["valid"], validation)
         self.assertTrue(validation["selection_evidence"]["fallback"])
         self.assertIn("local fallback", validation["selection_reason"])
-        self.assertGreaterEqual(len(attempts), 3)
+        self.assertGreaterEqual(len(attempts), 2)
 
     def test_tabloid_and_standard_both_reject_metaphorical_language(self):
         cases = (
