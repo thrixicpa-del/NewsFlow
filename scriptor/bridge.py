@@ -8076,6 +8076,23 @@ _COVER_WORD_UNNATURAL_PATTERNS = (
     "на нерве", "поджимает помидор", "трещит по швам", "раскачивает ситуацию",
     "градус раст", "входит в штопор",
 )
+# Thumbnail copy is intentionally literal.  These markers describe editorial
+# metaphors/column language rather than topic facts and are rejected in both
+# STANDARD and TABLOID.  TABLOID becomes stronger through a supported conflict,
+# consequence or emotion, never through prettier figurative language.
+_COVER_WORD_METAPHORICAL_MARKERS = (
+    "буксу", "застр", "трещ", "штопор", "набирает оборот", "гаснет",
+    "качается", "раскач", "на нерве", "градус", "держит курс",
+)
+_COVER_WORD_EDITORIAL_MARKERS = (
+    "сигнал о ", "без разрядк", "проверка границ", "политическая архитектур",
+    "архитектура конфликт", "динамика недоволь", "контуры ", "вектор ",
+    "новая глава ", "на повестке",
+)
+_COVER_WORD_INCOMPLETE_ACTION_ENDINGS = (
+    "раздражает", "раздражают", "пугает", "пугают", "тревожит", "тревожат",
+    "давит", "давят", "бьёт", "бьет", "бьют", "злит", "злят",
+)
 _COVER_WORD_SEMANTIC_GROUPS = {
     "collapse": ("рух", "обвал", "сократ", "паден", "провал"),
     "closure": ("закро", "перекр", "останов", "замороз"),
@@ -8286,8 +8303,8 @@ def _cover_word_editorial_evaluation(
     # When a source uses a close verb form (or an editor uses a literal verb
     # such as "держит курс"), that alone is not an artificial metaphor.
     neutral_action_stems = {
-        "держ", "меня", "обсуж", "повыш", "усил", "дави", "давл", "отвеч", "заяв", "ввод",
-        "реша", "соглас", "отказ", "треб", "сниж", "раст", "рван", "постав", "закры",
+        "обсуж", "повыш", "усил", "дави", "давл", "отвеч", "заяв", "ввод",
+        "реша", "соглас", "отказ", "треб", "сниж", "раст", "постав", "закры",
     }
     unknown_action = any(
         word[:4] in unknown_stems
@@ -8300,13 +8317,28 @@ def _cover_word_editorial_evaluation(
         and "на" in text.split()
         and len(source_matches) < max(2, len(stems))
     )
+    metaphorical_language = any(marker in text for marker in _COVER_WORD_METAPHORICAL_MARKERS)
+    editorial_language = any(marker in text for marker in _COVER_WORD_EDITORIAL_MARKERS)
+    incomplete_action = any(text.endswith(marker) for marker in _COVER_WORD_INCOMPLETE_ACTION_ENDINGS)
+    list_like_nominal = (
+        len(words) >= 4
+        and " и " in f" {text} "
+        and "?" not in text
+        and not any(
+            re.search(r"(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али|лся|лась|лись)$", word)
+            for word in words
+        )
+    )
     negative_example_signal = any(pattern in text for pattern in _COVER_WORD_UNNATURAL_PATTERNS)
     # These quantities are deliberately finite and explainable rather than a
     # hidden chain of reasoning.  The known historical examples merely add a
     # weak signal; they cannot independently reject a phrase.
+    plain_language_pass = not (
+        metaphorical_language or editorial_language or incomplete_action or list_like_nominal
+    )
     semantic_coherence_pass = not unknown_action and not bare_abstract_state
     literal_clarity_pass = not bare_abstract_state and bool(source_matches)
-    naturalness_pass = semantic_coherence_pass and literal_clarity_pass
+    naturalness_pass = semantic_coherence_pass and literal_clarity_pass and plain_language_pass
     cliche_penalty = int(negative_example_signal) + int(
         len(stems) > 0 and all(any(stem.startswith(generic) for generic in _COVER_WORD_GENERIC_STEMS)
                                for stem in stems)
@@ -8315,10 +8347,24 @@ def _cover_word_editorial_evaluation(
     specificity_score = min(5, len(source_matches) + int(bool(stems & named_anchors)) + int(len(stems) >= 3))
     hook_markers = (
         "давл", "спор", "конфликт", "тариф", "санкц", "угроз", "рост", "паден", "усил",
-        "закро", "переговор", "решен", "ответ",
+        "закро", "переговор", "решен", "ответ", "атак", "удар", "арест", "протест",
+        "отказ", "сорва", "потер", "дефиц", "цен",
+    )
+    emotion_markers = (
+        "страх", "злост", "злит", "протест", "арест", "удар", "атак", "угроз",
+        "потер", "сорва", "закро", "дорог", "цен", "сканд", "давл", "отказ",
     )
     hook_score = min(5, sum(any(stem.startswith(marker) or marker.startswith(stem)
                                 for marker in hook_markers) for stem in stems))
+    emotion_score = min(5, sum(any(stem.startswith(marker) or marker.startswith(stem)
+                                   for marker in emotion_markers) for stem in stems))
+    directness_score = min(
+        5,
+        len(source_matches)
+        + int(bool(stems & named_anchors))
+        + int(not metaphorical_language)
+        + int(not editorial_language),
+    )
     # Historical negative examples raise an audit signal, but never form a
     # standalone rejection path.  The contextual coherence/clarity checks
     # above must independently explain why a phrase is unsuitable.
@@ -8330,6 +8376,14 @@ def _cover_word_editorial_evaluation(
         reasons.append("unclear_abstract_state")
     if negative_example_signal:
         reasons.append("historical_negative_example_signal")
+    if metaphorical_language:
+        reasons.append("metaphorical_language")
+    if editorial_language:
+        reasons.append("editorial_column_language")
+    if incomplete_action:
+        reasons.append("incomplete_action")
+    if list_like_nominal:
+        reasons.append("list_like_nominal")
     if cliche_penalty and not negative_example_signal:
         reasons.append("generic_clickbait")
     if not naturalness_pass:
@@ -8338,10 +8392,13 @@ def _cover_word_editorial_evaluation(
         "naturalness_pass": naturalness_pass,
         "semantic_coherence_pass": semantic_coherence_pass,
         "literal_clarity_pass": literal_clarity_pass,
+        "plain_language_pass": plain_language_pass,
         "cliche_penalty": cliche_penalty,
         "editorial_plausibility_pass": editorial_plausibility_pass,
         "specificity_score": specificity_score,
         "hook_score": hook_score,
+        "emotion_score": emotion_score,
+        "directness_score": directness_score,
         "factual_pass": factual_pass,
         "grounding_pass": grounding_pass,
         "duplicate_pass": duplicate_pass,
@@ -8622,10 +8679,16 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
         "затем предложи разные короткие варианты. Верни 4–6 кандидатов, а не один случайный hash-шаблон. "
     )
     task += (
-        "СТИЛЬ: TABLOID. Усиль конфликт, риск, последствия и интригу, но не добавляй фактов, чисел, угроз, "
-        "ультиматумов, действий или сущностей, которых нет в источнике. "
+        "СТИЛЬ: TABLOID. Пиши ещё жёстче, эмоциональнее и грязнее по подаче, чем STANDARD: выноси вперёд "
+        "подтверждённый конфликт, провал, потерю, страх, злость, давление, ответственность, цену или неприятное "
+        "последствие. Используй простые массовые слова и прямой разговорный русский, который мгновенно читается "
+        "на YouTube-обложке. Грязнее означает выбрать самый острый ПОДТВЕРЖДЁННЫЙ угол, а не придумать обвинение. "
+        "Никаких метафор, образных глаголов, литературных оборотов, газетно-колоночного или политологического языка. "
+        "Не добавляй фактов, чисел, угроз, ультиматумов, действий или сущностей, которых нет в источнике. "
         if tabloid_mode else
-        "СТИЛЬ: STANDARD. Сильный, конкретный и современный новостной hook без искусственной истерики. "
+        "СТИЛЬ: STANDARD. Пиши живо, эмоционально и цепко, но буквально: простой современный разговорный русский, "
+        "конкретный subject/action/stake и понятный hook. Не пиши как газетная колонка, аналитик или литератор. "
+        "Никаких метафор, образных глаголов, политологической абстракции и красивых формулировок ради красоты. "
     )
     if kind == "headline":
         task += (
@@ -8647,7 +8710,9 @@ def _cover_word_provider_prompt(kind: str, template: str, item: dict, structure:
         )
     return (
         task + f"Требование длины каждого кандидата: {target}. Не придумывай числа и не усиливай риск до факта. "
-        "Пиши естественным современным русским: без канцелярита, газетных штампов, странных глаголов с объектом и "
+        "Главное правило языка: максимально естественно, просто и прямо. Не заменяй событие авторской интерпретацией. "
+        "Предпочитай буквальный сильный глагол или конкретное последствие вместо метафоры. Без канцелярита, "
+        "газетных штампов, редкой книжной лексики, политологического жаргона, странных глаголов с объектом и "
         "метафор ради драмы. Не используй лишние кавычки, Markdown или комментарии. Верни строго только JSON: " + schema
     )
 
@@ -8695,7 +8760,7 @@ def _cover_word_candidate_score(value: str, item: dict) -> tuple[int, int, int]:
 
 def _cover_word_editorial_selection_score(
     value: str, validation: dict[str, object], *, tabloid_mode: bool,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, ...]:
     """Select only from validated candidates using persisted editorial evidence."""
     evaluation = validation.get("editorial_evaluation")
     if not isinstance(evaluation, dict):
@@ -8704,10 +8769,85 @@ def _cover_word_editorial_selection_score(
     factual = int(bool(evaluation.get("factual_pass")))
     specificity = int(evaluation.get("specificity_score", 0) or 0)
     hook = int(evaluation.get("hook_score", 0) or 0)
-    # Standard favours compact concrete news wording; Tabloid uses the same
-    # factual/natural gate but deliberately promotes a stronger supported hook.
-    return ((natural, factual, hook, specificity, -len(value)) if tabloid_mode
-            else (natural, factual, -len(value), specificity, hook))
+    emotion = int(evaluation.get("emotion_score", 0) or 0)
+    directness = int(evaluation.get("directness_score", 0) or 0)
+    # Both modes prefer plain, factual, direct copy over mere shortness.
+    # TABLOID then promotes the strongest supported emotional/hook angle.
+    return (
+        (natural, factual, directness, emotion, hook, specificity, -len(value))
+        if tabloid_mode else
+        (natural, factual, directness, specificity, hook, emotion, -len(value))
+    )
+
+
+def _cover_word_source_fallback(
+    kind: str,
+    item: dict,
+    *,
+    headline: str = "",
+    structure: dict[str, object] | None = None,
+    recent: list[dict] | None = None,
+    tabloid_mode: bool = False,
+) -> tuple[str, dict[str, object]] | None:
+    """Build one local grounded fallback without another provider request.
+
+    Source-title segments are preferred.  If none is usable, a deliberately
+    plain "<anchor>: what happened/is known" form keeps the row non-empty while
+    making no new factual claim.
+    """
+    title = " ".join(str(item.get("title", "") or "").split())
+    segments = [
+        re.sub(r"^[\s«»\"'—–-]+|[\s«»\"'—–-]+$", "", part).strip()
+        for part in re.split(r"\s+[—–]\s+|\s+-\s+|(?<=[.!?])\s+", title)
+    ]
+    max_words = 5 if kind == "headline" else 10
+    min_words = 1 if kind == "headline" else 3
+    candidates = [
+        part for part in segments
+        if min_words <= len(part.split()) <= max_words
+    ]
+
+    title_words = [
+        word for word in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", title)
+        if word.casefold() not in _COVER_TOPIC_STOPWORDS
+    ]
+    headline_stems = _cover_meaningful_word_stems(headline)
+    named = _cover_word_named_source_entities(item)
+    ordered_words = sorted(
+        dict.fromkeys(title_words),
+        key=lambda word: (word.casefold()[:4] not in named, title_words.index(word)),
+    )
+    if kind == "headline":
+        if ordered_words:
+            candidates.append(f"{ordered_words[0]}: что произошло?")
+    else:
+        second_anchor = next(
+            (word for word in ordered_words if word.casefold()[:4] not in headline_stems),
+            "",
+        )
+        if second_anchor:
+            candidates.append(f"{second_anchor}: что известно сейчас")
+
+    validated: list[tuple[str, dict[str, object]]] = []
+    for candidate in dict.fromkeys(candidates):
+        validation = _validate_cover_word(
+            kind,
+            candidate,
+            item,
+            headline=headline,
+            structure={"semantic_slots": list((structure or {}).get(f"{kind}_semantic_slots", []))},
+            recent=recent,
+        )
+        if validation["valid"]:
+            validated.append((candidate, validation))
+    if not validated:
+        return None
+    return max(
+        validated,
+        key=lambda pair: _cover_word_editorial_selection_score(
+            pair[0], pair[1], tabloid_mode=tabloid_mode,
+        ),
+    )
 
 
 async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, template: str,
@@ -8746,6 +8886,8 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
                     "naturalness_pass": bool(evidence.get("naturalness_pass")),
                     "specificity_score": int(evidence.get("specificity_score", 0) or 0),
                     "hook_score": int(evidence.get("hook_score", 0) or 0),
+                    "emotion_score": int(evidence.get("emotion_score", 0) or 0),
+                    "directness_score": int(evidence.get("directness_score", 0) or 0),
                     "factual_pass": bool(evidence.get("factual_pass")),
                 },
             )
@@ -8754,6 +8896,33 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
             break
         last = attempts[-1]["validation"] if attempts else {"reason_code": "INVALID_JSON", "reason_detail": "Пустой ответ"}
         prompt = _cover_word_repair_prompt(kind, "", last, item, structure, headline, tabloid_mode=tabloid_mode)
+    fallback = _cover_word_source_fallback(
+        kind,
+        item,
+        headline=headline,
+        structure=structure,
+        recent=recent,
+        tabloid_mode=tabloid_mode,
+    )
+    if fallback is not None:
+        value, validation = fallback
+        validation = dict(validation)
+        evidence = dict(validation.get("editorial_evaluation", {}))
+        validation.update(
+            candidate_count=0,
+            selection_reason="safe grounded local fallback after bounded editorial repairs",
+            selection_evidence={
+                "style": "TABLOID" if tabloid_mode else "STANDARD",
+                "fallback": True,
+                "naturalness_pass": bool(evidence.get("naturalness_pass")),
+                "specificity_score": int(evidence.get("specificity_score", 0) or 0),
+                "hook_score": int(evidence.get("hook_score", 0) or 0),
+                "emotion_score": int(evidence.get("emotion_score", 0) or 0),
+                "directness_score": int(evidence.get("directness_score", 0) or 0),
+                "factual_pass": bool(evidence.get("factual_pass")),
+            },
+        )
+        return value, validation, attempts
     final_validation = attempts[-1]["validation"] if attempts else {
         "reason_code": "INVALID_JSON", "reason_detail": "Провайдер не вернул кандидатов",
     }
