@@ -126,29 +126,93 @@ def _planner_schema_reason(error: BaseException) -> str:
     """Map local Story Map validation failures to stable, safe UI codes."""
     message = " ".join(str(error).casefold().split())
     known_reasons = (
+        ("must return strict json", "NON_JSON"),
+        ("response must be an object", "NON_OBJECT_JSON"),
         ("requires thesis", "MISSING_THESIS"),
         ("requires macro_blocks", "MISSING_MACRO_BLOCKS"),
         ("requires content_atoms", "MISSING_CONTENT_ATOMS"),
-        ("requires exactly", "PART_TOPOLOGY"),
+        ("content atom must be an object", "MISSING_CONTENT_ATOMS"),
+        ("content atom ids must be unique", "ATOM_SEMANTIC_DUPLICATE"),
+        ("content_kind", "INVALID_CONTENT_KIND"),
+        ("requires before_development_after state transition contract", "INVALID_TRANSITION_CONTRACT"),
+        ("requires structured concrete change", "MISSING_TRANSITION_FIELDS"),
+        ("must describe an observable concrete change", "ABSTRACT_OR_NONCONCRETE_TRANSITION"),
+        ("requires concrete story developments", "SEMANTIC_DENSITY"),
+        ("requires at least", "SEMANTIC_DENSITY"),
+        ("content atoms must be materially distinct", "ATOM_SEMANTIC_DUPLICATE"),
+        ("parts must own materially distinct semantic content", "PART_SEMANTIC_DUPLICATE"),
         ("owner_part_id", "CONTENT_OWNERSHIP"),
         ("content atom owner", "CONTENT_OWNERSHIP"),
         ("content atom ownership", "CONTENT_OWNERSHIP"),
-        ("must return strict json", "NON_JSON"),
-        ("response must be an object", "NON_OBJECT_JSON"),
+        ("content atom is assigned more than once", "CONTENT_OWNERSHIP"),
+        ("requires exactly", "PART_TOPOLOGY"),
+        ("part ids must be ordered", "PART_TOPOLOGY"),
+        ("part must be an object", "PART_TOPOLOGY"),
+        ("references unknown macro block", "PART_TOPOLOGY"),
+        (" role must be ", "PART_TOPOLOGY"),
+        (" requires content_ids", "PART_TOPOLOGY"),
+        (" duplicates content ids", "CONTENT_OWNERSHIP"),
+        ("macro block", "MISSING_MACRO_BLOCKS"),
     )
     for marker, code in known_reasons:
         if marker in message:
             return code
-    return "INVALID_STORY_MAP"
+    # This remains a safe direct-retry category. The structural repairer can
+    # only change parts, so an unknown schema failure must never be presented
+    # to it as though it could repair atoms or top-level fields.
+    return "MISSING_CONTENT_ATOMS"
 
 
-def _pause_for_planner_schema_failure(job: Job, response: str, error: BaseException) -> None:
+_PARTS_ONLY_PLANNER_REASONS = frozenset({"PART_TOPOLOGY", "CONTENT_OWNERSHIP"})
+
+_FRESH_PLANNER_REASON_GUIDANCE = {
+    "INVALID_TRANSITION_CONTRACT": "Include the exact BEFORE_DEVELOPMENT_AFTER transition contract.",
+    "MISSING_TRANSITION_FIELDS": "Give every atom all required before/development/after fields.",
+    "ABSTRACT_OR_NONCONCRETE_TRANSITION": "Make every atom an observable concrete change, not an interpretation.",
+    "ATOM_SEMANTIC_DUPLICATE": "Keep every content atom materially distinct from the others.",
+    "PART_SEMANTIC_DUPLICATE": "Give every part distinct semantic ownership and novelty.",
+    "SEMANTIC_DENSITY": "Provide enough distinct concrete developments for each part's target.",
+    "PART_TOPOLOGY": "Use the required ordered part count, IDs, roles, macro references and ownership.",
+    "CONTENT_OWNERSHIP": "Assign every existing content atom exactly once to a matching planned part.",
+    "INVALID_CONTENT_KIND": "Use only SUPPORTED or DRAMATIZED as content_kind values.",
+    "MISSING_THESIS": "Include one compact thesis.",
+    "MISSING_MACRO_BLOCKS": "Include valid macro_blocks with unique IDs and purposes.",
+    "MISSING_CONTENT_ATOMS": "Include valid content_atoms with the required schema.",
+    "NON_JSON": "Return one strict JSON object only.",
+    "NON_OBJECT_JSON": "Return one JSON object, not an array or prose.",
+}
+
+
+def _fresh_planner_retry_prompt(planner_prompt: str, reason: str) -> str:
+    """Build a safe recovery prompt without reflecting provider output."""
+    guidance = _FRESH_PLANNER_REASON_GUIDANCE[reason]
+    return (
+        "FRESH STORY PLANNER RETRY. The previous planning response failed a local "
+        f"schema check with safe reason {reason}. {guidance} "
+        "Plan the SAME NewsFlow story again from the original task below. Return only "
+        "the complete JSON Story Map; do not write scenario prose. Do not quote or "
+        "reuse any previous planner response.\n\n"
+        f"TASK:\n{planner_prompt}"
+    )
+
+
+def _pause_for_planner_schema_failure(
+    job: Job,
+    response: str,
+    error: BaseException,
+    *,
+    initial_reason: str,
+    recovery_route: str,
+) -> None:
     """Pause safely after bounded recovery without retaining provider content."""
     reason = _planner_schema_reason(error)
     job.story_planner_status = "SCHEMA_RECOVERY_EXHAUSTED"
     job.story_planner_failure = {
         "phase": "FRESH_SCHEMA",
         "reason": reason,
+        "initial_reason": initial_reason,
+        "recovery_route": recovery_route,
+        "fresh_reason": reason,
         "response_chars": str(len(str(response or "").strip())),
         "response_sha256": hashlib.sha256(
             str(response or "").encode("utf-8"),
@@ -569,32 +633,42 @@ class ParallelRunner:
                     part_targets,
                     require_state_transitions=True,
                 )
-            except (TypeError, ValueError):
-                # Prefer the non-regenerative repair: keep the original Story
-                # Map substance and correct only its part topology/ownership.
-                try:
-                    structural_repair = await self._generate_usable(
-                        build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
-                        job.request,
-                        planner_budget,
-                    )
-                    plan = repair_story_plan_parts_response(
-                        structural_repair,
-                        planner_response,
-                        part_targets,
-                        require_state_transitions=True,
-                    )
-                except (TypeError, ValueError):
-                    # Some real provider failures are outside the parts-only
-                    # repair scope (missing content_kind, malformed macro/thesis,
-                    # empty/non-JSON response). No Writer prose exists yet, so
-                    # one fresh Planner retry is safe and does not regenerate an
-                    # accepted scenario or mutate an accepted prefix.
-                    fresh_planner_prompt = (
-                        "FRESH STORY PLANNER RETRY. The previous planning response was invalid. "
-                        "Plan the SAME NewsFlow story again from the original task below. "
-                        "Return only the complete JSON Story Map; do not write scenario prose.\n\n"
-                        f"TASK:\n{planner_prompt}"
+            except (TypeError, ValueError) as initial_error:
+                initial_reason = _planner_schema_reason(initial_error)
+                recovery_route = "FRESH_DIRECT"
+                needs_fresh_planner = True
+
+                # Parts-only repair is deliberately narrow. It preserves the
+                # original Story Map and can correct only ordered part topology
+                # and atom ownership. Atom, transition, semantic and top-level
+                # schema errors instead get the one permitted fresh Planner
+                # call directly; sending them to the repairer wastes a call and
+                # cannot make the invalid map valid.
+                if initial_reason in _PARTS_ONLY_PLANNER_REASONS:
+                    recovery_route = "STRUCTURAL_REPAIR"
+                    try:
+                        structural_repair = await self._generate_usable(
+                            build_story_plan_structure_repair_prompt(
+                                job.request, planner_response, part_targets,
+                            ),
+                            job.request,
+                            planner_budget,
+                        )
+                        plan = repair_story_plan_parts_response(
+                            structural_repair,
+                            planner_response,
+                            part_targets,
+                            require_state_transitions=True,
+                        )
+                        needs_fresh_planner = False
+                    except (TypeError, ValueError):
+                        # The original map is still unaccepted and no Writer
+                        # prose exists. Fall through to one fresh Planner call.
+                        pass
+
+                if needs_fresh_planner:
+                    fresh_planner_prompt = _fresh_planner_retry_prompt(
+                        planner_prompt, initial_reason,
                     )
                     fresh_planner_response = await self._generate_fresh_result(
                         fresh_planner_prompt, job.request, planner_budget,
@@ -618,7 +692,11 @@ class ParallelRunner:
                         # diagnostic instead of leaking a raw exception or
                         # persisting provider text.
                         _pause_for_planner_schema_failure(
-                            job, fresh_planner_response, fresh_error,
+                            job,
+                            fresh_planner_response,
+                            fresh_error,
+                            initial_reason=initial_reason,
+                            recovery_route=recovery_route,
                         )
                         return False
             job.story_plan = plan.to_dict()
