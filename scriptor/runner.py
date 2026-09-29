@@ -19,6 +19,7 @@ from .story_planner import (
     calculate_story_part_targets,
     parse_story_plan_response,
     repair_story_plan_parts_response,
+    seam_tail,
     story_plan_from_dict,
 )
 
@@ -469,9 +470,46 @@ class ParallelRunner:
             if part_index < len(job.accepted_story_parts):
                 continue
             active_target = self._next_story_part_target(job, plan, part_index)
+            final_min_chars = 0
+            final_max_chars = 0
+            is_final_multipart = len(plan.parts) > 1 and part_index == len(plan.parts) - 1
+            if is_final_multipart:
+                prefix_for_final = self._assembled_story(plan, job.accepted_story_parts)
+                final_separator_chars = 2 if prefix_for_final else 0
+                if job.request.allowed_min:
+                    final_min_chars = max(
+                        1,
+                        int(job.request.allowed_min)
+                        - len(prefix_for_final)
+                        - final_separator_chars,
+                    )
+                if job.request.allowed_max:
+                    final_max_chars = max(
+                        1,
+                        int(job.request.allowed_max)
+                        - len(prefix_for_final)
+                        - final_separator_chars,
+                    )
+                if final_min_chars:
+                    active_target = max(active_target, final_min_chars)
+                if final_max_chars:
+                    active_target = min(active_target, final_max_chars)
+
             writer_prompt = build_story_writer_prompt(
                 job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
+            if is_final_multipart:
+                final_range = (
+                    f"{final_min_chars}..{final_max_chars}"
+                    if final_max_chars
+                    else f"at least {final_min_chars or 1}"
+                )
+                writer_prompt += (
+                    "\n\nFINAL HARD LENGTH BUDGET FOR THIS CALL: "
+                    f"write {final_range} characters for this FINAL segment and aim for {active_target}. "
+                    "This range is calculated from the already accepted immutable prefix. "
+                    "Do not undershoot it and do not rewrite earlier parts."
+                )
             writer_result = await self._generate_writer_usable(
                 writer_prompt, job.request, active_target,
             )
@@ -549,10 +587,10 @@ class ParallelRunner:
                     job.length_status = "SHORT"
                     return False
             elif part_index == len(plan.parts) - 1:
-                # The final multipart segment is not immutable until the
-                # assembled story satisfies the global length contract.
-                # Keep the accepted prefix fixed and recover only this FINAL
-                # segment a bounded number of times before asking the operator.
+                # FINAL already receives its exact remaining range on the
+                # first Writer call. Avoid rewriting the whole segment merely
+                # to chase length: LONG is repaired locally, while SHORT gets
+                # at most one compact append-only top-up for the missing tail.
                 prefix_text = self._assembled_story(plan, job.accepted_story_parts)
                 separator_chars = 2 if prefix_text else 0
 
@@ -575,89 +613,102 @@ class ParallelRunner:
                     return assembled, status, chars
 
                 candidate_result, final_status, final_chars = final_candidate(accepted_text)
-                final_recovery_limit = 3
-                for recovery_attempt in range(1, final_recovery_limit + 1):
-                    if final_status not in {"SHORT", "LONG"}:
-                        break
-
-                    minimum_final_chars = (
-                        max(
-                            1,
-                            int(job.request.allowed_min or 0)
-                            - len(prefix_text)
-                            - separator_chars,
-                        )
-                        if job.request.allowed_min
-                        else 1
+                maximum_final_chars = (
+                    max(
+                        1,
+                        int(job.request.allowed_max or 0)
+                        - len(prefix_text)
+                        - separator_chars,
                     )
-                    maximum_final_chars = (
+                    if job.request.allowed_max
+                    else 0
+                )
+
+                if final_status == "LONG" and maximum_final_chars:
+                    accepted_text = trim_text_to_sentence_boundary(
+                        accepted_text, maximum_final_chars,
+                    )
+                    candidate_result, final_status, final_chars = final_candidate(
+                        accepted_text,
+                    )
+
+                if final_status == "SHORT":
+                    # One small append is cheaper than regenerating FINAL.
+                    # The fresh prompt contains only bounded semantic/style
+                    # context and the tail of the provisional FINAL.
+                    append_separator = 2 if accepted_text else 0
+                    minimum_addition = max(
+                        1,
+                        int(job.request.allowed_min or 0)
+                        - final_chars
+                        - append_separator,
+                    )
+                    target_addition = max(
+                        minimum_addition,
+                        int(job.request.target_chars or 0)
+                        - final_chars
+                        - append_separator,
+                    )
+                    maximum_addition = (
                         max(
                             1,
                             int(job.request.allowed_max or 0)
-                            - len(prefix_text)
-                            - separator_chars,
+                            - final_chars
+                            - append_separator,
                         )
                         if job.request.allowed_max
                         else 0
                     )
-
-                    # An overlong FINAL can often be repaired locally without
-                    # another provider call. If sentence-boundary trimming
-                    # undershoots the minimum, the same loop continues with a
-                    # fresh retry of FINAL only.
-                    if final_status == "LONG" and maximum_final_chars:
-                        accepted_text = trim_text_to_sentence_boundary(
-                            accepted_text, maximum_final_chars,
-                        )
-                        candidate_result, final_status, final_chars = final_candidate(
-                            accepted_text,
-                        )
-                        if final_status not in {"SHORT", "LONG"}:
-                            break
-
-                    if final_status != "SHORT":
-                        break
-
-                    preferred_final_chars = max(active_target, minimum_final_chars)
-                    if maximum_final_chars:
-                        preferred_final_chars = min(
-                            preferred_final_chars, maximum_final_chars,
-                        )
-                    range_instruction = (
-                        f"between {minimum_final_chars} and {maximum_final_chars} characters"
-                        if maximum_final_chars
-                        else f"at least {minimum_final_chars} characters"
+                    if maximum_addition:
+                        target_addition = min(target_addition, maximum_addition)
+                    addition_range = (
+                        f"between {minimum_addition} and {maximum_addition} characters"
+                        if maximum_addition
+                        else f"at least {minimum_addition} characters"
                     )
-                    length_retry_prompt = (
-                        f"FINAL SEGMENT LENGTH RECOVERY {recovery_attempt}/{final_recovery_limit}. "
-                        "Retry only this same unfinished final segment. "
-                        "The assembled scenario is outside its Python-checked length contract. "
-                        f"Write {range_instruction} for this segment and aim for "
-                        f"{preferred_final_chars} characters. "
-                        "Preserve the assigned Story Map content and FINAL role; do not restart or rewrite "
-                        "earlier accepted parts, add labels, JSON or commentary. Return one replacement FINAL "
-                        "segment only.\n\n"
-                        f"TASK:\n{writer_prompt}"
+                    style_excerpt = " ".join(
+                        str(job.request.prompt or "").split()
+                    )[:2500]
+                    top_up_prompt = (
+                        "FINAL SEGMENT TOP-UP. Write only NEW prose to append to the already-written "
+                        "unfinished FINAL below. Do not rewrite, summarize or repeat existing sentences. "
+                        f"Add {addition_range} and aim for {target_addition} characters. "
+                        "Keep the same story voice, finish the assigned FINAL purpose and close the story once. "
+                        "Return only the additional prose, with no labels, JSON, headings or commentary.\n\n"
+                        f"STORY THESIS: {str(plan.thesis)[:600]}\n"
+                        f"FINAL PURPOSE: {str(part.purpose)[:300]}\n"
+                        f"OPERATOR STYLE EXCERPT: {style_excerpt or 'none'}\n"
+                        "EXISTING FINAL SEAM (continuity only; do not repeat it):\n"
+                        f"{seam_tail(accepted_text, 700)}"
                     )
-                    job.length_repair_attempts = recovery_attempt
-                    length_retry = await self._generate_fresh_result(
-                        length_retry_prompt,
+                    job.length_repair_attempts = 1
+                    addition = await self._generate_fresh_result(
+                        top_up_prompt,
                         job.request,
-                        preferred_final_chars,
+                        target_addition,
                     )
-                    if self._writer_output_unusable(length_retry):
-                        continue
-                    accepted_text = length_retry.strip()
-                    candidate_result, final_status, final_chars = final_candidate(
-                        accepted_text,
-                    )
-                    if final_status == "LONG" and maximum_final_chars:
-                        accepted_text = trim_text_to_sentence_boundary(
-                            accepted_text, maximum_final_chars,
-                        )
-                        candidate_result, final_status, final_chars = final_candidate(
-                            accepted_text,
-                        )
+                    if not self._writer_output_unusable(addition):
+                        addition_text = addition.strip()
+                        if maximum_addition and len(addition_text) > maximum_addition:
+                            addition_text = trim_text_to_sentence_boundary(
+                                addition_text, maximum_addition,
+                            )
+                        if addition_text:
+                            accepted_text = (
+                                f"{accepted_text}\n\n{addition_text}"
+                                if accepted_text
+                                else addition_text
+                            )
+                            candidate_result, final_status, final_chars = final_candidate(
+                                accepted_text,
+                            )
+                            if final_status == "LONG" and maximum_final_chars:
+                                accepted_text = trim_text_to_sentence_boundary(
+                                    accepted_text, maximum_final_chars,
+                                )
+                                candidate_result, final_status, final_chars = final_candidate(
+                                    accepted_text,
+                                )
 
                 if final_status in {"SHORT", "LONG"}:
                     job.state = RunState.PAUSED
