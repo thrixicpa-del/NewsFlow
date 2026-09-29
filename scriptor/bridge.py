@@ -794,6 +794,7 @@ _COVER_PUBLIC_PERSON_ROLE_MARKERS = (
     "president", "prime_minister", "premier", "minister", "leader", "chancellor", "ambassador",
     "президент", "премьер", "министр", "лидер", "канцлер", "посол",
 )
+_COVER_IDENTITY_OWNER = "COVERS"
 
 
 def _cover_entity_is_explicit_person(value: object) -> bool:
@@ -909,6 +910,15 @@ def _cover_revalidated_persisted_candidate(item: dict, settings: Settings) -> tu
         return "", "", "", 0.0
     candidate = item.get("cover_primary_person")
     if not _cover_candidate_is_public_figure(candidate):
+        return "", "", "", 0.0
+    # ``core-*`` records only say that Core derived evidence; r26/r27
+    # Scenario Planner records were persisted with the same spelling.  Owner
+    # provenance is therefore explicit: only an identity created by this
+    # Covers resolver may skip a new semantic resolution pass.  Old planner
+    # records deliberately fail closed even when their stale name can be
+    # weakly associated with the current title/topic/script.
+    owner = str(candidate.get("cover_identity_owner", "") or "").strip().upper() if isinstance(candidate, dict) else ""
+    if owner != _COVER_IDENTITY_OWNER:
         return "", "", "", 0.0
     source = str(candidate.get("source", "") or "").strip().casefold() if isinstance(candidate, dict) else ""
     if not source.startswith("core-"):
@@ -1154,8 +1164,10 @@ def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> boo
             if derived is None:
                 continue
             resolved_subject = _cover_person_name(derived)
+            derived["cover_identity_owner"] = _COVER_IDENTITY_OWNER
             item["cover_people_candidates"] = [derived]
             item["cover_primary_person"] = derived
+            item["cover_identity_owner"] = _COVER_IDENTITY_OWNER
             item["cover_face_resolution_status"] = status
             item["cover_face_resolution_attempts"] = attempt
             if previous_subject and previous_subject.casefold() != resolved_subject.casefold():
