@@ -2221,9 +2221,10 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertTrue(validation["valid"], validation)
         evidence = validation["editorial_evaluation"]
         self.assertEqual(set(evidence), {
-            "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "cliche_penalty",
-            "editorial_plausibility_pass", "specificity_score", "hook_score", "factual_pass",
-            "grounding_pass", "duplicate_pass", "quality_reasons",
+            "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "plain_language_pass",
+            "cliche_penalty", "editorial_plausibility_pass", "specificity_score", "hook_score",
+            "emotion_score", "directness_score", "factual_pass", "grounding_pass",
+            "duplicate_pass", "quality_reasons",
         })
 
     def test_editorial_quality_selects_strong_natural_candidate_from_safe_batch(self):
