@@ -2397,13 +2397,14 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             self.assertFalse(validation["valid"], weak)
             self.assertEqual(validation["reason_code"], "MISSING_NAMED_ANCHOR")
 
-    def test_accepts_a_standalone_headline_with_a_named_topic_anchor(self):
+    def test_rejects_metaphorical_named_headline_even_with_topic_anchor(self):
         item = {
             "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
             "topic": "Трамп-Зеленский — давление и переговоры",
         }
         validation = _validate_cover_word("headline", "Зеленский держит курс", item)
-        self.assertTrue(validation["valid"], validation)
+        self.assertFalse(validation["valid"], validation)
+        self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
 
     def test_accepts_a_natural_headline_with_subject_action_and_object(self):
         item = {
