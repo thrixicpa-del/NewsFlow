@@ -39,9 +39,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
                 {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}",
-                 "content_kind": "SUPPORTED" if index == 1 else "DRAMATIZED",
+                 "content_kind": "SUPPORTED",
                  "state_before": f"Состояние до шага {index}.",
-                 "state_after": f"Состояние после шага {index}."}
+                 "state_after": f"Состояние после шага {index}.",
+                 "changed_subject": f"Рабочий объект {index}",
+                 "development": f"исполнитель выполнил действие {index}",
+                 "resulting_state": f"рабочий объект {index} получил новый статус"}
                 for index in range(1, part_count + 1)
             ],
             "parts": [
@@ -410,7 +413,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.prompts), 31)
         part_17_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P17" in prompt)
         self.assertIn("P18/M1: Смысловой блок 18", part_17_prompt)
-        self.assertIn("C018 [DRAMATIZED]: Новый материал 18", part_17_prompt)
+        self.assertIn("C018 [SUPPORTED]: Новый материал 18", part_17_prompt)
         self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Новый материал 1", part_17_prompt)
         self.assertIn("PREVIOUS SEAM TAIL", part_17_prompt)
         self.assertNotIn(chr(0x0401) * 5000, part_17_prompt)
@@ -811,9 +814,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                             else:
                                 raw["content_atoms"].append({
                                     "id": "C003", "summary": "Кульминация", "owner_part_id": "P3",
-                                    "content_kind": "DRAMATIZED",
+                                    "content_kind": "SUPPORTED",
                                     "state_before": "Состояние до кульминации.",
                                     "state_after": "Состояние после кульминации.",
+                                    "changed_subject": "Рабочий объект кульминации",
+                                    "development": "исполнитель выполнил кульминационное действие",
+                                    "resulting_state": "рабочий объект получил новый статус",
                                 })
                                 raw["parts"].append({
                                     "id": "P3", "role": "FINAL", "purpose": "Кульминация", "macro_id": "M1",
@@ -1420,7 +1426,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     raise AssertionError("single writer must use COMPLETE role")
                 if "DRAMATIZED OPENING DISCLOSURE" not in prompt:
                     raise AssertionError("single-part disclosure rule is missing")
-                return "а" * 6000
+                return "Первое событие произошло. Это драматизированная реконструкция. " + "а" * 6000
 
         client = SingleWriterClient()
         jobs = await ParallelRunner(client, 1).run([
@@ -1430,6 +1436,112 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(client.prompts), 2)
         self.assertEqual(jobs[0].state, RunState.DONE)
+
+    async def test_dramatized_complete_without_disclosure_is_not_accepted(self):
+        """A missing disclosure must retry only the unfinished COMPLETE part."""
+        class MissingDisclosureClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_calls = 0
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(1).replace(
+                        '"SUPPORTED"', '"DRAMATIZED"',
+                    )
+                self.writer_calls += 1
+                return "Первое событие произошло. Службы начали работу. Последствия уточняются."
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                self.assertIn("CURRENT PART: P1", prompt)
+                return "Первое событие произошло. Службы начали работу. Последствия уточняются."
+
+            @staticmethod
+            def assertIn(member, container):
+                if member not in container:
+                    raise AssertionError(f"{member!r} is missing")
+
+        client = MissingDisclosureClient()
+        jobs = await ParallelRunner(client, 1).run([ScenarioRequest(
+            0, "Headline only", "", target_chars=2000, allowed_min=1600, allowed_max=2400,
+        )])
+
+        job = jobs[0]
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.writer_calls, 1)
+        self.assertEqual(client.fresh_calls, 2)
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual(job.length_status, "QUALITY_UNUSABLE")
+        self.assertEqual(job.accepted_story_parts, [])
+
+    async def test_dramatized_opening_without_disclosure_keeps_future_parts_unstarted(self):
+        """A missing opening disclosure must not accept P1 or run P2."""
+        class MissingOpeningDisclosureClient:
+            def __init__(self):
+                self.prompts = []
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2).replace(
+                        '"SUPPORTED"', '"DRAMATIZED"',
+                    )
+                if "CURRENT PART: P2" in prompt:
+                    raise AssertionError("P2 must remain reserved while P1 is rejected")
+                return "Событие началось. Службы начали работу. Последствия уточняются."
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                self.prompts.append(prompt)
+                return "Событие началось. Службы начали работу. Последствия уточняются."
+
+        client = MissingOpeningDisclosureClient()
+        jobs = await ParallelRunner(client, 1).run([ScenarioRequest(
+            0, "Headline only", "", target_chars=10000, allowed_min=9000, allowed_max=11000,
+        )])
+
+        self.assertEqual(client.fresh_calls, 2)
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].accepted_story_parts, [])
+        self.assertFalse(any("CURRENT PART: P2" in prompt for prompt in client.prompts))
+
+    async def test_dramatized_disclosure_position_is_enforced_before_complete_acceptance(self):
+        """Only sentence #2 or #3 may carry the single COMPLETE disclosure."""
+        cases = (
+            ("second", "Событие началось. Это драматизированная реконструкция. Службы включились.", True),
+            ("third", "Событие началось. Службы включились. Это драматизированная реконструкция.", True),
+            ("first", "Это драматизированная реконструкция. Событие началось. Службы включились.", False),
+            ("late", "Событие началось. Службы включились. Город меняет режим. Это драматизированная реконструкция.", False),
+            ("duplicate", "Событие началось. Это драматизированная реконструкция. Это драматизированная реконструкция.", False),
+        )
+        for name, response, expected_done in cases:
+            with self.subTest(position=name):
+                class PositionClient:
+                    def __init__(self, planned_response):
+                        self.fresh_calls = 0
+                        self.planned_response = planned_response
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        if "NewsFlow Story Planner" in prompt:
+                            return ParallelRunnerTests._story_plan_json(1).replace(
+                                '"SUPPORTED"', '"DRAMATIZED"',
+                            )
+                        return self.planned_response
+
+                    async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                        self.fresh_calls += 1
+                        return self.planned_response
+
+                client = PositionClient(response)
+                jobs = await ParallelRunner(client, 1).run([ScenarioRequest(
+                    0, "Headline only", "", target_chars=2000, allowed_min=1600, allowed_max=2400,
+                )])
+                self.assertEqual(jobs[0].state is RunState.DONE, expected_done)
+                self.assertEqual(client.fresh_calls, 0 if expected_done else 2)
 
     async def test_supported_single_complete_writer_has_no_dramatized_disclosure(self):
         class SupportedClient:

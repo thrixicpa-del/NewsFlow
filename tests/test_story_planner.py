@@ -273,31 +273,67 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "state_before and state_after"):
+        with self.assertRaisesRegex(ValueError, "structured concrete change"):
             parse_story_plan_response(response, (3000,))
 
     def test_concrete_development_requires_a_distinct_before_and_after_state(self):
         """An event mention alone cannot substitute for a state transition."""
-        def atom(summary: str, before: str = "", after: str = "") -> StoryContentAtom:
+        def atom(
+            summary: str,
+            before: str = "",
+            after: str = "",
+            *,
+            changed_subject: str = "",
+            development: str = "",
+            resulting_state: str = "",
+        ) -> StoryContentAtom:
             record = StoryContentAtom("C001", summary, "P1", "DRAMATIZED")
             object.__setattr__(record, "state_before", before)
             object.__setattr__(record, "state_after", after)
+            object.__setattr__(record, "changed_subject", changed_subject)
+            object.__setattr__(record, "development", development)
+            object.__setattr__(record, "resulting_state", resulting_state)
             return record
 
         self.assertTrue(_has_concrete_story_development(atom(
             "Россия нанесла новый удар по Киеву",
             "В городе действовал обычный режим тревоги.",
             "Городские службы перевели критические объекты на резервное питание.",
+            changed_subject="Работа критической инфраструктуры",
+            development="службы перевели критические объекты на резервное питание",
+            resulting_state="объекты работают на резервном режиме",
         )))
         self.assertTrue(_has_concrete_story_development(atom(
-            "Киев перевёл критические объекты на резервное питание",
-            "Критическая инфраструктура работала в штатном режиме.",
-            "Критические объекты перешли на резервное питание.",
+            "Стороны перенесли следующую встречу",
+            "Следующий раунд переговоров был назначен.",
+            "Следующая встреча перенесена.",
+            changed_subject="Следующий раунд переговоров",
+            development="стороны не согласовали условия",
+            resulting_state="следующая встреча перенесена",
         )))
         self.assertTrue(_has_concrete_story_development(atom(
-            "После удара движение на участке было перекрыто",
-            "Движение на участке продолжалось.",
-            "Движение на участке было перекрыто.",
+            "Совет директоров отменил расширение",
+            "План расширения компании был активен.",
+            "Расширение отменено.",
+            changed_subject="План расширения компании",
+            development="совет директоров пересмотрел решение после отчёта",
+            resulting_state="расширение отменено",
+        )))
+        self.assertTrue(_has_concrete_story_development(atom(
+            "Компания остановила публичный релиз",
+            "Публичный релиз был запланирован.",
+            "Релиз остановлен.",
+            changed_subject="Публичный релиз",
+            development="компания обнаружила критическую ошибку",
+            resulting_state="релиз остановлен",
+        )))
+        self.assertTrue(_has_concrete_story_development(atom(
+            "Муниципальный сервис изменил порядок обработки заявок",
+            "Заявки обрабатывались в прежнем порядке.",
+            "Заявки направляются через резервный маршрут.",
+            changed_subject="Порядок обработки заявок",
+            development="оператор перевёл заявки на резервный маршрут",
+            resulting_state="заявки направляются через резервный маршрут",
         )))
         self.assertFalse(_has_concrete_story_development(atom(
             "Удар меняет политическую цену конфликта"
@@ -313,6 +349,45 @@ class StoryPlanValidationTests(unittest.TestCase):
             "Компания готовила отчёт.",
             "Компания готовила отчёт.",
         )))
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Удар становится политическим сигналом",
+            "Удар воспринимался как военный эпизод.",
+            "Удар воспринимается как политический сигнал.",
+            changed_subject="Политический смысл удара",
+            development="удар стал более важным сигналом",
+            resulting_state="политическая цена выросла",
+        )))
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Давление усилилось",
+            "Переговоры продолжались.",
+            "Пространство для манёвра сузилось.",
+            changed_subject="Переговорная ситуация",
+            development="давление усилилось",
+            resulting_state="пространство для манёвра сузилось",
+        )))
+
+    def test_parser_requires_structured_concrete_change_for_fresh_transition_maps(self):
+        """Different BEFORE/AFTER sentences alone must not certify a development."""
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Один удар получает только новую трактовку.",
+            "macro_blocks": [{"id": "M1", "purpose": "Ложное развитие"}],
+            "content_atoms": [{
+                "id": "C001", "summary": "Удар становится политическим сигналом",
+                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                "state_before": "Удар воспринимался как военный эпизод",
+                "state_after": "Удар воспринимается как политический сигнал",
+                "novelty_question": "Что изменилось?",
+                "novelty_payload": "Политическая цена выросла.",
+            }],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Показать изменение",
+                "macro_id": "M1", "content_ids": ["C001"],
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "structured concrete change"):
+            parse_story_plan_response(response, (2000,), require_state_transitions=True)
 
     def test_parser_rejects_analytic_atoms_that_only_mention_event_nouns(self):
         response = json.dumps({
@@ -341,7 +416,7 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "state_before and state_after"):
+        with self.assertRaisesRegex(ValueError, "structured concrete change"):
             parse_story_plan_response(response, (3000,))
 
     def test_parser_accepts_dramatized_concrete_event_chain(self):
@@ -375,6 +450,9 @@ class StoryPlanValidationTests(unittest.TestCase):
         for index, atom in enumerate(payload["content_atoms"], start=1):
             atom["state_before"] = f"Состояние до шага {index}."
             atom["state_after"] = f"Новое состояние после шага {index}."
+            atom["changed_subject"] = f"Рабочий объект {index}"
+            atom["development"] = f"исполнитель выполнил действие {index}"
+            atom["resulting_state"] = f"рабочий объект {index} получил новый статус"
         plan = parse_story_plan_response(
             json.dumps(payload, ensure_ascii=False),
             (3000,),

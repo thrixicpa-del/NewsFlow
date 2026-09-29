@@ -27,7 +27,10 @@ def _story_plan(part_count: int = 2) -> str:
             {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}",
              "content_kind": "SUPPORTED",
              "state_before": f"Состояние до шага {index}.",
-             "state_after": f"Состояние после шага {index}."}
+             "state_after": f"Состояние после шага {index}.",
+             "changed_subject": f"Рабочий объект {index}",
+             "development": f"исполнитель выполнил действие {index}",
+             "resulting_state": f"рабочий объект {index} получил новый статус"}
             for index in range(1, part_count + 1)
         ],
         "parts": [

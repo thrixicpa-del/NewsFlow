@@ -17,6 +17,15 @@ _COMPACT_ATOM_CHARS = 180
 _COMPACT_AVOID_CHARS = 140
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 _STATE_TRANSITION_CONTRACT = "BEFORE_DEVELOPMENT_AFTER"
+# These are abstract *interpretive subjects*, not topics. They deliberately
+# catch only the narrow class where a Planner labels a reading of an event as
+# though it were an observable event itself. A concrete government position,
+# market price, court status or city service can still change normally.
+_ABSTRACT_INTERPRETIVE_SUBJECT_STEMS = frozenset({
+    "смысл", "логик", "сигнал", "цен", "давлен", "баланс", "ситуац", "простр",
+    "важнос", "тревож", "интерп", "meanin", "logic", "signal", "pressu", "balanc",
+    "situat", "import", "tensio", "interp",
+})
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
     "котор", "этот", "этог", "того", "чтобы", "после", "перед", "между", "через", "снова",
@@ -35,6 +44,9 @@ class StoryContentAtom:
     do_not_repeat: str = ""
     state_before: str = ""
     state_after: str = ""
+    changed_subject: str = ""
+    development: str = ""
+    resulting_state: str = ""
 
 
 @dataclass(frozen=True)
@@ -174,19 +186,33 @@ def _obvious_semantic_duplicate(left: object, right: object) -> bool:
 
 
 def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
-    """Return true only for a declared, distinct before/development/after arc.
+    """Return true only for a declared, observable before/development/after arc.
 
     The test is deliberately domain-neutral: it validates the Planner's
-    explicit state transition rather than guessing meaning from topic words.
+    explicit structured change rather than guessing meaning from topic words.
     """
     before = _optional_text(atom.state_before)
     after = _optional_text(atom.state_after)
-    return bool(
+    changed_subject = _optional_text(atom.changed_subject)
+    development = _optional_text(atom.development)
+    resulting_state = _optional_text(atom.resulting_state)
+    if not (
         before
         and after
+        and changed_subject
+        and development
+        and resulting_state
         and before.casefold() != after.casefold()
         and not _obvious_semantic_duplicate(before, after)
-    )
+    ):
+        return False
+
+    # A transition about the *meaning*, balance or importance of an event is
+    # analysis, unless another atom names an observable action/state change.
+    # This small check is intentionally not a topic vocabulary or an NLP
+    # classifier; it rejects only an explicitly abstract changed_subject.
+    subject_tokens = _semantic_tokens(changed_subject)
+    return not bool(subject_tokens & _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS)
 
 
 def _id_list(value: object, _field: str) -> tuple[str, ...]:
@@ -409,6 +435,9 @@ def parse_story_plan_response(
             do_not_repeat=_optional_text(raw_atom.get("do_not_repeat")),
             state_before=_optional_text(raw_atom.get("state_before")),
             state_after=_optional_text(raw_atom.get("state_after")),
+            changed_subject=_optional_text(raw_atom.get("changed_subject")),
+            development=_optional_text(raw_atom.get("development")),
+            resulting_state=_optional_text(raw_atom.get("resulting_state")),
         )
         if atom.id in atom_by_id:
             raise ValueError("story plan content atom IDs must be unique")
@@ -426,10 +455,16 @@ def parse_story_plan_response(
     )
     if validate_state_transitions:
         for atom in atoms:
-            if not atom.state_before or not atom.state_after:
-                raise ValueError("story plan atom requires state_before and state_after")
+            if not (
+                atom.state_before
+                and atom.state_after
+                and atom.changed_subject
+                and atom.development
+                and atom.resulting_state
+            ):
+                raise ValueError("story plan atom requires structured concrete change")
             if not _has_concrete_story_development(atom):
-                raise ValueError("story plan atom must advance to a distinct state_after")
+                raise ValueError("story plan atom must describe an observable concrete change")
 
     # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
     # persisted maps stay readable even if an older Planner used repetitive
@@ -675,7 +710,10 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
-        "state_before, state_after, novelty_question, novelty_payload and do_not_repeat. novelty_question is the concrete question that atom "
+        "state_before, state_after, changed_subject, development, resulting_state, novelty_question, "
+        "novelty_payload and do_not_repeat. changed_subject is the actor/system/status that concretely changes; "
+        "development is what happened; resulting_state is the observable state afterward. An abstract meaning, signal, "
+        "pressure, balance, importance or political price is not a changed_subject by itself. novelty_question is the concrete question that atom "
         "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
         "it must describe the new story state/development, not another interpretation of an earlier state. "
         "do_not_repeat names the already-established conclusion/meaning this atom may reference briefly but must not "
@@ -761,6 +799,9 @@ def build_story_writer_prompt(
             f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
             f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
             f" | BEFORE={_compact(atom.state_before, _COMPACT_ATOM_CHARS)}"
+            f" | SUBJECT={_compact(atom.changed_subject, _COMPACT_ATOM_CHARS)}"
+            f" | DEVELOPMENT={_compact(atom.development, _COMPACT_ATOM_CHARS)}"
+            f" | RESULT={_compact(atom.resulting_state, _COMPACT_ATOM_CHARS)}"
             f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
             f"{f' | DO_NOT_REPEAT={avoid}' if avoid else ''}"
         )

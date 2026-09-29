@@ -368,7 +368,11 @@ class ParallelRunner:
         ))
 
     @staticmethod
-    def _writer_output_quality_unusable(text: str) -> bool:
+    def _writer_output_quality_unusable(
+        text: str,
+        *,
+        require_dramatized_disclosure: bool = False,
+    ) -> bool:
         """Reject only unmistakable analytical filler before a part is durable.
 
         This is intentionally a small local guard, not a second model or a
@@ -389,6 +393,8 @@ class ParallelRunner:
             index for index, sentence in enumerate(sentences)
             if "драматизирован" in sentence.casefold() and "реконструкц" in sentence.casefold()
         ]
+        if require_dramatized_disclosure and not disclosure_positions:
+            return True
         if disclosure_positions and (len(disclosure_positions) != 1 or disclosure_positions[0] not in {1, 2}):
             return True
         # A local detector cannot reliably score terse prose, verse, or test
@@ -408,14 +414,22 @@ class ParallelRunner:
             and analytic_sentences * 2 >= len(sentences)
         )
 
-    def _writer_output_rejection_reason(self, text: str) -> str:
+    def _writer_output_rejection_reason(
+        self,
+        text: str,
+        *,
+        require_dramatized_disclosure: bool = False,
+    ) -> str:
         if looks_like_action_required(text):
             return "ACTION_REQUIRED"
         if not str(text or "").strip():
             return "EMPTY"
         if self._writer_output_is_structural(text):
             return "STRUCTURAL"
-        if self._writer_output_quality_unusable(text):
+        if self._writer_output_quality_unusable(
+            text,
+            require_dramatized_disclosure=require_dramatized_disclosure,
+        ):
             return "QUALITY_UNUSABLE"
         return ""
 
@@ -446,6 +460,8 @@ class ParallelRunner:
         prompt: str,
         request: ScenarioRequest,
         expected_chars: int | None = None,
+        *,
+        require_dramatized_disclosure: bool = False,
     ) -> str:
         """Retry only the current unaccepted Writer part.
 
@@ -457,7 +473,10 @@ class ParallelRunner:
             self.client.generate, prompt, request, expected_chars,
         )
         for _attempt in range(2):
-            reason = self._writer_output_rejection_reason(result)
+            reason = self._writer_output_rejection_reason(
+                result,
+                require_dramatized_disclosure=require_dramatized_disclosure,
+            )
             if not reason:
                 return result
             if reason == "QUALITY_UNUSABLE":
@@ -480,7 +499,10 @@ class ParallelRunner:
             result = await self._generate_for_request(
                 generate_fresh, retry_prompt, request, expected_chars,
             )
-        reason = self._writer_output_rejection_reason(result)
+        reason = self._writer_output_rejection_reason(
+            result,
+            require_dramatized_disclosure=require_dramatized_disclosure,
+        )
         if reason:
             generate_openai = getattr(self.client, "generate_openai", None)
             if generate_openai is not None:
@@ -610,6 +632,9 @@ class ParallelRunner:
             self._notify(job)
 
         self._assembled_story(plan, job.accepted_story_parts)
+        plan_has_dramatized_atoms = any(
+            atom.content_kind == "DRAMATIZED" for atom in plan.content_atoms
+        )
         for part_index, part in enumerate(plan.parts):
             if part_index < len(job.accepted_story_parts):
                 continue
@@ -619,8 +644,16 @@ class ParallelRunner:
             )
             writer_result = await self._generate_writer_usable(
                 writer_prompt, job.request, active_target,
+                require_dramatized_disclosure=(
+                    plan_has_dramatized_atoms and part.role in {"OPENING", "COMPLETE"}
+                ),
             )
-            writer_failure = self._writer_output_rejection_reason(writer_result)
+            writer_failure = self._writer_output_rejection_reason(
+                writer_result,
+                require_dramatized_disclosure=(
+                    plan_has_dramatized_atoms and part.role in {"OPENING", "COMPLETE"}
+                ),
+            )
             if writer_failure:
                 job.state = RunState.PAUSED
                 job.error = (
