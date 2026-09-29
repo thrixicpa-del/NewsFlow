@@ -182,6 +182,88 @@ class StoryPlanValidationTests(unittest.TestCase):
 
         self.assertEqual(persisted["thesis"], "Старая история.")
         self.assertFalse(any(key.startswith("cover_") for key in persisted))
+    def test_parser_persists_novelty_contract_and_legacy_parts_get_safe_fallbacks(self):
+        explicit = json.dumps({
+            "thesis": "История движется по разным вопросам.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Что изменило исходную ситуацию", "owner_part_id": "P1",
+                 "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Как ответила другая сторона", "owner_part_id": "P2",
+                 "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Показать исходное изменение", "macro_id": "M1",
+                 "content_ids": ["C001"], "novelty_question": "Что именно изменилось в начале?",
+                 "novelty_payload": "Зритель впервые узнаёт конкретное исходное изменение."},
+                {"id": "P2", "role": "FINAL", "purpose": "Показать ответ и результат", "macro_id": "M1",
+                 "content_ids": ["C002"], "novelty_question": "Какой ответ последовал на это изменение?",
+                 "novelty_payload": "Зритель впервые узнаёт реакцию и её новое последствие."},
+            ],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(explicit, (5000, 5000))
+        self.assertEqual(plan.parts[0].novelty_question, "Что именно изменилось в начале?")
+        self.assertIn("реакцию", plan.parts[1].novelty_payload)
+
+        legacy = {
+            "thesis": "Старая карта без novelty-полей.",
+            "macro_blocks": [{"id": "M1", "purpose": "Вся история"}],
+            "content_atoms": [{"id": "C001", "summary": "Старый самостоятельный смысл",
+                               "owner_part_id": "P1", "content_kind": "SUPPORTED"}],
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Раскрыть старый смысл",
+                       "macro_id": "M1", "content_ids": ["C001"], "target_chars": 5000}],
+        }
+        restored = story_plan_from_dict(legacy)
+        self.assertEqual(restored.parts[0].novelty_question, "Раскрыть старый смысл")
+        self.assertEqual(restored.parts[0].novelty_payload, "Старый самостоятельный смысл")
+
+    def test_parser_rejects_obvious_near_copy_semantic_atoms(self):
+        response = json.dumps({
+            "thesis": "История без смысловых дублей.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Высокая цена помидоров вызывает устойчивое раздражение покупателей",
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Высокая цена помидоров вызывает устойчивое раздражение покупателей снова",
+                 "owner_part_id": "P2", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Показать исходный ценовой шок",
+                 "macro_id": "M1", "content_ids": ["C001"]},
+                {"id": "P2", "role": "FINAL", "purpose": "Показать отдельное последствие",
+                 "macro_id": "M1", "content_ids": ["C002"]},
+            ],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "materially distinct"):
+            parse_story_plan_response(response, (5000, 5000))
+
+    def test_parser_rejects_obvious_near_copy_part_novelty_contracts(self):
+        response = json.dumps({
+            "thesis": "Части обязаны отвечать на разные вопросы.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Покупатели замечают новый ценовой уровень на рынке",
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Продавцы меняют закупочную тактику из-за поставок",
+                 "owner_part_id": "P2", "content_kind": "DRAMATIZED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Первый механизм", "macro_id": "M1",
+                 "content_ids": ["C001"],
+                 "novelty_question": "Почему высокая цена вызывает устойчивое раздражение покупателей?",
+                 "novelty_payload": "Высокая цена становится постоянным повседневным раздражителем покупателей."},
+                {"id": "P2", "role": "FINAL", "purpose": "Второй механизм", "macro_id": "M1",
+                 "content_ids": ["C002"],
+                 "novelty_question": "Почему высокая цена вызывает устойчивое раздражение покупателей?",
+                 "novelty_payload": "Высокая цена становится постоянным повседневным раздражителем покупателей."},
+            ],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "parts must own materially distinct"):
+            parse_story_plan_response(response, (5000, 5000))
+
     def test_parser_requires_every_planned_part_and_unique_content_ownership(self):
         response = json.dumps({
             "thesis": "Одна история без второго круга.",
@@ -358,6 +440,10 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertNotIn("content_capacity_insufficient", prompt)
         self.assertIn("Even if only a headline is available", prompt)
         self.assertIn("DRAMATIZED", prompt)
+        self.assertIn("novelty_question", prompt)
+        self.assertIn("novelty_payload", prompt)
+        self.assertIn("2-4 genuinely different atoms", prompt)
+        self.assertIn("synonym swap", prompt)
 
     def test_planner_prompt_contains_only_story_planning_contract(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
@@ -397,13 +483,19 @@ class StoryWriterContextTests(unittest.TestCase):
             "parts": [
                 {"id": "P1", "role": "OPENING", "purpose": "Открыть историю", "macro_id": "M1",
                  "content_ids": ["C001"], "opens": ["L1"], "closes": [],
-                 "transition_direction": "к механизму"},
+                 "transition_direction": "к механизму",
+                 "novelty_question": "Что именно произошло в начале?",
+                 "novelty_payload": "Начальное событие и его непосредственный новый эффект."},
                 {"id": "P2", "role": "MIDDLE", "purpose": "Углубить механизм", "macro_id": "M1",
                  "content_ids": ["C002"], "opens": [], "closes": [],
-                 "transition_direction": "к последствиям"},
+                 "transition_direction": "к последствиям",
+                 "novelty_question": "Как работает новый механизм давления?",
+                 "novelty_payload": "Механизм, участники и реакция, которых не было в открытии."},
                 {"id": "P3", "role": "FINAL", "purpose": "Завершить историю", "macro_id": "M2",
                  "content_ids": ["C003"], "opens": [], "closes": ["L1"],
-                 "transition_direction": "финал"},
+                 "transition_direction": "финал",
+                 "novelty_question": "Какое новое последствие завершает историю?",
+                 "novelty_payload": "Финальное последствие и закрытие причинной цепочки."},
             ],
         }, ensure_ascii=False), (5000, 5000, 5000))
 
@@ -425,7 +517,12 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("not the overall scenario target", prompt)
         self.assertIn("FINAL ASSEMBLED STORY", prompt)
         self.assertIn("CURRENT PART: P2", prompt)
+        self.assertIn("CURRENT NOVELTY QUESTION: Как работает новый механизм давления?", prompt)
+        self.assertIn("CURRENT NEW INFORMATION: Механизм, участники и реакция", prompt)
         self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Начальное событие уже раскрыто", prompt)
+        self.assertIn("USED SEMANTIC MEANINGS (forbidden to restate): P1:", prompt)
+        self.assertIn("PARAPHRASE DOES NOT COUNT AS NEW INFORMATION", prompt)
+        self.assertIn("A paragraph that adds no new story information should not be written", prompt)
         self.assertIn("P3/M2: Завершить историю", prompt)
         self.assertIn("C002 [DRAMATIZED]: Новый механизм для текущей части", prompt)
         self.assertIn("C003 [DRAMATIZED]: Будущее последствие, которое ещё нельзя раскрывать", prompt)
