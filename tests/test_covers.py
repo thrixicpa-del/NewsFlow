@@ -250,7 +250,7 @@ class CoverPortraitIdentityRegressionTests(unittest.TestCase):
             self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
 
         self.assertEqual(pool.calls, 3)
-        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_primary_person"]["name"], "Владимир Путин")
         self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
 
     def test_missing_person_resolver_exhaustion_is_bounded_and_diagnostic(self):
@@ -889,6 +889,8 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("ordinary protester", prompt)
         self.assertIn("do NOT use that ordinary participant", prompt)
         self.assertIn("office-holder", prompt)
+        self.assertIn("MOST DIRECTLY RELEVANT", prompt)
+        self.assertIn("strongest direct relationship", prompt)
         self.assertIn("cover_people_candidates", prompt)
         self.assertIn("up to 3 ranked alternatives", prompt)
         self.assertNotIn("Russia ->", prompt)
@@ -920,10 +922,10 @@ class CoverGalleryFileStateTests(unittest.TestCase):
                         "confidence": 0.95,
                     },
                     "cover_people_candidates": [{
-                        "name": "Марек Новак",
+                        "name": "Владимир Путин",
                         "entity_type": "public_figure",
                         "role_in_story": "президент",
-                        "relation_to_story": "публичный политический руководитель стороны, связанной с институциональным контекстом",
+                        "relation_to_story": "публичный политический руководитель, напрямую связанный с Кремлём и российским государственным контекстом истории",
                         "source": "provider",
                         "confidence": 0.64,
                     }],
