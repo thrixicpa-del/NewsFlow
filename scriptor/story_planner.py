@@ -283,6 +283,12 @@ def parse_story_plan_response(
     raw_parts = raw.get("parts")
     if not isinstance(raw_parts, list) or len(raw_parts) != part_count:
         raise ValueError(f"story plan requires exactly {part_count} parts")
+    explicit_part_novelty = all(
+        isinstance(raw_part, dict)
+        and _optional_text(raw_part.get("novelty_question"))
+        and _optional_text(raw_part.get("novelty_payload"))
+        for raw_part in raw_parts
+    )
     parts: list[StoryPartPlan] = []
     for index, (raw_part, expected_id, expected_role, target) in enumerate(
         zip(raw_parts, expected_ids, expected_roles, targets, strict=True),
@@ -330,6 +336,12 @@ def parse_story_plan_response(
     raw_atoms = raw.get("content_atoms")
     if not isinstance(raw_atoms, list) or not raw_atoms:
         raise ValueError("story plan requires content_atoms")
+    explicit_atom_novelty = all(
+        isinstance(raw_atom, dict)
+        and _optional_text(raw_atom.get("novelty_question"))
+        and _optional_text(raw_atom.get("novelty_payload"))
+        for raw_atom in raw_atoms
+    )
     atoms: list[StoryContentAtom] = []
     atom_by_id: dict[str, StoryContentAtom] = {}
     for index, raw_atom in enumerate(raw_atoms, start=1):
@@ -366,7 +378,7 @@ def parse_story_plan_response(
     # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
     # persisted maps stay readable even if an older Planner used repetitive
     # summaries; accepted prose must never be invalidated by a new validator.
-    if validate_semantic_novelty:
+    if validate_semantic_novelty and explicit_atom_novelty:
         for atom_index, atom in enumerate(atoms):
             atom_contract = f"{atom.novelty_question} {atom.novelty_payload}"
             for previous in atoms[:atom_index]:
@@ -423,7 +435,7 @@ def parse_story_plan_response(
     # A part may stay on the same topic, but on a fresh plan it must not carry
     # an effectively identical novelty contract. Related vocabulary alone is
     # never a failure: this guard exists only for obvious near-copies.
-    if validate_semantic_novelty:
+    if validate_semantic_novelty and explicit_part_novelty:
         for part_index, part in enumerate(parts):
             contract = f"{part.novelty_question} {part.novelty_payload}"
             for previous in parts[:part_index]:
@@ -788,7 +800,8 @@ def build_story_writer_prompt(
         f"CURRENT NOVELTY QUESTION: {_compact(part.novelty_question, _COMPACT_PURPOSE_CHARS)}\n"
         f"CURRENT NEW INFORMATION: {_compact(part.novelty_payload, _COMPACT_ATOM_CHARS)}\n"
         f"{length_instruction}"
-        f"CURRENT CONTENT ORDER (consume once, in order):\n{current_atoms}\n"
+        "CURRENT CONTENT ORDER: consume the following atoms once, in listed order.\n"
+        f"CURRENT CONTENT:\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
         f"USED SEMANTIC MEANINGS (forbidden to restate): {used_semantic_meanings}\n"
         f"OPEN LOOPS BEFORE THIS PART: {', '.join(opened) or 'none'}\n"
