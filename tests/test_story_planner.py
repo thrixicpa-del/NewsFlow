@@ -420,6 +420,18 @@ class StoryPlanValidationTests(unittest.TestCase):
             development="давление усилилось",
             resulting_state="пространство для манёвра сузилось",
         )))
+        # A fully populated transition is still not a development when it
+        # merely relabels one already-known event as a harsher "phase".  This
+        # is deliberately topic-neutral: the defect is an interpretive state
+        # change, not the subject matter of the headline.
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Известное событие воспринимается как более жёсткая фаза",
+            "Событие уже произошло.",
+            "Участники ожидают дальнейшего давления.",
+            changed_subject="Интенсивность процесса",
+            development="событие воспринимается как более жёсткая фаза",
+            resulting_state="участники действуют с ожиданием затяжного давления",
+        )))
 
     def test_parser_requires_structured_concrete_change_for_fresh_transition_maps(self):
         """Different BEFORE/AFTER sentences alone must not certify a development."""
@@ -442,6 +454,36 @@ class StoryPlanValidationTests(unittest.TestCase):
         }, ensure_ascii=False)
 
         with self.assertRaisesRegex(ValueError, "structured concrete change"):
+            parse_story_plan_response(response, (2000,), require_state_transitions=True)
+
+    def test_parser_rejects_interpretive_transition_with_complete_fields(self):
+        """A filled schema cannot turn a perception of an event into an event."""
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Один известный факт не должен стать несколькими трактовками.",
+            "macro_blocks": [{"id": "M1", "purpose": "Проверить переход"}],
+            "content_atoms": [{
+                "id": "C001",
+                "summary": "Известное событие воспринимается как более жёсткая фаза",
+                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                "state_before": "Событие уже произошло.",
+                "changed_subject": "Интенсивность процесса",
+                "development": "Событие воспринимается как более жёсткая фаза.",
+                "resulting_state": "Участники действуют с ожиданием затяжного давления.",
+                "state_after": "Ожидания участников стали более тревожными.",
+                "novelty_question": "Как воспринимается известное событие?",
+                "novelty_payload": "Событие получает более тревожную трактовку.",
+                "do_not_repeat": "",
+            }],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Дать новое развитие",
+                "macro_id": "M1", "content_ids": ["C001"],
+                "novelty_question": "Какое действие произошло?",
+                "novelty_payload": "Новое действие меняет состояние истории.",
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "observable concrete change"):
             parse_story_plan_response(response, (2000,), require_state_transitions=True)
 
     def test_parser_rejects_analytic_atoms_that_only_mention_event_nouns(self):

@@ -26,6 +26,21 @@ _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS = frozenset({
     "важнос", "тревож", "интерп", "meanin", "logic", "signal", "pressu", "balanc",
     "situat", "import", "tensio", "interp",
 })
+# This is deliberately a compact language-level guard, not a catalogue of
+# news domains or topics.  It catches the residual form of analytical filler
+# that declares an abstract subject ("intensity", "prospect", "window") and
+# then only says how an earlier event is *viewed*.  A concrete action against
+# the same subject remains valid; the two signals must occur together.
+_ABSTRACT_TRANSITION_SUBJECT_STEMS = frozenset({
+    "интенс", "перспект", "корид", "окн", "состоян", "режим", "лини",
+    "intens", "prospect", "corrid", "window", "state", "mode", "line",
+})
+_INTERPRETIVE_FRAME_STEMS = frozenset({
+    "восприним", "выгляд", "означа", "показыв", "демонстр", "символиз",
+    "тракту", "смысл", "значен", "ожидан", "вероят", "итог",
+    "perceiv", "appear", "mean", "show", "demons", "symbol", "interpr",
+    "expect", "likely", "signif", "conclus",
+})
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
     "котор", "этот", "этог", "того", "чтобы", "после", "перед", "между", "через", "снова",
@@ -212,7 +227,20 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     # This small check is intentionally not a topic vocabulary or an NLP
     # classifier; it rejects only an explicitly abstract changed_subject.
     subject_tokens = _semantic_tokens(changed_subject)
-    return not bool(subject_tokens & _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS)
+    if subject_tokens & _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS:
+        return False
+
+    # Do not accept a dressed-up interpretation as a new state transition.
+    # This uses only the relation between a declared abstract subject and an
+    # interpretive predicate, so it neither depends on a news category nor
+    # rejects an ordinary concrete action because of a single word.
+    frame_tokens = _semantic_tokens(
+        f"{atom.summary} {development} {resulting_state}"
+    )
+    return not (
+        subject_tokens & _ABSTRACT_TRANSITION_SUBJECT_STEMS
+        and frame_tokens & _INTERPRETIVE_FRAME_STEMS
+    )
 
 
 def _id_list(value: object, _field: str) -> tuple[str, ...]:
@@ -714,7 +742,11 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "state_after says what is now different. A reference to an earlier event plus an interpretation of its "
         "importance is not a development by itself. Short analysis may connect two developments, but may not replace "
         "one. When supplied context is thin, create logical DRAMATIZED transitions rather than several readings of "
-        "one known event. Return strict JSON with top-level \"state_transition_contract\": "
+        "one known event. For each DRAMATIZED atom, name a new discrete occurrence in development: an actor takes "
+        "an action or decision, a response happens, a result is recorded, or a concrete status/process changes. "
+        "Do not label an abstract intensity, prospect, window, mode, line or state as the changed subject and then "
+        "only say how an earlier event is perceived, interpreted or expected; that is analysis, not a development. "
+        "Return strict JSON with top-level \"state_transition_contract\": "
         f"\"{_STATE_TRANSITION_CONTRACT}\" and thesis, "
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
