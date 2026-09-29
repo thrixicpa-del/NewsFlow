@@ -258,6 +258,60 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].actual_chars, 10000)
         self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
 
+    async def test_final_multipart_part_gets_bounded_second_recovery_without_rewriting_prefix(self):
+        """A second FINAL-only recovery should finish instead of requiring operator action."""
+        class MultiAttemptFinalClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_parts = []
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(3)
+                part = __import__("re").search(r"CURRENT PART: (P\d+)", prompt).group(1)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                self.writer_parts.append(part)
+                if part == "P1":
+                    return "А" * target
+                if part == "P2":
+                    return "Б" * target
+                return "В" * 500
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                if "FINAL SEGMENT LENGTH RECOVERY" not in prompt:
+                    raise AssertionError("only FINAL length recovery may use fresh chat")
+                self.fresh_calls += 1
+                target = int(__import__("re").search(
+                    r"aim for (\d+) characters", prompt,
+                ).group(1))
+                if self.fresh_calls == 1:
+                    return "Г" * 1000
+                return "Д" * target
+
+        client = MultiAttemptFinalClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(
+                0, "Тема", "CONTRACT", target_chars=15000,
+                allowed_min=15000, allowed_max=15000,
+            ),
+        ])
+
+        job = jobs[0]
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.writer_parts, ["P1", "P2", "P3"])
+        self.assertEqual(client.fresh_calls, 2)
+        self.assertEqual(job.state, RunState.DONE, job.error)
+        self.assertEqual(job.length_status, "READY")
+        self.assertEqual(job.actual_chars, 15000)
+        self.assertEqual([row["part_id"] for row in job.accepted_story_parts], ["P1", "P2", "P3"])
+        self.assertEqual(job.accepted_story_parts[0]["text"], "А" * 4999)
+        self.assertEqual(job.accepted_story_parts[1]["text"], "Б" * 4999)
+        self.assertEqual(job.accepted_story_parts[2]["text"], "Д" * 4998)
+
     async def test_unresolved_short_final_remains_unaccepted_so_normal_retry_can_repeat_only_final(self):
         class StickyFinalClient:
             def __init__(self):
