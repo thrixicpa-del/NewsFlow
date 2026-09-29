@@ -900,7 +900,10 @@ def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
         for value in values:
             if key != "selected_people" and not _cover_entity_is_explicit_person(value):
                 continue
-            if political_topic:
+            # selected_people is operator-owned and therefore remains an
+            # explicit/manual override path. Automatic structured candidates
+            # for political covers must be presidents.
+            if political_topic and key != "selected_people":
                 if not isinstance(value, dict) or not _cover_candidate_is_president(value):
                     continue
             name = _cover_person_name(value)
