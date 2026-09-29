@@ -2249,9 +2249,9 @@ class CoverHeadlineGuardTests(unittest.TestCase):
     def test_real_rc226_weak_cover_phrases_fail_naturalness_gate(self):
         cases = (
             ("Помидоры держат цены", "цены на помидоры не падают, люди недовольны"),
-            ("Бытовой рост цен раздражает", "рост цен на продукты вызывает недовольство людей"),
-            ("Проверка границ режима", "протест у кремля закончился задержанием и судом"),
-            ("Сигнал о мире без разрядки", "переговоры о мире продолжаются, но напряжённость сохраняется"),
+            ("Бытовой рост цен раздражает", "бытовой рост цен вызывает раздражение людей"),
+            ("Проверка границ режима", "после протеста обсуждают проверку границ режима"),
+            ("Сигнал о мире без разрядки", "сигнал о мире без разрядки обсуждается после переговоров"),
             ("Помидоры и протест в Казахстане", "цены на помидоры вызвали протест в Казахстане"),
         )
         for value, title in cases:
@@ -2385,8 +2385,11 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertGreaterEqual(len(attempts), 3)
 
     def test_tabloid_and_standard_both_reject_metaphorical_language(self):
-        item = {"title": "Переговоры продолжаются без результата"}
-        for candidate in ("Переговоры буксуют", "Мир снова застрял"):
+        cases = (
+            ("Переговоры буксуют", {"title": "переговоры буксуют без результата"}),
+            ("Мир снова застрял", {"title": "мир снова застрял после переговоров"}),
+        )
+        for candidate, item in cases:
             with self.subTest(candidate=candidate):
                 validation = _validate_cover_word("headline", candidate, item)
                 self.assertFalse(validation["valid"], validation)
