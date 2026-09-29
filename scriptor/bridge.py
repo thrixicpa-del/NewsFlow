@@ -1071,6 +1071,12 @@ def _cover_semantic_person_candidate(value: object) -> dict | None:
     candidate = dict(value, entity_type=entity_type)
     if entity_type not in _COVER_PERSON_ENTITY_TYPES or not name or not _cover_candidate_is_public_figure(candidate):
         return None
+    # A role-qualified person is a public figure for the final Covers
+    # contract.  Do not leave a generic ``person`` classification on a
+    # political foreground subject merely because a provider chose the less
+    # specific schema spelling.
+    if entity_type == "person":
+        entity_type = "public_figure"
     try:
         confidence = max(0.0, min(1.0, float(value.get("confidence", 0.5))))
     except (TypeError, ValueError):
@@ -1096,7 +1102,7 @@ def _cover_semantic_person_candidate(value: object) -> dict | None:
 
 
 def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> bool:
-    """Run exactly one semantic repair when a current Cover has no primary person.
+    """Run one bounded semantic recovery when a current Cover has no public person.
 
     The provider may suggest a person, but Core derives the evidence and keeps
     the result LOW_CONFIDENCE unless the current item itself names that person.
@@ -1108,41 +1114,62 @@ def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> boo
         item["cover_face_resolution_status"] = "FACE_RESOLUTION_ERROR"
         item["cover_face_resolution_error"] = "Нет настроенного text provider для semantic person-resolution"
         return False
-    try:
-        response = asyncio.run(HybridTextPool([], active_keys, "", settings.openai_model).generate(
-            _cover_semantic_person_prompt(item), max_output_tokens=700,
-        ))
-        payload = json.loads(str(response or ""))
-    except (OSError, TypeError, ValueError, json.JSONDecodeError, OpenAIAPIError) as exc:
-        item["cover_face_resolution_status"] = "FACE_RESOLUTION_ERROR"
-        item["cover_face_resolution_error"] = _cover_provider_error_message(exc)
-        return False
-    if not isinstance(payload, dict):
-        item["cover_face_resolution_status"] = "FACE_RESOLUTION_ERROR"
-        item["cover_face_resolution_error"] = "Semantic person resolver returned no JSON object"
-        return False
-    raw_candidates = [payload.get("cover_primary_person")]
-    extras = payload.get("cover_people_candidates")
-    if isinstance(extras, list):
-        raw_candidates.extend(extras)
-    seen: set[str] = set()
-    for raw_candidate in raw_candidates:
-        candidate = _cover_semantic_person_candidate(raw_candidate)
-        if candidate is None or candidate["name"].casefold() in seen:
+    # HybridTextPool already falls back when a key becomes unavailable.  A
+    # bounded outer retry additionally covers a temporary provider failure,
+    # refusal/blank answer, malformed JSON or a candidate that Core cannot
+    # ground.  It deliberately never invents a fallback person or consults
+    # the face tree as an identity source.
+    # Three total attempts make a one-key setup resilient to a blank/refusal
+    # followed by malformed JSON and still keep the repair strictly bounded.
+    # HybridTextPool distributes each attempt over the configured key pool.
+    max_attempts = 3
+    pool = HybridTextPool([], active_keys, "", settings.openai_model)
+    prompt = _cover_semantic_person_prompt(item)
+    previous_subject = _cover_person_name(item.get("cover_primary_person"))
+    last_error = "Semantic person resolver returned no grounded real public figure"
+    for attempt in range(1, max_attempts + 1):
+        item["cover_face_resolution_attempt"] = attempt
+        try:
+            response = asyncio.run(pool.generate(prompt, max_output_tokens=700))
+            payload = json.loads(str(response or ""))
+        except (OSError, TimeoutError, TypeError, ValueError, json.JSONDecodeError, OpenAIAPIError) as exc:
+            last_error = _cover_provider_error_message(exc)
             continue
-        seen.add(candidate["name"].casefold())
-        derived, status = derive_person_evidence(
-            candidate, item, settings, allow_semantic_text_anchors=True,
-        )
-        if derived is None:
+        if not isinstance(payload, dict):
+            last_error = "Semantic person resolver returned no JSON object"
             continue
-        item["cover_people_candidates"] = [derived]
-        item["cover_primary_person"] = derived
-        item["cover_face_resolution_status"] = status
-        item.pop("cover_face_resolution_error", None)
-        return True
+        raw_candidates = [payload.get("cover_primary_person")]
+        extras = payload.get("cover_people_candidates")
+        if isinstance(extras, list):
+            raw_candidates.extend(extras)
+        seen: set[str] = set()
+        for raw_candidate in raw_candidates:
+            candidate = _cover_semantic_person_candidate(raw_candidate)
+            if candidate is None or candidate["name"].casefold() in seen:
+                continue
+            seen.add(candidate["name"].casefold())
+            derived, status = derive_person_evidence(
+                candidate, item, settings, allow_semantic_text_anchors=True,
+            )
+            if derived is None:
+                continue
+            resolved_subject = _cover_person_name(derived)
+            item["cover_people_candidates"] = [derived]
+            item["cover_primary_person"] = derived
+            item["cover_face_resolution_status"] = status
+            item["cover_face_resolution_attempts"] = attempt
+            if previous_subject and previous_subject.casefold() != resolved_subject.casefold():
+                item["portrait_stale_identity_overridden"] = True
+                item["portrait_stale_identity"] = previous_subject
+            else:
+                item["portrait_stale_identity_overridden"] = False
+                item.pop("portrait_stale_identity", None)
+            item.pop("cover_face_resolution_error", None)
+            return True
+        last_error = "Semantic person resolver returned no grounded real public figure"
     item["cover_face_resolution_status"] = "FACE_RESOLUTION_ERROR"
-    item["cover_face_resolution_error"] = "Semantic person resolver returned no grounded real public figure"
+    item["cover_face_resolution_attempts"] = max_attempts
+    item["cover_face_resolution_error"] = last_error
     return False
 
 
