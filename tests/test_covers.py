@@ -2245,6 +2245,52 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertFalse(attempts[0]["validation"]["valid"])
         self.assertFalse(attempts[1]["validation"]["valid"])
 
+    def test_real_rc226_weak_cover_phrases_fail_naturalness_gate(self):
+        cases = (
+            ("Помидоры держат цены", "ПОМИДОРЫ ДОВЕЛИ ДО ПРОТЕСТА — ЦЕНЫ В КАЗАХСТАНЕ НЕ ПАДАЮТ — НЕДОВОЛЬСТВО БЬЁТ ПО ВЛАСТЯМ"),
+            ("Бытовой рост цен раздражает", "ПОМИДОРЫ ДОВЕЛИ ДО ПРОТЕСТА — ЦЕНЫ В АЗЕРБАЙДЖАНЕ НЕ ПАДАЮТ — НЕДОВОЛЬСТВО БЬЁТ ПО ВЛАСТЯМ"),
+            ("Проверка границ режима", "ПРОТЕСТ ПРОРВАЛСЯ К САМОМУ КРЕМЛЮ — МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ"),
+            ("Сигнал о мире без разрядки", "ПЕРЕГОВОРЫ ИЛИ НОВАЯ ЭСКАЛАЦИЯ — ПРЕДЛОЖЕНИЯ О МИРЕ ОСТАЮТСЯ НА СТОЛЕ — СТОРОНЫ ГОТОВЯТСЯ К НОВЫМ УДАРАМ"),
+            ("Помидоры и протест в Казахстане", "ПОМИДОРЫ ДОВЕЛИ ДО ПРОТЕСТА — ЦЕНЫ В КАЗАХСТАНЕ НЕ ПАДАЮТ — НЕДОВОЛЬСТВО БЬЁТ ПО ВЛАСТЯМ"),
+        )
+        for value, title in cases:
+            with self.subTest(value=value):
+                validation = _validate_cover_word("headline", value, {"title": title, "topic": title})
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
+
+    def test_real_simple_hooks_remain_valid(self):
+        cases = (
+            ("Границы закрыты?", "ГРАНИЦЫ ЗАКРЫТЫ? — ПРОБЛЕМЫ В БЕЛАРУСИ С ФУРАМИ — МИТИНГ ИЗ-ЗА ЗАКРЫТЫХ ГРАНИЦ"),
+            ("Киев под новой атакой", "МИР ОПЯТЬ ОТКЛАДЫВАЕТСЯ — РОССИЯ УСИЛИЛА УДАРЫ ПО УКРАИНЕ — КИЕВ СНОВА ОКАЗАЛСЯ ПОД МАССИРОВАННОЙ АТАКОЙ"),
+            ("Мир или новый удар", "ПЕРЕГОВОРЫ ИЛИ НОВАЯ ЭСКАЛАЦИЯ — ПРЕДЛОЖЕНИЯ О МИРЕ ОСТАЮТСЯ НА СТОЛЕ — СТОРОНЫ ГОТОВЯТСЯ К НОВЫМ УДАРАМ"),
+        )
+        for value, title in cases:
+            with self.subTest(value=value):
+                validation = _validate_cover_word("headline", value, {"title": title, "topic": title})
+                self.assertTrue(validation["valid"], validation)
+
+    def test_tabloid_prompt_demands_simple_emotional_mass_audience_language(self):
+        item = {"title": "Цены на помидоры не падают, недовольство растёт"}
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item), tabloid_mode=True,
+        )
+        self.assertIn("прост", prompt.casefold())
+        self.assertIn("эмоц", prompt.casefold())
+        self.assertIn("разговор", prompt.casefold())
+        self.assertIn("hook", prompt.casefold())
+        self.assertIn("не литератур", prompt.casefold())
+
+    def test_standard_prompt_is_natural_and_hooked_without_becoming_tabloid(self):
+        item = {"title": "Цены на помидоры не падают, недовольство растёт"}
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item), tabloid_mode=False,
+        )
+        self.assertIn("естествен", prompt.casefold())
+        self.assertIn("прост", prompt.casefold())
+        self.assertIn("hook", prompt.casefold())
+        self.assertNotIn("гряз", prompt.casefold())
+
     def test_naturalness_gate_rejects_editorially_awkward_but_grounded_hooks(self):
         cases = (
             ("Европа поджимает помидоры", "Европа обсуждает поставки помидоров после нового решения"),
