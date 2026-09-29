@@ -25,6 +25,15 @@
 
 .gallery-face-editor{display:grid;grid-template-columns:minmax(220px,1fr) minmax(190px,.7fr) auto auto;gap:9px;align-items:center;padding:12px 18px;border-bottom:1px solid #1a3047;background:#0a192a}.gallery-face-editor>div{display:grid;gap:4px}.gallery-face-editor b{color:#e7f1fd;font-size:12px}.gallery-face-editor small{color:#839db8;font-size:10px;line-height:1.45}.gallery-face-editor code{color:#71b0ff}.gallery-face-editor select{min-width:0}.gallery-face-editor .button{min-height:34px;padding:0 10px;font-size:10px}.gallery-face-current{grid-column:2/-1;color:#58d99b!important}@media(max-width:1000px){.gallery-face-editor{grid-template-columns:1fr 1fr}.gallery-face-editor>div{grid-column:1/-1}.gallery-face-current{grid-column:1/-1}}@media(max-width:650px){.gallery-face-editor{grid-template-columns:1fr}.gallery-face-current{grid-column:1}}
 .cover-headline-preset-row{padding-bottom:2px;border-bottom:1px solid #1a3048;background:#0a1828}
+.cover-tabloid-toggle{display:grid!important;grid-template-columns:20px minmax(230px,1fr) auto;align-items:center;gap:10px;min-width:min(100%,460px);padding:10px 12px;border:1px solid #31536f;border-radius:10px;background:#0a1929;color:#dcecff}
+.cover-tabloid-toggle.enabled{border-color:#b56b2f;background:linear-gradient(120deg,#251b13,#0b1827)}
+.cover-tabloid-toggle input{flex:0 0 18px!important;width:18px!important;min-width:18px!important;height:18px!important;margin:0;accent-color:#f59e0b}
+.cover-tabloid-toggle>span{display:grid;gap:2px;min-width:0}
+.cover-tabloid-toggle b{color:#eef6ff;font-size:11px}
+.cover-tabloid-toggle small{color:#879fb8;font-size:9px;line-height:1.35}
+.cover-tabloid-toggle em{padding:5px 7px;border:1px solid #34516b;border-radius:999px;color:#9eb5ca;background:#081421;font-size:9px;font-style:normal;font-weight:900;letter-spacing:.04em}
+.cover-tabloid-toggle.enabled em{border-color:#a9642f;color:#ffd09a;background:#3a2415}
+@media(max-width:760px){.cover-tabloid-toggle{grid-template-columns:20px minmax(0,1fr)}.cover-tabloid-toggle em{grid-column:2;justify-self:start}}
 .reference-list .reference-preview{width:52px;height:32px;flex:0 0 auto;object-fit:cover;border:1px solid #395b7d;border-radius:5px;background:#07111e}.reference-enable-toggle{margin-top:10px;color:#dcecff;font-size:11px}
 .cover-image-load-error{display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:90px;padding:12px;color:#9db7d2;font-size:12px;text-align:center;background:#07111e}
 .gallery-retry-state{padding:8px 18px;border-bottom:1px solid #17334c;color:#90bce5;background:#0a1b2c;font-size:10px;font-weight:700}

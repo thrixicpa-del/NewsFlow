@@ -1834,15 +1834,15 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             transcript.append(prompt)
             title = prompt.split("ТЕМА: «", 1)[1].split("»", 1)[0]
             headline = {
-                "Трамп усиливает давление на поставки нефти": "ТРАМП ДАВИТ",
-                "Путин и Макрон обсуждают переговоры": "ПУТИН ДАВИТ",
-                "Цены на нефть могут вырасти": "НЕФТЬ РВАНЁТ?",
+                "Трамп усиливает давление на поставки нефти": "ТРАМП УСИЛИВАЕТ ДАВЛЕНИЕ",
+                "Путин и Макрон обсуждают переговоры": "МАКРОН ТРЕБУЕТ ГАРАНТИЙ",
+                "Цены на нефть могут вырасти": "НЕФТЬ МОЖЕТ ПОДОРОЖАТЬ",
                 "Порт закрыт из-за кризиса": "ПОРТ ЗАКРЫТ",
                 "Поставки газа могут сократиться": "ПОСТАВКИ ПОД РИСКОМ?",
             }
             subheadline = {
                 "Трамп усиливает давление на поставки нефти": "Танкеры ждут решения",
-                "Путин и Макрон обсуждают переговоры": "Макрон требует гарантий",
+                "Путин и Макрон обсуждают переговоры": "Переговоры под давлением",
                 "Цены на нефть могут вырасти": "Рынок ждёт дефицита",
                 "Порт закрыт из-за кризиса": "Контейнеры застряли на терминале",
                 "Поставки газа могут сократиться": "Заводы сокращают выпуск",
@@ -2205,13 +2205,13 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
         self.assertFalse(validation["editorial_evaluation"]["semantic_coherence_pass"])
 
-    def test_editorial_quality_does_not_reject_natural_contextual_word_by_legacy_substring(self):
+    def test_editorial_quality_rejects_newspaper_style_even_when_source_uses_it(self):
         item = {"title": "Россия нагнетает давление в переговорах"}
 
         validation = _validate_cover_word("headline", "Россия нагнетает давление", item)
 
-        self.assertTrue(validation["valid"], validation)
-        self.assertTrue(validation["editorial_evaluation"]["naturalness_pass"])
+        self.assertFalse(validation["valid"], validation)
+        self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
 
     def test_editorial_evaluation_is_compact_and_structured(self):
         item = {"title": "Трамп повысил тарифы для Китая"}
@@ -2221,9 +2221,10 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertTrue(validation["valid"], validation)
         evidence = validation["editorial_evaluation"]
         self.assertEqual(set(evidence), {
-            "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "cliche_penalty",
-            "editorial_plausibility_pass", "specificity_score", "hook_score", "factual_pass",
-            "grounding_pass", "duplicate_pass", "quality_reasons",
+            "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "plain_language_pass",
+            "cliche_penalty", "editorial_plausibility_pass", "specificity_score", "hook_score",
+            "emotion_score", "directness_score", "literalness_score", "factual_pass", "grounding_pass",
+            "duplicate_pass", "quality_reasons",
         })
 
     def test_editorial_quality_selects_strong_natural_candidate_from_safe_batch(self):
@@ -2244,6 +2245,52 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertTrue(validation["editorial_evaluation"]["naturalness_pass"])
         self.assertFalse(attempts[0]["validation"]["valid"])
         self.assertFalse(attempts[1]["validation"]["valid"])
+
+    def test_real_rc226_weak_cover_phrases_fail_naturalness_gate(self):
+        cases = (
+            ("Помидоры держат цены", "цены на помидоры не падают, люди недовольны"),
+            ("Бытовой рост цен раздражает", "бытовой рост цен вызывает раздражение людей"),
+            ("Проверка границ режима", "после протеста обсуждают проверку границ режима"),
+            ("Сигнал о мире без разрядки", "сигнал о мире без разрядки обсуждается после переговоров"),
+            ("Помидоры и протест в Казахстане", "цены на помидоры вызвали протест в Казахстане"),
+        )
+        for value, title in cases:
+            with self.subTest(value=value):
+                validation = _validate_cover_word("headline", value, {"title": title, "topic": title})
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
+
+    def test_real_simple_hooks_remain_valid(self):
+        cases = (
+            ("Границы закрыты?", {"title": "Границы закрыты, перевозчики ждут решения"}),
+            ("Киев под новой атакой", {"title": "Киев снова оказался под массированной атакой", "primary_entities": ["Киев"]}),
+            ("Мир или новый удар", {"title": "Переговоры продолжаются, стороны готовятся к новым ударам"}),
+        )
+        for value, item in cases:
+            with self.subTest(value=value):
+                validation = _validate_cover_word("headline", value, item)
+                self.assertTrue(validation["valid"], validation)
+
+    def test_tabloid_prompt_demands_simple_emotional_mass_audience_language(self):
+        item = {"title": "Цены на помидоры не падают, недовольство растёт"}
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item), tabloid_mode=True,
+        )
+        self.assertIn("прост", prompt.casefold())
+        self.assertIn("эмоц", prompt.casefold())
+        self.assertIn("разговор", prompt.casefold())
+        self.assertIn("hook", prompt.casefold())
+        self.assertIn("не литератур", prompt.casefold())
+
+    def test_standard_prompt_is_natural_and_hooked_without_becoming_tabloid(self):
+        item = {"title": "Цены на помидоры не падают, недовольство растёт"}
+        prompt = _cover_word_provider_prompt(
+            "headline", "", item, _cover_word_structure_pair(item), tabloid_mode=False,
+        )
+        self.assertIn("естествен", prompt.casefold())
+        self.assertIn("прост", prompt.casefold())
+        self.assertIn("hook", prompt.casefold())
+        self.assertNotIn("гряз", prompt.casefold())
 
     def test_naturalness_gate_rejects_editorially_awkward_but_grounded_hooks(self):
         cases = (
@@ -2311,6 +2358,43 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             tabloid_evidence["editorial_evaluation"]["hook_score"],
         )
 
+    def test_bounded_editorial_exhaustion_uses_grounded_local_fallback_without_extra_call(self):
+        from scriptor import bridge
+
+        item = {"title": "Границы закрыты? — перевозчики ждут решения"}
+        calls = 0
+
+        async def generate(_prompt, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return json.dumps({"candidates": [
+                "Сигнал границ без разрядки",
+                "Границы снова буксуют",
+            ]}, ensure_ascii=False)
+
+        value, validation, attempts = asyncio.run(bridge._generate_cover_word_v2(
+            SimpleNamespace(generate=generate), "headline", item, "", _cover_word_structure_pair(item),
+            tabloid_mode=True,
+        ))
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(value, "Границы закрыты?")
+        self.assertTrue(validation["valid"], validation)
+        self.assertTrue(validation["selection_evidence"]["fallback"])
+        self.assertIn("local fallback", validation["selection_reason"])
+        self.assertGreaterEqual(len(attempts), 2)
+
+    def test_tabloid_and_standard_both_reject_metaphorical_language(self):
+        cases = (
+            ("Переговоры буксуют", {"title": "переговоры буксуют без результата"}),
+            ("Мир снова застрял", {"title": "мир снова застрял после переговоров"}),
+        )
+        for candidate, item in cases:
+            with self.subTest(candidate=candidate):
+                validation = _validate_cover_word("headline", candidate, item)
+                self.assertFalse(validation["valid"], validation)
+                self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
+
     def test_headline_is_limited_to_five_words(self):
         self.assertEqual(
             _clean_cover_headline("ОРМУЗ ПОД УГРОЗОЙ ПРЯМО СЕЙЧАС НОЧЬЮ"),
@@ -2350,13 +2434,14 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             self.assertFalse(validation["valid"], weak)
             self.assertEqual(validation["reason_code"], "MISSING_NAMED_ANCHOR")
 
-    def test_accepts_a_standalone_headline_with_a_named_topic_anchor(self):
+    def test_rejects_metaphorical_named_headline_even_with_topic_anchor(self):
         item = {
             "title": "ЗЕЛЕНСКИЙ НЕ УСТУПАЕТ ТРАМПУ — спор вокруг Украины обостряется — помощь США под вопросом",
             "topic": "Трамп-Зеленский — давление и переговоры",
         }
         validation = _validate_cover_word("headline", "Зеленский держит курс", item)
-        self.assertTrue(validation["valid"], validation)
+        self.assertFalse(validation["valid"], validation)
+        self.assertEqual(validation["reason_code"], "EDITORIAL_QUALITY_FAILED")
 
     def test_accepts_a_natural_headline_with_subject_action_and_object(self):
         item = {

@@ -6576,7 +6576,7 @@ export function Covers({
           </div>
         </div>
         <div className="cover-preset-row cover-headline-preset-row">
-          <label className="check-row">
+          <label className={`check-row cover-tabloid-toggle ${tabloidMode ? "enabled" : ""}`}>
             <input
               aria-label="Жёлтая пресса / максимально кликбейтный стиль"
               type="checkbox"
@@ -6586,7 +6586,15 @@ export function Covers({
                 void command("save-cover-settings", { tabloidMode: event.target.checked });
               }}
             />
-            Жёлтая пресса / максимально кликбейтный стиль
+            <span>
+              <b>Жёлтая пресса</b>
+              <small>
+                {tabloidMode
+                  ? "TABLOID: жёстче, эмоциональнее и грязнее, но без метафор и выдуманных фактов"
+                  : "STANDARD: прямой, естественный и эмоциональный текст без литературности"}
+              </small>
+            </span>
+            <em>{tabloidMode ? "TABLOID" : "STANDARD"}</em>
           </label>
           <select
             value={selectedHeadlinePreset}
