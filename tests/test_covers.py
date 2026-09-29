@@ -1834,15 +1834,15 @@ class CoverGalleryFileStateTests(unittest.TestCase):
             transcript.append(prompt)
             title = prompt.split("ТЕМА: «", 1)[1].split("»", 1)[0]
             headline = {
-                "Трамп усиливает давление на поставки нефти": "ТРАМП ДАВИТ",
-                "Путин и Макрон обсуждают переговоры": "ПУТИН ДАВИТ",
-                "Цены на нефть могут вырасти": "НЕФТЬ РВАНЁТ?",
+                "Трамп усиливает давление на поставки нефти": "ТРАМП УСИЛИВАЕТ ДАВЛЕНИЕ",
+                "Путин и Макрон обсуждают переговоры": "МАКРОН ТРЕБУЕТ ГАРАНТИЙ",
+                "Цены на нефть могут вырасти": "НЕФТЬ МОЖЕТ ПОДОРОЖАТЬ",
                 "Порт закрыт из-за кризиса": "ПОРТ ЗАКРЫТ",
                 "Поставки газа могут сократиться": "ПОСТАВКИ ПОД РИСКОМ?",
             }
             subheadline = {
                 "Трамп усиливает давление на поставки нефти": "Танкеры ждут решения",
-                "Путин и Макрон обсуждают переговоры": "Макрон требует гарантий",
+                "Путин и Макрон обсуждают переговоры": "Переговоры под давлением",
                 "Цены на нефть могут вырасти": "Рынок ждёт дефицита",
                 "Порт закрыт из-за кризиса": "Контейнеры застряли на терминале",
                 "Поставки газа могут сократиться": "Заводы сокращают выпуск",
@@ -2223,7 +2223,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
         self.assertEqual(set(evidence), {
             "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "plain_language_pass",
             "cliche_penalty", "editorial_plausibility_pass", "specificity_score", "hook_score",
-            "emotion_score", "directness_score", "factual_pass", "grounding_pass",
+            "emotion_score", "directness_score", "literalness_score", "factual_pass", "grounding_pass",
             "duplicate_pass", "quality_reasons",
         })
 
