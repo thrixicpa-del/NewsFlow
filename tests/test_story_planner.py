@@ -3,6 +3,8 @@ import unittest
 
 from scriptor.core import ScenarioRequest
 from scriptor.story_planner import (
+    StoryContentAtom,
+    _has_concrete_story_development,
     build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
@@ -243,9 +245,10 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "materially distinct"):
             parse_story_plan_response(response, (5000, 5000))
 
-    def test_parser_rejects_abstract_analytic_atoms_without_event_progression(self):
-        """Different political abstractions are not distinct story developments."""
+    def test_parser_rejects_analytic_atoms_without_declared_state_transitions(self):
+        """Different interpretations cannot substitute for before/development/after."""
         response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
             "thesis": "Переговорная ситуация становится всё жёстче.",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
@@ -270,11 +273,80 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "concrete story developments"):
+        with self.assertRaisesRegex(ValueError, "state_before and state_after"):
+            parse_story_plan_response(response, (3000,))
+
+    def test_concrete_development_requires_a_distinct_before_and_after_state(self):
+        """An event mention alone cannot substitute for a state transition."""
+        def atom(summary: str, before: str = "", after: str = "") -> StoryContentAtom:
+            record = StoryContentAtom("C001", summary, "P1", "DRAMATIZED")
+            object.__setattr__(record, "state_before", before)
+            object.__setattr__(record, "state_after", after)
+            return record
+
+        self.assertTrue(_has_concrete_story_development(atom(
+            "Россия нанесла новый удар по Киеву",
+            "В городе действовал обычный режим тревоги.",
+            "Городские службы перевели критические объекты на резервное питание.",
+        )))
+        self.assertTrue(_has_concrete_story_development(atom(
+            "Киев перевёл критические объекты на резервное питание",
+            "Критическая инфраструктура работала в штатном режиме.",
+            "Критические объекты перешли на резервное питание.",
+        )))
+        self.assertTrue(_has_concrete_story_development(atom(
+            "После удара движение на участке было перекрыто",
+            "Движение на участке продолжалось.",
+            "Движение на участке было перекрыто.",
+        )))
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Удар меняет политическую цену конфликта"
+        )))
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Атака показывает, что мир отдаляется"
+        )))
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Москва получает новый сигнал о смене логики"
+        )))
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Компания опубликовала отчёт",
+            "Компания готовила отчёт.",
+            "Компания готовила отчёт.",
+        )))
+
+    def test_parser_rejects_analytic_atoms_that_only_mention_event_nouns(self):
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Один удар получает несколько аналитических трактовок.",
+            "macro_blocks": [{"id": "M1", "purpose": "Ложное развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Новая атака показывает, что мир отдаляется",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Что означает атака?",
+                 "novelty_payload": "Удар делает переговорную рамку жёстче."},
+                {"id": "C002", "summary": "Усиление ударов меняет политическую цену конфликта",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Что меняют удары?",
+                 "novelty_payload": "Атака становится новым сигналом для сторон."},
+                {"id": "C003", "summary": "Москва получает новый сигнал о смене логики",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Что значит этот сигнал?",
+                 "novelty_payload": "Баланс после удара становится менее устойчивым."},
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Пересказать одну трактовку",
+                "macro_id": "M1", "content_ids": ["C001", "C002", "C003"],
+                "novelty_question": "Как меняется контекст?",
+                "novelty_payload": "Зритель получает три формулировки одного вывода.",
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "state_before and state_after"):
             parse_story_plan_response(response, (3000,))
 
     def test_parser_accepts_dramatized_concrete_event_chain(self):
         response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
             "thesis": "После новой атаки стороны проходят через последовательную цепочку решений.",
             "macro_blocks": [{"id": "M1", "purpose": "Событие, ответ и последствие"}],
             "content_atoms": [
@@ -299,7 +371,14 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        plan = parse_story_plan_response(response, (3000,))
+        payload = json.loads(response)
+        for index, atom in enumerate(payload["content_atoms"], start=1):
+            atom["state_before"] = f"Состояние до шага {index}."
+            atom["state_after"] = f"Новое состояние после шага {index}."
+        plan = parse_story_plan_response(
+            json.dumps(payload, ensure_ascii=False),
+            (3000,),
+        )
 
         self.assertEqual([atom.id for atom in plan.content_atoms], ["C001", "C002", "C003"])
 

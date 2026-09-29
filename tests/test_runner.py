@@ -34,11 +34,14 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
     def _story_plan_json(part_count: int) -> str:
         roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
         return json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
             "thesis": "Одна последовательная история без второго смыслового круга.",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
                 {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}",
-                 "content_kind": "SUPPORTED" if index == 1 else "DRAMATIZED"}
+                 "content_kind": "SUPPORTED" if index == 1 else "DRAMATIZED",
+                 "state_before": f"Состояние до шага {index}.",
+                 "state_after": f"Состояние после шага {index}."}
                 for index in range(1, part_count + 1)
             ],
             "parts": [
@@ -809,6 +812,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                                 raw["content_atoms"].append({
                                     "id": "C003", "summary": "Кульминация", "owner_part_id": "P3",
                                     "content_kind": "DRAMATIZED",
+                                    "state_before": "Состояние до кульминации.",
+                                    "state_after": "Состояние после кульминации.",
                                 })
                                 raw["parts"].append({
                                     "id": "P3", "role": "FINAL", "purpose": "Кульминация", "macro_id": "M1",
@@ -1212,6 +1217,22 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runner._writer_output_unusable(
             "Это драматизированная реконструкция событий, а не подтверждённая хроника. "
             "Россия нанесла удар по Киеву, и городские службы немедленно ответили."
+        ))
+        self.assertTrue(runner._writer_output_unusable(
+            "Этот удар меняет политическую рамку переговоров. "
+            "Новая атака показывает, что мир отдаляется. "
+            "По сути, усиление ударов повышает политическую цену. "
+            "В этой точке атака становится новым сигналом. "
+            "Именно поэтому удар делает баланс менее устойчивым. "
+            "Пространство для манёвра сужается после каждой атаки."
+        ))
+        self.assertTrue(runner._writer_output_unusable(
+            "Россия нанесла удар по Киеву. "
+            "Городские службы перевели объекты на резервное питание. "
+            "Украина направила партнёрам срочный запрос. "
+            "Это драматизированная реконструкция событий, а не подтверждённая хроника. "
+            "Партнёры созвали совещание. "
+            "Переговорный канал был приостановлен."
         ))
         self.assertFalse(runner._writer_output_unusable(event_prose))
 

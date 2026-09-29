@@ -30,16 +30,11 @@ _ANALYTIC_FILLER_PATTERNS = (
     "поле выбора", "архитектура давления", "политическая цена", "новый сигнал",
     "баланс становится", "баланс стал", "менее устойчив",
 )
-_WRITER_EVENT_CUES = (
-    "атак", "удар", "обстрел", "нанес", "провел", "заяв", "потребов",
-    "объяв", "ввел", "ввёл", "подпис", "встрет", "отказ", "задерж",
-    "арест", "суд", "отправ", "закры", "откры", "переве", "направ",
-    "запрос", "ответ", "реагир", "вышел", "вышл", "созвал", "приня",
-    "решил", "голос", "назнач", "увол", "сократ", "увелич", "перекры",
-    "эваку", "запуст", "прибыл", "обсуд", "отозв", "прекрат", "восстанов",
-    "attack", "strike", "launch", "announce", "demand", "reject", "arrest",
-    "detain", "send", "close", "open", "move", "request", "respond", "meet",
-    "sign", "vote", "approve", "block", "evacuate",
+_ANALYTIC_SENTENCE_SHAPE = re.compile(
+    r"\b(?:это|этот|эта|эти|такой|такая|такие|new)\b.{0,120}"
+    r"\b(?:показыва\w*|означа\w*|меня\w*|дела\w*|станов\w*|повыша\w*|"
+    r"сужа\w*|отража\w*|shows?|means?|changes?|becomes?)\b",
+    re.IGNORECASE,
 )
 
 
@@ -380,7 +375,8 @@ class ParallelRunner:
         factuality judge.  Short/ambiguous prose remains accepted.  A retry is
         warranted only when a substantial response is overwhelmingly composed
         of known analytical-transition language and contains almost no named
-        event/action cues, or when it puts a dramatized disclosure first.
+        analytical transitions, or when it puts a dramatized disclosure in a
+        position that violates the opening contract.
         """
         cleaned = " ".join(str(text or "").split())
         if not cleaned:
@@ -389,8 +385,11 @@ class ParallelRunner:
             sentence.strip() for sentence in re.split(r"(?<=[.!?…])\s+", cleaned)
             if sentence.strip()
         ]
-        first = sentences[0].casefold() if sentences else cleaned.casefold()
-        if "драматизирован" in first and "реконструкц" in first:
+        disclosure_positions = [
+            index for index, sentence in enumerate(sentences)
+            if "драматизирован" in sentence.casefold() and "реконструкц" in sentence.casefold()
+        ]
+        if disclosure_positions and (len(disclosure_positions) != 1 or disclosure_positions[0] not in {1, 2}):
             return True
         # A local detector cannot reliably score terse prose, verse, or test
         # fixtures without normal sentence boundaries.  Let the Writer prompt
@@ -398,17 +397,15 @@ class ParallelRunner:
         if len(sentences) < 6:
             return False
         analytic_sentences = sum(
-            any(pattern in sentence.casefold() for pattern in _ANALYTIC_FILLER_PATTERNS)
-            for sentence in sentences
-        )
-        event_sentences = sum(
-            any(cue in sentence.casefold() for cue in _WRITER_EVENT_CUES)
+            (
+                any(pattern in sentence.casefold() for pattern in _ANALYTIC_FILLER_PATTERNS)
+                or bool(_ANALYTIC_SENTENCE_SHAPE.search(sentence))
+            )
             for sentence in sentences
         )
         return (
             analytic_sentences >= 5
             and analytic_sentences * 2 >= len(sentences)
-            and event_sentences <= 1
         )
 
     def _writer_output_rejection_reason(self, text: str) -> str:
@@ -545,7 +542,11 @@ class ParallelRunner:
                 job.error = "Планировщик сценария не вернул рабочий план"
                 return False
             try:
-                plan = parse_story_plan_response(planner_response, part_targets)
+                plan = parse_story_plan_response(
+                    planner_response,
+                    part_targets,
+                    require_state_transitions=True,
+                )
             except (TypeError, ValueError):
                 # Prefer the non-regenerative repair: keep the original Story
                 # Map substance and correct only its part topology/ownership.
@@ -556,7 +557,10 @@ class ParallelRunner:
                         planner_budget,
                     )
                     plan = repair_story_plan_parts_response(
-                        structural_repair, planner_response, part_targets,
+                        structural_repair,
+                        planner_response,
+                        part_targets,
+                        require_state_transitions=True,
                     )
                 except (TypeError, ValueError):
                     # Some real provider failures are outside the parts-only
@@ -582,7 +586,9 @@ class ParallelRunner:
                         return False
                     try:
                         plan = parse_story_plan_response(
-                            fresh_planner_response, part_targets,
+                            fresh_planner_response,
+                            part_targets,
+                            require_state_transitions=True,
                         )
                     except (TypeError, ValueError) as fresh_error:
                         # The bounded Planner recovery is exhausted before any

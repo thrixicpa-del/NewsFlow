@@ -20,11 +20,14 @@ from scriptor.story_planner import (
 def _story_plan(part_count: int = 2) -> str:
     roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
     return json.dumps({
+        "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
         "thesis": "Одна история",
         "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
         "content_atoms": [
             {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}",
-             "content_kind": "SUPPORTED"}
+             "content_kind": "SUPPORTED",
+             "state_before": f"Состояние до шага {index}.",
+             "state_after": f"Состояние после шага {index}."}
             for index in range(1, part_count + 1)
         ],
         "parts": [

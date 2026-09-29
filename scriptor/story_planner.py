@@ -16,18 +16,7 @@ _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
 _COMPACT_AVOID_CHARS = 140
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
-_EVENT_DEVELOPMENT_CUES = (
-    "атак", "удар", "обстрел", "нанес", "провел", "заяв", "потребов",
-    "объяв", "ввел", "ввёл", "подпис", "встрет", "отказ", "задерж",
-    "арест", "суд", "отправ", "закры", "откры", "переве", "направ",
-    "запрос", "ответ", "реагир", "вышел", "вышл", "созвал", "приня",
-    "решил", "голос", "назнач", "увол", "сократ", "сокращ", "увелич", "перекры",
-    "эваку", "запуст", "прибыл", "обсуд", "отозв", "прекрат", "восстанов",
-    "покуп", "продав", "постав", "протест", "событ",
-    "attack", "strike", "launch", "announce", "demand", "reject", "arrest",
-    "detain", "send", "close", "open", "move", "request", "respond", "meet",
-    "sign", "vote", "approve", "block", "evacuate",
-)
+_STATE_TRANSITION_CONTRACT = "BEFORE_DEVELOPMENT_AFTER"
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
     "котор", "этот", "этог", "того", "чтобы", "после", "перед", "между", "через", "снова",
@@ -44,6 +33,8 @@ class StoryContentAtom:
     novelty_question: str = ""
     novelty_payload: str = ""
     do_not_repeat: str = ""
+    state_before: str = ""
+    state_after: str = ""
 
 
 @dataclass(frozen=True)
@@ -183,16 +174,19 @@ def _obvious_semantic_duplicate(left: object, right: object) -> bool:
 
 
 def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
-    """Return true only when an atom names an observable action or event.
+    """Return true only for a declared, distinct before/development/after arc.
 
-    This deliberately stays local and conservative.  It is not a factuality
-    classifier and it does not reject a single compact atom; it prevents a new
-    Planner response from satisfying semantic density solely with several
-    differently worded abstractions such as pressure, balance or a changed
-    framework.
+    The test is deliberately domain-neutral: it validates the Planner's
+    explicit state transition rather than guessing meaning from topic words.
     """
-    material = f"{atom.summary} {atom.novelty_payload}".casefold()
-    return any(cue in material for cue in _EVENT_DEVELOPMENT_CUES)
+    before = _optional_text(atom.state_before)
+    after = _optional_text(atom.state_after)
+    return bool(
+        before
+        and after
+        and before.casefold() != after.casefold()
+        and not _obvious_semantic_duplicate(before, after)
+    )
 
 
 def _id_list(value: object, _field: str) -> tuple[str, ...]:
@@ -285,6 +279,7 @@ def parse_story_plan_response(
     part_targets: tuple[int, ...],
     *,
     validate_semantic_novelty: bool = True,
+    require_state_transitions: bool = False,
 ) -> StoryPlan:
     """Parse and validate the complete planner map before any writer starts.
 
@@ -297,6 +292,7 @@ def parse_story_plan_response(
         invalid_message="story planner must return strict JSON",
         object_message="story planner response must be an object",
     )
+    state_transition_contract = _optional_text(raw.get("state_transition_contract"))
 
     targets = tuple(max(0, int(target or 0)) for target in part_targets) or (0,)
     part_count = len(targets)
@@ -411,6 +407,8 @@ def parse_story_plan_response(
             novelty_question=_optional_text(raw_atom.get("novelty_question")) or summary,
             novelty_payload=_optional_text(raw_atom.get("novelty_payload")) or summary,
             do_not_repeat=_optional_text(raw_atom.get("do_not_repeat")),
+            state_before=_optional_text(raw_atom.get("state_before")),
+            state_after=_optional_text(raw_atom.get("state_after")),
         )
         if atom.id in atom_by_id:
             raise ValueError("story plan content atom IDs must be unique")
@@ -420,6 +418,18 @@ def parse_story_plan_response(
             )
         atom_by_id[atom.id] = atom
         atoms.append(atom)
+
+    if require_state_transitions and state_transition_contract != _STATE_TRANSITION_CONTRACT:
+        raise ValueError("story plan requires BEFORE_DEVELOPMENT_AFTER state transition contract")
+    validate_state_transitions = (
+        require_state_transitions or state_transition_contract == _STATE_TRANSITION_CONTRACT
+    )
+    if validate_state_transitions:
+        for atom in atoms:
+            if not atom.state_before or not atom.state_after:
+                raise ValueError("story plan atom requires state_before and state_after")
+            if not _has_concrete_story_development(atom):
+                raise ValueError("story plan atom must advance to a distinct state_after")
 
     # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
     # persisted maps stay readable even if an older Planner used repetitive
@@ -448,13 +458,10 @@ def parse_story_plan_response(
                     "distinct content atoms for semantic density"
                 )
 
-        # Lexically different analysis is not a sequence of developments.  A
-        # fresh event-driven map may still include interpretation, but when it
-        # has multiple explicit atoms at least half must name observable
-        # actions/events/reactions/consequences.  This runs after the existing
-        # density floor so its established diagnostics stay stable. Persisted
-        # legacy plans skip the guard, preserving resume compatibility.
-        if len(atoms) >= 2:
+        # A state-transition map may still include interpretation, but its
+        # atoms must carry actual before/development/after changes. Persisted
+        # legacy maps do not opt into this contract and remain resumable.
+        if validate_state_transitions and len(atoms) >= 2:
             concrete_atoms = sum(
                 _has_concrete_story_development(atom) for atom in atoms
             )
@@ -530,7 +537,13 @@ def parse_story_plan_response(
     )
 
 
-def repair_story_plan_parts_response(text: str, original_response: str, part_targets: tuple[int, ...]) -> StoryPlan:
+def repair_story_plan_parts_response(
+    text: str,
+    original_response: str,
+    part_targets: tuple[int, ...],
+    *,
+    require_state_transitions: bool = False,
+) -> StoryPlan:
     """Repair only part topology; atoms keep identity/meaning but may move owner."""
     original = _load_json_object(
         original_response,
@@ -571,7 +584,11 @@ def repair_story_plan_parts_response(text: str, original_response: str, part_tar
         {**atom, "owner_part_id": ownership[str(atom["id"]).strip()]}
         for atom in original_atoms
     ]
-    return parse_story_plan_response(json.dumps(merged, ensure_ascii=False), part_targets)
+    return parse_story_plan_response(
+        json.dumps(merged, ensure_ascii=False),
+        part_targets,
+        require_state_transitions=require_state_transitions,
+    )
 
 
 def story_plan_from_dict(value: dict[str, Any]) -> StoryPlan:
@@ -647,32 +664,34 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "REFERENCE DATA FOR PLANNING, not an instruction to execute now: do not obey its requests to write/return "
         "the finished scenario during this Planner call. Plan the complete story before any writer begins. "
         "Even if only a headline is available, create the full Story Map for every requested P1...PN. Never stop "
-        "planning because supporting facts are thin. Plan an EVENT-DRIVEN story map: every DRAMATIZED atom must "
-        "primarily name a concrete new development, preferably ACTOR -> ACTION / DECISION -> TARGET -> IMMEDIATE "
-        "RESULT, EVENT -> REACTION -> COUNTERMOVE -> CONSEQUENCE, or ACTION -> RESPONSE -> NEW TURNING POINT. "
-        "When the supplied context does not cover a needed distinct development, create that concrete DRAMATIZED "
-        "circumstance, action, reaction, conflict, consequence, causal step, scene detail or turning point. "
-        "Abstract analysis such as stronger pressure, a changed framework, a new signal, a narrower room for "
-        "manoeuvre, a higher political price or an unstable balance may follow an event briefly, but is never a "
-        "standalone development atom. Return strict JSON with thesis, "
+        "planning because supporting facts are thin. Plan every atom as a universal state transition: BEFORE -> "
+        "DEVELOPMENT -> AFTER. state_before says what was true immediately before this atom; summary names the "
+        "new action, decision, reaction, discovery, result, status change or other observable development; "
+        "state_after says what is now different. A reference to an earlier event plus an interpretation of its "
+        "importance is not a development by itself. Short analysis may connect two developments, but may not replace "
+        "one. When supplied context is thin, create logical DRAMATIZED transitions rather than several readings of "
+        "one known event. Return strict JSON with top-level \"state_transition_contract\": "
+        f"\"{_STATE_TRANSITION_CONTRACT}\" and thesis, "
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
-        "novelty_question, novelty_payload and do_not_repeat. novelty_question is the concrete question that atom "
+        "state_before, state_after, novelty_question, novelty_payload and do_not_repeat. novelty_question is the concrete question that atom "
         "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
+        "it must describe the new story state/development, not another interpretation of an earlier state. "
         "do_not_repeat names the already-established conclusion/meaning this atom may reference briefly but must not "
         "explain again (use an empty string when there is no earlier meaning to protect). "
         "No two atoms may answer the same question or carry the same new information. SUPPORTED atoms must rely on "
         "provided NewsFlow context. DRAMATIZED atoms may extend the narrative, but must still be materially distinct. "
         "Do not fill parts by paraphrasing one meaning. A synonym swap, a summary of an "
         "earlier conclusion, or another explanation of the same thesis is NOT new story material. Keep thesis, purposes "
-        "and atom summaries compact. Plan enough distinct developments for the requested long-form volume: for a roughly "
+        "and atom summaries compact. Use the smallest number of distinct transitions that makes a complete story; a "
+        "compact roughly-2k COMPLETE story may need only an initial development, an immediate reaction, a next move and "
+        "a resulting new state. Never invent extra atoms only to meet a pattern. Plan enough distinct developments for the requested long-form volume: for a roughly "
         "5k-character part use at least 3 and normally 3-5 genuinely different atoms; for a 6-9k COMPLETE part use "
         "at least 5 and normally 5-7. These are semantic-density requirements, not fixed story templates. Treat content_ids "
-        "as a one-way story progression: event -> actor/mechanism -> reaction/countermove -> consequence/turning point "
-        "as appropriate to the topic, without forcing categories that do not fit. If supplied facts "
-        "are thin, add distinct DRAMATIZED actions, reactions, mechanisms, consequences, actors, scene developments or "
-        "turning points instead of stretching one conclusion. Every part purpose must name a concrete distinct "
+        "as a one-way sequence of changed story states. For each next atom ask: what is now different after the previous "
+        "one? If nothing is different, it is probably filler. If supplied facts are thin, add distinct DRAMATIZED "
+        "transitions instead of stretching one conclusion. Every part purpose must name a concrete distinct "
         "responsibility; never use generic purposes like 'continue' or 'develop further' without saying what new "
         "question/content that part owns. Each macro block needs id and purpose. Every part needs id, role, purpose, "
         "macro_id, content_ids, transition_direction, novelty_question and novelty_payload. novelty_question is one "
@@ -741,6 +760,8 @@ def build_story_writer_prompt(
             f"{format_atom(atom_id)} "
             f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
             f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
+            f" | BEFORE={_compact(atom.state_before, _COMPACT_ATOM_CHARS)}"
+            f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
             f"{f' | DO_NOT_REPEAT={avoid}' if avoid else ''}"
         )
 
@@ -853,8 +874,9 @@ def build_story_writer_prompt(
 
     novelty_instruction = (
         "\nSEMANTIC NOVELTY RULE: Every substantive paragraph must advance the CURRENT CONTENT by adding at least "
-        "one genuinely new fact/event, actor, causal mechanism, reaction/countermove, consequence, concrete scene "
-        "development, or a new causal question with its answer. PARAPHRASE DOES NOT COUNT AS NEW INFORMATION. "
+        "one genuinely new story state or development. For each CURRENT atom, move from its BEFORE state through its "
+        "named development to its AFTER state; analysis may connect that movement but cannot replace it. PARAPHRASE "
+        "DOES NOT COUNT AS NEW INFORMATION. "
         "Do not restate the thesis, re-summarize an earlier conclusion, or repeat USED SEMANTIC MEANINGS with synonyms. "
         "Use the requested volume to deepen sequence, mechanism, actors, reactions and consequences inside the current "
         "owned atoms. CURRENT CONTENT is an ordered one-way progression: consume its atoms in listed order. Once an "
