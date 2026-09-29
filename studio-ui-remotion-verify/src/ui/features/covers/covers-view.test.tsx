@@ -33,6 +33,29 @@ describe("Covers Light view", () => {
     expect(screen.getByLabelText("Конвейер создания обложки")).toBeTruthy();
   });
 
+  it("shows an explicit tabloid toggle and forwards it to cover-word generation", async () => {
+    const command = vi.fn(async () => undefined);
+    render(<Covers data={fallback} command={command} />);
+
+    const toggle = screen.getByLabelText("Жёлтая пресса / максимально кликбейтный стиль");
+    expect(toggle.closest("label")?.textContent).toContain("STANDARD");
+    expect(coverStyles).toContain(".cover-tabloid-toggle");
+
+    fireEvent.click(toggle);
+    expect(toggle.closest("label")?.textContent).toContain("TABLOID");
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-cover-settings",
+      { tabloidMode: true },
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Придумать заголовки и подзаголовки — всем" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "generate-cover-texts",
+      expect.objectContaining({ tabloidMode: true }),
+    ));
+  });
+
   it("keeps the verified FastGen cover-start contract", async () => {
     const command = vi.fn(async () => undefined);
     const data = {
