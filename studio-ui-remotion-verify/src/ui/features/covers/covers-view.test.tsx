@@ -35,7 +35,11 @@ describe("Covers Light view", () => {
 
   it("shows an explicit tabloid toggle and forwards it to cover-word generation", async () => {
     const command = vi.fn(async () => undefined);
-    render(<Covers data={fallback} command={command} />);
+    const data = {
+      ...fallback,
+      covers: [{ production_item_id: "production:test", title: "Границы закрыты", paths: [] }],
+    };
+    render(<Covers data={data} command={command} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
     const toggle = await screen.findByLabelText("Жёлтая пресса / максимально кликбейтный стиль");
