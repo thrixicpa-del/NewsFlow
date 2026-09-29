@@ -876,6 +876,125 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertEqual(resolved["portrait_subject"], "Марек Новак")
         self.assertEqual(item["cover_face_resolution_status"], "LOW_CONFIDENCE")
 
+    def test_semantic_face_prompt_rejects_ordinary_participant_and_requests_ranked_public_figures(self):
+        from scriptor import bridge
+
+        prompt = bridge._cover_semantic_person_prompt({
+            "title": (
+                "ПРОТЕСТ ПРОРВАЛСЯ К САМОМУ КРЕМЛЮ — МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ "
+                "НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ"
+            ),
+        })
+
+        self.assertIn("ordinary protester", prompt)
+        self.assertIn("do NOT use that ordinary participant", prompt)
+        self.assertIn("office-holder", prompt)
+        self.assertIn("cover_people_candidates", prompt)
+        self.assertIn("up to 3 ranked alternatives", prompt)
+        self.assertNotIn("Russia ->", prompt)
+        self.assertNotIn("Кремль ->", prompt)
+
+    def test_semantic_resolver_skips_ordinary_primary_and_accepts_public_alternative_same_call(self):
+        """A central protester must not block Covers when one ranked public figure is also returned."""
+        from scriptor import bridge
+
+        title = (
+            "ПРОТЕСТ ПРОРВАЛСЯ К САМОМУ КРЕМЛЮ — МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ "
+            "НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ"
+        )
+
+        class SemanticPool:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, prompt, **_kwargs):
+                self.calls += 1
+                self.last_prompt = prompt
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Иван Петров",
+                        "entity_type": "person",
+                        "role_in_story": "участник протеста",
+                        "relation_to_story": "вышел с плакатом на площадь",
+                        "source": "provider",
+                        "confidence": 0.95,
+                    },
+                    "cover_people_candidates": [{
+                        "name": "Марек Новак",
+                        "entity_type": "public_figure",
+                        "role_in_story": "президент",
+                        "relation_to_story": "публичный политический руководитель стороны, связанной с институциональным контекстом",
+                        "source": "provider",
+                        "confidence": 0.64,
+                    }],
+                }, ensure_ascii=False)
+
+        pool = SemanticPool()
+        item = {
+            "title": title,
+            "cover_face_required": True,
+            "cover_face_resolution_status": "LOW_CONFIDENCE",
+            "cover_primary_person": None,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="test", secret="test")])
+
+        with patch.object(bridge, "HybridTextPool", return_value=pool):
+            self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(pool.calls, 1)
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_primary_person"]["entity_type"], "public_figure")
+        self.assertEqual(item["cover_face_resolution_attempts"], 1)
+        self.assertNotEqual(item["cover_primary_person"]["name"], "Иван Петров")
+
+    def test_semantic_retry_correction_explicitly_moves_off_rejected_ordinary_participant(self):
+        """If the first call still returns only an ordinary person, retry must change the instruction."""
+        from scriptor import bridge
+
+        class SemanticPool:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt, **_kwargs):
+                self.prompts.append(prompt)
+                if len(self.prompts) == 1:
+                    return json.dumps({
+                        "cover_primary_person": {
+                            "name": "Иван Петров",
+                            "entity_type": "person",
+                            "role_in_story": "очевидец",
+                            "relation_to_story": "наблюдал событие",
+                            "confidence": 0.8,
+                        },
+                    }, ensure_ascii=False)
+                return json.dumps({
+                    "cover_primary_person": {
+                        "name": "Марек Новак",
+                        "entity_type": "public_figure",
+                        "role_in_story": "министр",
+                        "relation_to_story": "отвечает за решение государственного органа",
+                        "confidence": 0.61,
+                    },
+                }, ensure_ascii=False)
+
+        pool = SemanticPool()
+        item = {
+            "title": "ПРАВИТЕЛЬСТВО ПРИНИМАЕТ РЕШЕНИЕ — ОЧЕВИДЕЦ РАССКАЗАЛ О СОБЫТИИ",
+            "cover_face_required": True,
+            "cover_primary_person": None,
+        }
+        settings = Settings(openai_api_keys=[OpenAIKey(label="test", secret="test")])
+
+        with patch.object(bridge, "HybridTextPool", return_value=pool):
+            self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+
+        self.assertEqual(len(pool.prompts), 2)
+        self.assertNotIn("RETRY CORRECTION", pool.prompts[0])
+        self.assertIn("RETRY CORRECTION", pool.prompts[1])
+        self.assertIn("Do not return the ordinary participant", pool.prompts[1])
+        self.assertEqual(item["cover_primary_person"]["name"], "Марек Новак")
+        self.assertEqual(item["cover_face_resolution_attempts"], 2)
+
     def test_missing_primary_gets_one_semantic_person_resolution_before_fastgen(self):
         """An institution anchor is resolved to a person, not kept as LOW_CONFIDENCE + None."""
         from scriptor import bridge
