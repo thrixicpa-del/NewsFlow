@@ -11,6 +11,7 @@ from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import (
     SessionWriteConflictError,
+    _read_session,
     _session_data,
     _write_session_file,
     backup_session_path,
@@ -25,6 +26,19 @@ from scriptor.session import (
 
 
 class SessionTests(unittest.TestCase):
+    def test_legacy_cover_marker_is_not_restored_as_scenario_status(self):
+        """Covers-only r27 status must not leak back into the Scenario table."""
+        request = ScenarioRequest(0, "Тема", "Промпт")
+        job = Job(request, RunState.PAUSED, story_plan={"thesis": "Старая карта"},
+                  story_planner_status="FACE_REPAIR_DEFERRED")
+        payload = _session_data(["Тема"], [job])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _titles, restored = _read_session(path)
+
+        self.assertEqual(restored[0].story_planner_status, "")
+
     def test_session_write_retries_a_transient_windows_access_denied(self):
         """A snapshot reader may briefly deny an atomic Windows replace."""
         with tempfile.TemporaryDirectory() as folder:

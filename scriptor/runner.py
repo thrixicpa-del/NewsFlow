@@ -13,13 +13,11 @@ from typing import Any
 from .core import ScenarioRequest
 from .story_planner import (
     StoryPlan,
-    build_story_plan_face_repair_prompt,
     build_story_plan_structure_repair_prompt,
     build_story_planner_prompt,
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
-    repair_story_plan_face_metadata_response,
     repair_story_plan_parts_response,
     story_plan_from_dict,
 )
@@ -379,6 +377,10 @@ class ParallelRunner:
 
         if job.story_plan:
             plan = story_plan_from_dict(job.story_plan)
+            # Older sessions stored a Covers-only marker in scenario state.
+            # Do not carry it into a Writer resume or the Scenario UI.
+            if job.story_planner_status == "FACE_REPAIR_DEFERRED":
+                job.story_planner_status = "READY"
             if (
                 self._persisted_story_contract_changed(job.story_plan, job.request)
                 or tuple(part.target_chars for part in plan.parts) != part_targets
@@ -439,31 +441,26 @@ class ParallelRunner:
                         job.state = RunState.PAUSED
                         job.error = "Планировщик сценария не вернул рабочий план"
                         return False
-                    plan = parse_story_plan_response(
-                        fresh_planner_response, part_targets,
-                    )
-            face_repair_deferred = False
-            if plan.cover_face_repair_needed:
-                try:
-                    plan = repair_story_plan_face_metadata_response(
-                        await self._generate_usable(
-                            build_story_plan_face_repair_prompt(job.request, plan),
-                            job.request,
-                            2048,
-                        ),
-                        plan,
-                    )
-                except Exception:  # noqa: BLE001 - provider boundary cannot cancel valid prose
-                    # A malformed provider face block must never discard a
-                    # valid plan or accepted/next Writer work. Covers may
-                    # later continue semantic resolution from its own context.
-                    face_repair_deferred = True
+                    try:
+                        plan = parse_story_plan_response(
+                            fresh_planner_response, part_targets,
+                        )
+                    except (TypeError, ValueError):
+                        # The bounded Planner recovery is exhausted before any
+                        # Writer prose exists. Keep this actionable; raw schema
+                        # exceptions must never become a user-visible ERROR.
+                        job.state = RunState.PAUSED
+                        job.error = "Планировщик сценария не вернул рабочий план"
+                        job.result = ""
+                        job.actual_chars = 0
+                        job.length_status = "FAILED"
+                        return False
             job.story_plan = plan.to_dict()
             job.story_plan["length_contract"] = self._story_length_contract(
                 job.request,
             )
             job.accepted_story_parts = []
-            job.story_planner_status = "FACE_REPAIR_DEFERRED" if face_repair_deferred else "READY"
+            job.story_planner_status = "READY"
             # Persist the complete plan before a prose part is accepted.
             self._notify(job)
 

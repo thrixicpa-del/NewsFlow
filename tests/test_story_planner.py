@@ -7,7 +7,6 @@ from scriptor.story_planner import (
     build_story_writer_prompt,
     calculate_story_part_targets,
     parse_story_plan_response,
-    repair_story_plan_face_metadata_response,
     repair_story_plan_parts_response,
     seam_tail,
     story_plan_from_dict,
@@ -15,6 +14,14 @@ from scriptor.story_planner import (
 
 
 class StoryPartSizingTests(unittest.TestCase):
+    def test_short_scenarios_stay_single_complete_parts_until_ten_thousand(self):
+        """A 6–9k brief is a compact whole, not an artificial continuation."""
+        self.assertEqual(calculate_story_part_targets(6000), (6000,))
+        self.assertEqual(calculate_story_part_targets(7500), (7500,))
+        self.assertEqual(calculate_story_part_targets(9000), (9000,))
+        self.assertEqual(len(calculate_story_part_targets(10000)), 2)
+        self.assertEqual(len(calculate_story_part_targets(15000)), 3)
+
     def test_part_targets_scale_evenly_around_five_thousand_characters(self):
         self.assertEqual(calculate_story_part_targets(5000), (5000,))
         self.assertEqual(calculate_story_part_targets(15000), (4999, 4999, 4998))
@@ -55,6 +62,19 @@ class StoryPlanValidationTests(unittest.TestCase):
                 self.assertEqual(plan.parts[0].id, "P1")
                 self.assertEqual(plan.thesis, "Проверяемая история.")
 
+    def test_cover_metadata_is_inert_for_a_scenario_story_map(self):
+        """A valid story neither requires nor persists Covers-only fields."""
+        raw = json.loads(self._single_part_cover_response(
+            candidates=[{"name": "Не человек", "entity_type": "organization"}],
+            primary={"name": "Не человек", "entity_type": "organization"},
+            required=False,
+        ))
+        plan = parse_story_plan_response(json.dumps(raw, ensure_ascii=False), (5000,))
+
+        persisted = plan.to_dict()
+        self.assertEqual(plan.parts[0].role, "COMPLETE")
+        self.assertFalse(any(key.startswith("cover_") for key in persisted))
+
     def test_structural_repair_accepts_fenced_original_and_repair_json(self):
         original = json.dumps({
             "thesis": "Одна история.",
@@ -83,131 +103,6 @@ class StoryPlanValidationTests(unittest.TestCase):
 
         self.assertEqual([part.id for part in plan.parts], ["P1", "P2"])
         self.assertEqual([atom.owner_part_id for atom in plan.content_atoms], ["P1", "P2"])
-
-    def test_planner_cannot_disable_core_face_requirement(self):
-        person = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
-                  "relation_to_story": "выступил", "source": "selected_people", "confidence": 0.94}
-
-        with self.assertRaisesRegex(ValueError, "cover_face_required"):
-            parse_story_plan_response(
-                self._single_part_cover_response(candidates=[person], primary=person, required=False), (5000,),
-            )
-
-    def test_fresh_planner_response_cannot_leave_cover_face_for_manual_review(self):
-        """Malformed face metadata becomes bounded repair work, not a Writer blocker."""
-        plan = parse_story_plan_response(
-            self._single_part_cover_response(candidates=[], primary=None, status="NEEDS_REVIEW"),
-            (5000,), require_cover_person=True,
-        )
-        self.assertTrue(plan.cover_face_repair_needed)
-        self.assertEqual(plan.cover_face_resolution_status, "LOW_CONFIDENCE")
-
-    def test_ranked_people_require_primary_first_and_non_increasing_confidence(self):
-        primary = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
-                   "relation_to_story": "выступил", "source": "selected_people", "confidence": 0.94}
-        weaker = {"name": "Амина Диалло", "entity_type": "person", "role_in_story": "министр",
-                  "relation_to_story": "участвует", "source": "entities", "confidence": 0.71}
-        ranked = parse_story_plan_response(
-            self._single_part_cover_response(candidates=[primary, weaker], primary=primary), (5000,),
-        )
-        self.assertEqual(ranked.to_dict()["cover_people_candidates"][0]["name"], "Марек Новак")
-
-        reordered = parse_story_plan_response(
-            self._single_part_cover_response(candidates=[weaker, primary], primary=primary), (5000,),
-        )
-        self.assertEqual(reordered.cover_people_candidates[0]["name"], "Марек Новак")
-
-    def test_anchor_derived_person_requires_low_confidence_evidence_not_resolved(self):
-        person = {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель",
-                  "relation_to_story": "отвечает за решение комиссии", "source": "institution-decision-maker",
-                  "confidence": 0.62, "evidence_type": "ANCHOR_DERIVED",
-                  "evidence_summary": "Контекст связывает комиссию с решением и её председателем."}
-
-        self.assertEqual(parse_story_plan_response(
-            self._single_part_cover_response(candidates=[person], primary=person), (5000,),
-        ).cover_face_resolution_status, "LOW_CONFIDENCE")
-        plan = parse_story_plan_response(
-            self._single_part_cover_response(candidates=[person], primary=person, status="LOW_CONFIDENCE"), (5000,),
-        )
-        self.assertEqual(plan.to_dict()["cover_primary_person"]["evidence_type"], "ANCHOR_DERIVED")
-    def test_parser_persists_ranked_cover_people_and_primary_person(self):
-        response = json.dumps({
-            "thesis": "История с проверяемым главным действующим лицом.",
-            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
-            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
-                               "content_kind": "SUPPORTED"}],
-            "cover_face_required": True,
-            "cover_people_candidates": [
-                {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "президент",
-                 "relation_to_story": "выступил по центральному вопросу", "source": "selected_people",
-                 "confidence": 0.94},
-                {"name": "Амина Диалло", "entity_type": "person", "role_in_story": "министр",
-                 "relation_to_story": "участвует в переговорах", "source": "entities", "confidence": 0.71},
-            ],
-            "cover_primary_person": {"name": "Марек Новак", "entity_type": "public_figure",
-                                     "role_in_story": "президент", "relation_to_story": "выступил по центральному вопросу",
-                                     "source": "selected_people", "confidence": 0.94},
-            "cover_face_resolution_status": "RESOLVED",
-            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
-                       "content_ids": ["C001"]}],
-        }, ensure_ascii=False)
-
-        plan = parse_story_plan_response(response, (5000,))
-        persisted = plan.to_dict()
-
-        self.assertTrue(persisted["cover_face_required"])
-        self.assertEqual(persisted["cover_primary_person"]["name"], "Марек Новак")
-        self.assertEqual([row["name"] for row in persisted["cover_people_candidates"]], ["Марек Новак", "Амина Диалло"])
-        self.assertEqual(persisted["cover_face_resolution_status"], "LOW_CONFIDENCE")
-        self.assertEqual(persisted["cover_primary_person"]["provider_evidence_claim"]["source"], "selected_people")
-
-    def test_parser_rejects_non_person_primary_cover_entity(self):
-        response = json.dumps({
-            "thesis": "История.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
-            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
-                               "content_kind": "SUPPORTED"}],
-            "cover_face_required": True,
-            "cover_people_candidates": [{"name": "Европейский Союз", "entity_type": "organization",
-                                         "role_in_story": "сторона", "relation_to_story": "контекст",
-                                         "source": "entities", "confidence": 0.9}],
-            "cover_primary_person": {"name": "Европейский Союз", "entity_type": "organization",
-                                     "role_in_story": "сторона", "relation_to_story": "контекст",
-                                     "source": "entities", "confidence": 0.9},
-            "cover_face_resolution_status": "RESOLVED",
-            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
-                       "content_ids": ["C001"]}],
-        }, ensure_ascii=False)
-
-        plan = parse_story_plan_response(response, (5000,))
-        self.assertTrue(plan.cover_face_repair_needed)
-        self.assertIsNone(plan.cover_primary_person)
-
-    def test_malformed_face_metadata_does_not_invalidate_valid_story_structure(self):
-        response = self._single_part_cover_response(
-            candidates=[
-                {"name": "Европейский Союз", "entity_type": "organization", "role_in_story": "сторона", "relation_to_story": "решение", "source": "provider", "confidence": 0.9},
-                {"name": "Марек Новак", "entity_type": "public_figure", "role_in_story": "председатель", "relation_to_story": "подписал решение", "source": "provider", "confidence": 0.7},
-            ],
-            primary={"name": "Европейский Союз", "entity_type": "organization", "role_in_story": "сторона", "relation_to_story": "решение", "source": "provider", "confidence": 0.9},
-        )
-        plan = parse_story_plan_response(response, (5000,))
-        self.assertEqual(plan.parts[0].id, "P1")
-        self.assertEqual(plan.cover_primary_person["name"], "Марек Новак")
-        self.assertTrue(plan.cover_face_repair_needed)
-
-    def test_face_only_repair_normalizes_a_named_role_without_rewriting_story(self):
-        plan = parse_story_plan_response(
-            self._single_part_cover_response(candidates=[], primary=None, status="NEEDS_REVIEW"), (5000,),
-        )
-        repaired = repair_story_plan_face_metadata_response(json.dumps({
-            "cover_people_candidates": [{"name": "Иван Петров", "entity_type": "president", "role_in_story": "президент", "relation_to_story": "принял решение", "source": "repair", "confidence": 0.61}],
-            "cover_primary_person": {"name": "Иван Петров", "entity_type": "president", "role_in_story": "президент", "relation_to_story": "принял решение", "source": "repair", "confidence": 0.61},
-            "cover_face_resolution_status": "LOW_CONFIDENCE",
-        }, ensure_ascii=False), plan)
-        self.assertEqual(repaired.thesis, plan.thesis)
-        self.assertEqual(repaired.parts, plan.parts)
-        self.assertEqual(repaired.cover_primary_person["entity_type"], "public_figure")
-        self.assertFalse(repaired.cover_face_repair_needed)
 
     def test_exact_two_part_repair_changes_only_parts_and_requires_opening_final(self):
         original = json.dumps({
@@ -272,41 +167,21 @@ class StoryPlanValidationTests(unittest.TestCase):
             ("C003", "P2", "Финал", "DRAMATIZED"),
         ])
 
-    def test_parser_accepts_low_confidence_real_person_after_deeper_actor_resolution(self):
-        response = json.dumps({
-            "thesis": "История решения институции.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
-            "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1",
-                               "content_kind": "SUPPORTED"}],
-            "cover_face_required": True,
-            "cover_people_candidates": [{"name": "Марек Новак", "entity_type": "public_figure",
-                                         "role_in_story": "председатель комиссии", "relation_to_story": "отвечает за решение",
-                                         "source": "institution-decision-maker", "confidence": 0.62}],
-            "cover_primary_person": {"name": "Марек Новак", "entity_type": "public_figure",
-                                     "role_in_story": "председатель комиссии", "relation_to_story": "отвечает за решение",
-                                     "source": "institution-decision-maker", "confidence": 0.62},
-            "cover_face_resolution_status": "LOW_CONFIDENCE",
-            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
-                       "content_ids": ["C001"]}],
-        }, ensure_ascii=False)
-
-        plan = parse_story_plan_response(response, (5000,))
-
-        self.assertEqual(plan.to_dict()["cover_face_resolution_status"], "LOW_CONFIDENCE")
-
-    def test_legacy_persisted_plan_defaults_cover_resolution_to_needs_review(self):
+    def test_legacy_persisted_plan_ignores_cover_metadata_on_scenario_resume(self):
         legacy = {
             "thesis": "Старая история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
             "content_atoms": [{"id": "C001", "summary": "Контекст", "owner_part_id": "P1"}],
+            "cover_face_required": False,
+            "cover_primary_person": {"name": "Неважно", "entity_type": "organization"},
+            "cover_face_resolution_status": "FACE_REPAIR_DEFERRED",
             "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "Вся история", "macro_id": "M1",
                        "content_ids": ["C001"], "target_chars": 5000}],
         }
 
         persisted = story_plan_from_dict(legacy).to_dict()
 
-        self.assertTrue(persisted["cover_face_required"])
-        self.assertEqual(persisted["cover_people_candidates"], [])
-        self.assertIsNone(persisted["cover_primary_person"])
-        self.assertEqual(persisted["cover_face_resolution_status"], "NEEDS_REVIEW")
+        self.assertEqual(persisted["thesis"], "Старая история.")
+        self.assertFalse(any(key.startswith("cover_") for key in persisted))
     def test_parser_requires_every_planned_part_and_unique_content_ownership(self):
         response = json.dumps({
             "thesis": "Одна история без второго круга.",
@@ -484,24 +359,12 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("Even if only a headline is available", prompt)
         self.assertIn("DRAMATIZED", prompt)
 
-    def test_planner_prompt_requires_ranked_public_figure_resolution_for_covers(self):
+    def test_planner_prompt_contains_only_story_planning_contract(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 
-        self.assertIn("cover_people_candidates", prompt)
-        self.assertIn("cover_primary_person", prompt)
-        self.assertIn("LOW_CONFIDENCE", prompt)
-        self.assertIn("Never infer a person from geography", prompt)
-        self.assertIn("Never return NEEDS_REVIEW", prompt)
-
-    def test_planner_uses_place_or_institution_as_an_anchor_for_contextual_actor_resolution(self):
-        prompt = build_story_planner_prompt(
-            ScenarioRequest(0, "ЕС вводит новые ограничения", "Сторона решения: Еврокомиссия."),
-            (5000,),
-        )
-
-        self.assertIn("institution/place/event as a semantic", prompt)
-        self.assertIn("decision maker", prompt)
-        self.assertIn("Do not stop at the institution/place/event", prompt)
+        self.assertNotIn("COVER FACE RESOLUTION", prompt)
+        self.assertNotIn("cover_people_candidates", prompt)
+        self.assertNotIn("cover_primary_person", prompt)
 
     def test_single_part_planner_prompt_requires_one_complete_part(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))

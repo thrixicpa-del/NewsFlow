@@ -6381,17 +6381,10 @@ def generate_scenarios(payload: dict) -> dict:
     def save_job(job):
         current[job.request.index] = job
         save_session(titles, list(current.values()))
-        # The runner notifies immediately after it has persisted a validated
-        # Story Map and before its first Writer call. Keep the semantic Cover
-        # person on the durable ProductionItem at that same checkpoint.
-        if _project_story_plan_face_resolution(settings, job.request.title, job):
-            save_settings(settings)
 
     workers = pool.concurrency
     finished = asyncio.run(ParallelRunner(pool, workers, save_job).run(selected, resume_jobs=resume_jobs))
     current.update({job.request.index: job for job in finished})
-    for job in finished:
-        _project_story_plan_face_resolution(settings, job.request.title, job)
     save_session(titles, list(current.values()))
     save_settings(settings)
     return snapshot()

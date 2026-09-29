@@ -290,6 +290,11 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
             state = RunState(item.get("state", RunState.WAITING.value))
             story_plan = item.get("story_plan")
             accepted_parts = item.get("accepted_story_parts")
+            planner_status = str(item.get("story_planner_status", "") or "")
+            # r27 persisted a Covers-only marker beside scenario progress.
+            # It is intentionally discarded when reading a scenario session.
+            if planner_status == "FACE_REPAIR_DEFERRED":
+                planner_status = ""
             jobs.append(Job(
                 request,
                 state,
@@ -300,7 +305,7 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
                 max(0, int(item.get("length_repair_attempts", 0) or 0)),
                 story_plan if isinstance(story_plan, dict) else None,
                 accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
-                str(item.get("story_planner_status", "") or ""),
+                planner_status,
             ))
     except (ValueError, TypeError, KeyError, UnicodeDecodeError) as error:
         raise _SessionSnapshotReadError(error, revision) from error
