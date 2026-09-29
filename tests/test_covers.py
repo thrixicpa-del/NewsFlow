@@ -3185,6 +3185,14 @@ class CoverFaceLibraryTests(unittest.TestCase):
         """A political scene must keep an identified side portrait even without local files."""
         from scriptor import bridge
 
+        class SemanticPool:
+            async def generate(self, _prompt, **_kwargs):
+                return json.dumps({"cover_primary_person": {
+                    "name": "Владимир Путин", "entity_type": "public_figure",
+                    "role_in_story": "президент", "relation_to_story": "главный политический субъект темы",
+                    "confidence": 0.65,
+                }}, ensure_ascii=False)
+
         for build_mode in ("fastgen-full", "fastgen-full-my-face"):
             with self.subTest(build_mode=build_mode), TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -3195,6 +3203,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
                     cover_face_library_folder=str(root / "missing-faces"),
                     cover_face_prepared_folder=str(root / "missing-prepared"),
                     cover_face_library_enabled=True,
+                    openai_api_keys=[OpenAIKey(label="text", secret="test")],
                 )
                 settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
                 settings.fastgen_capabilities_cache = {"image": [{
@@ -3223,6 +3232,7 @@ class CoverFaceLibraryTests(unittest.TestCase):
                      patch.object(bridge, "_hydrate_cover_library", return_value=False), \
                      patch.object(bridge, "_save_cover_state"), \
                      patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=SemanticPool()), \
                      patch.object(bridge.FastGenPool, "generate_media", side_effect=render):
                     bridge.generate_covers({
                         "indices": [0], "productionItemIds": ["production:kremlin"],
@@ -3235,8 +3245,8 @@ class CoverFaceLibraryTests(unittest.TestCase):
                 self.assertEqual(calls[0][1], ())
                 self.assertEqual(item["portrait_subject"], "Владимир Путин")
                 self.assertIn(item["portrait_side"], {"LEFT", "RIGHT"})
-                self.assertEqual(item["portrait_source"], "covers-president-registry")
-                self.assertIn("president of Russia", item["portrait_resolver_reason"])
+                self.assertEqual(item["portrait_source"], "covers-revalidated")
+                self.assertIn("главный политический субъект", item["portrait_resolver_reason"])
                 self.assertIn("Владимир Путин", calls[0][0])
                 self.assertIn("large side portrait", calls[0][0])
                 self.assertEqual(item["face_reference_count"], 0)
@@ -6402,52 +6412,102 @@ class CoverAutomaticPresidentContractTests(unittest.TestCase):
         },
     }
 
-    def test_actor_country_beats_passive_target_and_resolves_registry_president(self):
-        """The acting side, not a later attacked location, owns the portrait."""
+    def test_multi_country_actor_target_defers_to_semantic_stage_instead_of_verb_grammar(self):
+        """Stage 1 must not guess a title actor with an ad-hoc verb grammar."""
         from scriptor import bridge
 
         item = {"title": "Country A strikes Country B — capital of Country B under attack"}
         resolved = bridge._cover_resolve_primary_country(item, registry=self.PRESIDENT_FIXTURES)
-        self.assertEqual(resolved["country_id"], "country-a")
-        self.assertEqual(resolved["source"], "title:acting-subject")
-        candidate = bridge._cover_resolve_registry_president(resolved, registry=self.PRESIDENT_FIXTURES)
-        self.assertEqual(candidate["name"], "President Alpha")
-        self.assertTrue(bridge._cover_candidate_is_president(candidate))
+        self.assertIsNone(resolved)
 
-    def test_reversed_and_two_president_titles_follow_the_title_actor(self):
+    def test_two_president_titles_defer_to_semantic_stage(self):
         from scriptor import bridge
 
         cases = (
-            ("Country B announces response to Country A", "country-b", "President Bravo"),
-            ("President Alpha pressures President Bravo", "country-a", "President Alpha"),
-            ("President Bravo rejects President Alpha's conditions", "country-b", "President Bravo"),
+            "Country B announces response to Country A",
+            "President Alpha pressures President Bravo",
+            "President Bravo rejects President Alpha's conditions",
         )
-        for title, country_id, president in cases:
+        for title in cases:
             with self.subTest(title=title):
                 resolved = bridge._cover_resolve_primary_country(
                     {"title": title}, registry=self.PRESIDENT_FIXTURES,
                 )
-                self.assertEqual(resolved["country_id"], country_id)
-                self.assertEqual(
-                    bridge._cover_resolve_registry_president(
-                        resolved, registry=self.PRESIDENT_FIXTURES,
-                    )["name"],
-                    president,
-                )
+                self.assertIsNone(resolved)
 
     def test_known_russia_and_ukraine_titles_are_resolved_without_semantic_person_provider(self):
         from scriptor import bridge
 
         cases = (
-            ("РОССИЯ УСИЛИЛА УДАРЫ ПО УКРАИНЕ — КИЕВ СНОВА ПОД АТАКОЙ", "russia", "Владимир Путин"),
-            ("КИЕВ ОТВЕТИЛ НА НОВЫЕ УСЛОВИЯ МОСКВЫ", "ukraine", "Владимир Зеленский"),
-            ("КРЕМЛЬ ИЗМЕНИЛ ПОЗИЦИЮ ПО ПЕРЕГОВОРАМ", "russia", "Владимир Путин"),
+            ("КРЕМЛЬ ИЗМЕНИЛ ПОЗИЦИЮ", "russia", "Владимир Путин"),
+            ("КИЕВ ГОТОВИТ ОТВЕТ", "ukraine", "Владимир Зеленский"),
+            ("ПРЕЗИДЕНТ ВЛАДИМИР ПУТИН ВЫСТУПИЛ С ЗАЯВЛЕНИЕМ", "russia", "Владимир Путин"),
         )
         for title, country_id, president in cases:
             with self.subTest(title=title):
                 resolved = bridge._cover_resolve_primary_country({"title": title})
                 self.assertEqual(resolved["country_id"], country_id)
                 self.assertEqual(bridge._cover_resolve_registry_president(resolved)["name"], president)
+
+    def test_unsupported_actor_and_supported_target_never_selects_the_passive_target(self):
+        from scriptor import bridge
+
+        registry = {"country-b": self.PRESIDENT_FIXTURES["country-b"]}
+        item = {"title": "Country A strikes Country B"}
+        self.assertIsNone(bridge._cover_resolve_primary_country(item, registry=registry))
+        fallback = bridge._cover_apply_automatic_political_portrait(item, registry=registry)
+        self.assertFalse(fallback["ok"])
+        self.assertEqual(fallback["reason"], "SEMANTIC_COUNTRY_FALLBACK")
+        self.assertNotIn("cover_primary_person", item)
+
+    def test_generated_cover_words_never_change_title_owned_political_identity(self):
+        from scriptor import bridge
+
+        item = {
+            "title": "КРЕМЛЬ ИЗМЕНИЛ ПОЗИЦИЮ",
+            "cover_headline": "ПЕРЕГОВОРЫ СОРВАЛИСЬ",
+            "cover_subheadline": "КИЕВУ СТАВЯТ УСЛОВИЯ",
+        }
+        self.assertTrue(bridge._cover_apply_automatic_political_portrait(item)["ok"])
+        first = item["cover_primary_person"]["name"]
+        item["cover_headline"] = "СОВСЕМ ДРУГОЙ ТЕКСТ"
+        item["cover_subheadline"] = "И ДРУГАЯ ПЛАШКА"
+        self.assertTrue(bridge._cover_apply_automatic_political_portrait(item)["ok"])
+        self.assertEqual(item["cover_primary_person"]["name"], first)
+
+    def test_multi_country_titles_use_bounded_semantic_president_stage(self):
+        from scriptor import bridge
+
+        class SemanticPool:
+            def __init__(self, name: str):
+                self.name = name
+                self.calls = 0
+
+            async def generate(self, prompt, **_kwargs):
+                self.calls += 1
+                self.prompt = prompt
+                return json.dumps({"cover_primary_person": {
+                    "name": self.name, "entity_type": "public_figure", "role_in_story": "president",
+                    "relation_to_story": "главный политический субъект исходной темы", "confidence": 0.61,
+                }}, ensure_ascii=False)
+
+        cases = (
+            ("ТРАМП ДАВИТ НА ЗЕЛЕНСКОГО", "Дональд Трамп"),
+            ("ЗЕЛЕНСКИЙ ОТВЕРГ УСЛОВИЯ ТРАМПА", "Владимир Зеленский"),
+            ("Country A strikes Country B", "President Alpha"),
+        )
+        settings = Settings(openai_api_keys=[OpenAIKey(label="text", secret="test")])
+        for title, president in cases:
+            with self.subTest(title=title):
+                item = {"title": title, "topic_classification": "political", "cover_face_required": True}
+                self.assertFalse(bridge._cover_apply_automatic_political_portrait(item)["ok"])
+                pool = SemanticPool(president)
+                with patch.object(bridge, "HybridTextPool", return_value=pool):
+                    self.assertTrue(bridge._resolve_missing_cover_primary_person(item, settings))
+                self.assertEqual(pool.calls, 1)
+                self.assertIn(title, pool.prompt)
+                self.assertEqual(item["cover_primary_person"]["name"], president)
+                self.assertTrue(bridge._cover_candidate_is_president(item["cover_primary_person"]))
 
     def test_country_president_contract_ignores_null_minister_and_ordinary_provider_candidates(self):
         from scriptor import bridge

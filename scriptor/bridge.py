@@ -810,7 +810,7 @@ _COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
     },
     "ukraine": {
         "country": "Ukraine", "aliases": ("украина", "украин", "киев", "kyiv", "ukraine", "ukrainian"),
-        "president": {"name": "Владимир Зеленский", "aliases": ("зеленский", "zelensky")}, "updated": "2026-09",
+        "president": {"name": "Владимир Зеленский", "aliases": ("зеленский", "зеленск", "zelensky")}, "updated": "2026-09",
     },
     "united-states": {
         "country": "United States", "aliases": ("сша", "американ", "белый дом", "вашингтон", "united states", "u.s.", "usa"),
@@ -829,14 +829,6 @@ _COVER_PRESIDENT_REGISTRY: dict[str, dict[str, object]] = {
         "president": {"name": "Реджеп Тайип Эрдоган", "aliases": ("эрдоган", "erdogan")}, "updated": "2026-09",
     },
 }
-_COVER_ACTOR_ACTIONS = re.compile(
-    r"\b(?:strikes?|attacks?|announces?|responds?|rejects?|pressures?|launches?|imposes?|"
-    r"усилил(?:а|и)?|нан[её]с(?:ла|ли)?|атаковал(?:а|и)?|ответил(?:а|и)?|объявил(?:а|и)?|"
-    r"заявил(?:а|и)?|отверг(?:ла|ли)?|готовит|готовят|изменил(?:а|и)?|принял(?:а|и)?)\b",
-    flags=re.IGNORECASE,
-)
-
-
 def _cover_registry_aliases(country_id: str, entry: dict[str, object]) -> tuple[str, ...]:
     aliases = [country_id, str(entry.get("country", "") or "")]
     aliases.extend(str(value or "") for value in entry.get("aliases", ()) if value)
@@ -862,14 +854,23 @@ def _cover_alias_positions(text: str, registry: dict[str, dict[str, object]]) ->
     return sorted(set(positions))
 
 
+def _cover_title_has_unknown_country_label(text: str, registry: dict[str, dict[str, object]]) -> bool:
+    """Keep Stage 1 from treating the sole known side as an unambiguous one."""
+    for match in re.finditer(r"(?<!\w)country\s+[a-z](?!\w)", text, flags=re.IGNORECASE):
+        label = match.group(0).casefold()
+        if not any(label in _cover_registry_aliases(country_id, entry) for country_id, entry in registry.items()):
+            return True
+    return False
+
+
 def _cover_resolve_primary_country(
     item: dict, *, registry: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, str] | None:
-    """Resolve the main political side from title-first action evidence.
+    """Resolve only unambiguous current-topic country evidence for Stage 1.
 
-    A passive location is deliberately not enough when a title identifies an
-    actor.  Multiple country mentions without an acting subject stay unresolved
-    rather than silently selecting the first or most famous country.
+    This intentionally does not parse a growing grammar of political verbs.
+    When a title names multiple sides, or an unsupported side alongside a
+    supported one, Stage 2 semantic resolution owns the subject/target choice.
     """
     active_registry = registry or _COVER_PRESIDENT_REGISTRY
     for field in ("title", "topic", "geography", "entities", "primary_entities", "primary_entity",
@@ -880,29 +881,18 @@ def _cover_resolve_primary_country(
         positions = _cover_alias_positions(text, active_registry)
         if not positions:
             continue
-        for action in _COVER_ACTOR_ACTIONS.finditer(text):
-            preceding = [value for value in positions if 0 <= action.start() - value[0] <= 160]
-            if preceding:
-                country_id = preceding[-1][1]
-                entry = active_registry[country_id]
-                return {
-                    "country_id": country_id,
-                    "country": str(entry.get("country", country_id) or country_id),
-                    "source": f"{field}:acting-subject",
-                    "reason": f"{field} identifies {entry.get('country', country_id)} as the acting political side",
-                }
         unique = {country_id for _position, country_id in positions}
-        if len(unique) == 1:
+        if len(unique) == 1 and not (field == "title" and _cover_title_has_unknown_country_label(text, active_registry)):
             country_id = next(iter(unique))
             entry = active_registry[country_id]
             return {
                 "country_id": country_id,
                 "country": str(entry.get("country", country_id) or country_id),
-                "source": f"{field}:single-country",
-                "reason": f"{field} contains one supported political country",
+                "source": f"{field}:deterministic",
+                "reason": f"{field} contains one unambiguous supported political country",
             }
-        # Title is authoritative.  Do not dilute its unresolved multi-country
-        # meaning with a secondary script/location field.
+        # Title is authoritative.  Do not dilute an unresolved multi-country
+        # title with a secondary script/location field.
         if field == "title":
             return None
     return None
@@ -1489,10 +1479,10 @@ def _resolve_cover_portrait(
         else:
             subject, source, reason, confidence = _cover_registry_portrait_candidate(item)
             if not subject:
+                subject, source, reason, confidence = _cover_revalidated_persisted_candidate(item, settings)
+            if not subject:
                 subject, source, reason = _cover_explicit_portrait_candidate(item)
                 confidence = 0.8 if subject else 0.0
-            if not subject:
-                subject, source, reason, confidence = _cover_revalidated_persisted_candidate(item, settings)
             if not subject:
                 # The tree can verify a subject only after structured/context
                 # evidence has named one. It never becomes a random identity
