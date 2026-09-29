@@ -243,6 +243,66 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "materially distinct"):
             parse_story_plan_response(response, (5000, 5000))
 
+    def test_parser_rejects_abstract_analytic_atoms_without_event_progression(self):
+        """Different political abstractions are not distinct story developments."""
+        response = json.dumps({
+            "thesis": "Переговорная ситуация становится всё жёстче.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Давление вокруг переговоров усиливается",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Почему выросло давление?",
+                 "novelty_payload": "Политическая цена решения становится выше."},
+                {"id": "C002", "summary": "Пространство для манёвра становится уже",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Как изменилась переговорная рамка?",
+                 "novelty_payload": "Новая конфигурация ограничивает поле выбора."},
+                {"id": "C003", "summary": "Москва получает новый сигнал",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Что означает этот сдвиг?",
+                 "novelty_payload": "Баланс становится менее устойчивым."},
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Раскрыть изменение политической логики",
+                "macro_id": "M1", "content_ids": ["C001", "C002", "C003"],
+                "novelty_question": "Как меняется политическая ситуация?",
+                "novelty_payload": "Зритель получает несколько новых трактовок одного сдвига.",
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "concrete story developments"):
+            parse_story_plan_response(response, (3000,))
+
+    def test_parser_accepts_dramatized_concrete_event_chain(self):
+        response = json.dumps({
+            "thesis": "После новой атаки стороны проходят через последовательную цепочку решений.",
+            "macro_blocks": [{"id": "M1", "purpose": "Событие, ответ и последствие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Россия наносит новый удар по инфраструктуре Киева",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Что запускает историю?",
+                 "novelty_payload": "Ночной удар нарушает работу нескольких районов Киева."},
+                {"id": "C002", "summary": "Городские службы переводят критические объекты на резервный режим",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Как отвечает Киев?",
+                 "novelty_payload": "После атаки службы меняют режим работы инфраструктуры."},
+                {"id": "C003", "summary": "Украина направляет партнёрам срочный запрос на дополнительную защиту",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "К чему приводит ответ?",
+                 "novelty_payload": "Новый запрос переводит последствия атаки в дипломатический канал."},
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Провести историю от удара к новому решению",
+                "macro_id": "M1", "content_ids": ["C001", "C002", "C003"],
+                "novelty_question": "Как один эпизод меняет следующий ход?",
+                "novelty_payload": "Зритель видит конкретную цепочку событие, ответ и новое последствие.",
+            }],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (3000,))
+
+        self.assertEqual([atom.id for atom in plan.content_atoms], ["C001", "C002", "C003"])
+
     def test_parser_rejects_obvious_near_copy_part_novelty_contracts(self):
         response = json.dumps({
             "thesis": "Части обязаны отвечать на разные вопросы.",
@@ -785,6 +845,9 @@ class StoryWriterContextTests(unittest.TestCase):
         )
 
         self.assertEqual(opening.count("DRAMATIZED OPENING DISCLOSURE"), 1)
+        self.assertIn("Start with one or two strong event/hook sentences", opening)
+        self.assertIn("never as the first sentence", opening)
+        self.assertIn("After that hook, write the one short natural disclosure", opening)
         self.assertNotIn("DRAMATIZED OPENING DISCLOSURE", middle)
         self.assertNotIn("DRAMATIZED OPENING DISCLOSURE", final)
 
@@ -833,6 +896,8 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("for DRAMATIZED atoms use the explicit NewsFlow", prompt)
         self.assertNotIn("Preserve all global style, factual-discipline", prompt)
         self.assertEqual(prompt.count("DRAMATIZED OPENING DISCLOSURE"), 1)
+        self.assertIn("Start with one or two strong event/hook sentences", prompt)
+        self.assertIn("never as the first sentence", prompt)
 
 
 if __name__ == "__main__":

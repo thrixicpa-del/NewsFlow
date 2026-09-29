@@ -1188,6 +1188,85 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             "Part of the evidence was published later."
         ))
 
+    def test_writer_output_gate_rejects_analytic_filler_but_not_event_prose(self):
+        filler = (
+            "В этом и заключается главный нерв ситуации. "
+            "Именно поэтому пространство для манёвра сузилось. "
+            "Это меняет политическую рамку переговоров. "
+            "По сути, новая конфигурация делает баланс менее устойчивым. "
+            "В этой точке выросла политическая цена решения. "
+            "Москва получила новый сигнал о смене логики. "
+            "Именно поэтому поле выбора стало ещё уже."
+        )
+        event_prose = (
+            "Ночью Россия нанесла удар по нескольким районам Киева. "
+            "После тревоги городские службы перевели критические объекты на резервное питание. "
+            "Утром украинская сторона направила партнёрам запрос на дополнительные средства защиты. "
+            "В ответ Москва публично ужесточила условия следующего раунда переговоров. "
+            "Киев отказался снимать прежние требования и начал готовить новую позицию. "
+            "К вечеру переговорный канал остался закрыт, а спор перешёл в новый дипломатический этап."
+        )
+
+        runner = ParallelRunner(FakeClient(), 1)
+        self.assertTrue(runner._writer_output_unusable(filler))
+        self.assertTrue(runner._writer_output_unusable(
+            "Это драматизированная реконструкция событий, а не подтверждённая хроника. "
+            "Россия нанесла удар по Киеву, и городские службы немедленно ответили."
+        ))
+        self.assertFalse(runner._writer_output_unusable(event_prose))
+
+    async def test_analytic_filler_retries_only_the_current_unaccepted_part(self):
+        filler = (
+            "В этом и заключается главный нерв ситуации. "
+            "Именно поэтому пространство для манёвра сузилось. "
+            "Это меняет политическую рамку переговоров. "
+            "По сути, новая конфигурация делает баланс менее устойчивым. "
+            "В этой точке выросла политическая цена решения. "
+            "Москва получила новый сигнал о смене логики. "
+            "Именно поэтому поле выбора стало ещё уже."
+        )
+        repaired = (
+            "Россия ночью нанесла удар по районам Киева. "
+            "После тревоги службы перевели объекты на резервное питание. "
+            "Украина направила партнёрам срочный запрос на защиту. "
+            "Москва затем ужесточила публичные условия переговоров. "
+            "Киев ответил новым планом дипломатических действий. "
+            "К вечеру канал переговоров остался закрыт, и стороны перешли к следующему спору."
+        )
+
+        class QualityRetryClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.fresh_prompts = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(2)
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 5000
+                if "CURRENT PART: P2" in prompt:
+                    return filler
+                raise AssertionError("unexpected writer part")
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_prompts.append(prompt)
+                return repaired
+
+        client = QualityRetryClient()
+        job = (await ParallelRunner(client, 1).run([ScenarioRequest(
+            0, "Тема", "CONTRACT", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )]))[0]
+
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(len(client.fresh_prompts), 1)
+        self.assertIn("CURRENT PART: P2", client.fresh_prompts[0])
+        self.assertIn("concrete event progression", client.fresh_prompts[0])
+        self.assertEqual(job.accepted_story_parts[0]["text"], "А" * 5000)
+        self.assertEqual(job.accepted_story_parts[1]["text"], repaired)
+        self.assertEqual(job.state, RunState.DONE, job.error)
+
     def test_detects_claude_request_to_rephrase_but_not_normal_script(self):
         self.assertTrue(looks_like_action_required("К сожалению, я не могу написать это. Переформулируйте тему."))
         self.assertTrue(looks_like_action_required("Please rephrase the topic and try again."))

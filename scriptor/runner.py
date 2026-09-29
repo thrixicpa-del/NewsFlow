@@ -23,6 +23,25 @@ from .story_planner import (
     story_plan_from_dict,
 )
 
+_ANALYTIC_FILLER_PATTERNS = (
+    "в этом и заключается", "именно поэтому", "в этой точке", "здесь важно понять",
+    "главный нерв", "по сути", "меняет саму логику", "пространство для манёвра",
+    "пространство для маневра", "политическая рамка", "новая конфигурация",
+    "поле выбора", "архитектура давления", "политическая цена", "новый сигнал",
+    "баланс становится", "баланс стал", "менее устойчив",
+)
+_WRITER_EVENT_CUES = (
+    "атак", "удар", "обстрел", "нанес", "провел", "заяв", "потребов",
+    "объяв", "ввел", "ввёл", "подпис", "встрет", "отказ", "задерж",
+    "арест", "суд", "отправ", "закры", "откры", "переве", "направ",
+    "запрос", "ответ", "реагир", "вышел", "вышл", "созвал", "приня",
+    "решил", "голос", "назнач", "увол", "сократ", "увелич", "перекры",
+    "эваку", "запуст", "прибыл", "обсуд", "отозв", "прекрат", "восстанов",
+    "attack", "strike", "launch", "announce", "demand", "reject", "arrest",
+    "detain", "send", "close", "open", "move", "request", "respond", "meet",
+    "sign", "vote", "approve", "block", "evacuate",
+)
+
 
 def looks_like_action_required(text: str) -> bool:
     if not text:
@@ -353,12 +372,58 @@ class ParallelRunner:
             str(text or "").strip(),
         ))
 
-    def _writer_output_unusable(self, text: str) -> bool:
-        return (
-            looks_like_action_required(text)
-            or not str(text or "").strip()
-            or self._writer_output_is_structural(text)
+    @staticmethod
+    def _writer_output_quality_unusable(text: str) -> bool:
+        """Reject only unmistakable analytical filler before a part is durable.
+
+        This is intentionally a small local guard, not a second model or a
+        factuality judge.  Short/ambiguous prose remains accepted.  A retry is
+        warranted only when a substantial response is overwhelmingly composed
+        of known analytical-transition language and contains almost no named
+        event/action cues, or when it puts a dramatized disclosure first.
+        """
+        cleaned = " ".join(str(text or "").split())
+        if not cleaned:
+            return False
+        sentences = [
+            sentence.strip() for sentence in re.split(r"(?<=[.!?…])\s+", cleaned)
+            if sentence.strip()
+        ]
+        first = sentences[0].casefold() if sentences else cleaned.casefold()
+        if "драматизирован" in first and "реконструкц" in first:
+            return True
+        # A local detector cannot reliably score terse prose, verse, or test
+        # fixtures without normal sentence boundaries.  Let the Writer prompt
+        # govern those instead of creating a false blocker.
+        if len(sentences) < 6:
+            return False
+        analytic_sentences = sum(
+            any(pattern in sentence.casefold() for pattern in _ANALYTIC_FILLER_PATTERNS)
+            for sentence in sentences
         )
+        event_sentences = sum(
+            any(cue in sentence.casefold() for cue in _WRITER_EVENT_CUES)
+            for sentence in sentences
+        )
+        return (
+            analytic_sentences >= 5
+            and analytic_sentences * 2 >= len(sentences)
+            and event_sentences <= 1
+        )
+
+    def _writer_output_rejection_reason(self, text: str) -> str:
+        if looks_like_action_required(text):
+            return "ACTION_REQUIRED"
+        if not str(text or "").strip():
+            return "EMPTY"
+        if self._writer_output_is_structural(text):
+            return "STRUCTURAL"
+        if self._writer_output_quality_unusable(text):
+            return "QUALITY_UNUSABLE"
+        return ""
+
+    def _writer_output_unusable(self, text: str) -> bool:
+        return bool(self._writer_output_rejection_reason(text))
 
     async def _generate_fresh_result(
         self,
@@ -395,26 +460,46 @@ class ParallelRunner:
             self.client.generate, prompt, request, expected_chars,
         )
         for _attempt in range(2):
-            if not self._writer_output_unusable(result):
+            reason = self._writer_output_rejection_reason(result)
+            if not reason:
                 return result
-            retry_prompt = (
-                "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
-                "Do not restart the whole story, do not emit a part label or JSON, "
-                "and return only the requested continuous prose segment.\n\n"
-                f"TASK:\n{prompt}"
-            )
+            if reason == "QUALITY_UNUSABLE":
+                retry_prompt = (
+                    "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
+                    "Rewrite SAME unfinished segment as concrete event progression: name actors, actions or "
+                    "decisions, reactions and a new consequence. Do not restart the whole story, do not repeat "
+                    "accepted material, do not emit a part label or JSON, and return only the requested continuous "
+                    "prose segment.\n\n"
+                    f"TASK:\n{prompt}"
+                )
+            else:
+                retry_prompt = (
+                    "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
+                    "Do not restart the whole story, do not emit a part label or JSON, "
+                    "and return only the requested continuous prose segment.\n\n"
+                    f"TASK:\n{prompt}"
+                )
             generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
             result = await self._generate_for_request(
                 generate_fresh, retry_prompt, request, expected_chars,
             )
-        if self._writer_output_unusable(result):
+        reason = self._writer_output_rejection_reason(result)
+        if reason:
             generate_openai = getattr(self.client, "generate_openai", None)
             if generate_openai is not None:
-                openai_prompt = (
-                    "Write only the SAME unfinished NewsFlow story segment below. "
-                    "Do not restart the story, ask questions, emit labels/JSON, or explain limitations.\n\n"
-                    f"TASK:\n{prompt}"
-                )
+                if reason == "QUALITY_UNUSABLE":
+                    openai_prompt = (
+                        "Write only the SAME unfinished NewsFlow story segment below as concrete event progression. "
+                        "Name actors, actions or decisions, reactions and a new consequence. Do not restart the "
+                        "story, repeat accepted material, ask questions, emit labels/JSON, or explain limitations.\n\n"
+                        f"TASK:\n{prompt}"
+                    )
+                else:
+                    openai_prompt = (
+                        "Write only the SAME unfinished NewsFlow story segment below. "
+                        "Do not restart the story, ask questions, emit labels/JSON, or explain limitations.\n\n"
+                        f"TASK:\n{prompt}"
+                    )
                 result = await self._generate_for_request(
                     generate_openai, openai_prompt, request, expected_chars,
                 )
@@ -529,12 +614,21 @@ class ParallelRunner:
             writer_result = await self._generate_writer_usable(
                 writer_prompt, job.request, active_target,
             )
-            if self._writer_output_unusable(writer_result):
+            writer_failure = self._writer_output_rejection_reason(writer_result)
+            if writer_failure:
                 job.state = RunState.PAUSED
-                job.error = f"Писатель части {part.id} не вернул готовый фрагмент"
+                job.error = (
+                    f"Писатель части {part.id} вернул аналитический текст без событийного развития"
+                    if writer_failure == "QUALITY_UNUSABLE"
+                    else f"Писатель части {part.id} не вернул готовый фрагмент"
+                )
                 job.result = self._assembled_story(plan, job.accepted_story_parts)
                 job.actual_chars = len(job.result)
-                job.length_status = f"PART {part_index + 1}/{len(plan.parts)}"
+                job.length_status = (
+                    "QUALITY_UNUSABLE"
+                    if writer_failure == "QUALITY_UNUSABLE"
+                    else f"PART {part_index + 1}/{len(plan.parts)}"
+                )
                 return False
 
             accepted_text = writer_result.strip()

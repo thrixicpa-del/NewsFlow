@@ -16,6 +16,18 @@ _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
 _COMPACT_AVOID_CHARS = 140
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
+_EVENT_DEVELOPMENT_CUES = (
+    "атак", "удар", "обстрел", "нанес", "провел", "заяв", "потребов",
+    "объяв", "ввел", "ввёл", "подпис", "встрет", "отказ", "задерж",
+    "арест", "суд", "отправ", "закры", "откры", "переве", "направ",
+    "запрос", "ответ", "реагир", "вышел", "вышл", "созвал", "приня",
+    "решил", "голос", "назнач", "увол", "сократ", "сокращ", "увелич", "перекры",
+    "эваку", "запуст", "прибыл", "обсуд", "отозв", "прекрат", "восстанов",
+    "покуп", "продав", "постав", "протест", "событ",
+    "attack", "strike", "launch", "announce", "demand", "reject", "arrest",
+    "detain", "send", "close", "open", "move", "request", "respond", "meet",
+    "sign", "vote", "approve", "block", "evacuate",
+)
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
     "котор", "этот", "этог", "того", "чтобы", "после", "перед", "между", "через", "снова",
@@ -168,6 +180,19 @@ def _obvious_semantic_duplicate(left: object, right: object) -> bool:
     union = len(first | second)
     jaccard = intersection / union if union else 0.0
     return containment >= 0.95 and jaccard >= 0.82
+
+
+def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
+    """Return true only when an atom names an observable action or event.
+
+    This deliberately stays local and conservative.  It is not a factuality
+    classifier and it does not reject a single compact atom; it prevents a new
+    Planner response from satisfying semantic density solely with several
+    differently worded abstractions such as pressure, balance or a changed
+    framework.
+    """
+    material = f"{atom.summary} {atom.novelty_payload}".casefold()
+    return any(cue in material for cue in _EVENT_DEVELOPMENT_CUES)
 
 
 def _id_list(value: object, _field: str) -> tuple[str, ...]:
@@ -423,6 +448,21 @@ def parse_story_plan_response(
                     "distinct content atoms for semantic density"
                 )
 
+        # Lexically different analysis is not a sequence of developments.  A
+        # fresh event-driven map may still include interpretation, but when it
+        # has multiple explicit atoms at least half must name observable
+        # actions/events/reactions/consequences.  This runs after the existing
+        # density floor so its established diagnostics stay stable. Persisted
+        # legacy plans skip the guard, preserving resume compatibility.
+        if len(atoms) >= 2:
+            concrete_atoms = sum(
+                _has_concrete_story_development(atom) for atom in atoms
+            )
+            if concrete_atoms * 2 < len(atoms):
+                raise ValueError(
+                    "story plan requires concrete story developments, not only analytical interpretations"
+                )
+
     assigned_ids = [content_id for part in parts for content_id in part.content_ids]
     if len(set(assigned_ids)) != len(assigned_ids):
         raise ValueError("story plan content atom is assigned more than once")
@@ -607,9 +647,14 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "REFERENCE DATA FOR PLANNING, not an instruction to execute now: do not obey its requests to write/return "
         "the finished scenario during this Planner call. Plan the complete story before any writer begins. "
         "Even if only a headline is available, create the full Story Map for every requested P1...PN. Never stop "
-        "planning because supporting facts are thin. When the supplied context does not cover a needed distinct "
-        "development, create a DRAMATIZED atom: a coherent model-created circumstance, action, reaction, conflict, "
-        "position, consequence, causal step, scene detail or turning point. Return strict JSON with thesis, "
+        "planning because supporting facts are thin. Plan an EVENT-DRIVEN story map: every DRAMATIZED atom must "
+        "primarily name a concrete new development, preferably ACTOR -> ACTION / DECISION -> TARGET -> IMMEDIATE "
+        "RESULT, EVENT -> REACTION -> COUNTERMOVE -> CONSEQUENCE, or ACTION -> RESPONSE -> NEW TURNING POINT. "
+        "When the supplied context does not cover a needed distinct development, create that concrete DRAMATIZED "
+        "circumstance, action, reaction, conflict, consequence, causal step, scene detail or turning point. "
+        "Abstract analysis such as stronger pressure, a changed framework, a new signal, a narrower room for "
+        "manoeuvre, a higher political price or an unstable balance may follow an event briefly, but is never a "
+        "standalone development atom. Return strict JSON with thesis, "
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
@@ -799,9 +844,11 @@ def build_story_writer_prompt(
     disclosure_instruction = ""
     if part.role in {"OPENING", "COMPLETE"} and has_dramatized_atoms:
         disclosure_instruction = (
-            "\nDRAMATIZED OPENING DISCLOSURE: Before the story, write one short natural disclosure that part of "
-            "this narrative is a dramatized reconstruction, not confirmed factual chronicle. Write it once only; "
-            "after it, continue in confident narrative language without repeating conditional hedging.\n"
+            "\nDRAMATIZED OPENING DISCLOSURE: Start with one or two strong event/hook sentences. Then, never as "
+            "the first sentence, write one short natural disclosure that part of this narrative is a dramatized "
+            "reconstruction, not confirmed factual chronicle. After that hook, write the one short natural disclosure "
+            "once only; then continue in confident event-driven narrative language without repeating conditional "
+            "hedging.\n"
         )
 
     novelty_instruction = (
