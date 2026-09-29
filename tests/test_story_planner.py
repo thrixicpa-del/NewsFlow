@@ -296,7 +296,7 @@ class StoryPlanValidationTests(unittest.TestCase):
             ],
         }, ensure_ascii=False)
 
-        plan = parse_story_plan_response(response, (5000, 5000))
+        plan = parse_story_plan_response(response, (2000, 2000))
         self.assertEqual([part.id for part in plan.parts], ["P1", "P2"])
 
     def test_legacy_persisted_repetitive_map_remains_readable(self):
@@ -375,6 +375,97 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn("NEW=Уличный эпизод превращается", prompt)
         self.assertIn("Once an atom's question/new information has been explained", prompt)
         self.assertIn("single COMPLETE 6-9k story", prompt)
+        self.assertIn("last owned atom must be written as a genuinely new terminal development", prompt)
+
+    def test_fresh_five_thousand_part_requires_multiple_distinct_atoms(self):
+        """A fresh 5k plan may not stretch one or two broad meanings into the whole part."""
+        response = json.dumps({
+            "thesis": "Плотная история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Полная история"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Исходное изменение на рынке", "owner_part_id": "P1",
+                 "content_kind": "SUPPORTED", "novelty_question": "Что изменилось?",
+                 "novelty_payload": "Цена закрепилась выше ожидаемого уровня.", "do_not_repeat": ""},
+                {"id": "C002", "summary": "Покупатели меняют поведение", "owner_part_id": "P1",
+                 "content_kind": "DRAMATIZED", "novelty_question": "Как реагируют покупатели?",
+                 "novelty_payload": "Люди сокращают покупки и ищут замену.", "do_not_repeat": "Цена уже выросла."},
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Раскрыть всю историю",
+                "macro_id": "M1", "content_ids": ["C001", "C002"],
+                "novelty_question": "Как развивается ситуация?",
+                "novelty_payload": "История движется от изменения цены к реакции людей.",
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "at least 3 distinct content atoms"):
+            parse_story_plan_response(response, (5000,))
+
+    def test_fresh_six_to_nine_thousand_complete_requires_five_distinct_atoms(self):
+        """The 6-9k COMPLETE contract needs enough new material inside its single part."""
+        atoms = [
+            {
+                "id": f"C00{index}",
+                "summary": f"Новый смысловой шаг номер {index}",
+                "owner_part_id": "P1",
+                "content_kind": "DRAMATIZED",
+                "novelty_question": f"Какой новый вопрос раскрывает шаг {index}?",
+                "novelty_payload": f"Зритель узнаёт отдельное развитие номер {index}.",
+                "do_not_repeat": f"Не возвращаться к выводу шага {index - 1}." if index > 1 else "",
+            }
+            for index in range(1, 5)
+        ]
+        response = json.dumps({
+            "thesis": "Одна длинная COMPLETE-история.",
+            "macro_blocks": [{"id": "M1", "purpose": "Последовательное развитие"}],
+            "content_atoms": atoms,
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Пройти четыре шага",
+                "macro_id": "M1", "content_ids": [atom["id"] for atom in atoms],
+                "novelty_question": "Как меняется ситуация по ходу истории?",
+                "novelty_payload": "Четыре разных шага пока недостаточны для 7k.",
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "at least 5 distinct content atoms"):
+            parse_story_plan_response(response, (7000,))
+
+    def test_do_not_repeat_is_persisted_and_exposed_only_for_current_atoms(self):
+        response = json.dumps({
+            "thesis": "Каждый смысл раскрывается один раз.",
+            "macro_blocks": [{"id": "M1", "purpose": "Полная история"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Причина изменения цены", "owner_part_id": "P1",
+                 "content_kind": "SUPPORTED", "novelty_question": "Почему цена не снизилась?",
+                 "novelty_payload": "Поставка стала дороже и изменила себестоимость.", "do_not_repeat": ""},
+                {"id": "C002", "summary": "Реакция покупателей", "owner_part_id": "P1",
+                 "content_kind": "DRAMATIZED", "novelty_question": "Как меняется поведение людей?",
+                 "novelty_payload": "Покупатели сокращают объём и выбирают заменители.",
+                 "do_not_repeat": "Не объяснять заново, почему цена не снизилась."},
+                {"id": "C003", "summary": "Ответ продавцов", "owner_part_id": "P1",
+                 "content_kind": "DRAMATIZED", "novelty_question": "Что делают продавцы?",
+                 "novelty_payload": "Продавцы меняют закупки и ассортимент.",
+                 "do_not_repeat": "Не повторять реакцию покупателей."},
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Раскрыть три разных шага",
+                "macro_id": "M1", "content_ids": ["C001", "C002", "C003"],
+                "novelty_question": "Как цена меняет рынок?",
+                "novelty_payload": "Причина, реакция людей и ответ продавцов раскрываются отдельно.",
+            }],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000,))
+        persisted = plan.to_dict()
+        self.assertEqual(
+            persisted["content_atoms"][1]["do_not_repeat"],
+            "Не объяснять заново, почему цена не снизилась.",
+        )
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Цены", "CONTRACT"), plan, [], 0, 5000,
+        )
+        self.assertIn("DO_NOT_REPEAT=Не объяснять заново, почему цена не снизилась.", prompt)
+        self.assertIn("do not create a fresh paragraph", prompt)
 
     def test_parser_requires_every_planned_part_and_unique_content_ownership(self):
         response = json.dumps({
@@ -556,7 +647,10 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("novelty_payload", prompt)
         self.assertIn("3-5 genuinely different atoms", prompt)
         self.assertIn("5-7", prompt)
-        self.assertIn("novelty_question and novelty_payload", prompt)
+        self.assertIn("novelty_question, novelty_payload and do_not_repeat", prompt)
+        self.assertIn("semantic-density requirements", prompt)
+        self.assertIn("minimum 3 distinct atoms", prompt)
+        self.assertIn("terminal development", prompt)
         self.assertIn("synonym swap", prompt)
 
     def test_planner_prompt_contains_only_story_planning_contract(self):
@@ -611,7 +705,7 @@ class StoryWriterContextTests(unittest.TestCase):
                  "novelty_question": "Какое новое последствие завершает историю?",
                  "novelty_payload": "Финальное последствие и закрытие причинной цепочки."},
             ],
-        }, ensure_ascii=False), (5000, 5000, 5000))
+        }, ensure_ascii=False), (5000, 5000, 5000), validate_semantic_novelty=False)
 
     def test_middle_writer_receives_bounded_seam_plus_semantic_past_and_future_memory(self):
         first_part = ("Ранний материал, который не должен целиком попадать в следующий запрос. " * 120).strip()
@@ -680,7 +774,7 @@ class StoryWriterContextTests(unittest.TestCase):
         supported = self._plan().to_dict()
         for atom in supported["content_atoms"]:
             atom["content_kind"] = "SUPPORTED"
-        plan = parse_story_plan_response(json.dumps(supported, ensure_ascii=False), (5000, 5000, 5000))
+        plan = story_plan_from_dict(supported)
 
         opening = build_story_writer_prompt(ScenarioRequest(0, "Тема", "CONTRACT"), plan, [], 0)
 
