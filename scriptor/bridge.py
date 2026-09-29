@@ -8899,7 +8899,7 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
     """Generate, validate and repair at most twice; callers persist state per item."""
     prompt = _cover_word_provider_prompt(kind, template, item, structure, headline, tabloid_mode=tabloid_mode)
     attempts: list[dict] = []
-    for repair_index in range(3):
+    for repair_index in range(2):
         raw = await pool.generate(prompt, before_request=pause_waiter)
         accepted: list[tuple[str, dict[str, object]]] = []
         for candidate in _cover_word_candidates(raw, kind):
@@ -8935,7 +8935,7 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
                 },
             )
             return value, validation, attempts
-        if repair_index == 2:
+        if repair_index == 1:
             break
         last = attempts[-1]["validation"] if attempts else {"reason_code": "INVALID_JSON", "reason_detail": "Пустой ответ"}
         prompt = _cover_word_repair_prompt(kind, "", last, item, structure, headline, tabloid_mode=tabloid_mode)
