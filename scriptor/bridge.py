@@ -789,6 +789,11 @@ _COVER_POLITICAL_MARKERS = (
     "белый дом", "внешн", "международн",
 )
 _COVER_PERSON_ENTITY_TYPES = {"person", "human", "public_figure", "politician", "individual"}
+_COVER_PUBLIC_PERSON_ENTITY_TYPES = {"public_figure", "politician"}
+_COVER_PUBLIC_PERSON_ROLE_MARKERS = (
+    "president", "prime_minister", "premier", "minister", "leader", "chancellor", "ambassador",
+    "президент", "премьер", "министр", "лидер", "канцлер", "посол",
+)
 
 
 def _cover_entity_is_explicit_person(value: object) -> bool:
@@ -800,6 +805,22 @@ def _cover_entity_is_explicit_person(value: object) -> bool:
         for key in ("type", "entity_type", "kind", "classification")
     }
     return bool(classifications & _COVER_PERSON_ENTITY_TYPES) or bool(value.get("is_person") is True)
+
+
+def _cover_candidate_is_public_figure(value: object) -> bool:
+    """Reject a named participant unless its data identifies a public role."""
+    if not isinstance(value, dict):
+        return False
+    classifications = {
+        str(value.get(key, "") or "").strip().casefold()
+        for key in ("type", "entity_type", "kind", "classification")
+    }
+    if classifications & _COVER_PUBLIC_PERSON_ENTITY_TYPES:
+        return True
+    role = " ".join(str(value.get(key, "") or "") for key in (
+        "role_in_story", "role", "position", "title",
+    )).casefold()
+    return any(marker in role for marker in _COVER_PUBLIC_PERSON_ROLE_MARKERS)
 
 
 def _cover_has_role_qualified_person(item: dict) -> bool:
@@ -855,11 +876,14 @@ def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
     # selected_people is the operator-owned person-only source.  Generic
     # entities are deliberately *not* inferred from capitalised words: an
     # organisation or place must carry an explicit person classification.
+    political_topic = _cover_requires_political_portrait(item)
     for key in ("selected_people", "primary_entities", "primary_entity", "entities"):
         values = item.get(key)
         values = values if isinstance(values, list) else [values]
         for value in values:
             if key != "selected_people" and not _cover_entity_is_explicit_person(value):
+                continue
+            if political_topic and isinstance(value, dict) and not _cover_candidate_is_public_figure(value):
                 continue
             name = _cover_person_name(value)
             if name:
@@ -879,23 +903,31 @@ def _cover_explicit_portrait_candidate(item: dict) -> tuple[str, str, str]:
     return "", "", ""
 
 
-def _cover_story_planner_candidate(item: dict) -> tuple[str, str, str, float]:
-    """Return the persisted Planner choice only when it remains a person."""
+def _cover_revalidated_persisted_candidate(item: dict, settings: Settings) -> tuple[str, str, str, float]:
+    """Reuse only a Covers-derived public figure after current-context validation."""
     if str(item.get("cover_face_resolution_status", "")).strip().upper() not in {"RESOLVED", "LOW_CONFIDENCE"}:
         return "", "", "", 0.0
     candidate = item.get("cover_primary_person")
-    if not _cover_entity_is_explicit_person(candidate):
+    if not _cover_candidate_is_public_figure(candidate):
         return "", "", "", 0.0
-    name = _cover_person_name(candidate)
-    if not name:
+    source = str(candidate.get("source", "") or "").strip().casefold() if isinstance(candidate, dict) else ""
+    if not source.startswith("core-"):
         return "", "", "", 0.0
+    derived, status = derive_person_evidence(
+        candidate, item, settings, allow_semantic_text_anchors=True,
+    )
+    if derived is None or not _cover_candidate_is_public_figure(derived):
+        return "", "", "", 0.0
+    item["cover_primary_person"] = derived
+    item["cover_people_candidates"] = [derived]
+    item["cover_face_resolution_status"] = status
+    name = _cover_person_name(derived)
     try:
-        confidence = float(candidate.get("confidence", 0) or 0)
+        confidence = float(derived.get("confidence", 0) or 0)
     except (AttributeError, TypeError, ValueError):
         confidence = 0.0
-    relation = " ".join(str(candidate.get("relation_to_story", "") or "").split())
-    source = " ".join(str(candidate.get("source", "story-planner") or "story-planner").split())
-    return name, "story-planner", relation or f"planner-selected person from {source}", max(0.0, min(1.0, confidence))
+    relation = " ".join(str(derived.get("relation_to_story", "") or "").split())
+    return name, "covers-revalidated", relation or "Covers-revalidated public figure", max(0.0, min(1.0, confidence))
 
 
 def _cover_person_evidence_type(candidate: object) -> str:
@@ -1036,7 +1068,8 @@ def _cover_semantic_person_candidate(value: object) -> dict | None:
                   "президент", "министр", "лидер", "спикер"}
     if entity_type in role_types and name:
         entity_type = "public_figure"
-    if entity_type not in _COVER_PERSON_ENTITY_TYPES or not name:
+    candidate = dict(value, entity_type=entity_type)
+    if entity_type not in _COVER_PERSON_ENTITY_TYPES or not name or not _cover_candidate_is_public_figure(candidate):
         return None
     try:
         confidence = max(0.0, min(1.0, float(value.get("confidence", 0.5))))
@@ -1133,10 +1166,10 @@ def _resolve_cover_portrait(
         if item.get("face_reference_source") == "manual" and manual_label:
             subject, source, reason, confidence = manual_label, "manual", "operator selected a portrait for this topic", 1.0
         else:
-            subject, source, reason, confidence = _cover_story_planner_candidate(item)
+            subject, source, reason = _cover_explicit_portrait_candidate(item)
+            confidence = 0.8 if subject else 0.0
             if not subject:
-                subject, source, reason = _cover_explicit_portrait_candidate(item)
-                confidence = 0.8 if subject else 0.0
+                subject, source, reason, confidence = _cover_revalidated_persisted_candidate(item, settings)
             if not subject:
                 # The tree can verify a subject only after structured/context
                 # evidence has named one. It never becomes a random identity
@@ -1353,12 +1386,11 @@ def _match_cover_face_reference(item: dict, settings: Settings, *, force: bool =
         return "", "", ""
     folder = Path(settings.cover_face_library_folder).expanduser()
     files, _ = _cover_face_files(folder)
-    # A planner/manual/structured choice takes absolute identity priority. A
+    # A manual/resolved/structured choice takes absolute identity priority. A
     # visual reference is deliberately absent here, so Person Y in a style
     # image can never replace the resolved Person X.
-    planner_subject, _source, _reason, _confidence = _cover_story_planner_candidate(item)
     explicit_subject, _explicit_source, _explicit_reason = _cover_explicit_portrait_candidate(item)
-    identity_context = str(item.get("portrait_subject") or planner_subject or explicit_subject or "").strip()
+    identity_context = str(item.get("portrait_subject") or explicit_subject or "").strip()
     if not identity_context:
         # Legacy imported rows predate the ProductionItem face contract. Keep
         # direct title-to-tree matching only for those rows; a current explicit
@@ -9966,8 +9998,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             prompt_item = dict(item)
             for key in ("face_reference_path", "face_reference_label", "face_reference_source"):
                 prompt_item.pop(key, None)
-            if face_label:
-                prompt_item["selected_people"] = face_label
+        if portrait["portrait_subject"]:
+            prompt_item["selected_people"] = portrait["portrait_subject"]
         if repeat_current_contract:
             final_prompt_options = list(saved_provider_prompts)
         else:

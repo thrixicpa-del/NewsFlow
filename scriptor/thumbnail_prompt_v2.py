@@ -63,7 +63,7 @@ def visual_brief(item: Mapping[str, object] | None = None) -> dict[str, str]:
     row = item or {}
     title = _clean(row.get("title"), "current news topic")
     source = " ".join((title, _context(row, "script", "event_context", "supporting_context"))).casefold()
-    selected_people = _context(row, "face_reference_label", "selected_people", "primary_entities", "primary_entity", "entities")
+    selected_people = _context(row, "portrait_subject", "face_reference_label", "selected_people", "primary_entities", "primary_entity", "entities")
     defaults = _topic_scene_defaults(title, source)
     main_subject = _context(row, "main_subject", "topic", "angle") or defaults["main_subject"]
     action = _context(row, "visible_action", "action", "event_context", "conflict")
@@ -174,7 +174,14 @@ def build_final_provider_prompt(
 ) -> str:
     """Build the one immutable FastGen payload from semantic values and V2 rules."""
     scene_values = _structured_scene_values(scene_prompt)
-    brief = visual_brief({**dict(item or {}), **scene_values})
+    current_item = dict(item or {})
+    prompt_values = {**current_item, **scene_values}
+    current_identity = _context(current_item, "portrait_subject", "selected_people")
+    if current_identity:
+        # A stored V2 draft can describe an old identity. The render-time
+        # Covers resolver is the only authority for SELECTED PEOPLE.
+        prompt_values["selected_people"] = current_identity
+    brief = visual_brief(prompt_values)
     scene = _semantic_scene(scene_prompt, brief["title"])
     # ``_semantic_scene`` has already extracted only the old draft's STORY
     # CONTEXT.  Keep that concise scene narrative intact; the structured slots
