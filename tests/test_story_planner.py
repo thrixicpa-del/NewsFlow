@@ -264,6 +264,113 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "parts must own materially distinct"):
             parse_story_plan_response(response, (5000, 5000))
 
+
+    def test_related_story_atoms_with_shared_topic_words_are_not_false_duplicates(self):
+        """Same topic is allowed when actor/mechanism/consequence actually advances."""
+        response = json.dumps({
+            "thesis": "Одна тема развивается через разные причинные шаги.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие давления"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Высокая цена помидоров раздражает покупателей на городском рынке",
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED",
+                 "novelty_question": "Что первым замечают покупатели?",
+                 "novelty_payload": "Покупатели фиксируют устойчиво высокий ценник на повседневный товар."},
+                {"id": "C002", "summary": "Поставщики сокращают объём дешёвых партий после роста логистических затрат",
+                 "owner_part_id": "P2", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Какой механизм удерживает цену?",
+                 "novelty_payload": "Новый дефицит дешёвых поставок меняет закупочную тактику продавцов."},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Показать бытовой ценовой сигнал",
+                 "macro_id": "M1", "content_ids": ["C001"],
+                 "novelty_question": "Что первым замечают покупатели?",
+                 "novelty_payload": "Покупатели видят устойчиво высокий ценник."},
+                {"id": "P2", "role": "FINAL", "purpose": "Раскрыть отдельный механизм поставок",
+                 "macro_id": "M1", "content_ids": ["C002"],
+                 "novelty_question": "Почему цена не снижается после ожиданий?",
+                 "novelty_payload": "Поставки и закупочная тактика создают новый механизм удержания цены."},
+            ],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000, 5000))
+        self.assertEqual([part.id for part in plan.parts], ["P1", "P2"])
+
+    def test_legacy_persisted_repetitive_map_remains_readable(self):
+        """New semantic guards must never invalidate an accepted legacy resume artifact."""
+        legacy = {
+            "thesis": "Старая карта.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Высокая цена вызывает устойчивое раздражение покупателей",
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED"},
+                {"id": "C002", "summary": "Высокая цена вызывает устойчивое раздражение покупателей снова",
+                 "owner_part_id": "P2", "content_kind": "SUPPORTED"},
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Первый шаг", "macro_id": "M1",
+                 "content_ids": ["C001"], "target_chars": 5000},
+                {"id": "P2", "role": "FINAL", "purpose": "Второй шаг", "macro_id": "M1",
+                 "content_ids": ["C002"], "target_chars": 5000},
+            ],
+        }
+
+        restored = story_plan_from_dict(legacy)
+        self.assertEqual([part.id for part in restored.parts], ["P1", "P2"])
+        self.assertEqual(restored.content_atoms[0].novelty_payload,
+                         "Высокая цена вызывает устойчивое раздражение покупателей")
+
+    def test_single_complete_writer_consumes_atom_novelty_in_one_way_order(self):
+        """N=1 still needs internal progression; cross-part novelty cannot protect it."""
+        response = json.dumps({
+            "thesis": "Одна длинная COMPLETE-история движется по новым смысловым шагам.",
+            "macro_blocks": [{"id": "M1", "purpose": "Полная причинная цепочка"}],
+            "content_atoms": [
+                {"id": "C001", "summary": "Одиночный протест начинается на площади",
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED",
+                 "novelty_question": "Что произошло первым?",
+                 "novelty_payload": "Протестующий появляется в символическом месте."},
+                {"id": "C002", "summary": "Охрана замечает акцию и вмешивается",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Как развивается реакция на месте?",
+                 "novelty_payload": "Силовой ответ меняет ход сцены и прекращает акцию."},
+                {"id": "C003", "summary": "Дело переходит из площади в судебную процедуру",
+                 "owner_part_id": "P1", "content_kind": "SUPPORTED",
+                 "novelty_question": "Что меняется после задержания?",
+                 "novelty_payload": "Уличный эпизод превращается в отдельное юридическое последствие."},
+                {"id": "C004", "summary": "Решение суда создаёт новое последствие для героя",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Чем заканчивается причинная цепочка?",
+                 "novelty_payload": "Финал показывает конкретное последствие судебного решения."},
+                {"id": "C005", "summary": "История получает более широкий общественный эффект",
+                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                 "novelty_question": "Какой новый эффект остаётся после финала?",
+                 "novelty_payload": "Событие становится отдельным общественным сигналом, а не повтором сцены."},
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Раскрыть всю причинную цепочку",
+                "macro_id": "M1", "content_ids": ["C001", "C002", "C003", "C004", "C005"],
+                "novelty_question": "Как одиночный эпизод проходит путь от события до последствия?",
+                "novelty_payload": "Зритель получает пять последовательных новых смысловых шагов.",
+            }],
+        }, ensure_ascii=False)
+        plan = parse_story_plan_response(response, (7000,))
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Протест", "USER CONTRACT"),
+            plan,
+            [],
+            0,
+            7000,
+        )
+
+        self.assertIn("CURRENT ROLE: COMPLETE", prompt)
+        self.assertIn("CURRENT CONTENT ORDER (consume once, in order):", prompt)
+        self.assertIn("C001 [SUPPORTED]", prompt)
+        self.assertIn("C005 [DRAMATIZED]", prompt)
+        self.assertIn("Q=Что произошло первым?", prompt)
+        self.assertIn("NEW=Уличный эпизод превращается", prompt)
+        self.assertIn("Once an atom's question/new information has been explained", prompt)
+        self.assertIn("single COMPLETE 6-9k story", prompt)
+
     def test_parser_requires_every_planned_part_and_unique_content_ownership(self):
         response = json.dumps({
             "thesis": "Одна история без второго круга.",
@@ -442,7 +549,9 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("DRAMATIZED", prompt)
         self.assertIn("novelty_question", prompt)
         self.assertIn("novelty_payload", prompt)
-        self.assertIn("2-4 genuinely different atoms", prompt)
+        self.assertIn("3-5 genuinely different atoms", prompt)
+        self.assertIn("5-7", prompt)
+        self.assertIn("novelty_question and novelty_payload", prompt)
         self.assertIn("synonym swap", prompt)
 
     def test_planner_prompt_contains_only_story_planning_contract(self):
@@ -519,6 +628,9 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("CURRENT PART: P2", prompt)
         self.assertIn("CURRENT NOVELTY QUESTION: Как работает новый механизм давления?", prompt)
         self.assertIn("CURRENT NEW INFORMATION: Механизм, участники и реакция", prompt)
+        self.assertIn("CURRENT CONTENT ORDER (consume once, in order):", prompt)
+        self.assertIn("Q=", prompt)
+        self.assertIn("NEW=", prompt)
         self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Начальное событие уже раскрыто", prompt)
         self.assertIn("USED SEMANTIC MEANINGS (forbidden to restate): P1:", prompt)
         self.assertIn("PARAPHRASE DOES NOT COUNT AS NEW INFORMATION", prompt)
