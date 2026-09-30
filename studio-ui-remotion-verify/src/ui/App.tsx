@@ -2531,8 +2531,12 @@ export function Scenarios({
   const [draft, setDraft] = useState("");
   const [manualTitle, setManualTitle] = useState("");
   const [manualText, setManualText] = useState("");
+  const [manualImportError, setManualImportError] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
+  const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
+  const [editedScriptText, setEditedScriptText] = useState("");
+  const [savingScript, setSavingScript] = useState(false);
   const manualImportLock = useRef(false);
   const [importingManualScenario, setImportingManualScenario] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -2628,6 +2632,36 @@ export function Scenarios({
     setRenameTitle(item?.title ?? "");
     setRenameOpen(true);
   };
+  const selectedReadyScenario =
+    selected.length === 1
+      ? data.scenarios.find(
+          (scenario) =>
+            scenario.index === selected[0] &&
+            scenario.state === "Готово" &&
+            scenario.result.trim(),
+        )
+      : undefined;
+  const editScript = () => {
+    if (!selectedReadyScenario) return;
+    setEditedScriptText(selectedReadyScenario.result);
+    setScriptEditorOpen(true);
+  };
+  const saveEditedScript = async () => {
+    if (!selectedReadyScenario || !editedScriptText.trim() || savingScript) return;
+    setSavingScript(true);
+    try {
+      const result = await command("save-scenario-text", {
+        index: selectedReadyScenario.index,
+        text: editedScriptText,
+      });
+      if (result) {
+        setScriptEditorOpen(false);
+        setEditedScriptText("");
+      }
+    } finally {
+      setSavingScript(false);
+    }
+  };
   const confirmRename = async () => {
     if (selected.length !== 1 || !renameTitle.trim()) return;
     const result = await command("rename-scenario", {
@@ -2663,6 +2697,31 @@ export function Scenarios({
         manualImportLock.current = false;
         setImportingManualScenario(false);
       }
+    }
+  };
+  const importReadyFiles = async () => {
+    if (manualImportLock.current) return;
+    manualImportLock.current = true;
+    setImportingManualScenario(true);
+    setManualImportError("");
+    try {
+      const items = await window.newsflowDesktop?.chooseScenarioTexts();
+      if (!items?.length) return;
+      const result = await command("import-manual-scenarios", { items });
+      if (result) {
+        setSelected([]);
+      } else {
+        setManualImportError("Не удалось добавить выбранные сценарии. Повторите попытку.");
+      }
+    } catch (error) {
+      setManualImportError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Не удалось прочитать выбранные сценарии. Повторите попытку.",
+      );
+    } finally {
+      manualImportLock.current = false;
+      setImportingManualScenario(false);
     }
   };
   const write = async (indices?: number[], force = false) => {
@@ -2718,6 +2777,32 @@ export function Scenarios({
           <Button onClick={() => setRenameOpen(false)}>Отмена</Button>
           <Button kind="primary" onClick={() => void confirmRename()} disabled={!renameTitle.trim()}>
             Сохранить название
+          </Button>
+        </div>
+      </Dialog>
+      <Dialog
+        open={scriptEditorOpen}
+        onOpenChange={(open) => {
+          setScriptEditorOpen(open);
+          if (!open) setEditedScriptText("");
+        }}
+        title="Редактировать сценарий"
+        description="Измените текст выбранного готового сценария и сохраните его в текущей очереди."
+      >
+        <Textarea
+          label={`Текст сценария: ${selectedReadyScenario?.title || ""}`}
+          value={editedScriptText}
+          onChange={(event) => setEditedScriptText(event.target.value)}
+          autoFocus
+        />
+        <div className="toolbar">
+          <Button onClick={() => setScriptEditorOpen(false)}>Отмена</Button>
+          <Button
+            kind="primary"
+            onClick={() => void saveEditedScript()}
+            disabled={savingScript || !editedScriptText.trim()}
+          >
+            {savingScript ? "Сохранение…" : "Сохранить сценарий"}
           </Button>
         </div>
       </Dialog>
@@ -2845,10 +2930,16 @@ export function Scenarios({
           <Button
             kind="success"
             disabled={importingManualScenario}
-            onClick={() => void importReady()}
+            onClick={() => void importReadyFiles()}
           >
             <Upload size={17} />
             {importingManualScenario ? "Сохранение…" : "Добавить готовый"}
+          </Button>
+          <Button
+            disabled={importingManualScenario || !manualTitle.trim() || !manualText.trim()}
+            onClick={() => void importReady()}
+          >
+            Добавить своё
           </Button>
         </div>
         <Textarea
@@ -2857,11 +2948,16 @@ export function Scenarios({
           onChange={(event) => setManualText(event.target.value)}
           placeholder="Вставьте полный текст сценария…"
         />
+        {manualImportError ? <div className="knowledge-status" role="alert">{manualImportError}</div> : null}
       </section>
       <div className="toolbar compact">
         <Button onClick={edit}>
           <Pencil size={16} />
           Изменить тему
+        </Button>
+        <Button disabled={!selectedReadyScenario} onClick={editScript}>
+          <Pencil size={16} />
+          Редактировать сценарий
         </Button>
         <Button kind="danger" onClick={remove}>
           <Trash2 size={16} />

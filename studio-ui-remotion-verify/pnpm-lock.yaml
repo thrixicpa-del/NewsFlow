@@ -57,6 +57,9 @@ importers:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
+      unzipper:
+        specifier: 0.12.5
+        version: 0.12.5
       vite:
         specifier: 8.2.2
         version: 8.2.2(@types/node@26.2.0)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.50.0)
