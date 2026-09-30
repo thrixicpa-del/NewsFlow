@@ -36,10 +36,13 @@ _ABSTRACT_TRANSITION_SUBJECT_STEMS = frozenset({
     "intens", "prospect", "corrid", "window", "state", "mode", "line",
 })
 _INTERPRETIVE_FRAME_STEMS = frozenset({
-    "восприним", "выгляд", "означа", "показыв", "демонстр", "символиз",
+    # _semantic_tokens keeps at most six characters, so every stem here uses
+    # that same compact representation.
+    "воспри", "выгляд", "означа", "показыв", "демонс", "символ",
     "тракту", "смысл", "значен", "ожидан", "вероят", "итог",
-    "perceiv", "appear", "mean", "show", "demons", "symbol", "interpr",
-    "expect", "likely", "signif", "conclus",
+    "станов", "усил", "сузило", "растет", "повыш",
+    "percei", "appear", "mean", "show", "demons", "symbol", "inter",
+    "expect", "likely", "signif", "conclu", "intens", "narrow", "increa",
 })
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
@@ -222,13 +225,13 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     ):
         return False
 
-    # A transition about the *meaning*, balance or importance of an event is
-    # analysis, unless another atom names an observable action/state change.
-    # This small check is intentionally not a topic vocabulary or an NLP
-    # classifier; it rejects only an explicitly abstract changed_subject.
+    # A noun such as "situation", "state" or "pressure" does not by itself
+    # make a transition analytical.  It can legitimately be the *system that
+    # changed* when the declared development is an observable action and the
+    # resulting state is concrete.  Treat it as a problem only together with
+    # an interpretive frame below; otherwise a lexical label would reject
+    # valid maps from arbitrary news domains.
     subject_tokens = _semantic_tokens(changed_subject)
-    if subject_tokens & _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS:
-        return False
 
     # Do not accept a dressed-up interpretation as a new state transition.
     # This uses only the relation between a declared abstract subject and an
@@ -238,7 +241,10 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
         f"{atom.summary} {development} {resulting_state}"
     )
     return not (
-        subject_tokens & _ABSTRACT_TRANSITION_SUBJECT_STEMS
+        subject_tokens & (
+            _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS
+            | _ABSTRACT_TRANSITION_SUBJECT_STEMS
+        )
         and frame_tokens & _INTERPRETIVE_FRAME_STEMS
     )
 

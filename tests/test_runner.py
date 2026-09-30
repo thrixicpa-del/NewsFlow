@@ -667,7 +667,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 if "NewsFlow Story Planner" in prompt:
                     raw = json.loads(ParallelRunnerTests._story_plan_json(2))
                     raw["thesis"] = marker
-                    raw["content_atoms"][0]["changed_subject"] = "смысл прежнего события"
+                    raw["content_atoms"][0].update({
+                        "summary": "Известное событие воспринимается как более жёсткая фаза",
+                        "changed_subject": "смысл прежнего события",
+                        "development": "событие воспринимается как более важный сигнал",
+                        "resulting_state": "политическая цена воспринимается как выросшая",
+                    })
                     return json.dumps(raw, ensure_ascii=False)
                 target = int(__import__("re").search(
                     r"CURRENT TARGET: approximately (\d+) characters", prompt,

@@ -390,6 +390,19 @@ class StoryPlanValidationTests(unittest.TestCase):
             development="оператор перевёл заявки на резервный маршрут",
             resulting_state="заявки направляются через резервный маршрут",
         )))
+        # A changed system state may be named with an abstract noun when the
+        # declared development itself is an observable action and the result
+        # is concrete.  Rejecting this solely because it contains
+        # "ситуация" would turn a lexical blacklist into a false semantic
+        # gate and reject otherwise valid maps from any news domain.
+        self.assertTrue(_has_concrete_story_development(atom(
+            "Городские службы перевели критические объекты на резервное питание",
+            "После атаки критические объекты работали по обычной схеме.",
+            "Критические объекты работают на резервном питании.",
+            changed_subject="Оперативная ситуация в городе",
+            development="городские службы перевели критические объекты на резервное питание",
+            resulting_state="критические объекты перешли на резервное питание",
+        )))
         self.assertFalse(_has_concrete_story_development(atom(
             "Удар меняет политическую цену конфликта"
         )))
@@ -556,6 +569,38 @@ class StoryPlanValidationTests(unittest.TestCase):
         )
 
         self.assertEqual([atom.id for atom in plan.content_atoms], ["C001", "C002", "C003"])
+
+    def test_parser_accepts_concrete_action_for_a_named_system_state(self):
+        """A system-state label cannot override its concrete event evidence."""
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Оперативная ситуация меняется после конкретного действия служб.",
+            "macro_blocks": [{"id": "M1", "purpose": "Показать действие и его результат"}],
+            "content_atoms": [{
+                "id": "C001",
+                "summary": "Городские службы переводят критические объекты на резервное питание",
+                "owner_part_id": "P1",
+                "content_kind": "DRAMATIZED",
+                "state_before": "После атаки критические объекты работали по обычной схеме.",
+                "changed_subject": "Оперативная ситуация в городе",
+                "development": "городские службы перевели критические объекты на резервное питание",
+                "resulting_state": "критические объекты перешли на резервное питание",
+                "state_after": "Критические объекты работают на резервном питании.",
+                "novelty_question": "Как службы изменили работу объектов?",
+                "novelty_payload": "Службы перевели критические объекты на резервное питание.",
+                "do_not_repeat": "",
+            }],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Показать конкретное действие служб",
+                "macro_id": "M1", "content_ids": ["C001"],
+                "novelty_question": "Как изменилась работа критических объектов?",
+                "novelty_payload": "Объекты переходят на резервное питание.",
+            }],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (2000,), require_state_transitions=True)
+
+        self.assertEqual(plan.content_atoms[0].changed_subject, "Оперативная ситуация в городе")
 
     def test_parser_rejects_obvious_near_copy_part_novelty_contracts(self):
         response = json.dumps({
