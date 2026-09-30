@@ -1390,6 +1390,22 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("P3≈3998 chars; minimum 3 distinct atoms", prompt)
         self.assertIn("not an essay outline, opinion column, literary narrative", prompt)
 
+    def test_planner_builds_an_event_spine_before_allocating_parts(self):
+        """New maps begin with content progression, not authorial presentation tasks."""
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "Тема", "Ручной шаблон остаётся справочным."),
+            (3999, 3999, 3998),
+        )
+
+        self.assertIn("FIRST construct a causal-temporal EVENT SPINE", prompt)
+        self.assertIn("Only AFTER that allocate each event step exactly once to P1...PN", prompt)
+        self.assertIn("Choose the FINAL terminal result before allocating FINAL", prompt)
+        self.assertIn(
+            "'expand context', 'show significance' or 'leave a question' are presentation tasks, not event steps",
+            prompt,
+        )
+        self.assertIn("optional final question may follow that result but cannot replace it", prompt)
+
     def test_planner_prompt_contains_only_story_planning_contract(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 
@@ -1511,6 +1527,42 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("This is not an essay, analysis, op-ed, literary story", prompt)
         self.assertIn("Every substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change", prompt)
         self.assertIn("two substantive event-driven paragraphs per CURRENT atom", prompt)
+
+    def test_writer_receives_the_part_event_sequence_before_coverage_beats(self):
+        """The Writer sees its ordered state changes as content, not author tasks."""
+        persisted = self._plan().to_dict()
+        persisted["content_atoms"][1].update({
+            "state_before": "Заявка ждёт решения.",
+            "changed_subject": "Комиссия",
+            "development": "Комиссия утверждает новый порядок.",
+            "resulting_state": "Заявка получает утверждённый маршрут.",
+            "state_after": "Исполнители получают новый порядок.",
+            "writer_material": [
+                "Комиссия получает заявку с прежним порядком.",
+                "Комиссия утверждает новый порядок обработки.",
+                "STEP_THREE: исполнители получают утверждённый маршрут.",
+            ],
+        })
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "CONTRACT", target_chars=15000),
+            story_plan_from_dict(persisted),
+            [{"part_id": "P1", "text": "Первый фрагмент.", "content_ids": ["C001"]}],
+            1,
+        )
+
+        self.assertIn("PART EVENT SEQUENCE (content, not author tasks):", prompt)
+        self.assertIn(
+            "C002: before=Заявка ждёт решения.; subject=Комиссия; "
+            "development=Комиссия утверждает новый порядок.; "
+            "result=Заявка получает утверждённый маршрут.; "
+            "after=Исполнители получают новый порядок.",
+            prompt,
+        )
+        self.assertIn("STEP_THREE: исполнители получают утверждённый маршрут.", prompt)
+        self.assertLess(
+            prompt.index("PART EVENT SEQUENCE (content, not author tasks):"),
+            prompt.index("CURRENT CONTENT ORDER:"),
+        )
 
     def test_writer_execution_boundary_follows_conflicting_whole_story_length(self):
         prompt = build_story_writer_prompt(

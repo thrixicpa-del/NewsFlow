@@ -772,7 +772,12 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "new action, decision, reaction, discovery, result, status change or other observable development; "
         "state_after says what is now different. A reference to an earlier event plus an interpretation of its "
         "importance is not a development by itself. Short analysis may connect two developments, but may not replace "
-        "one. This is not an essay outline, opinion column, literary narrative or atmospheric treatment: never create "
+        "one. FIRST construct a causal-temporal EVENT SPINE for the whole story: identify the initial concrete "
+        "situation, each next action/reaction/decision/result that changes it, and the terminal concrete result. "
+        "Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate each event step exactly "
+        "once to P1...PN and express those allocated steps as content_atoms and writer_material. 'expand context', "
+        "'show significance' or 'leave a question' are presentation tasks, not event steps. An optional final question "
+        "may follow that result but cannot replace it. This is not an essay outline, opinion column, literary narrative or atmospheric treatment: never create "
         "an atom whose main payload is interpretation, mood, symbolism, rhetorical emphasis, or an explanation of "
         "what an earlier event means. "
         f"{thin_context_transition_instruction}For each DRAMATIZED atom, name a new discrete occurrence in "
@@ -967,6 +972,16 @@ def build_story_writer_prompt(
 
     current_atoms = "\n".join(
         f"- {format_current_atom(atom_id)}" for atom_id in part.content_ids
+    )
+    event_sequence = "\n".join(
+        (
+            f"- {atom_id}: before={_compact(atoms[atom_id].state_before, _COMPACT_ATOM_CHARS)}; "
+            f"subject={_compact(atoms[atom_id].changed_subject, _COMPACT_ATOM_CHARS)}; "
+            f"development={_compact(atoms[atom_id].development, _COMPACT_ATOM_CHARS)}; "
+            f"result={_compact(atoms[atom_id].resulting_state, _COMPACT_ATOM_CHARS)}; "
+            f"after={_compact(atoms[atom_id].state_after, _COMPACT_ATOM_CHARS)}"
+        )
+        for atom_id in part.content_ids
     )
     material_budget = (
         max(1, active_target // max(1, len(part.content_ids)))
@@ -1188,6 +1203,8 @@ def build_story_writer_prompt(
         f"MATERIAL ALLOCATION: this part has {len(part.content_ids)} owned atoms; reserve roughly "
         f"{material_budget} characters of event-led coverage for each atom before moving to the next. "
         "Use each atom's WRITER MATERIAL as ordered first-pass coverage, not as a list to print.\n"
+        "PART EVENT SEQUENCE (content, not author tasks):\n"
+        f"{event_sequence}\n"
         "CURRENT CONTENT ORDER: consume the following atoms once, in listed order.\n"
         f"CURRENT CONTENT:\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
