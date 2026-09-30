@@ -46,10 +46,16 @@ def _sha(value: str | bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _write_text(path: Path, value: str) -> None:
+    """Write evidence bytes verbatim across Windows and POSIX hosts."""
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(value)
+
+
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(
+    _write_text(
+        path,
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
 
@@ -215,13 +221,13 @@ class RecordingPool:
 
 
 def _write_readme(evidence: Path, run_id: str) -> None:
-    (evidence / "README.md").write_text(
+    _write_text(
+        evidence / "README.md",
         "# Disposable Scenario acceptance evidence\n\n"
         f"Run: `{run_id}`. This directory contains safe post-adapter payloads, "
         "visible model text, persisted Story Map/session projection, accepted "
         "parts, assembly facts and call ledgers. Credentials, headers, cookies, "
         "runtime-root and account settings are intentionally excluded.\n",
-        encoding="utf-8",
     )
 
 
@@ -313,7 +319,7 @@ def main() -> int:
         "test_context_origin": item["test_context_origin"],
         "production_context": "NONE: headline is not factual evidence",
     })
-    (evidence / "01-user-template.txt").write_text(settings.template, encoding="utf-8")
+    _write_text(evidence / "01-user-template.txt", settings.template)
     _write_json(evidence / "02-production-item-test-context.json", item)
     _write_readme(evidence, args.run_id)
 
@@ -371,7 +377,7 @@ def main() -> int:
         }
         captured_responses.append(meta)
         _write_json(evidence / f"response-{number:02d}-transport-meta.json", meta)
-        (evidence / f"response-{number:02d}-visible.txt").write_text(visible, encoding="utf-8")
+        _write_text(evidence / f"response-{number:02d}-visible.txt", visible)
         return response
 
     pool_box: dict[str, RecordingPool] = {}
@@ -413,8 +419,8 @@ def main() -> int:
             ],
         })
         for row in job.accepted_story_parts:
-            (evidence / f"part-{row['part_id']}.txt").write_text(str(row.get("text", "")), encoding="utf-8")
-        (evidence / "scenario.txt").write_text(job.result, encoding="utf-8")
+            _write_text(evidence / f"part-{row['part_id']}.txt", str(row.get("text", "")))
+        _write_text(evidence / "scenario.txt", job.result)
         _write_json(evidence / "30-assembly.json", {
             "separator": "\\n\\n", "python_len_stripped": len(job.result.strip()),
             "scenario_sha256": _sha(job.result),

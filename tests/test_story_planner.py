@@ -88,8 +88,25 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertTrue(repair_format["strict"])
         self.assertEqual(planner_format["type"], "json_schema")
         self.assertIn("event_steps", atom_schema["required"])
+        self.assertIn("event_spine", schema["required"])
         self.assertNotIn("writer_material", atom_schema["properties"])
         self.assertFalse(any("minItems" in repr(value) for value in (schema, repair_format["schema"])))
+
+    def test_parser_persists_optional_event_spine_without_blocking_legacy_maps(self):
+        raw = json.loads(self._single_part_cover_response(
+            candidates=[], primary=None, status="NEEDS_REVIEW",
+        ))
+        raw["event_spine"] = [
+            "Служба фиксирует сбой подачи ресурса.",
+            "Дежурная бригада переключает резервный маршрут.",
+            "Подача на критический участок восстанавливается.",
+        ]
+        plan = parse_story_plan_response(json.dumps(raw, ensure_ascii=False), (5000,))
+        self.assertEqual(
+            plan.event_spine,
+            tuple(raw["event_spine"]),
+        )
+        self.assertEqual(plan.to_dict()["event_spine"], raw["event_spine"])
 
     def test_parser_rejects_damaged_root_instead_of_accepting_nested_macro(self):
         """A complete child object is never a substitute for a broken Story Map root."""
@@ -1597,7 +1614,9 @@ class StoryPlannerPromptTests(unittest.TestCase):
         )
 
         self.assertIn("FIRST construct a causal-temporal EVENT SPINE", prompt)
-        self.assertIn("Only AFTER that allocate each event step exactly once to P1...PN", prompt)
+        self.assertIn("Return that sequence first as event_spine", prompt)
+        self.assertIn("each event-spine item exactly once to P1...PN", prompt)
+        self.assertIn("not a list of angles, questions, themes, moods, stakes or explanations", prompt)
         self.assertIn("Choose the FINAL terminal result before allocating FINAL", prompt)
         self.assertIn(
             "'expand context', 'show significance' or 'leave a question' are presentation tasks, not event steps",

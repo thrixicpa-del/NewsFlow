@@ -80,6 +80,9 @@ def story_planner_response_format() -> dict[str, Any]:
         "schema": _strict_object({
             "state_transition_contract": {"type": "string", "enum": [_STATE_TRANSITION_CONTRACT]},
             "thesis": {"type": "string"},
+            # The spine is planning evidence for fresh maps.  It is additive:
+            # resumed legacy maps remain valid when this field is absent.
+            "event_spine": _string_array_schema(),
             "macro_blocks": {"type": "array", "items": _strict_object({
                 "id": {"type": "string"}, "purpose": {"type": "string"},
             })},
@@ -169,6 +172,9 @@ class StoryPlan:
     macro_blocks: tuple[dict[str, str], ...]
     content_atoms: tuple[StoryContentAtom, ...]
     parts: tuple[StoryPartPlan, ...]
+    # Fresh Structured Outputs carry the whole causal-temporal sequence before
+    # it is allocated to atoms.  Empty is the deliberate legacy value.
+    event_spine: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         rows = []
@@ -180,6 +186,7 @@ class StoryPlan:
             rows.append(row)
         return {
             "thesis": self.thesis,
+            "event_spine": list(self.event_spine),
             "macro_blocks": [dict(block) for block in self.macro_blocks],
             "content_atoms": [asdict(atom) for atom in self.content_atoms],
             "parts": rows,
@@ -497,6 +504,13 @@ def parse_story_plan_response(
     )
     raw = _normalise_nested_part_atoms(raw)
     state_transition_contract = _optional_text(raw.get("state_transition_contract"))
+    raw_spine = raw.get("event_spine", [])
+    event_spine = tuple(
+        text for text in (
+            _optional_text(item)
+            for item in (raw_spine if isinstance(raw_spine, list) else [])
+        ) if text
+    )
 
     targets = tuple(max(0, int(target or 0)) for target in part_targets) or (0,)
     part_count = len(targets)
@@ -703,6 +717,7 @@ def parse_story_plan_response(
         macro_blocks=tuple(macro_blocks),
         content_atoms=tuple(atoms),
         parts=tuple(parts),
+        event_spine=event_spine,
     )
 
 
@@ -866,8 +881,10 @@ def _story_planner_request_components(
         "importance is not a development by itself. Short analysis may connect two developments, but may not replace "
         "one. FIRST construct a causal-temporal EVENT SPINE for the whole story: identify the initial concrete "
         "situation, each next action/reaction/decision/result that changes it, and the terminal concrete result. "
-        "Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate each event step exactly "
-        "once to P1...PN and express those allocated steps as content_atoms. event_steps is the single canonical "
+        "Return that sequence first as event_spine: an ordered list of concise, discrete development-and-immediate-result "
+        "statements for the whole story. The event_spine is working material, not a list of angles, questions, themes, "
+        "moods, stakes or explanations. Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate "
+        "each event-spine item exactly once to P1...PN and express those allocated items as content_atoms. event_steps is the single canonical "
         "ordered source of action/result content that the Writer will expand; the other atom fields are compact technical "
         "metadata, not alternative prose beats. 'expand context', "
         "'show significance' or 'leave a question' are presentation tasks, not event steps. An optional final question "
@@ -881,7 +898,7 @@ def _story_planner_request_components(
         "Do not label an abstract intensity, prospect, window, mode, line or state as the changed subject and then "
         "only say how an earlier event is perceived, interpreted or expected; that is analysis, not a development. "
         "Return strict JSON with top-level \"state_transition_contract\": "
-        f"\"{_STATE_TRANSITION_CONTRACT}\" and thesis, "
+        f"\"{_STATE_TRANSITION_CONTRACT}\", thesis, event_spine, "
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
