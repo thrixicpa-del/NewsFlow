@@ -24,18 +24,21 @@ class ScenarioAcceptanceCaptureTests(unittest.TestCase):
 
     def test_test_planner_route_changes_only_structured_planner_calls(self):
         planner = _planner_test_route_kwargs(
-            {"text_format": {"type": "json_schema"}, "max_output_tokens": 32768},
+            {"text_format": {"type": "json_schema"}, "max_output_tokens": 6144},
             model="gpt-5.4",
             reasoning_effort="medium",
+            planner_output_tokens=32768,
         )
         writer = _planner_test_route_kwargs(
             {"max_output_tokens": 5120},
             model="gpt-5.4",
             reasoning_effort="medium",
+            planner_output_tokens=32768,
         )
 
         self.assertEqual(planner["model"], "gpt-5.4")
         self.assertEqual(planner["reasoning_effort"], "medium")
+        self.assertEqual(planner["max_output_tokens"], 32768)
         self.assertEqual(writer, {"max_output_tokens": 5120})
 
     def test_planner_matrix_comparison_removes_only_model_and_reasoning(self):

@@ -128,6 +128,7 @@ def _phase(prompt: str, instructions: object, method: str) -> str:
 
 def _planner_test_route_kwargs(
     kwargs: dict[str, object], *, model: str | None, reasoning_effort: str | None,
+    planner_output_tokens: int | None = None,
 ) -> dict[str, object]:
     """Route only Structured-Output Planner calls in an opt-in test harness.
 
@@ -142,6 +143,8 @@ def _planner_test_route_kwargs(
             routed["model"] = model
         if reasoning_effort is not None:
             routed["reasoning_effort"] = reasoning_effort
+        if planner_output_tokens is not None:
+            routed["max_output_tokens"] = int(planner_output_tokens)
     return routed
 
 
@@ -282,7 +285,7 @@ class RecordingPool:
     """Transparent logical-call ledger; it does not change provider retries."""
 
     def __init__(self, sessions, openai_keys, chat_url, model, *, planner_model=None,
-                 planner_reasoning_effort=None):
+                 planner_reasoning_effort=None, planner_output_tokens=None):
         from scriptor.openai_client import HybridTextPool
 
         self.inner = HybridTextPool(sessions, openai_keys, chat_url, model)
@@ -291,6 +294,7 @@ class RecordingPool:
         self.max_logical_calls: int | None = None
         self.planner_model = planner_model
         self.planner_reasoning_effort = planner_reasoning_effort
+        self.planner_output_tokens = planner_output_tokens
 
     async def _call(self, method: str, prompt: str, *args, **kwargs):
         if self.max_logical_calls is not None and len(self.calls) >= self.max_logical_calls:
@@ -299,6 +303,7 @@ class RecordingPool:
             kwargs,
             model=self.planner_model,
             reasoning_effort=self.planner_reasoning_effort,
+            planner_output_tokens=self.planner_output_tokens,
         )
         instructions = routed_kwargs.get("instructions")
         entry = {
@@ -534,6 +539,7 @@ def main() -> int:
             **pool_kwargs,
             planner_model=args.planner_model,
             planner_reasoning_effort=args.planner_reasoning_effort,
+            planner_output_tokens=args.planner_output_tokens,
         )
         pool.max_logical_calls = int(reservation["reserved_logical_calls"])
         pool_box["pool"] = pool
