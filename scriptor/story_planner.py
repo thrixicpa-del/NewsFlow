@@ -15,6 +15,7 @@ PREFERRED_PART_CHARS = 5_000
 _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
 _WRITER_MATERIAL_CHARS = 640
+_WRITER_MATERIAL_BEAT_CHARS = 220
 _COMPACT_AVOID_CHARS = 140
 _WRITER_RECENT_USED_ATOMS = 6
 _WRITER_RECENT_USED_PARTS = 2
@@ -483,16 +484,6 @@ def parse_story_plan_response(
                         "story plan content atoms must be materially distinct"
                     )
 
-    # A state-transition map may still include interpretation, but its atoms
-    # must carry actual before/development/after changes. This belongs to the
-    # atom layer and deliberately precedes every part/topology decision.
-    if validate_semantic_novelty and validate_state_transitions and len(atoms) >= 2:
-        concrete_atoms = sum(_has_concrete_story_development(atom) for atom in atoms)
-        if concrete_atoms * 2 < len(atoms):
-            raise ValueError(
-                "story plan requires concrete story developments, not only analytical interpretations"
-            )
-
     # Only after all atom fields, transitions and atom novelty are valid may
     # the runtime assess technical parts. The runtime knows this skeleton; it
     # is not a model-owned narrative choice.
@@ -918,12 +909,21 @@ def build_story_writer_prompt(
     def format_current_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
         avoid = _compact(atom.do_not_repeat, _COMPACT_AVOID_CHARS)
-        material = "; ".join(atom.writer_material) or " -> ".join((
-            f"before: {atom.state_before}",
-            f"development: {atom.development}",
-            f"result: {atom.resulting_state}",
-            f"after: {atom.state_after}",
-        ))
+        if atom.writer_material:
+            # The Planner contract supplies four to six ordered coverage beats.
+            # Bound each beat independently so the terminal action/result remains
+            # available to this Writer instead of being cut by one aggregate cap.
+            material = "; ".join(
+                _compact(beat, _WRITER_MATERIAL_BEAT_CHARS)
+                for beat in atom.writer_material[:6]
+            )
+        else:
+            material = " -> ".join((
+                f"before: {atom.state_before}",
+                f"development: {atom.development}",
+                f"result: {atom.resulting_state}",
+                f"after: {atom.state_after}",
+            ))
         return (
             f"{format_atom(atom_id)} "
             f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
@@ -933,7 +933,7 @@ def build_story_writer_prompt(
             f" | DEVELOPMENT={_compact(atom.development, _COMPACT_ATOM_CHARS)}"
             f" | RESULT={_compact(atom.resulting_state, _COMPACT_ATOM_CHARS)}"
             f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
-            f" | WRITER MATERIAL={_compact(material, _WRITER_MATERIAL_CHARS)}"
+            f" | WRITER MATERIAL={material}"
             f"{f' | DO_NOT_REPEAT={avoid}' if avoid else ''}"
         )
 

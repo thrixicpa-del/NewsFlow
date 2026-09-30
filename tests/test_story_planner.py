@@ -330,6 +330,45 @@ class StoryPlanValidationTests(unittest.TestCase):
             ("объявление решения", "порядок применения", "первая реакция"),
         )
 
+    def test_writer_keeps_the_last_current_material_beat_with_its_result(self):
+        """Current coverage is bounded per beat, rather than cutting its final action."""
+        beats = [
+            f"Шаг {index}: служба документирует отдельное действие и его проверяемую деталь. "
+            + "Контекст этого шага описан достаточно подробно для самостоятельного абзаца. " * 2
+            for index in range(1, 6)
+        ]
+        beats.append(
+            "LAST_ACTION_MARKER: комиссия публикует итоговое решение после проверки. "
+            "LAST_RESULT_MARKER: новый порядок вступает в силу и меняет следующий этап истории. "
+            + "Детали результата остаются в материале текущего атома. " * 2
+        )
+        plan = StoryPlan(
+            thesis="Одна полная цепочка действий.",
+            macro_blocks=({"id": "M1", "purpose": "Цепочка решения"},),
+            content_atoms=(StoryContentAtom(
+                id="C001", summary="Комиссия завершает процедуру", owner_part_id="P1",
+                content_kind="DRAMATIZED", novelty_question="Чем завершается процедура?",
+                novelty_payload="Комиссия публикует решение и запускает новый порядок.",
+                state_before="Проверка ещё продолжалась.", changed_subject="Порядок процедуры",
+                development="Комиссия публикует итоговое решение.",
+                resulting_state="Новый порядок вступает в силу.",
+                state_after="Следующий этап идёт по новому порядку.", writer_material=tuple(beats),
+            ),),
+            parts=(StoryPartPlan(
+                id="P1", role="COMPLETE", purpose="Раскрыть решение", macro_id="M1",
+                content_ids=("C001",), target_chars=5000,
+                novelty_question="Как меняется процедура?",
+                novelty_payload="Итоговое решение меняет порядок работы.",
+            ),),
+        )
+
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "Контекст", target_chars=5000), plan, [], 0,
+        )
+
+        self.assertIn("LAST_ACTION_MARKER", prompt)
+        self.assertIn("LAST_RESULT_MARKER", prompt)
+
     def test_cover_metadata_is_inert_for_a_scenario_story_map(self):
         """A valid story neither requires nor persists Covers-only fields."""
         raw = json.loads(self._single_part_cover_response(
@@ -709,6 +748,51 @@ class StoryPlanValidationTests(unittest.TestCase):
 
         plan = parse_story_plan_response(response, (2000,), require_state_transitions=True)
         self.assertEqual(plan.content_atoms[0].id, "C001")
+
+    def test_parser_does_not_aggregate_lexical_advice_into_a_story_map_veto(self):
+        """Several complete transitions remain valid when lexical advice is negative."""
+        atoms = []
+        for index in range(1, 4):
+            atoms.append({
+                "id": f"C00{index}",
+                "summary": f"Режим сервиса получает трактовку этапа {index}",
+                "owner_part_id": "P1",
+                "content_kind": "DRAMATIZED",
+                "state_before": f"Режим сервиса воспринимался как этап {index - 1}.",
+                "changed_subject": "Режим сервиса",
+                "development": f"Участники воспринимают режим как символ этапа {index}.",
+                "resulting_state": f"Обсуждение трактует режим как новый сигнал этапа {index}.",
+                "state_after": f"Режим сервиса воспринимается как этап {index}.",
+                "novelty_question": f"Как изменилась трактовка этапа {index}?",
+                "novelty_payload": f"Режим сервиса получил отдельную трактовку этапа {index}.",
+                "do_not_repeat": f"Не повторять трактовку этапа {index - 1}.",
+            })
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Проверка структурного договора без лексического veto.",
+            "macro_blocks": [{"id": "M1", "purpose": "Последовательность изменений"}],
+            "content_atoms": atoms,
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Собрать переходы",
+                "macro_id": "M1", "content_ids": ["C001", "C002", "C003"],
+                "novelty_question": "Как развивалась история?",
+                "novelty_payload": "Каждый атом сохранил свой формальный переход.",
+            }],
+        }, ensure_ascii=False)
+
+        self.assertTrue(all(
+            not _has_concrete_story_development(StoryContentAtom(
+                id=atom["id"], summary=atom["summary"], owner_part_id=atom["owner_part_id"],
+                content_kind=atom["content_kind"], novelty_question=atom["novelty_question"],
+                novelty_payload=atom["novelty_payload"], do_not_repeat=atom["do_not_repeat"],
+                state_before=atom["state_before"], changed_subject=atom["changed_subject"],
+                development=atom["development"], resulting_state=atom["resulting_state"],
+                state_after=atom["state_after"],
+            ))
+            for atom in atoms
+        ))
+        plan = parse_story_plan_response(response, (2000,), require_state_transitions=True)
+        self.assertEqual([atom.id for atom in plan.content_atoms], ["C001", "C002", "C003"])
 
     def test_parser_rejects_analytic_atoms_that_only_mention_event_nouns(self):
         response = json.dumps({
