@@ -511,7 +511,13 @@ class ParallelRunner:
             job.story_planner_status = ""
             job.story_planner_failure = {}
             planner_prompt = build_story_planner_prompt(job.request, part_targets)
-            planner_budget = max(2048, min(8192, 1024 + len(part_targets) * 350))
+            # A Planner response carries every atom's transition fields plus
+            # the complete technical topology.  Three 4k parts own at least
+            # nine atoms, so the former ~2k expected-character budget could
+            # truncate a valid JSON map before content_atoms/parts completed.
+            # This is an output allowance only; it neither adds provider
+            # attempts nor changes the Writer's one-call contract.
+            planner_budget = max(2304, min(8192, 1536 + len(part_targets) * 768))
             planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
             if looks_like_action_required(planner_response):
                 job.result = planner_response

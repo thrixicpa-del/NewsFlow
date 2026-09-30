@@ -696,6 +696,30 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(marker, client.fresh_prompt)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
 
+    async def test_three_part_planner_has_budget_for_a_complete_transition_map(self):
+        """A 12k plan owns nine rich atoms and cannot fit in the old 2k cap."""
+        class BudgetClient:
+            def __init__(self):
+                self.planner_budgets = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_budgets.append(max_output_tokens)
+                    return ParallelRunnerTests._story_plan_json(3)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+        client = BudgetClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=12000,
+                            allowed_min=11500, allowed_max=12500),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(client.planner_budgets, [4096])
+
     async def test_scenario_runner_never_requests_or_persists_cover_face_metadata(self):
         """Cover identity work belongs to Covers, never Planner/Writer execution."""
         class ScenarioOnlyClient:
