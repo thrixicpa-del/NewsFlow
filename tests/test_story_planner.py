@@ -1387,6 +1387,8 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("detailed enough to develop into a paragraph", prompt)
         self.assertIn("rather than a label such as 'background', 'mechanism', 'result' or 'transition'", prompt)
         self.assertIn("not a parser gate", prompt)
+        self.assertIn("coverage beats must be a causal chain, not four ways to state one conclusion", prompt)
+        self.assertIn("For a roughly 4-5k part, allocate enough distinct chronological material", prompt)
         self.assertIn("Before returning JSON, check that every atom", prompt)
         self.assertIn("different declared states", prompt)
         self.assertIn("synonym swap", prompt)
