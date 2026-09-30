@@ -311,7 +311,9 @@ class ScenarioGenerationTests(unittest.TestCase):
             ("factual-empty", "FACTUAL", [], False, False, False),
             ("factual-supported", "FACTUAL", ["Подтверждённый контекст."], True, False, False),
             ("hypothetical-empty", "HYPOTHETICAL", [], False, True, True),
+            ("hypothetical-supported", "HYPOTHETICAL", ["Подтверждённый контекст."], True, True, False),
             ("editorial-empty", "EDITORIAL", [], False, True, True),
+            ("editorial-supported", "EDITORIAL", ["Подтверждённый контекст."], True, True, False),
         )
         for _name, framing, context, factual_available, dramatized_allowed, every_atom_dramatized in cases:
             with self.subTest(mode=_name):
