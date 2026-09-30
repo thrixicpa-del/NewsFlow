@@ -34,6 +34,30 @@ class FakeClient:
 
 
 class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_planner_adapter_without_text_format_uses_explicit_legacy_request(self):
+        """Do not silently send a split Planner request after dropping its schema."""
+        class LegacyPlannerClient:
+            def __init__(self):
+                self.calls = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None,
+                               instructions=None):
+                self.calls.append((prompt, instructions))
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
+                return "Г" * 5000
+
+        client = LegacyPlannerClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "MANUAL_LEGACY_TEMPLATE", target_chars=5000),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        planner_prompt, planner_instructions = client.calls[0]
+        self.assertIn("NewsFlow Story Planner", planner_prompt)
+        self.assertIn("MANUAL_LEGACY_TEMPLATE", planner_prompt)
+        self.assertIsNone(planner_instructions)
+
     async def test_low_density_map_starts_one_writer_call_per_part_without_planner_recovery(self):
         """The prior live map remains runnable; material density is advisory."""
         evidence = (
@@ -49,8 +73,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             async def generate(
                 self, prompt, on_progress=None, max_output_tokens=None, instructions=None,
+                text_format=None,
             ):
-                self.calls.append((prompt, instructions, max_output_tokens))
+                self.calls.append((prompt, instructions, max_output_tokens, text_format))
                 if instructions and "NewsFlow Story Planner" in instructions:
                     return evidence
                 if "CURRENT PART: P1" in prompt:
@@ -76,6 +101,9 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NewsFlow Story Planner", client.calls[0][1])
         self.assertNotIn("MANUAL_STAGE_TEMPLATE", client.calls[0][1])
         self.assertIn("MANUAL_STAGE_TEMPLATE", client.calls[0][0])
+        self.assertEqual(client.calls[0][3]["type"], "json_schema")
+        self.assertTrue(client.calls[0][3]["strict"])
+        self.assertTrue(all(call[3] is None for call in client.calls[1:]))
         self.assertEqual(
             ["P1", "P2", "P3"],
             [record["part_id"] for record in job.accepted_story_parts],
@@ -565,7 +593,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(all("MATERIAL ALLOCATION:" in prompt for prompt in client.writer_prompts))
                 self.assertTrue(all(
-                    "WRITER MATERIAL=объект" in prompt
+                    "CANONICAL EVENT STEPS=объект" in prompt
                     and "ответственная служба проверила изменение" in prompt
                     and "следующий шаг использует результат" in prompt
                     for prompt in client.writer_prompts
@@ -1124,15 +1152,16 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_part_count_gets_one_structural_repair_then_exact_two_part_story(self):
         class StructuralRepairClient:
             def __init__(self):
-                self.prompts = []
+                self.calls = []
 
-            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
-                self.prompts.append(prompt)
-                if "NewsFlow Story Planner" in prompt:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None,
+                               instructions=None, text_format=None):
+                self.calls.append((prompt, instructions, text_format))
+                if "NewsFlow Story Planner" in (instructions or ""):
                     raw = json.loads(ParallelRunnerTests._story_plan_json(2))
                     raw["parts"] = raw["parts"][:1]
                     return json.dumps(raw, ensure_ascii=False)
-                if "structural repairer" in prompt:
+                if "structural repairer" in (instructions or ""):
                     return json.dumps({"parts": json.loads(ParallelRunnerTests._story_plan_json(2))["parts"]}, ensure_ascii=False)
                 target = __import__("re").search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
                 return "С" * int(target.group(1))
@@ -1141,8 +1170,11 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "Тема", "контекст", target_chars=10000, allowed_min=9000, allowed_max=11000)])
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual([part["part_id"] for part in jobs[0].accepted_story_parts], ["P1", "P2"])
-        self.assertEqual(sum("NewsFlow Story Planner" in prompt for prompt in client.prompts), 1)
-        self.assertEqual(sum("structural repairer" in prompt for prompt in client.prompts), 1)
+        self.assertEqual(sum("NewsFlow Story Planner" in instructions for _prompt, instructions, _format in client.calls), 1)
+        self.assertEqual(sum("structural repairer" in instructions for _prompt, instructions, _format in client.calls), 1)
+        self.assertEqual(client.calls[0][2]["name"], "newsflow_story_plan")
+        repair = next(call for call in client.calls if "structural repairer" in call[1])
+        self.assertEqual(repair[2]["name"], "newsflow_story_plan_parts_repair")
 
     async def test_failed_structural_repair_persists_only_safe_repair_reason_before_fresh_failure(self):
         """A failed parts-only repair exposes its code, never either provider payload."""

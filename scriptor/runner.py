@@ -20,9 +20,12 @@ from .story_planner import (
     calculate_story_part_targets,
     parse_story_plan_response,
     repair_story_plan_parts_response,
+    split_story_plan_structure_repair_request,
     split_story_planner_request,
     split_story_writer_request,
     story_plan_from_dict,
+    story_plan_structure_repair_response_format,
+    story_planner_response_format,
 )
 
 
@@ -325,6 +328,7 @@ class ParallelRunner:
         *,
         instructions: str | None = None,
         legacy_prompt: str | None = None,
+        text_format: dict[str, Any] | None = None,
     ) -> str:
         """Call modern Responses adapters with stages, legacy adapters with one prompt.
 
@@ -336,12 +340,23 @@ class ParallelRunner:
         supports_instructions = bool(instructions) and self._accepts_keyword(
             method, "instructions",
         )
-        call_prompt = prompt if supports_instructions else (legacy_prompt or prompt)
+        supports_text_format = text_format is None or self._accepts_keyword(
+            method, "text_format",
+        )
+        # A Planner stage without its requested schema is not equivalent to a
+        # structured Planner stage.  Old adapters deliberately receive the
+        # legacy flat request instead of a split request with text.format
+        # silently dropped; Writer calls have no text_format and keep their
+        # historical compatibility path.
+        supports_stage_contract = supports_instructions and supports_text_format
+        call_prompt = prompt if supports_stage_contract else (legacy_prompt or prompt)
         kwargs: dict[str, Any] = {}
         if budget and self._accepts_keyword(method, "max_output_tokens"):
             kwargs["max_output_tokens"] = budget
-        if supports_instructions:
+        if supports_stage_contract:
             kwargs["instructions"] = instructions
+        if text_format is not None and supports_text_format:
+            kwargs["text_format"] = text_format
         return await method(call_prompt, **kwargs)
 
     async def _generate_usable(
@@ -352,6 +367,7 @@ class ParallelRunner:
         *,
         instructions: str | None = None,
         legacy_prompt: str | None = None,
+        text_format: dict[str, Any] | None = None,
     ) -> str:
         """Retry an unusable provider reply before any scenario prose is accepted."""
         result = await self._generate_for_request(
@@ -361,6 +377,7 @@ class ParallelRunner:
             expected_chars,
             instructions=instructions,
             legacy_prompt=legacy_prompt,
+            text_format=text_format,
         )
         refused = looks_like_action_required(result)
         for attempt in range(1, 3):
@@ -378,6 +395,7 @@ class ParallelRunner:
                 expected_chars,
                 instructions=(retry_prefix + instructions) if instructions else None,
                 legacy_prompt=retry_prefix + f"TASK:\n{legacy_prompt or prompt}",
+                text_format=text_format,
             )
             refused = looks_like_action_required(result)
         if refused:
@@ -393,6 +411,7 @@ class ParallelRunner:
                     expected_chars,
                     instructions=(openai_prefix + instructions) if instructions else None,
                     legacy_prompt=openai_prefix + f"TASK:\n{legacy_prompt or prompt}",
+                    text_format=text_format,
                 )
         return result
 
@@ -494,12 +513,14 @@ class ParallelRunner:
         *,
         instructions: str | None = None,
         legacy_prompt: str | None = None,
+        text_format: dict[str, Any] | None = None,
     ) -> str:
         """Run one bounded fresh-chat recovery before any new artifact is accepted."""
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
         result = await self._generate_for_request(
             generate_fresh, prompt, request, expected_chars,
             instructions=instructions, legacy_prompt=legacy_prompt,
+            text_format=text_format,
         )
         if looks_like_action_required(result):
             generate_openai = getattr(self.client, "generate_openai", None)
@@ -507,6 +528,7 @@ class ParallelRunner:
                 result = await self._generate_for_request(
                     generate_openai, prompt, request, expected_chars,
                     instructions=instructions, legacy_prompt=legacy_prompt,
+                    text_format=text_format,
                 )
         return result
 
@@ -584,6 +606,7 @@ class ParallelRunner:
                 planner_budget,
                 instructions=planner_instructions,
                 legacy_prompt=planner_prompt,
+                text_format=story_planner_response_format(),
             )
             if looks_like_action_required(planner_response):
                 job.result = planner_response
@@ -613,12 +636,18 @@ class ParallelRunner:
                 if initial_reason in _PARTS_ONLY_PLANNER_REASONS:
                     recovery_route = "STRUCTURAL_REPAIR"
                     try:
+                        repair_instructions, repair_input = split_story_plan_structure_repair_request(
+                            job.request, planner_response, part_targets,
+                        )
                         structural_repair = await self._generate_usable(
-                            build_story_plan_structure_repair_prompt(
-                                job.request, planner_response, part_targets,
-                            ),
+                            repair_input,
                             job.request,
                             planner_budget,
+                            instructions=repair_instructions,
+                            legacy_prompt=build_story_plan_structure_repair_prompt(
+                                job.request, planner_response, part_targets,
+                            ),
+                            text_format=story_plan_structure_repair_response_format(),
                         )
                         plan = repair_story_plan_parts_response(
                             structural_repair,
@@ -650,6 +679,7 @@ class ParallelRunner:
                         planner_budget,
                         instructions=fresh_planner_instructions,
                         legacy_prompt=fresh_planner_prompt,
+                        text_format=story_planner_response_format(),
                     )
                     if looks_like_action_required(fresh_planner_response):
                         job.result = fresh_planner_response

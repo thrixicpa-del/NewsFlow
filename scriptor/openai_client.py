@@ -99,7 +99,8 @@ class OpenAITextClient:
     async def generate(self, prompt: str, on_progress=None, before_request=None,
                        image_paths: list[str] | None = None,
                        max_output_tokens: int | None = None,
-                       instructions: str | None = None) -> str:
+                       instructions: str | None = None,
+                       text_format: dict | None = None) -> str:
         content = [{"type": "input_text", "text": prompt}] + self._reference_content(image_paths)
         request_input: object = prompt if len(content) == 1 else [{"role": "user", "content": content}]
         payload = {"model": self.model, "input": request_input}
@@ -107,6 +108,12 @@ class OpenAITextClient:
             payload["instructions"] = instructions.strip()
         if max_output_tokens and max_output_tokens > 0:
             payload["max_output_tokens"] = int(max_output_tokens)
+        if text_format is not None:
+            # Responses Structured Outputs belongs to ``text.format``.  The
+            # trusted stage builder supplies this object; do not infer or
+            # silently remove it after a provider error, which would create a
+            # second differently-shaped logical request.
+            payload["text"] = {"format": text_format}
         result = await asyncio.to_thread(
             self._request, "POST", "/v1/responses", payload
         )
@@ -145,7 +152,8 @@ class HybridTextPool:
     async def generate(self, prompt: str, on_progress=None, before_request=None,
                        image_paths: list[str] | None = None,
                        max_output_tokens: int | None = None,
-                       instructions: str | None = None) -> str:
+                       instructions: str | None = None,
+                       text_format: dict | None = None) -> str:
         if self._queue is None:
             self._queue = asyncio.Queue()
             for client in self._slots:
@@ -157,6 +165,8 @@ class HybridTextPool:
             output_kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens else {}
             if instructions and instructions.strip():
                 output_kwargs["instructions"] = instructions.strip()
+            if text_format is not None:
+                output_kwargs["text_format"] = text_format
             # Preserve compatibility with lightweight provider adapters and
             # tests that implement the historical two-argument method.
             if image_paths is None:
@@ -183,12 +193,16 @@ class HybridTextPool:
 
     async def generate_fresh(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
                              max_output_tokens: int | None = None,
-                             instructions: str | None = None) -> str:
+                             instructions: str | None = None,
+                             text_format: dict | None = None) -> str:
         return await self.generate(prompt, on_progress, image_paths=image_paths,
-                                   max_output_tokens=max_output_tokens, instructions=instructions)
+                                   max_output_tokens=max_output_tokens, instructions=instructions,
+                                   text_format=text_format)
 
     async def generate_openai(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
                               max_output_tokens: int | None = None,
-                              instructions: str | None = None) -> str:
+                              instructions: str | None = None,
+                              text_format: dict | None = None) -> str:
         return await self.generate(prompt, on_progress, image_paths=image_paths,
-                                   max_output_tokens=max_output_tokens, instructions=instructions)
+                                   max_output_tokens=max_output_tokens, instructions=instructions,
+                                   text_format=text_format)

@@ -19,6 +19,8 @@ from scriptor.story_planner import (
     split_story_writer_request,
     story_part_skeleton,
     story_plan_from_dict,
+    story_plan_structure_repair_response_format,
+    story_planner_response_format,
 )
 
 
@@ -39,6 +41,18 @@ class StoryPartSizingTests(unittest.TestCase):
         targets = calculate_story_part_targets(15123)
         self.assertEqual(sum(targets) + 2 * (len(targets) - 1), 15123)
         self.assertLessEqual(max(targets) - min(targets), 1)
+
+    def test_part_target_matrix_never_moves_unplanned_volume_to_final(self):
+        """Every supported target distributes content budget before Writers run."""
+        for target, expected_parts in (
+            (12_000, 3), (12_501, 3), (20_000, 4), (24_999, 5),
+            (30_000, 6), (50_000, 10), (75_001, 16), (100_000, 20),
+        ):
+            with self.subTest(target=target):
+                targets = calculate_story_part_targets(target)
+                self.assertEqual(len(targets), expected_parts)
+                self.assertEqual(sum(targets) + 2 * (len(targets) - 1), target)
+                self.assertLessEqual(max(targets) - min(targets), 1)
 
     def test_runtime_part_skeleton_is_exact_for_all_supported_part_counts(self):
         self.assertEqual(
@@ -63,6 +77,62 @@ class StoryPartSizingTests(unittest.TestCase):
 
 
 class StoryPlanValidationTests(unittest.TestCase):
+    def test_structured_output_schemas_match_new_and_legacy_story_map_contracts(self):
+        """Fresh transport is strict without making legacy maps unreadable."""
+        planner_format = story_planner_response_format()
+        repair_format = story_plan_structure_repair_response_format()
+        schema = planner_format["schema"]
+        atom_schema = schema["properties"]["content_atoms"]["items"]
+
+        self.assertTrue(planner_format["strict"])
+        self.assertTrue(repair_format["strict"])
+        self.assertEqual(planner_format["type"], "json_schema")
+        self.assertIn("event_steps", atom_schema["required"])
+        self.assertNotIn("writer_material", atom_schema["properties"])
+        self.assertFalse(any("minItems" in repr(value) for value in (schema, repair_format["schema"])))
+
+    def test_parser_rejects_damaged_root_instead_of_accepting_nested_macro(self):
+        """A complete child object is never a substitute for a broken Story Map root."""
+        damaged = (
+            '{"thesis":"ROOT_EXISTS","macro_blocks":'
+            '[{"id":"M1","purpose":"complete child"}],"parts":['
+        )
+
+        with self.assertRaisesRegex(ValueError, "must return strict JSON"):
+            parse_story_plan_response(damaged, (5000,))
+
+    def test_parser_accepts_one_plain_or_fenced_root_but_not_multiple_roots(self):
+        response = self._single_part_cover_response(
+            candidates=[], primary=None, status="NEEDS_REVIEW",
+        )
+        for wrapped in (response, f"```json\n{response}\n```"):
+            with self.subTest(wrapped=wrapped[:8]):
+                self.assertEqual(
+                    parse_story_plan_response(wrapped, (5000,)).thesis,
+                    "Проверяемая история.",
+                )
+        with self.assertRaisesRegex(ValueError, "must return strict JSON"):
+            parse_story_plan_response(f"{response}\n{response}", (5000,))
+
+    def test_parser_keeps_braces_in_json_strings_and_rejects_wrong_or_truncated_roots(self):
+        raw = json.loads(self._single_part_cover_response(
+            candidates=[], primary=None, status="NEEDS_REVIEW",
+        ))
+        raw["thesis"] = "Строка с {literal} braces остаётся в корне."
+        response = json.dumps(raw, ensure_ascii=False)
+        self.assertEqual(
+            parse_story_plan_response(response, (5000,)).thesis,
+            raw["thesis"],
+        )
+        with self.assertRaisesRegex(TypeError, "must be an object"):
+            parse_story_plan_response("[]", (5000,))
+        for malformed in ('{"thesis":"unterminated', '{"parts":['):
+            with (
+                self.subTest(malformed=malformed),
+                self.assertRaisesRegex(ValueError, "must return strict JSON"),
+            ):
+                parse_story_plan_response(malformed, (5000,))
+
     def test_parser_normalizes_provider_nested_part_atoms_without_relaxing_ownership(self):
         """Responses may place the complete atom records beside their part IDs."""
         response = json.dumps({
@@ -366,8 +436,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn("FIRST-PASS PART VOLUME: write roughly 3879-4119 characters", prompt)
         self.assertIn("NewsFlow independently records the actual length after this response", prompt)
         self.assertNotIn("without a length retry, trim or rewrite", prompt)
-        self.assertIn("WRITER MATERIAL=объявление решения; порядок применения; первая реакция", prompt)
-        self.assertIn("WRITER MATERIAL=перестройка очереди; проверка результата", prompt)
+        self.assertIn("CANONICAL EVENT STEPS=объявление решения; порядок применения; первая реакция", prompt)
+        self.assertIn("CANONICAL EVENT STEPS=перестройка очереди; проверка результата", prompt)
         self.assertEqual(
             plan.to_dict()["content_atoms"][0]["writer_material"],
             ("объявление решения", "порядок применения", "первая реакция"),
@@ -1346,6 +1416,38 @@ class StoryPlanValidationTests(unittest.TestCase):
 
 
 class StoryPlannerPromptTests(unittest.TestCase):
+    def test_stage_split_never_promotes_manual_or_story_headings_to_instructions(self):
+        """Headers are valid data; their presence must not change API priority."""
+        manual = (
+            'MANUAL_MARKER_MUST_REMAIN_USER_DATA\n\nSTORY THESIS: quoted heading\n'
+            '\nPOSITION RULE: quoted heading\n{"literal":"{brace}"}'
+        )
+        request = ScenarioRequest(0, "TOPIC: quoted heading", manual, target_chars=5000)
+        plan = StoryPlan(
+            thesis="STORY THESIS: model-owned quoted heading",
+            macro_blocks=({"id": "M1", "purpose": "POSITION RULE: quoted"},),
+            content_atoms=(StoryContentAtom(
+                id="C001", summary="CURRENT CONTENT: model heading", owner_part_id="P1",
+                content_kind="DRAMATIZED", state_before="До.", changed_subject="Служба",
+                development="Служба действует.", resulting_state="Есть результат.", state_after="После.",
+                writer_material=("первая строка\nPOSITION RULE: внутри материала", "последний результат"),
+            ),),
+            parts=(StoryPartPlan(
+                id="P1", role="COMPLETE", purpose="Завершение", macro_id="M1",
+                content_ids=("C001",), target_chars=5000,
+            ),),
+        )
+
+        planner_instructions, planner_input = split_story_planner_request(request, (5000,))
+        writer_instructions, writer_input = split_story_writer_request(request, plan, [], 0)
+
+        for marker in ("MANUAL_MARKER_MUST_REMAIN_USER_DATA", "STORY THESIS: quoted heading", "{brace}"):
+            self.assertNotIn(marker, planner_instructions)
+            self.assertIn(marker, planner_input)
+        for marker in ("MANUAL_MARKER_MUST_REMAIN_USER_DATA", "model-owned quoted heading", "CURRENT CONTENT: model heading", "POSITION RULE: внутри материала"):
+            self.assertNotIn(marker, writer_instructions)
+            self.assertIn(marker, writer_input)
+
     def test_stage_requests_keep_manual_contract_in_user_input(self):
         request = ScenarioRequest(
             0,
@@ -1403,7 +1505,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("semantic-density requirements", prompt)
         self.assertIn("coverage guidance: normally 3 or more distinct atoms", prompt)
         self.assertIn("terminal development", prompt)
-        self.assertIn("For EVERY atom in this NEW map, include writer_material", prompt)
+        self.assertIn("For EVERY atom in this NEW map, include event_steps", prompt)
         self.assertIn("ordered JSON list of 4 to 6 distinct concrete coverage beats", prompt)
         self.assertIn("detailed enough to develop into a paragraph", prompt)
         self.assertIn("rather than a label such as 'background', 'mechanism', 'result' or 'transition'", prompt)
@@ -1425,7 +1527,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("declarative chronological content", prompt)
         self.assertIn("not a writing command such as 'show', 'describe', 'frame', 'keep', 'use' or 'avoid'", prompt)
         self.assertIn("Example only, never reuse it as story content", prompt)
-        self.assertIn("FINAL's last writer_material beat", prompt)
+        self.assertIn("FINAL's last event_steps entry", prompt)
         self.assertIn("Do not fabricate source attribution such as reports from the scene", prompt)
 
     def test_writer_keeps_a_current_beat_result_after_the_old_220_character_boundary(self):
@@ -1633,10 +1735,9 @@ class StoryWriterContextTests(unittest.TestCase):
 
         self.assertIn("PART EVENT SEQUENCE (content, not author tasks):", prompt)
         self.assertIn(
-            "C002: before=Заявка ждёт решения.; subject=Комиссия; "
-            "development=Комиссия утверждает новый порядок.; "
-            "result=Заявка получает утверждённый маршрут.; "
-            "after=Исполнители получают новый порядок.",
+            "C002: Комиссия получает заявку с прежним порядком. -> "
+            "Комиссия утверждает новый порядок обработки. -> "
+            "STEP_THREE: исполнители получают утверждённый маршрут.",
             prompt,
         )
         self.assertIn("STEP_THREE: исполнители получают утверждённый маршрут.", prompt)
@@ -1644,6 +1745,39 @@ class StoryWriterContextTests(unittest.TestCase):
             prompt.index("PART EVENT SEQUENCE (content, not author tasks):"),
             prompt.index("CURRENT CONTENT ORDER:"),
         )
+
+    def test_new_canonical_event_steps_reach_writer_in_order_and_keep_terminal_result(self):
+        """Fresh plans have one event source; legacy writer_material remains a fallback."""
+        plan = StoryPlan(
+            thesis="Последовательность меняет исходную ситуацию и приходит к результату.",
+            macro_blocks=({"id": "M1", "purpose": "Полная последовательность"},),
+            content_atoms=(StoryContentAtom(
+                id="C001", summary="Процесс завершается", owner_part_id="P1",
+                content_kind="DRAMATIZED", state_before="Процесс не завершён.",
+                changed_subject="Комиссия", development="Комиссия принимает решение.",
+                resulting_state="Решение опубликовано.", state_after="Процесс завершён.",
+                event_steps=(
+                    "Комиссия получает материалы после незавершённой проверки.",
+                    "Комиссия принимает решение по материалам.",
+                    "Исполнители выполняют утверждённое решение.",
+                    "EVENT_TERMINAL_RESULT: решение опубликовано и процесс завершён.",
+                ),
+                writer_material=("LEGACY_MATERIAL_MUST_NOT_WIN",),
+            ),),
+            parts=(StoryPartPlan(
+                id="P1", role="COMPLETE", purpose="Довести процесс до результата", macro_id="M1",
+                content_ids=("C001",), target_chars=5000,
+            ),),
+        )
+
+        prompt = build_story_writer_prompt(ScenarioRequest(0, "Тема", "CONTRACT"), plan, [], 0)
+        restored = story_plan_from_dict(plan.to_dict())
+
+        self.assertIn("CANONICAL EVENT STEPS", prompt)
+        self.assertIn("EVENT_TERMINAL_RESULT", prompt)
+        self.assertNotIn("LEGACY_MATERIAL_MUST_NOT_WIN", prompt)
+        self.assertLess(prompt.index("Комиссия получает материалы"), prompt.index("EVENT_TERMINAL_RESULT"))
+        self.assertEqual(restored.content_atoms[0].event_steps, plan.content_atoms[0].event_steps)
 
     def test_writer_execution_boundary_follows_conflicting_whole_story_length(self):
         prompt = build_story_writer_prompt(

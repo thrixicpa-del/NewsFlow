@@ -148,6 +148,24 @@ class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["input"], "TOPIC: пользовательская тема\nOPERATOR: ручной шаблон")
         self.assertNotIn("TRUSTED PLANNER CONTRACT", payload["input"])
 
+    async def test_responses_api_sends_planner_schema_only_in_text_format(self):
+        client = OpenAITextClient("sk-test")
+        response_format = {
+            "type": "json_schema", "name": "newsflow_story_plan", "strict": True,
+            "schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        }
+        with patch.object(client, "_request", return_value={"output_text": "{}"}) as request:
+            await client.generate(
+                "untrusted scenario input",
+                instructions="trusted planner instructions",
+                text_format=response_format,
+            )
+
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["text"], {"format": response_format})
+        self.assertNotIn("json_schema", payload["input"])
+        self.assertEqual(payload["instructions"], "trusted planner instructions")
+
     def test_text_request_times_out_after_two_minutes_instead_of_blocking_the_batch(self):
         response = MagicMock()
         response.read.return_value = json.dumps({"data": []}).encode("utf-8")
