@@ -1623,6 +1623,10 @@ class StoryPlannerPromptTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("optional final question may follow that result but cannot replace it", prompt)
+        self.assertIn("EVENT-SPINE PACKET FORMAT", prompt)
+        self.assertIn("EVENT-SPINE PACKETS (prepare enough concrete material before assigning atoms):", prompt)
+        self.assertIn("P1 / OPENING / approximately 3999 chars: 10-12 direct event records", prompt)
+        self.assertIn("P3 / FINAL / approximately 3998 chars: 10-12 direct event records", prompt)
 
     def test_dramatized_event_spine_precedes_conflicting_manual_no_invention_rule(self):
         """The trusted mode must prepare events, not invite analytical evasions."""
@@ -1809,6 +1813,7 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertNotIn("CURRENT NOVELTY QUESTION:", prompt)
         self.assertNotIn("CURRENT NEW INFORMATION:", prompt)
         self.assertIn("TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):", prompt)
+        self.assertIn("single event sequence has 3 direct records; reserve roughly 1666 characters", prompt)
         self.assertLess(
             prompt.index("CURRENT EVENT SEQUENCE (the only content to develop):"),
             prompt.index("TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):"),

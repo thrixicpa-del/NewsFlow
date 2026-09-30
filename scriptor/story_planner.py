@@ -845,6 +845,24 @@ def _story_planner_request_components(
         )
         for index, target in enumerate(part_targets)
     )
+    def event_record_guidance(target: int) -> str:
+        if target <= 0:
+            return "a complete natural sequence of direct event records"
+        if target < 3_500:
+            return "6-8 direct event records"
+        if target <= 5_500:
+            return "10-12 direct event records"
+        return "12-16 direct event records"
+
+    event_packet_rows = "\n".join(
+        (
+            f"P{index + 1} / {roles[index]} / approximately {target} chars: "
+            f"{event_record_guidance(target)}"
+            if target else
+            f"P{index + 1} / {roles[index]}: {event_record_guidance(target)}"
+        )
+        for index, target in enumerate(part_targets)
+    )
     factual_context_available = bool(getattr(request, "factual_context_available", False))
     dramatized_allowed = bool(getattr(request, "dramatized_allowed", True))
     provenance_boundary = (
@@ -889,7 +907,10 @@ def _story_planner_request_components(
         "moods, stakes or explanations. Do not use an interpretation of the initial headline as an event-spine item: "
         "each item must introduce a concrete action, response, decision, process step or recorded result that changes "
         "the situation before the next item. Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate "
-        "each event-spine item exactly once to P1...PN and express those allocated items as content_atoms. EVENT MATERIAL WORK ORDER: "
+        "each event-spine item exactly once to P1...PN and express those allocated items as content_atoms. EVENT-SPINE PACKET FORMAT: "
+        "prefix every event_spine entry with its destination part ID followed by ` | `, for example `P2 | the operator confirms the new route and dispatches the repair team`. "
+        "The packet allocation and record guidance appear below; they are content-planning guidance, not parser gates and not a demand to invent filler. "
+        "EVENT MATERIAL WORK ORDER: "
         "first prepare the ordered event sequence; then allocate its contiguous developments to parts; only after that write compact "
         "thesis, macro purpose, summary, novelty and transition labels that describe the already prepared material. Those labels cannot "
         "introduce a separate author task such as explain significance, widen context, collect a conclusion or leave a question. "
@@ -979,7 +1000,9 @@ def _story_planner_request_components(
     trusted_suffix = (
         f"RUNTIME TECHNICAL SKELETON: {skeleton}. Return exactly these parts. Do not add or remove parts. "
         "Do not rename part IDs. Do not change roles. Do not use COMPLETE when EXACT_PART_COUNT is greater than 1.\n"
-        f"PARTS: {part_rows}\n\n"
+        f"PARTS: {part_rows}\n"
+        "EVENT-SPINE PACKETS (prepare enough concrete material before assigning atoms):\n"
+        f"{event_packet_rows}\n\n"
         "PLANNER EXECUTION BOUNDARY:\n"
         "This is a planning call. Return ONLY the strict JSON Story Map; do not return finished scenario prose, "
         "Markdown, an essay, a refusal, or a description of the plan. Preserve the embedded manual writing contract as reference "
@@ -1148,8 +1171,25 @@ def _story_writer_request_components(
     event_sequence = "\n".join(
         format_event_sequence(atom_id) for atom_id in part.content_ids
     )
+    event_record_count = sum(
+        len(atoms[atom_id].event_steps or atoms[atom_id].writer_material)
+        or len([
+            value for value in (
+                atoms[atom_id].summary,
+                atoms[atom_id].state_before,
+                atoms[atom_id].development,
+                atoms[atom_id].resulting_state,
+                atoms[atom_id].state_after,
+            ) if str(value or "").strip()
+        ])
+        for atom_id in part.content_ids
+    )
     material_budget = (
         max(1, active_target // max(1, len(part.content_ids)))
+        if active_target else 0
+    )
+    event_record_budget = (
+        max(1, active_target // max(1, event_record_count))
         if active_target else 0
     )
     local_volume_delta = max(1, round(active_target * 0.03))
@@ -1365,6 +1405,8 @@ def _story_writer_request_components(
         f"{length_instruction}"
         f"MATERIAL ALLOCATION: this part has {len(part.content_ids)} owned atoms; reserve roughly "
         f"{material_budget} characters of event-led coverage for each atom before moving to the next. "
+        f"Its single event sequence has {event_record_count} direct records; reserve roughly {event_record_budget} "
+        "characters to unfold each record's action, immediate result and the next affected response before moving on. "
         "Expand the ordered steps below in direct prose; do not print their numbers or turn them into a checklist.\n"
         "CURRENT EVENT SEQUENCE (the only content to develop):\n"
         f"{event_sequence}\n"
