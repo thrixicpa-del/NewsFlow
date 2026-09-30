@@ -44,6 +44,7 @@ from scriptor.bridge import (
     regenerate_covers,
     regenerate_covers_new_prompts,
     remove_cover_image,
+    remove_cover_prompts,
     remove_cover_results,
     render_cover_text,
     render_cover_text_fastgen,
@@ -59,6 +60,7 @@ from scriptor.config import (
     load_settings,
     save_settings,
 )
+from scriptor.cover_library import CoverLibrary
 from scriptor.cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
 from scriptor.covers import (
     FastGenClient,
@@ -4391,8 +4393,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
                 for term in forbidden:
                     self.assertNotIn(term, story_context.casefold())
 
-    def test_standard_duplicate_rewrite_keeps_the_legacy_provider_output_path(self):
-        """The composition-only fallback is strictly opt-in."""
+    def test_standard_duplicate_rewrite_replaces_an_exact_provider_repeat_without_intensity(self):
+        """Freshness remains mandatory while intensity amplification stays opt-in."""
         settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=False)
         provider_scene = "Mayor Elena Petrova signs the River Bridge closure order"
         item = {
@@ -4422,7 +4424,10 @@ class CoverLocalCompositorTests(unittest.TestCase):
                 "rewrite": True,
             })
 
-        self.assertEqual(settings.cover_queue[0]["image_prompt"], prior_prompt)
+        rewritten = settings.cover_queue[0]["image_prompt"]
+        self.assertNotEqual(rewritten, prior_prompt)
+        self.assertIn("Composition-only alternative", rewritten)
+        self.assertNotIn("Context-grounded intensity", rewritten)
 
     def test_cover_build_mode_ranges_reject_overlaps(self):
         settings = Settings()
@@ -5555,6 +5560,244 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
 
         self.assertEqual(generated_ids, ["production:missing"])
         self.assertEqual(settings.cover_queue[0]["cover_headline"], "ГОТОВО")
+
+
+class CoverPromptFreshnessTests(unittest.TestCase):
+    @staticmethod
+    def _row(index: int, **values):
+        return {
+            "production_item_id": f"production:fresh-{index}",
+            "title": f"Тема {index}",
+            "script": "Проверяемая новостная сцена.",
+            **values,
+        }
+
+    def test_standard_rewrite_replaces_an_exact_previous_prompt_without_intensity(self):
+        """Freshness is required even when visual intensity is disabled."""
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=False)
+        prior_scene = "Officials review a signed transport agreement at a briefing table"
+        item = self._row(0)
+        prior_prompt = _normalize_cover_photo_prompt(prior_scene, item)
+        settings.cover_queue = [{
+            **item,
+            "image_prompt": prior_prompt,
+            "image_prompt_options": [prior_prompt],
+        }]
+
+        async def same_prompt(*_args, **_kwargs):
+            return json.dumps({"prompts": [prior_scene], "recommended": 1})
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=same_prompt)):
+            generate_cover_prompts({
+                "indices": [0], "productionItemIds": ["production:fresh-0"],
+                "provider": "agent", "rewrite": True,
+            })
+
+        rewritten = settings.cover_queue[0]["image_prompt"]
+        self.assertNotEqual(rewritten, prior_prompt)
+        self.assertNotIn("Context-grounded intensity", rewritten)
+        self.assertIn("Composition-only alternative", rewritten)
+
+    def test_rewrite_output_is_distinct_from_active_history_and_each_other(self):
+        """Validation happens after provider normalization and local variant fill."""
+        settings = Settings(cover_prompt_variant_count=3, cover_scene_intensity_mode=False)
+        old_scene = "Negotiators stand beside a trade document"
+        history_scene = "Delegates examine tariff papers in a meeting room"
+        item = self._row(0)
+        old_prompt = _normalize_cover_photo_prompt(old_scene, item)
+        history_prompt = _normalize_cover_photo_prompt(history_scene, item)
+        settings.cover_queue = [{
+            **item,
+            "image_prompt": old_prompt,
+            "image_prompt_options": [old_prompt],
+            "recent_visual_prompt_history": [history_prompt],
+        }]
+
+        async def duplicate_short_response(*_args, **_kwargs):
+            return json.dumps({"prompts": [old_scene], "recommended": 1})
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=duplicate_short_response)):
+            generate_cover_prompts({
+                "indices": [0], "productionItemIds": ["production:fresh-0"],
+                "provider": "agent", "rewrite": True,
+            })
+
+        options = settings.cover_queue[0]["image_prompt_options"]
+        self.assertEqual(len(options), 3)
+        self.assertEqual(len(set(options)), 3)
+        self.assertNotIn(old_prompt, options)
+        self.assertNotIn(history_prompt, options)
+
+    def test_delete_keeps_bounded_history_without_restoring_an_active_prompt(self):
+        """Deletion clears active state but retains only bounded do-not-repeat evidence."""
+        settings = Settings(cover_queue=[self._row(
+            0,
+            image_prompt="current prompt",
+            image_prompt_options=["current prompt", "second prompt"],
+            recent_visual_prompt_history=[f"older prompt {index}" for index in range(5)],
+            selected_prompt_index=1,
+            prompt_provider="agent",
+            prompt_revision_id="revision",
+        )])
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge._save_cover_state"), \
+             patch("scriptor.bridge.snapshot", return_value={}):
+            remove_cover_prompts({"indices": [0]})
+
+        row = settings.cover_queue[0]
+        self.assertNotIn("image_prompt", row)
+        self.assertNotIn("image_prompt_options", row)
+        self.assertNotIn("selected_prompt_index", row)
+        self.assertNotIn("prompt_provider", row)
+        self.assertEqual(row["recent_visual_prompt_history"], [
+            "older prompt 2", "older prompt 3", "older prompt 4", "current prompt", "second prompt",
+        ])
+
+    def test_deleted_prompt_stays_deleted_after_durable_library_hydration(self):
+        """A newer prompt-clear tombstone row wins over an older polling snapshot."""
+        with TemporaryDirectory() as directory:
+            library = CoverLibrary(Path(directory) / "covers-library.json")
+            original = self._row(
+                0,
+                image_prompt="old active visual prompt",
+                image_prompt_options=["old active visual prompt"],
+                updatedAt="2020-01-01T00:00:00+00:00",
+            )
+            settings = Settings(cover_queue=[dict(original)])
+            with patch("scriptor.bridge.load_settings", return_value=settings), \
+                 patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+                 patch("scriptor.bridge._save_cover_state"), \
+                 patch("scriptor.bridge.snapshot", return_value={}):
+                remove_cover_prompts({"indices": [0]})
+
+            library.persist(settings.cover_queue, {}, {})
+            hydrated, _capabilities, _usage = library.hydrate(
+                [original], {}, {}, active_production_ids={"production:fresh-0"},
+            )
+            self.assertNotIn("image_prompt", hydrated[0])
+            self.assertNotIn("image_prompt_options", hydrated[0])
+            self.assertEqual(hydrated[0]["recent_visual_prompt_history"], ["old active visual prompt"])
+
+    def test_create_after_delete_rejects_the_deleted_exact_prompt(self):
+        """A missing prompt still calls the provider, but deleted text cannot become active again."""
+        settings = Settings(cover_prompt_variant_count=1)
+        deleted_scene = "A minister speaks beside a budget document"
+        item = self._row(0, recent_visual_prompt_history=[])
+        deleted_prompt = _normalize_cover_photo_prompt(deleted_scene, item)
+        item["recent_visual_prompt_history"] = [deleted_prompt]
+        settings.cover_queue = [item]
+        calls = []
+
+        async def same_deleted_prompt(prompt, **_kwargs):
+            calls.append(prompt)
+            return json.dumps({"prompts": [deleted_scene], "recommended": 1})
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=same_deleted_prompt)):
+            generate_cover_prompts({
+                "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
+            })
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("НЕ ПОВТОРЯЙ", calls[0])
+        self.assertNotEqual(settings.cover_queue[0]["image_prompt"], deleted_prompt)
+
+    def test_failed_rewrite_keeps_old_prompts_files_and_manual_cover_state(self):
+        """Provider failure must be truthful without destructively clearing the accepted render."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            image = Path(directory) / "old.png"
+            image.write_bytes(b"old image")
+            face = Path(directory) / "manual-face.png"
+            face.write_bytes(b"face")
+            old_prompt = "Existing accepted visual prompt"
+            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+                0,
+                image_prompt=old_prompt,
+                image_prompt_options=[old_prompt],
+                paths=[str(image)], path=str(image), selected_path=str(image), selected_base_path=str(image),
+                cover_headline="РУЧНОЙ ЗАГОЛОВОК", headline_source="MANUAL",
+                cover_subheadline="Ручной подзаголовок", subheadline_source="MANUAL",
+                face_reference_path=str(face), face_reference_label="Ручное лицо", face_reference_source="manual",
+            )])
+
+            async def failed_provider(*_args, **_kwargs):
+                raise RuntimeError("provider unavailable")
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=failed_provider)):
+                bridge.regenerate_covers_new_prompts({
+                    "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
+                })
+
+            row = settings.cover_queue[0]
+            self.assertEqual(row["image_prompt"], old_prompt)
+            self.assertEqual(row["image_prompt_options"], [old_prompt])
+            self.assertTrue(image.is_file())
+            self.assertEqual(row["paths"], [str(image)])
+            self.assertEqual(row["selected_path"], str(image))
+            self.assertEqual(row["cover_headline"], "РУЧНОЙ ЗАГОЛОВОК")
+            self.assertEqual(row["cover_subheadline"], "Ручной подзаголовок")
+            self.assertEqual(row["face_reference_path"], str(face))
+            self.assertEqual(row["face_reference_source"], "manual")
+            self.assertIn("provider unavailable", row["error"])
+
+    def test_successful_rewrite_records_old_prompts_then_clears_only_its_old_render(self):
+        """A successful rewrite commits prompts before deleting its obsolete rendered files."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            old_image = Path(directory) / "old.png"
+            old_image.write_bytes(b"old")
+            other_image = Path(directory) / "other.png"
+            other_image.write_bytes(b"other")
+            old_prompt = "Old accepted prompt"
+            settings = Settings(cover_output_folder=directory, cover_queue=[
+                self._row(0, image_prompt=old_prompt, image_prompt_options=[old_prompt],
+                          paths=[str(old_image)], path=str(old_image), selected_path=str(old_image)),
+                self._row(1, image_prompt="Unselected prompt", image_prompt_options=["Unselected prompt"],
+                          paths=[str(other_image)], path=str(other_image), selected_path=str(other_image)),
+            ])
+
+            async def fresh_provider(*_args, **_kwargs):
+                return '{"prompts":["A distinct new briefing scene with signed documents"],"recommended":1}'
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=fresh_provider)), \
+                 patch.object(bridge, "generate_covers") as render:
+                bridge.regenerate_covers_new_prompts({
+                    "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
+                })
+
+            selected, unselected = settings.cover_queue
+            self.assertNotEqual(selected["image_prompt"], old_prompt)
+            self.assertIn(old_prompt, selected["recent_visual_prompt_history"])
+            self.assertFalse(old_image.exists())
+            self.assertEqual(selected["paths"], [])
+            self.assertEqual(selected["selected_path"], "")
+            self.assertTrue(other_image.exists())
+            self.assertEqual(unselected["paths"], [str(other_image)])
+            render.assert_not_called()
 
 
 class CoverRenderQueueSafetyTests(unittest.TestCase):
