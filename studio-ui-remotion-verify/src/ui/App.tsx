@@ -2533,6 +2533,9 @@ export function Scenarios({
   const [manualText, setManualText] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
+  const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
+  const [editedScriptText, setEditedScriptText] = useState("");
+  const [savingScript, setSavingScript] = useState(false);
   const manualImportLock = useRef(false);
   const [importingManualScenario, setImportingManualScenario] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -2627,6 +2630,36 @@ export function Scenarios({
     );
     setRenameTitle(item?.title ?? "");
     setRenameOpen(true);
+  };
+  const selectedReadyScenario =
+    selected.length === 1
+      ? data.scenarios.find(
+          (scenario) =>
+            scenario.index === selected[0] &&
+            scenario.state === "Готово" &&
+            scenario.result.trim(),
+        )
+      : undefined;
+  const editScript = () => {
+    if (!selectedReadyScenario) return;
+    setEditedScriptText(selectedReadyScenario.result);
+    setScriptEditorOpen(true);
+  };
+  const saveEditedScript = async () => {
+    if (!selectedReadyScenario || !editedScriptText.trim() || savingScript) return;
+    setSavingScript(true);
+    try {
+      const result = await command("save-scenario-text", {
+        index: selectedReadyScenario.index,
+        text: editedScriptText,
+      });
+      if (result) {
+        setScriptEditorOpen(false);
+        setEditedScriptText("");
+      }
+    } finally {
+      setSavingScript(false);
+    }
   };
   const confirmRename = async () => {
     if (selected.length !== 1 || !renameTitle.trim()) return;
@@ -2732,6 +2765,32 @@ export function Scenarios({
           <Button onClick={() => setRenameOpen(false)}>Отмена</Button>
           <Button kind="primary" onClick={() => void confirmRename()} disabled={!renameTitle.trim()}>
             Сохранить название
+          </Button>
+        </div>
+      </Dialog>
+      <Dialog
+        open={scriptEditorOpen}
+        onOpenChange={(open) => {
+          setScriptEditorOpen(open);
+          if (!open) setEditedScriptText("");
+        }}
+        title="Редактировать сценарий"
+        description="Измените текст выбранного готового сценария и сохраните его в текущей очереди."
+      >
+        <Textarea
+          label={`Текст сценария: ${selectedReadyScenario?.title || ""}`}
+          value={editedScriptText}
+          onChange={(event) => setEditedScriptText(event.target.value)}
+          autoFocus
+        />
+        <div className="toolbar">
+          <Button onClick={() => setScriptEditorOpen(false)}>Отмена</Button>
+          <Button
+            kind="primary"
+            onClick={() => void saveEditedScript()}
+            disabled={savingScript || !editedScriptText.trim()}
+          >
+            {savingScript ? "Сохранение…" : "Сохранить сценарий"}
           </Button>
         </div>
       </Dialog>
@@ -2882,6 +2941,10 @@ export function Scenarios({
         <Button onClick={edit}>
           <Pencil size={16} />
           Изменить тему
+        </Button>
+        <Button disabled={!selectedReadyScenario} onClick={editScript}>
+          <Pencil size={16} />
+          Редактировать сценарий
         </Button>
         <Button kind="danger" onClick={remove}>
           <Trash2 size={16} />

@@ -220,6 +220,33 @@ describe("Scenarios and scripts Light views", () => {
     );
   });
 
+  it("edits one selected ready scenario from the queue through the existing save command", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const data = {
+      ...fallback,
+      scenarios: [
+        { index: 0, title: "Готовый материал", state: "Готово", result: "Исходный текст", error: "" },
+      ],
+    };
+    render(<Scenarios data={data} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Готовый материал" }));
+    fireEvent.click(screen.getByRole("button", { name: "Редактировать сценарий" }));
+    expect(screen.getByRole("dialog", { name: "Редактировать сценарий" })).toBeTruthy();
+
+    const text = screen.getByLabelText("Текст сценария: Готовый материал") as HTMLTextAreaElement;
+    expect(text.value).toBe("Исходный текст");
+    fireEvent.change(text, { target: { value: "Исправленный текст" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить сценарий" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("save-scenario-text", {
+        index: 0,
+        text: "Исправленный текст",
+      }),
+    );
+  });
+
   it("preserves manual import fields when the import command fails", async () => {
     const command = vi.fn().mockResolvedValue(undefined);
     render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
