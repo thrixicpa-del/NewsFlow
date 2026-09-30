@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import scriptor.session as session
+from scriptor import session
 
 
 class SessionRevisionSerializationTests(unittest.TestCase):
@@ -45,7 +45,7 @@ class SessionRevisionSerializationTests(unittest.TestCase):
         def read():
             try:
                 observed.append(session.load_session())
-            except BaseException as error:
+            except (AssertionError, OSError, ValueError, TypeError, RuntimeError, LookupError) as error:
                 failures.append(error)
 
         with patch.object(session, "_apply_scenario_tombstones", side_effect=delayed_filter):
@@ -100,7 +100,7 @@ class SessionRevisionSerializationTests(unittest.TestCase):
         def recover():
             try:
                 results.append(session.load_session())
-            except BaseException as error:
+            except (AssertionError, OSError, ValueError, TypeError, RuntimeError, LookupError) as error:
                 failures.append(error)
 
         worker = threading.Thread(target=recover, daemon=True)
@@ -122,7 +122,7 @@ class SessionRevisionSerializationTests(unittest.TestCase):
             while not stop.is_set():
                 try:
                     observed.append(session.load_session()[0][0])
-                except BaseException as error:
+                except (AssertionError, OSError, ValueError, TypeError, RuntimeError, LookupError) as error:
                     failures.append(error)
                     return
 
