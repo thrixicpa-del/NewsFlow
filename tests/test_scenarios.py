@@ -228,14 +228,63 @@ class ScenarioGenerationTests(unittest.TestCase):
                 self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", prompt)
                 self.assertIn("Целевой объем: 10000 символов", prompt)
                 self.assertIn("Допустимый итоговый диапазон: 9000–11000 символов", prompt)
-                self.assertIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", prompt)
-                self.assertIn("ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину", prompt)
-                self.assertIn("len(text.strip())", prompt)
-                self.assertIn("а не слова, токены или приблизительный объем", prompt)
+                self.assertIn("Не утверждай, что выполнял код или использовал счётчик символов", prompt)
+                self.assertIn("NewsFlow после получения ответа независимо измерит", prompt)
+                self.assertNotIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", prompt)
+                self.assertNotIn("len(text.strip())", prompt)
                 self.assertLess(
                     prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
                     prompt.index("FULL_USER_PROMPT_BEGIN"),
                 )
+
+    def test_event_first_production_contract_reaches_planner_and_writer_without_editorial_injection(self):
+        """Generated context is event-first in both model-visible pipeline stages."""
+        title = "Проверочная тема"
+        manual_requirement = "Ручная формулировка: раскрой политическую цену решения."
+        settings = Settings(
+            scenario_provider="openai",
+            template="Сохрани ручной шаблон для {title}.",
+            scenario_target_chars=6000,
+            scenario_allowed_min=5500,
+            scenario_allowed_max=6500,
+            idea_production_items=[{"id": "item-1", "title": title}],
+            idea_scenario_context={title: {
+                "id": "item-1",
+                "framing_type": "EDITORIAL",
+                "core_event": "Комиссия опубликовала решение.",
+                "script_requirements": [manual_requirement],
+            }},
+        )
+
+        class CapturePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
+                target = int(re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt).group(1))
+                return "Т" * target
+
+        pool = CapturePool()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([title], [])), \
+             patch.object(bridge, "save_session"), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=pool):
+            bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+
+        self.assertEqual(len(pool.prompts), 2)
+        for prompt in pool.prompts:
+            self.assertIn(manual_requirement, prompt)
+            self.assertIn("Режим материала: EVENT_FIRST", prompt)
+            self.assertIn("действия, решения, реакции и результаты", prompt)
+            self.assertNotIn("Режим подачи: EDITORIAL", prompt)
+            self.assertNotIn("раскрой конфликт, давление, политическую цену", prompt)
 
     def test_add_scenarios_persists_identity_before_any_read_only_snapshot(self):
         """A typed title gets one durable ID on the explicit Add action."""

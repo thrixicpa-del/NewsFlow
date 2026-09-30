@@ -322,7 +322,8 @@ class StoryPlanValidationTests(unittest.TestCase):
 
         self.assertIn("MATERIAL ALLOCATION: this part has 3 owned atoms; reserve roughly 1333 characters", prompt)
         self.assertIn("FIRST-PASS PART VOLUME: write roughly 3879-4119 characters", prompt)
-        self.assertIn("without a length retry, trim or rewrite", prompt)
+        self.assertIn("NewsFlow independently records the actual length after this response", prompt)
+        self.assertNotIn("without a length retry, trim or rewrite", prompt)
         self.assertIn("WRITER MATERIAL=объявление решения; порядок применения; первая реакция", prompt)
         self.assertIn("WRITER MATERIAL=перестройка очереди; проверка результата", prompt)
         self.assertEqual(
@@ -1331,6 +1332,50 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("Before returning JSON, check that every atom", prompt)
         self.assertIn("different declared states", prompt)
         self.assertIn("synonym swap", prompt)
+
+    def test_planner_distinguishes_title_only_from_supported_and_dramatized_material(self):
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "Тема без источников", "КОНТЕКСТ: отсутствует"),
+            (3999, 3999, 3998),
+        )
+
+        self.assertIn("TITLE/TOPIC names the subject, not verified evidence", prompt)
+        self.assertIn("title alone is not SUPPORTED", prompt)
+        self.assertIn("declarative chronological content", prompt)
+        self.assertIn("not a writing command such as 'show', 'describe', 'frame', 'keep', 'use' or 'avoid'", prompt)
+        self.assertIn("Example only, never reuse it as story content", prompt)
+        self.assertIn("FINAL's last writer_material beat", prompt)
+        self.assertIn("Do not fabricate source attribution such as reports from the scene", prompt)
+
+    def test_writer_keeps_a_current_beat_result_after_the_old_220_character_boundary(self):
+        long_tail = (
+            "Промежуточная деталь описывает ход проверки и передачу результата между службами. " * 4
+            + "FINAL_RESULT_AFTER_220: оператор публикует подтверждённый итоговый статус."
+        )
+        plan = StoryPlan(
+            thesis="Одна цепочка.",
+            macro_blocks=({"id": "M1", "purpose": "Проверка"},),
+            content_atoms=(StoryContentAtom(
+                id="C001", summary="Проверка завершается", owner_part_id="P1",
+                content_kind="DRAMATIZED", novelty_question="Чем завершилась проверка?",
+                novelty_payload="Опубликован итоговый статус.", state_before="Проверка идёт.",
+                changed_subject="Статус проверки", development="Оператор завершает проверку.",
+                resulting_state="Статус опубликован.", state_after="Проверка закрыта.",
+                writer_material=(long_tail,),
+            ),),
+            parts=(StoryPartPlan(
+                id="P1", role="COMPLETE", purpose="Завершить проверку", macro_id="M1",
+                content_ids=("C001",), target_chars=5000,
+                novelty_question="Какой итог получен?", novelty_payload="Статус опубликован.",
+            ),),
+        )
+
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "Контекст", target_chars=5000), plan, [], 0,
+        )
+
+        self.assertGreater(long_tail.index("FINAL_RESULT_AFTER_220"), 220)
+        self.assertIn("FINAL_RESULT_AFTER_220", prompt)
 
     def test_twelve_thousand_plan_requires_event_density_before_writer(self):
         targets = calculate_story_part_targets(12000)

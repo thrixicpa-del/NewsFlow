@@ -235,6 +235,21 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertIn("Стороны спорят о главном условии", prompt)
         self.assertIn("назвать участников", prompt)
 
+    def test_event_first_contract_preserves_manual_requirements_without_editorial_injection(self):
+        manual_requirement = "Ручная формулировка: раскрой политическую цену решения."
+        prompt = bridge.production_item_prompt({
+            "framing_type": "EDITORIAL",
+            "core_event": "Комиссия опубликовала решение.",
+            "script_requirements": [manual_requirement],
+        })
+
+        self.assertIn(manual_requirement, prompt)
+        self.assertIn("Режим материала: EVENT_FIRST", prompt)
+        self.assertIn("действия, решения, реакции и результаты", prompt)
+        self.assertIn("Заголовок/тема задаёт предмет", prompt)
+        self.assertNotIn("Режим подачи: EDITORIAL", prompt)
+        self.assertNotIn("раскрой конфликт, давление, политическую цену", prompt)
+
     def test_hypothetical_scenario_prompt_prohibits_reporting_forecast_as_fact(self):
         prompt = bridge.production_item_prompt({
             "framing_type": "HYPOTHETICAL",
