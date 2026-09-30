@@ -323,6 +323,70 @@ describe("Scenarios and scripts Light views", () => {
     );
   });
 
+  it("opens the ready-file chooser only once while a prior click is pending", async () => {
+    let finishChoose: (items: Array<{ title: string; text: string }>) => void = () => undefined;
+    const chooseScenarioTexts = vi.fn(() => new Promise<Array<{ title: string; text: string }>>((resolve) => {
+      finishChoose = resolve;
+    }));
+    Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
+    render(<Scenarios data={fallback} go={vi.fn()} command={vi.fn()} refresh={async () => undefined} />);
+
+    const button = screen.getByRole("button", { name: "Добавить готовый" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(chooseScenarioTexts).toHaveBeenCalledTimes(1);
+
+    finishChoose([]);
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+    fireEvent.click(button);
+    expect(chooseScenarioTexts).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the ready-file import lock after a successful import", async () => {
+    const chooseScenarioTexts = vi.fn().mockResolvedValue([{ title: "Файл", text: "Текст" }]);
+    Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
+    render(<Scenarios data={fallback} go={vi.fn()} command={vi.fn().mockResolvedValue(fallback)} refresh={async () => undefined} />);
+
+    const button = screen.getByRole("button", { name: "Добавить готовый" });
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+    fireEvent.click(button);
+    expect(chooseScenarioTexts).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a local alert and preserves manual fields when the file import fails", async () => {
+    const chooseScenarioTexts = vi.fn().mockRejectedValue(new Error("Не удалось прочитать ZIP-архив «broken.zip»."));
+    Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
+    const command = vi.fn();
+    render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
+    fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
+    const button = screen.getByRole("button", { name: "Добавить готовый" });
+    fireEvent.click(button);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Не удалось прочитать ZIP-архив");
+    expect((screen.getByLabelText("Название сценария") as HTMLInputElement).value).toBe("Ручной заголовок");
+    expect((screen.getByLabelText("Полный текст сценария") as HTMLTextAreaElement).value).toBe("Ручной текст");
+    expect(command).not.toHaveBeenCalled();
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+  });
+
+  it("releases the ready-file import lock after an error", async () => {
+    const chooseScenarioTexts = vi.fn()
+      .mockRejectedValueOnce(new Error("Ошибка выбора"))
+      .mockResolvedValueOnce([]);
+    Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
+    render(<Scenarios data={fallback} go={vi.fn()} command={vi.fn()} refresh={async () => undefined} />);
+
+    const button = screen.getByRole("button", { name: "Добавить готовый" });
+    fireEvent.click(button);
+    await screen.findByRole("alert");
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+    fireEvent.click(button);
+    expect(chooseScenarioTexts).toHaveBeenCalledTimes(2);
+  });
+
   it("submits manual import once and disables its button while pending", () => {
     const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
     render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);

@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { extname, basename } from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 
 export type ReadyScenarioText = { title: string; text: string };
 
@@ -23,6 +23,7 @@ const MAX_TEXT_BYTES = 1_000_000;
 const MAX_ARCHIVE_BYTES = 20_000_000;
 const MAX_ARCHIVE_ENTRIES = 100;
 const MAX_ARCHIVE_TEXT_BYTES = 10_000_000;
+const BINARY_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/;
 
 function isTextFile(name: string): boolean {
   return TEXT_EXTENSIONS.has(extname(name).toLowerCase());
@@ -44,12 +45,35 @@ function assertSafeArchivePath(name: string): void {
   }
 }
 
+function decodeScenarioText(contents: Buffer, name: string): string {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch {
+    throw new Error(`Файл «${name}» должен быть строго в кодировке UTF-8.`);
+  }
+  if (BINARY_CONTROL.test(text)) {
+    throw new Error(`Файл «${name}» содержит служебные бинарные символы.`);
+  }
+  return text.trim();
+}
+
 async function readLimitedText(path: string, limit = MAX_TEXT_BYTES): Promise<string> {
-  const contents = await readFile(path);
-  if (contents.length > limit) {
+  const metadata = await stat(path);
+  if (metadata.size > limit) {
     throw new Error(`Файл «${basename(path)}» больше 1 МБ. Разделите его на несколько TXT.`);
   }
-  return contents.toString("utf8").trim();
+  const handle = await open(path, "r");
+  try {
+    const contents = Buffer.allocUnsafe(limit + 1);
+    const { bytesRead } = await handle.read(contents, 0, contents.length, 0);
+    if (bytesRead > limit) {
+      throw new Error(`Файл «${basename(path)}» больше 1 МБ. Разделите его на несколько TXT.`);
+    }
+    return decodeScenarioText(contents.subarray(0, bytesRead), basename(path));
+  } finally {
+    await handle.close();
+  }
 }
 
 async function readZipEntry(entry: ZipEntry): Promise<Buffer> {
@@ -95,7 +119,7 @@ async function readZip(path: string): Promise<ReadyScenarioText[]> {
       throw new Error(`Текстовые сценарии в архиве «${basename(path)}» больше 10 МБ.`);
     }
     const title = titleFor(entry.path);
-    const text = contents.toString("utf8").trim();
+    const text = decodeScenarioText(contents, entry.path);
     if (title && text) scenarios.push({ title, text });
   }
   return scenarios;

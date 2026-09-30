@@ -6,13 +6,13 @@ import { describe, expect, it } from "vitest";
 
 import { readReadyScenarioFiles } from "./scenario-import.js";
 
-function storedZip(entries: Array<{ name: string; text: string }>): Buffer {
+function storedZip(entries: Array<{ name: string; text?: string; data?: Buffer }>): Buffer {
   const chunks: Buffer[] = [];
   const central: Buffer[] = [];
   let offset = 0;
   for (const entry of entries) {
     const name = Buffer.from(entry.name, "utf8");
-    const input = Buffer.from(entry.text, "utf8");
+    const input = entry.data ?? Buffer.from(entry.text ?? "", "utf8");
     const data = deflateRawSync(input);
     const header = Buffer.alloc(30);
     header.writeUInt32LE(0x04034b50, 0);
@@ -84,6 +84,56 @@ describe("readReadyScenarioFiles", () => {
       await writeFile(zip, storedZip([{ name: "../outside.txt", text: "Нельзя импортировать" }]));
 
       await expect(readReadyScenarioFiles([zip])).rejects.toThrow("небезопасный путь");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts strict UTF-8 Cyrillic, emoji and paragraphs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "newsflow-ready-scenarios-"));
+    try {
+      const txt = join(root, "Срочный сюжет.txt");
+      await writeFile(txt, "Первый абзац 📰\n\nВторой абзац с кириллицей.", "utf8");
+
+      await expect(readReadyScenarioFiles([txt])).resolves.toEqual([
+        { title: "Срочный сюжет", text: "Первый абзац 📰\n\nВторой абзац с кириллицей." },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed UTF-8 text files instead of replacing invalid bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "newsflow-ready-scenarios-"));
+    try {
+      const txt = join(root, "broken.txt");
+      await writeFile(txt, Buffer.from([0xd0, 0x28]));
+
+      await expect(readReadyScenarioFiles([txt])).rejects.toThrow("UTF-8");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed UTF-8 ZIP entries instead of importing replacement text", async () => {
+    const root = await mkdtemp(join(tmpdir(), "newsflow-ready-scenarios-"));
+    try {
+      const zip = join(root, "broken.zip");
+      await writeFile(zip, storedZip([{ name: "broken.txt", data: Buffer.from([0xd0, 0x28]) }]));
+
+      await expect(readReadyScenarioFiles([zip])).rejects.toThrow("UTF-8");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects NUL and binary control content", async () => {
+    const root = await mkdtemp(join(tmpdir(), "newsflow-ready-scenarios-"));
+    try {
+      const txt = join(root, "binary.txt");
+      await writeFile(txt, Buffer.from("Текст\u0000сценария", "utf8"));
+
+      await expect(readReadyScenarioFiles([txt])).rejects.toThrow("служебные бинарные символы");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

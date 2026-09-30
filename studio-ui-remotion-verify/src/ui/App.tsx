@@ -2531,6 +2531,7 @@ export function Scenarios({
   const [draft, setDraft] = useState("");
   const [manualTitle, setManualTitle] = useState("");
   const [manualText, setManualText] = useState("");
+  const [manualImportError, setManualImportError] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
   const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
@@ -2700,13 +2701,24 @@ export function Scenarios({
   };
   const importReadyFiles = async () => {
     if (manualImportLock.current) return;
-    const items = await window.newsflowDesktop?.chooseScenarioTexts();
-    if (!items?.length) return;
     manualImportLock.current = true;
     setImportingManualScenario(true);
+    setManualImportError("");
     try {
+      const items = await window.newsflowDesktop?.chooseScenarioTexts();
+      if (!items?.length) return;
       const result = await command("import-manual-scenarios", { items });
-      if (result) setSelected([]);
+      if (result) {
+        setSelected([]);
+      } else {
+        setManualImportError("Не удалось добавить выбранные сценарии. Повторите попытку.");
+      }
+    } catch (error) {
+      setManualImportError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Не удалось прочитать выбранные сценарии. Повторите попытку.",
+      );
     } finally {
       manualImportLock.current = false;
       setImportingManualScenario(false);
@@ -2936,6 +2948,7 @@ export function Scenarios({
           onChange={(event) => setManualText(event.target.value)}
           placeholder="Вставьте полный текст сценария…"
         />
+        {manualImportError ? <div className="knowledge-status" role="alert">{manualImportError}</div> : null}
       </section>
       <div className="toolbar compact">
         <Button onClick={edit}>
