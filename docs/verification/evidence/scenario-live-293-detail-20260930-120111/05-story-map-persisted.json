@@ -1,0 +1,266 @@
+{
+  "thesis": "Russia intensified strikes on Ukraine as Kyiv again came under a mass attack, with the immediate storyline centered on pressure, damage, response, and whether any peace track can survive.",
+  "macro_blocks": [
+    {
+      "id": "MB1",
+      "purpose": "Establish the renewed attack on Kyiv and the first confirmed reaction on the ground."
+    },
+    {
+      "id": "MB2",
+      "purpose": "Show how the assault expands into the wider strike pattern and the immediate operational response."
+    },
+    {
+      "id": "MB3",
+      "purpose": "Close with the political and security consequences, including the unresolved peace question and the current state after the attack."
+    }
+  ],
+  "content_atoms": [
+    {
+      "id": "A1",
+      "summary": "Kyiv comes under a renewed mass attack.",
+      "owner_part_id": "P1",
+      "content_kind": "SUPPORTED",
+      "novelty_question": "What is the immediate new security state of Kyiv?",
+      "novelty_payload": "Kyiv has been struck again in a mass attack, changing the city from a normal operating state to an active emergency situation.",
+      "do_not_repeat": "The general idea that the war remains ongoing.",
+      "state_before": "Before the latest wave, Kyiv was not in the middle of a new mass strike event.",
+      "state_after": "Kyiv is again under a large-scale attack.",
+      "changed_subject": "Kyiv",
+      "development": "The city is hit by another mass assault from Russia.",
+      "resulting_state": "Air defenses, emergency services, and residents are operating under active strike conditions.",
+      "writer_material": [
+        "State that Kyiv is once again under a mass attack and keep the description tied to the attack itself.",
+        "Show that the immediate environment shifts into emergency mode, with air defenses and responders activated.",
+        "Note that residents are now reacting to the renewed strike threat rather than a distant front-line event.",
+        "Keep the beat focused on the present assault and its observable effect on the city, not on long interpretation.",
+        "Use the attack as the first concrete change in the story, not as a summary of the wider war."
+      ]
+    },
+    {
+      "id": "A2",
+      "summary": "Russia increases the intensity of its strikes across Ukraine.",
+      "owner_part_id": "P1",
+      "content_kind": "SUPPORTED",
+      "novelty_question": "What changed in Russia's strike pattern?",
+      "novelty_payload": "Russia has intensified its attacks, moving the story from a single city strike to a broader escalation pattern.",
+      "do_not_repeat": "The fact that Kyiv was attacked again.",
+      "state_before": "Before this escalation, the strike tempo was lower than the current wave.",
+      "state_after": "The attacks are more intense and more frequent.",
+      "changed_subject": "Russian strike activity",
+      "development": "Russia steps up its strikes on Ukrainian targets.",
+      "resulting_state": "The conflict now shows a higher level of pressure on Ukrainian cities and infrastructure.",
+      "writer_material": [
+        "Specify that the strikes have been intensified rather than merely repeated.",
+        "Connect the escalation to a broader pressure pattern on Ukraine, not only to one target.",
+        "Indicate that the attack tempo now presents a higher operational burden for Ukrainian defenses.",
+        "Keep the focus on a concrete change in strike activity, not on motives or strategic theory.",
+        "Make clear that the new fact is the increased intensity of the attacks."
+      ]
+    },
+    {
+      "id": "A3",
+      "summary": "Ukrainian authorities and emergency crews respond to the new wave.",
+      "owner_part_id": "P1",
+      "content_kind": "DRAMATIZED",
+      "novelty_question": "What happens on the ground after the strike begins?",
+      "novelty_payload": "Officials and emergency teams move into response mode, showing the attack has forced an immediate citywide reaction.",
+      "do_not_repeat": "The renewed attack itself.",
+      "state_before": "At the start of the attack, the city is being struck and the scale of the consequences is still unfolding.",
+      "state_after": "A response is underway and the immediate aftermath is being handled.",
+      "changed_subject": "Ukrainian response apparatus",
+      "development": "Authorities activate emergency procedures, and crews begin dealing with the consequences of the strike.",
+      "resulting_state": "The city moves from impact phase into response and recovery efforts.",
+      "writer_material": [
+        "Show local authorities switching into emergency response mode during the assault.",
+        "Include emergency crews moving to affected areas to assess and contain damage.",
+        "Note that the city is now in an active response phase rather than only under threat.",
+        "Keep the beat concrete: alarms, responders, and municipal actions must be the observable change.",
+        "Avoid explaining why the response matters; show only what changed on the ground."
+      ]
+    },
+    {
+      "id": "A4",
+      "summary": "The new strikes add pressure to Ukraine's defense and infrastructure picture.",
+      "owner_part_id": "P2",
+      "content_kind": "SUPPORTED",
+      "novelty_question": "What broader condition results from the escalation?",
+      "novelty_payload": "The assault does not stay limited to one event; it raises the load on Ukraine's defenses and infrastructure.",
+      "do_not_repeat": "The fact that Kyiv was hit again.",
+      "state_before": "Before the latest escalation, Ukraine's defensive system was facing a lower immediate burden.",
+      "state_after": "Ukraine is under heavier operational strain.",
+      "changed_subject": "Ukraine's defensive situation",
+      "development": "The intensified strikes create added pressure on defense systems and civilian infrastructure.",
+      "resulting_state": "Protection efforts become more difficult and more urgent.",
+      "writer_material": [
+        "Describe the practical strain created when the attack tempo rises.",
+        "Tie the strain to defenses and infrastructure as the concrete systems under pressure.",
+        "Show that the situation becomes more urgent for protection efforts, not just more dramatic in tone.",
+        "Keep the development grounded in operational consequences, not editorial framing.",
+        "Present the change as a new level of pressure that follows from the intensified strikes."
+      ]
+    },
+    {
+      "id": "A5",
+      "summary": "International hopes for a quick peace are pushed back by the renewed escalation.",
+      "owner_part_id": "P2",
+      "content_kind": "DRAMATIZED",
+      "novelty_question": "What happens to the peace expectation after the assault?",
+      "novelty_payload": "The new escalation delays any sense of near-term peace by making the conflict harder to de-escalate.",
+      "do_not_repeat": "The general idea that war continues.",
+      "state_before": "Before the escalation, there was at least an open possibility that a peace track could move forward.",
+      "state_after": "That possibility is visibly weakened by the attack wave.",
+      "changed_subject": "Peace prospects",
+      "development": "The renewed strikes make an immediate peace breakthrough look less likely.",
+      "resulting_state": "Talk of peace is left under stronger doubt and delay.",
+      "writer_material": [
+        "Link the attack wave to the practical setback for peace expectations.",
+        "Show that the possibility of a quick breakthrough is now weaker after the renewed strikes.",
+        "Keep the beat as a factual change in outlook, not a philosophical judgment.",
+        "Use the attack as the event that resets expectations, not as a moral lesson.",
+        "State plainly that the peace track looks delayed by the new escalation."
+      ]
+    },
+    {
+      "id": "A6",
+      "summary": "The story shifts from the assault itself to the political and security cost of the escalation.",
+      "owner_part_id": "P2",
+      "content_kind": "DRAMATIZED",
+      "novelty_question": "What larger issue does the latest attack force into view?",
+      "novelty_payload": "The assault turns into a broader test of endurance and pressure, broadening the story beyond the initial strike.",
+      "do_not_repeat": "That Kyiv was attacked and responders are active.",
+      "state_before": "The immediate focus is still on the strike and response.",
+      "state_after": "The emphasis moves to what the escalation means for decision-makers and the battlefield outlook.",
+      "changed_subject": "News focus / political-security framing",
+      "development": "The renewed attack becomes a test of endurance for Ukraine and a signal of continued pressure from Russia.",
+      "resulting_state": "The crisis is now framed as an ongoing pressure point rather than a one-off event.",
+      "writer_material": [
+        "Show the story moving from the incident itself to the wider pressure it creates.",
+        "Frame the escalation as a continuing burden for Ukrainian decision-makers.",
+        "Keep the beat anchored in the observable shift from event to broader crisis condition.",
+        "Do not repeat the strike details; add the new framing that now accompanies them.",
+        "Present the new state as sustained pressure rather than a single isolated hit."
+      ]
+    },
+    {
+      "id": "A7",
+      "summary": "After the strike wave, Kyiv remains on alert and the situation is still unstable.",
+      "owner_part_id": "P3",
+      "content_kind": "SUPPORTED",
+      "novelty_question": "What is the city's condition after the latest attack phase?",
+      "novelty_payload": "Kyiv is still under alert after the assault, and the situation has not returned to normal.",
+      "do_not_repeat": "The earlier fact that the city was attacked.",
+      "state_before": "Before the immediate aftermath settles, the city is still in the middle of the attack response.",
+      "state_after": "Kyiv remains exposed, alert, and not yet returned to normal.",
+      "changed_subject": "Kyiv's immediate status",
+      "development": "The city stays in a heightened security posture after the mass attack.",
+      "resulting_state": "The aftermath is unresolved and the emergency condition continues.",
+      "writer_material": [
+        "State that the city remains on alert after the strike wave.",
+        "Show that the situation is still unstable rather than settled.",
+        "Indicate that the emergency condition continues beyond the initial impact.",
+        "Keep the beat focused on the observable post-attack status.",
+        "Avoid re-describing the attack itself; give the new end-state after it."
+      ]
+    },
+    {
+      "id": "A8",
+      "summary": "The escalation leaves the peace question unanswered.",
+      "owner_part_id": "P3",
+      "content_kind": "DRAMATIZED",
+      "novelty_question": "What final state is left by the escalation?",
+      "novelty_payload": "The attack wave ends with the peace question still unresolved and no visible breakthrough in place.",
+      "do_not_repeat": "The broader idea that peace is delayed.",
+      "state_before": "The renewed attacks have already complicated any near-term diplomatic path.",
+      "state_after": "No clear peace breakthrough is visible at the end of the segment.",
+      "changed_subject": "Peace process outlook",
+      "development": "The latest violence closes the segment with no confirmed move toward settlement.",
+      "resulting_state": "The conflict remains open-ended, with peace still deferred.",
+      "writer_material": [
+        "End on the absence of a confirmed breakthrough after the escalation.",
+        "Show that the conflict remains unresolved at the close of the segment.",
+        "Keep the beat concrete by pointing to the lack of a new settlement step.",
+        "Use the unresolved state as the final observable outcome, not as commentary.",
+        "Make this the terminal consequence of the renewed strike wave."
+      ]
+    },
+    {
+      "id": "A9",
+      "summary": "Russia's pressure remains the active driver of the story at the end.",
+      "owner_part_id": "P3",
+      "content_kind": "SUPPORTED",
+      "novelty_question": "What is the lasting operational picture at the end?",
+      "novelty_payload": "Russian strike pressure remains the defining condition at the close, keeping the story in an active security state.",
+      "do_not_repeat": "The specific attack on Kyiv already established earlier.",
+      "state_before": "Before the final beat, the active condition is the assault and its aftermath.",
+      "state_after": "The dominant visible fact is continued Russian pressure and Ukrainian exposure.",
+      "changed_subject": "Story state",
+      "development": "The episode closes with Russian strikes still defining the security picture.",
+      "resulting_state": "The final state is one of ongoing pressure, not closure.",
+      "writer_material": [
+        "State that Russian strike pressure is still shaping the security picture at the end.",
+        "Show that the conflict's active condition continues into the closing state.",
+        "Keep the beat tied to visible security pressure rather than abstract meaning.",
+        "Do not repeat the city-under-attack detail; move to the broader end-state.",
+        "Use this as the closing status that follows from the escalation."
+      ]
+    }
+  ],
+  "parts": [
+    {
+      "id": "P1",
+      "role": "OPENING",
+      "purpose": "Introduce the renewed strike on Kyiv and the first immediate response on the ground.",
+      "macro_id": "MB1",
+      "content_ids": [
+        "A1",
+        "A2",
+        "A3"
+      ],
+      "target_chars": 3999,
+      "opens": [],
+      "closes": [],
+      "transition_direction": "forward",
+      "novelty_question": "What just happened in Kyiv and how did the city react?",
+      "novelty_payload": "Kyiv is again under mass attack, Russia has intensified its strikes, and emergency response is underway."
+    },
+    {
+      "id": "P2",
+      "role": "MIDDLE",
+      "purpose": "Expand from the city strike to the wider pressure on Ukraine and the setback to peace expectations.",
+      "macro_id": "MB2",
+      "content_ids": [
+        "A4",
+        "A5",
+        "A6"
+      ],
+      "target_chars": 3999,
+      "opens": [],
+      "closes": [],
+      "transition_direction": "forward",
+      "novelty_question": "What wider consequences follow the renewed escalation?",
+      "novelty_payload": "The intensified attacks raise pressure on Ukraine's defenses, weaken hopes for a quick peace track, and shift the story into a broader crisis frame."
+    },
+    {
+      "id": "P3",
+      "role": "FINAL",
+      "purpose": "Resolve on the post-attack state in Kyiv and the still-unanswered peace question.",
+      "macro_id": "MB3",
+      "content_ids": [
+        "A7",
+        "A8",
+        "A9"
+      ],
+      "target_chars": 3998,
+      "opens": [],
+      "closes": [],
+      "transition_direction": "forward",
+      "novelty_question": "What is the final state after the latest strike wave?",
+      "novelty_payload": "Kyiv remains on alert, no peace breakthrough has appeared, and Russian pressure still defines the security picture."
+    }
+  ],
+  "length_contract": {
+    "target_chars": 12000,
+    "allowed_min": 11500,
+    "allowed_max": 12500
+  }
+}

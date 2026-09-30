@@ -1,0 +1,57 @@
+{
+  "classification": "RECONSTRUCTED_OFFLINE",
+  "source_sha": "bb6b31a44456adf3f55b99008afa3cb85c70dc5f",
+  "prompt_telemetry_match": {
+    "planner": {
+      "reconstructed_chars": 10168,
+      "reconstructed_sha256": "b7531640d29d78b3115472f8e5370bf0fa34fb784a03c8b59c7c15955ed25387",
+      "telemetry_chars": 10168,
+      "telemetry_sha256": "b7531640d29d78b3115472f8e5370bf0fa34fb784a03c8b59c7c15955ed25387",
+      "match": true
+    },
+    "writers": [
+      {
+        "part": "P1",
+        "reconstructed_chars": 14391,
+        "reconstructed_sha256": "0739082f7fc632a577073b8b8eec6ddae1c0fc47312a7eb59a373e875b08cebe",
+        "telemetry_chars": 14391,
+        "telemetry_sha256": "0739082f7fc632a577073b8b8eec6ddae1c0fc47312a7eb59a373e875b08cebe",
+        "match": true
+      },
+      {
+        "part": "P2",
+        "reconstructed_chars": 14217,
+        "reconstructed_sha256": "e4b6cd871b5fb73348b5acfe2b01ce435034f90b69720832016e9ef6649829e8",
+        "telemetry_chars": 14217,
+        "telemetry_sha256": "e4b6cd871b5fb73348b5acfe2b01ce435034f90b69720832016e9ef6649829e8",
+        "match": true
+      },
+      {
+        "part": "P3",
+        "reconstructed_chars": 13931,
+        "reconstructed_sha256": "e78b3b6130c9eb07ffb81978be7c2c1092e8e773b38aa34be6b5dcb4f359ddbc",
+        "telemetry_chars": 13931,
+        "telemetry_sha256": "e78b3b6130c9eb07ffb81978be7c2c1092e8e773b38aa34be6b5dcb4f359ddbc",
+        "match": true
+      }
+    ]
+  },
+  "assembly": {
+    "stored_scenario_chars_python": 9141,
+    "stored_scenario_sha256": "864af5554c49fb75abac961965aed8b52c2a9ca3eb144c8c2edad455360df613",
+    "part_chars_python": [
+      2472,
+      3363,
+      3302
+    ],
+    "part_sha256": [
+      "e23fda70d706ace2ace2eababe188f1557e29107eec5288d08ba01899e0e5eb0",
+      "cf7a5404eaba76dbe626a8c06cf23a7b80072c64f59dfd0402e8f99c18c7f506",
+      "8b3c930a6534f07ddce6556df5864be5909bf90da9262a8804aefeaf14f34aa9"
+    ],
+    "assembly_rule_from_historical_runner": "'\\n\\n'.join(record['text'].strip() for record in accepted_parts if text.strip()).strip()",
+    "reassembled_matches_stored_scenario": true,
+    "separator_characters": 4,
+    "session_result_matches_stored_scenario": true
+  }
+}
