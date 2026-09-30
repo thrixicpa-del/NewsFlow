@@ -40,5 +40,8 @@ while its assembly SHA still identifies the original runtime string.  A2 and
 A3 `scenario.txt` bytes match their assembly SHA exactly.
 
 The complete paragraph-by-paragraph editorial audit and map-to-prose coverage
-are in [EDITORIAL_AUDIT.md](EDITORIAL_AUDIT.md).  No credentials, account
-settings, Authorization headers, cookies, or hidden reasoning are included.
+are in [EDITORIAL_AUDIT.md](EDITORIAL_AUDIT.md).  The subsequent independent
+reading review and correction of the A3 disclosure assertion are recorded in
+[INDEPENDENT_REVIEW_ADDENDUM.md](INDEPENDENT_REVIEW_ADDENDUM.md).  No
+credentials, account settings, Authorization headers, cookies, or hidden
+reasoning are included.

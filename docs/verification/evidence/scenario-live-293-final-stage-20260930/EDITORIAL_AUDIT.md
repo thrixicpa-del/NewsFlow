@@ -3,8 +3,11 @@
 The assessments below were made by reading each complete `part-P*.txt`, its
 persisted map, and the post-adapter request that supplied the current material.
 They are an acceptance review, **not** a runtime veto and did not cause a
-Planner or Writer retry.  `DRAMATIZED` was disclosed once in each opening; it
-is not treated as supplied reporting.
+Planner or Writer retry.  All maps mark their material `DRAMATIZED`, so it is
+not treated as supplied reporting.  The required prose disclosure is assessed
+from each raw Writer response; the prior statement that every opening emitted
+one was incorrect.  In particular, A3 P1 did **not** emit the required
+disclosure.  See [INDEPENDENT_REVIEW_ADDENDUM.md](INDEPENDENT_REVIEW_ADDENDUM.md).
 
 ## A1 — `scenario-live-293-a1-20260930-134000`
 
@@ -59,6 +62,13 @@ returns to a general “нагрузка”.  P3 begins “разговор о �
 назад” and remains a six-paragraph explanation of that point.  It has neither
 a separate final action/result nor a non-analytic closing development.
 
+**Separate Writer-contract failure:** P1’s instructions require one short
+DRAMATIZED disclosure after one or two opening hook sentences.  The visible P1
+response in `response-02-visible.txt` contains no such disclosure, and neither
+does the assembled `scenario.txt`.  This corrects the original audit’s false
+claim that every opening disclosed the reconstruction; it does not alter the
+historical map, response, or the fact that A3’s planned atoms are DRAMATIZED.
+
 | Part / atom / steps | Map material actually supplied | Result and assessment |
 | --- | --- | --- |
 | P1 / A1 / 1–5 | threat, immediate protection, altered routine, emergency regime | **DEVELOPED / COMPRESSED.** The opening is direct, but “ритм” and “смысл” paragraphs explain the same emergency. |
@@ -78,8 +88,10 @@ them rather than dropping detailed event steps.  The current source change
 clarifies trusted DRAMATIZED precedence and forbids an interpretation as an
 event-spine item, but A3 is its only live test and it still fails.
 3. **No factual claim is accepted merely from the title.** All atoms are
-`DRAMATIZED`; each opening includes its single disclosure.  The generic
-reconstruction is a quality problem, not disguised factual evidence.
+`DRAMATIZED`.  A1 and A2 opening responses contain their required disclosure;
+A3 does not, which is a separately recorded Writer-contract failure rather
+than evidence of supplied factual support.  The generic reconstruction is a
+quality problem, not disguised factual evidence.
 4. **No 30k conclusion can be drawn.** B is `NOT_RUN`: the prerequisite A
 acceptance did not occur.  Any source changes after A3 are `NOT_RETESTED`
 until a separately authorised new paid budget exists.
