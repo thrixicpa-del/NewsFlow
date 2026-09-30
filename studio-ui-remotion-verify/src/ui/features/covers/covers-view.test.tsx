@@ -700,10 +700,12 @@ describe("Covers Light view", () => {
     };
     render(<CoverGallery data={data} command={command} />);
 
+    fireEvent.click(screen.getByRole("button", { name: "1. Новый промпт" }));
     fireEvent.click(
       screen.getByTitle("Клик — увеличить; Ctrl+клик — выбрать несколько"),
       { ctrlKey: true },
     );
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
     fireEvent.click(screen.getByRole("button", { name: "Повторить с новыми (1)" }));
 
     expect(command).toHaveBeenCalledWith("regenerate-covers", {
@@ -765,6 +767,91 @@ describe("Covers Light view", () => {
       "regenerate-covers",
       expect.objectContaining({ currentProfile: true }),
     );
+  });
+
+  it("keeps the inspector current-repeat action on its immutable saved contract", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:inspector-current",
+        title: "Текущая обложка инспектора",
+        image_prompt: "saved inspector scene",
+        status: "Готово",
+        paths: [],
+      }],
+      coverSettings: {
+        ...fallback.coverSettings,
+        operation: "current_operation",
+      },
+    };
+    render(<CoverGallery data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Текущая обложка инспектора" }));
+    fireEvent.click(screen.getByRole("button", { name: "Повторить текущий" }));
+
+    expect(command).toHaveBeenCalledWith("regenerate-covers", {
+      indices: [0],
+      productionItemIds: ["production:inspector-current"],
+      currentProfile: true,
+      operation: "current_operation",
+    });
+  });
+
+  it("sends only new-prompt gallery topics through the new contract without clearing a manual face", () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        {
+          production_item_id: "production:new-manual-face",
+          title: "Новая обложка с выбранным лицом",
+          image_prompt: "new political scene",
+          status: "Новые промпты созданы",
+          face_reference_source: "manual" as const,
+          face_reference_label: "Ильхам Алиев",
+          face_reference_path: "C:/faces/aliyev.png",
+          paths: ["new.png"],
+        },
+        {
+          production_item_id: "production:old-prompt",
+          title: "Старая готовая обложка",
+          image_prompt: "saved scene",
+          status: "Готово",
+          paths: ["old.png"],
+        },
+      ],
+      coverSettings: {
+        ...fallback.coverSettings,
+        operation: "fresh_operation",
+        buildMode: "fastgen-full-my-face" as const,
+      },
+    };
+    render(<CoverGallery data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Новая обложка с выбранным лицом" }));
+    fireEvent.click(screen.getByTitle("Клик — увеличить; Ctrl+клик — выбрать несколько"), { ctrlKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    fireEvent.click(screen.getByRole("button", { name: "2. Старая готовая обложка" }));
+    fireEvent.click(screen.getByTitle("Клик — увеличить; Ctrl+клик — выбрать несколько"), { ctrlKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    fireEvent.click(screen.getByRole("button", { name: "Повторить с новыми (1)" }));
+
+    expect(command).toHaveBeenCalledWith("regenerate-covers", {
+      indices: [0],
+      productionItemIds: ["production:new-manual-face"],
+      currentProfile: false,
+      useBuildModeRanges: true,
+      operation: "fresh_operation",
+      buildMode: "fastgen-full-my-face",
+      faceMode: "auto",
+      textMode: "fastgen",
+      localFaceOnly: false,
+    });
+    expect(command).not.toHaveBeenCalledWith("clear-cover-face", expect.anything());
+    expect(command).not.toHaveBeenCalledWith("select-cover-face-person", expect.anything());
+    expect(data.covers[0].face_reference_source).toBe("manual");
+    expect(data.covers[0].face_reference_label).toBe("Ильхам Алиев");
   });
 
   it("keeps gallery context and metrics readable beside the workstation inspector", () => {
