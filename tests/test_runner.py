@@ -504,7 +504,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all("WRITER MATERIAL=" in prompt for prompt in client.writer_prompts))
                 self.assertEqual(
                     client.planner_budgets,
-                    [scenario_output_token_budget(request, 1536 + len(targets) * 768)],
+                    [scenario_output_token_budget(request, 1536 + len(targets) * 1536)],
                 )
                 self.assertEqual(job.state, RunState.DONE)
 
@@ -513,7 +513,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(
             scenario_output_token_budget(
                 ScenarioRequest(0, "T", "P", target_chars=50000),
-                1536 + len(calculate_story_part_targets(50000)) * 768,
+                1536 + len(calculate_story_part_targets(50000)) * 1536,
             ),
             8192,
         )
@@ -794,7 +794,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
 
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual(client.planner_budgets, [4096])
+        self.assertEqual(client.planner_budgets, [6144])
 
     async def test_scenario_runner_never_requests_or_persists_cover_face_metadata(self):
         """Cover identity work belongs to Covers, never Planner/Writer execution."""

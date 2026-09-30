@@ -1241,6 +1241,8 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("terminal development", prompt)
         self.assertIn("For EVERY atom in this NEW map, include writer_material", prompt)
         self.assertIn("ordered JSON list of 4 to 6 distinct concrete coverage beats", prompt)
+        self.assertIn("detailed enough to develop into a paragraph", prompt)
+        self.assertIn("rather than a label such as 'background', 'mechanism', 'result' or 'transition'", prompt)
         self.assertIn("not a parser gate", prompt)
         self.assertIn("Before returning JSON, check that every atom", prompt)
         self.assertIn("different declared states", prompt)

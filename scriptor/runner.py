@@ -512,7 +512,11 @@ class ParallelRunner:
             # Scale with the complete immutable map.  The provider-budget
             # helper remains the single global safety cap; an additional 8k
             # ceiling here would truncate the tail atoms of 50k+ scenarios.
-            planner_budget = max(2304, 1536 + len(part_targets) * 768)
+            # Each planned part now carries several concrete coverage beats
+            # for its first and only Writer call. Reserve enough output for
+            # that complete map at every supported target size; the provider
+            # helper below remains the only global cap.
+            planner_budget = max(3072, 1536 + len(part_targets) * 1536)
             planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
             if looks_like_action_required(planner_response):
                 job.result = planner_response
