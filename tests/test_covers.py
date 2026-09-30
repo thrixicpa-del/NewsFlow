@@ -4168,6 +4168,53 @@ class CoverLocalCompositorTests(unittest.TestCase):
         ])
         self.assertTrue(settings.cover_allow_varied_text_palette)
 
+    def test_scene_intensity_mode_is_persisted_and_changes_only_new_prompt_instructions(self):
+        """The opt-in scene treatment must not alter the standard Covers contract."""
+        settings = Settings()
+        item = {"title": "Правительство обсуждает бюджет", "script": ""}
+        standard = _cover_instruction(item, 0, settings)
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}):
+            save_cover_settings({"sceneIntensityMode": True})
+
+        enhanced = _cover_instruction(item, 0, settings)
+        self.assertTrue(settings.cover_scene_intensity_mode)
+        self.assertNotIn("УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ", standard)
+        self.assertIn("УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ", enhanced)
+        self.assertIn("только когда это следует из темы", enhanced)
+
+    def test_enhanced_new_prompt_replaces_an_unchanged_provider_scene_with_a_distinct_composition(self):
+        """A deliberate enhanced rewrite never silently keeps the old scene prompt."""
+        settings = Settings(cover_prompt_variant_count=1)
+        settings.cover_scene_intensity_mode = True
+        prior_scene = "People protest in a city square with signs"
+        item = {
+            "title": "Протест против решения правительства",
+            "script": "Участники вышли на площадь после объявления решения.",
+        }
+        prior_prompt = _normalize_cover_photo_prompt(prior_scene, item)
+        settings.cover_queue = [{
+            **item,
+            "image_prompt": prior_prompt,
+            "image_prompt_options": [prior_prompt],
+        }]
+
+        async def unchanged_prompt(*_args, **_kwargs):
+            return '{"prompts":["People protest in a city square with signs"],"recommended":1}'
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=unchanged_prompt)):
+            generate_cover_prompts({"indices": [0], "provider": "agent", "rewrite": True})
+
+        rewritten = settings.cover_queue[0]["image_prompt"]
+        self.assertNotEqual(rewritten.strip(), prior_prompt.strip())
+        self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", rewritten)
+
     def test_cover_build_mode_ranges_reject_overlaps(self):
         settings = Settings()
         with patch("scriptor.bridge.load_settings", return_value=settings), \

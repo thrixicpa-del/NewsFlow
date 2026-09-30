@@ -204,6 +204,7 @@ export const fallback: NewsFlowSnapshot = {
     referenceModeAuto: false,
     referenceMissingPaths: [],
     tabloidMode: false,
+    sceneIntensityMode: false,
     faceLibraryFolder: "",
     facePreparedFolder: "",
     faceLibraryEnabled: false,
@@ -3842,6 +3843,7 @@ export function Covers({
       referenceWillSendCount: rawData.coverSettings?.referenceWillSendCount || 0,
       referenceWillSendCountMyFaces: rawData.coverSettings?.referenceWillSendCountMyFaces || 0,
       tabloidMode: Boolean(rawData.coverSettings?.tabloidMode),
+      sceneIntensityMode: Boolean(rawData.coverSettings?.sceneIntensityMode),
       faceLibrary: {
         ...fallback.coverSettings.faceLibrary,
         ...(rawData.coverSettings?.faceLibrary || {}),
@@ -3920,6 +3922,9 @@ export function Covers({
     Boolean(data.coverSettings.referenceModeAuto),
   );
   const [tabloidMode, setTabloidMode] = useState(Boolean(data.coverSettings.tabloidMode));
+  const [sceneIntensityMode, setSceneIntensityMode] = useState(
+    Boolean(data.coverSettings.sceneIntensityMode),
+  );
   const [faceLibraryFolder, setFaceLibraryFolder] = useState(
     data.coverSettings.faceLibraryFolder || "",
   );
@@ -4017,6 +4022,7 @@ export function Covers({
     setCoverBuildMode(normaliseCoverBuildMode(data.coverSettings.buildMode));
     setBuildModeRanges(data.coverSettings.buildModeRanges || []);
     setAllowVariedTextPalette(data.coverSettings.allowVariedTextPalette);
+    setSceneIntensityMode(Boolean(data.coverSettings.sceneIntensityMode));
   // `data.coverSettings` above is a deliberately normalised object created
   // for every render. Depending on it here makes a missing optional field
   // (for example `selectedKeyLabels`) allocate a new fallback array forever
@@ -4337,6 +4343,7 @@ export function Covers({
     referenceModeComposition: fastgenReferenceModeComposition,
     referenceModeMoodLighting: fastgenReferenceModeMoodLighting,
     referenceModeAuto: fastgenReferenceModeAuto,
+    sceneIntensityMode,
     tabloidMode,
     faceLibraryFolder,
     facePreparedFolder,
@@ -5187,6 +5194,21 @@ export function Covers({
                 </label>
                 <small>
                   Без галочки: светлый/жёлтый текст на красной плашке. С галочкой FastGen выбирает контрастную пару под сцену. Ровная красная рамка остаётся обязательной.
+                </small>
+                <label className="check-row">
+                  <input
+                    aria-label="Усилить драматургию сцен"
+                    type="checkbox"
+                    checked={sceneIntensityMode}
+                    onChange={(event) => {
+                      setSceneIntensityMode(event.target.checked);
+                      void command("save-cover-settings", { sceneIntensityMode: event.target.checked });
+                    }}
+                  />
+                  Усилить драматургию сцен
+                </label>
+                <small>
+                  Только для новых промптов: добавляет уместный масштаб, противостояние и массовую реакцию по теме. «Создать новый промпт» не сохранит прежнюю композицию.
                 </small>
                 {buildModeRangeError ? <small className="error">{buildModeRangeError}</small> : null}
               </div>

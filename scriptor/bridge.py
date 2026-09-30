@@ -2906,6 +2906,7 @@ def snapshot() -> dict:
             "referenceModeComposition": settings.cover_fastgen_reference_mode_composition,
             "referenceModeMoodLighting": settings.cover_fastgen_reference_mode_mood_lighting,
             "referenceModeAuto": settings.cover_fastgen_reference_mode_auto,
+            "sceneIntensityMode": settings.cover_scene_intensity_mode,
             "referenceMissingPaths": [path for path in settings.cover_fastgen_reference_paths
                                       if not Path(path).expanduser().is_file()],
             "referenceProviderLimit": _cover_operation_reference_limit(settings, settings.cover_operation) or 10,
@@ -7432,6 +7433,8 @@ def save_cover_settings(payload: dict) -> dict:
                 setattr(settings, setting_name, bool(payload[payload_key]))
         if any(key in payload for key in ("referenceModeStyle", "referenceModeComposition", "referenceModeMoodLighting")):
             settings.cover_fastgen_reference_mode_auto = False
+    if isinstance(payload.get("sceneIntensityMode"), bool):
+        settings.cover_scene_intensity_mode = bool(payload["sceneIntensityMode"])
     if isinstance(payload.get("tabloidMode"), bool):
         settings.cover_tabloid_mode = bool(payload["tabloidMode"])
     if "faceLibraryFolder" in payload:
@@ -8125,6 +8128,59 @@ def _cover_topic_visual_plan(item: dict) -> str:
     )
 
 
+def _cover_scene_intensity_instruction(settings: Settings) -> str:
+    """Return the user's optional amplification for newly authored scene briefs."""
+    if not settings.cover_scene_intensity_mode:
+        return ""
+    return (
+        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ: пользователь просит более масштабную и плотную визуальную подачу. "
+        "Покажи заметную коллективную реакцию и ясное противостояние, только когда это следует из темы или сценария. "
+        "Для подтверждённого протеста используй большую недовольную толпу и читаемые издалека плакаты; "
+        "для подтверждённого вооружённого конфликта — больше релевантной техники, военных и масштаба столкновения; "
+        "для подтверждённых ударов — видимые последствия, разрушения, дым или спасательные действия. "
+        "Не добавляй людей, оружие, взрывы, разрушения или митинг к теме, которая их не содержит; вместо этого усили "
+        "контекстно уместные масштаб, реакцию, контраст, действие и композиционное противостояние. "
+    )
+
+
+_COVER_ENHANCED_REWRITE_COMPOSITIONS = (
+    "wide elevated view with the main action in the foreground and a separate visible reaction layer behind it",
+    "eye-level foreground confrontation with a large contextual reaction in the middle distance",
+    "compressed telephoto scene with a clear central action, layered bystanders and visible evidence of the consequence",
+    "diagonal composition that separates the opposing sides while preserving one immediate readable action",
+)
+
+
+def _cover_distinct_enhanced_rewrite_options(
+    options: list[str], item: dict, previous_options: list[object],
+) -> list[str]:
+    """Avoid silently retaining an old scene brief after an enhanced rewrite.
+
+    The provider gets the first opportunity to propose a new visual idea. If
+    it echoes a persisted option verbatim, this local fallback changes only
+    the composition and makes no additional provider request.
+    """
+    used = {" ".join(str(value).split()) for value in previous_options if str(value).strip()}
+    result: list[str] = []
+    for index, option in enumerate(options):
+        candidate = option
+        key = " ".join(candidate.split())
+        result_keys = {" ".join(value.split()) for value in result}
+        if key in used or key in result_keys:
+            direction = _COVER_ENHANCED_REWRITE_COMPOSITIONS[index % len(_COVER_ENHANCED_REWRITE_COMPOSITIONS)]
+            candidate = _normalize_cover_photo_prompt(
+                f"{_fallback_cover_prompt(item, index + 1)} Composition change: {direction}.", item,
+            )
+            attempt = 1
+            while " ".join(candidate.split()) in used or " ".join(candidate.split()) in result_keys:
+                candidate = _normalize_cover_photo_prompt(
+                    f"{_fallback_cover_prompt(item, index + attempt + 1)} Composition alternative {attempt}: {direction}.", item,
+                )
+                attempt += 1
+        result.append(candidate)
+    return result
+
+
 def _cover_news_conflict_requirement(item: dict) -> str:
     """Require a visible story stake without imposing a pre-classified scene."""
     del item
@@ -8156,6 +8212,7 @@ def _cover_instruction(item: dict, position: int, settings) -> str:
         "ракурсом, дистанцией камеры и расположением людей/объектов от остальных вариантов.\n\n"
         f"ТЕМА: {title}\n{_cover_structured_context(item)}\n{_cover_topic_visual_plan(item)}"
     )
+    request += _cover_scene_intensity_instruction(settings)
     if base:
         request += f"\nДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ ПОЛЬЗОВАТЕЛЯ: {base}"
     request += _cover_ai_reference_instruction(item, position, settings)
@@ -8367,6 +8424,7 @@ def generate_cover_prompts(payload: dict) -> dict:
     _save_cover_state(settings)
 
     async def build_one(index: int, item: dict) -> None:
+        previous_options = list(item.get("image_prompt_options") or [])
         provider_call = _BoundedCoverTextProvider(
             pool,
             lambda attempt: (
@@ -8378,8 +8436,8 @@ def generate_cover_prompts(payload: dict) -> dict:
         )
         try:
             prompt = _cover_instruction(item, index, settings)
-            if rewrite and item.get("image_prompt_options"):
-                previous = "\n".join(f"- {value}" for value in item.get("image_prompt_options", [])[:5])
+            if rewrite and previous_options:
+                previous = "\n".join(f"- {value}" for value in previous_options[:5])
                 prompt += ("\nПредыдущие варианты не подошли. Сделай новый визуальный ход, заметно отличный от них, "
                            "но сохрани фактическую тему и выбранные слова.\nПРЕДЫДУЩИЕ ВАРИАНТЫ:\n" + previous)
             if provider == "agent":
@@ -8391,6 +8449,8 @@ def generate_cover_prompts(payload: dict) -> dict:
                 await provider_call.generate(prompt, image_paths=reference_paths[:6]), settings.cover_prompt_variant_count,
             )
             options = [_normalize_cover_photo_prompt(value, item) for value in options]
+            if rewrite and settings.cover_scene_intensity_mode:
+                options = _cover_distinct_enhanced_rewrite_options(options, item, previous_options)
             if not options:
                 raise ValueError("ИИ вернул слишком короткий промпт обложки")
             requested_count = max(1, int(settings.cover_prompt_variant_count or 1))
@@ -8414,6 +8474,8 @@ def generate_cover_prompts(payload: dict) -> dict:
             if _cover_prompt_safety_blocked(exc):
                 fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
                 options = [_normalize_cover_photo_prompt(_fallback_cover_prompt(item, variant), item) for variant in range(fallback_count)]
+                if rewrite and settings.cover_scene_intensity_mode:
+                    options = _cover_distinct_enhanced_rewrite_options(options, item, previous_options)
                 _cover_step(item, "Промпты готовы", 100,
                             "Провайдер отклонил формулировку: создан безопасный локальный вариант")
                 item.update(image_prompt_options=options, selected_prompt_index=0,
