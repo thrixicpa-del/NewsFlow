@@ -4,12 +4,54 @@ from pathlib import Path
 
 from scripts.capture_scenario_acceptance import (
     _budget_totals,
+    _estimate_max_call_usd,
+    _planner_test_route_kwargs,
+    _post_adapter_payload_comparison,
     _reserve_budget,
     _write_text,
 )
 
 
 class ScenarioAcceptanceCaptureTests(unittest.TestCase):
+    def test_cost_reservation_counts_reasoning_inside_output_once(self):
+        estimate = _estimate_max_call_usd(
+            "gpt-5.4", input_chars=1000, max_output_tokens=32768,
+        )
+
+        self.assertEqual(estimate["input_token_upper_bound"], 1000)
+        self.assertEqual(estimate["output_token_upper_bound"], 32768)
+        self.assertAlmostEqual(estimate["estimated_max_usd"], 0.49402, places=5)
+
+    def test_test_planner_route_changes_only_structured_planner_calls(self):
+        planner = _planner_test_route_kwargs(
+            {"text_format": {"type": "json_schema"}, "max_output_tokens": 32768},
+            model="gpt-5.4",
+            reasoning_effort="medium",
+        )
+        writer = _planner_test_route_kwargs(
+            {"max_output_tokens": 5120},
+            model="gpt-5.4",
+            reasoning_effort="medium",
+        )
+
+        self.assertEqual(planner["model"], "gpt-5.4")
+        self.assertEqual(planner["reasoning_effort"], "medium")
+        self.assertEqual(writer, {"max_output_tokens": 5120})
+
+    def test_planner_matrix_comparison_removes_only_model_and_reasoning(self):
+        first = {
+            "model": "gpt-5.4-mini", "reasoning": {"effort": "none"},
+            "instructions": "same", "input": "same", "text": {"format": {"strict": True}},
+            "max_output_tokens": 32768,
+        }
+        second = {
+            **first, "model": "gpt-5.4", "reasoning": {"effort": "medium"},
+        }
+
+        self.assertEqual(_post_adapter_payload_comparison(first), _post_adapter_payload_comparison(second))
+        self.assertNotIn("model", _post_adapter_payload_comparison(first))
+        self.assertNotIn("reasoning", _post_adapter_payload_comparison(first))
+
     def test_visible_evidence_text_keeps_its_original_newline_bytes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "scenario.txt"

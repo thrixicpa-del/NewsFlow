@@ -156,10 +156,12 @@ class OpenAITextClient:
                        image_paths: list[str] | None = None,
                        max_output_tokens: int | None = None,
                        instructions: str | None = None,
-                       text_format: dict | None = None) -> str:
+                       text_format: dict | None = None,
+                       model: str | None = None,
+                       reasoning_effort: str | None = None) -> str:
         content = [{"type": "input_text", "text": prompt}] + self._reference_content(image_paths)
         request_input: object = prompt if len(content) == 1 else [{"role": "user", "content": content}]
-        payload = {"model": self.model, "input": request_input}
+        payload = {"model": str(model or self.model).strip() or self.model, "input": request_input}
         if instructions and instructions.strip():
             payload["instructions"] = instructions.strip()
         if max_output_tokens and max_output_tokens > 0:
@@ -170,6 +172,8 @@ class OpenAITextClient:
             # silently remove it after a provider error, which would create a
             # second differently-shaped logical request.
             payload["text"] = {"format": text_format}
+        if reasoning_effort is not None:
+            payload["reasoning"] = {"effort": str(reasoning_effort)}
         result = await asyncio.to_thread(
             self._request, "POST", "/v1/responses", payload
         )
@@ -241,7 +245,9 @@ class HybridTextPool:
                        image_paths: list[str] | None = None,
                        max_output_tokens: int | None = None,
                        instructions: str | None = None,
-                       text_format: dict | None = None) -> str:
+                       text_format: dict | None = None,
+                       model: str | None = None,
+                       reasoning_effort: str | None = None) -> str:
         if self._queue is None:
             self._queue = asyncio.Queue()
             for client in self._slots:
@@ -255,6 +261,10 @@ class HybridTextPool:
                 output_kwargs["instructions"] = instructions.strip()
             if text_format is not None:
                 output_kwargs["text_format"] = text_format
+            if model is not None:
+                output_kwargs["model"] = model
+            if reasoning_effort is not None:
+                output_kwargs["reasoning_effort"] = reasoning_effort
             # Preserve compatibility with lightweight provider adapters and
             # tests that implement the historical two-argument method.
             if image_paths is None:
@@ -282,15 +292,21 @@ class HybridTextPool:
     async def generate_fresh(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
                              max_output_tokens: int | None = None,
                              instructions: str | None = None,
-                             text_format: dict | None = None) -> str:
+                             text_format: dict | None = None,
+                             model: str | None = None,
+                             reasoning_effort: str | None = None) -> str:
         return await self.generate(prompt, on_progress, image_paths=image_paths,
                                    max_output_tokens=max_output_tokens, instructions=instructions,
-                                   text_format=text_format)
+                                   text_format=text_format, model=model,
+                                   reasoning_effort=reasoning_effort)
 
     async def generate_openai(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
                               max_output_tokens: int | None = None,
                               instructions: str | None = None,
-                              text_format: dict | None = None) -> str:
+                              text_format: dict | None = None,
+                              model: str | None = None,
+                              reasoning_effort: str | None = None) -> str:
         return await self.generate(prompt, on_progress, image_paths=image_paths,
                                    max_output_tokens=max_output_tokens, instructions=instructions,
-                                   text_format=text_format)
+                                   text_format=text_format, model=model,
+                                   reasoning_effort=reasoning_effort)

@@ -9,6 +9,7 @@ the paid-call budget.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import hashlib
 import json
@@ -39,11 +40,40 @@ SECRET_PATTERNS = (
 _MAX_FULL_RUNS = 4
 _MAX_LOGICAL_CALLS = 32
 _MAX_HTTP_ATTEMPTS = 40
+_MODEL_USD_PER_MILLION_TOKENS = {
+    "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
+    "gpt-5.4": {"input": 2.50, "output": 15.00},
+}
 
 
 def _sha(value: str | bytes) -> str:
     data = value.encode("utf-8") if isinstance(value, str) else value
     return hashlib.sha256(data).hexdigest()
+
+
+def _estimate_max_call_usd(model: str, *, input_chars: int, max_output_tokens: int) -> dict[str, object]:
+    """Conservatively reserve an upper bound before an opt-in live request.
+
+    One input character per token deliberately over-reserves Russian text.
+    Reasoning is part of output tokens in Responses usage, so it is never
+    charged a second time in this estimate.
+    """
+    normalized = str(model or "").strip()
+    tariff_key = next((key for key in _MODEL_USD_PER_MILLION_TOKENS if normalized.startswith(key)), "")
+    if not tariff_key:
+        raise ValueError(f"no approved cost tariff for model {normalized!r}")
+    tariff = _MODEL_USD_PER_MILLION_TOKENS[tariff_key]
+    input_upper = max(0, int(input_chars))
+    output_upper = max(0, int(max_output_tokens))
+    estimate = (input_upper * tariff["input"] + output_upper * tariff["output"]) / 1_000_000
+    return {
+        "model": normalized,
+        "pricing_basis": "official USD per 1M input/output tokens; one input character per token upper bound",
+        "input_token_upper_bound": input_upper,
+        "output_token_upper_bound": output_upper,
+        "reasoning_tokens_charged_separately": False,
+        "estimated_max_usd": round(estimate, 6),
+    }
 
 
 def _write_text(path: Path, value: str) -> None:
@@ -96,6 +126,65 @@ def _phase(prompt: str, instructions: object, method: str) -> str:
     return f"WRITER_{match.group(1)}" if match else f"UNKNOWN:{method}"
 
 
+def _planner_test_route_kwargs(
+    kwargs: dict[str, object], *, model: str | None, reasoning_effort: str | None,
+) -> dict[str, object]:
+    """Route only Structured-Output Planner calls in an opt-in test harness.
+
+    The normal runtime has no route override.  In this harness a non-empty
+    ``text_format`` is the adapter's trusted technical indication of a Planner
+    or structural-repair request; Writer calls do not carry a schema and keep
+    their configured model and parameters exactly as-is.
+    """
+    routed = dict(kwargs)
+    if routed.get("text_format") is not None:
+        if model:
+            routed["model"] = model
+        if reasoning_effort is not None:
+            routed["reasoning_effort"] = reasoning_effort
+    return routed
+
+
+def _post_adapter_payload_comparison(payload: object) -> object:
+    """Return a comparison projection that excludes only matrix variables."""
+    if not isinstance(payload, dict):
+        raise TypeError("post-adapter payload must be an object")
+    return {
+        key: value for key, value in payload.items()
+        if key not in {"model", "reasoning"}
+    }
+
+
+def _test_scenario_request(settings, title: str, item: dict, bridge):
+    """Use the same request constructors and trusted item contract as bridge."""
+    from scriptor.core import PromptRange, ScenarioRequest, build_requests
+
+    ranges = [PromptRange(
+        int(value.get("start", 1)), int(value.get("end", 1)), str(value.get("prompt", "")),
+        max(0, int(value.get("target_chars", 0) or 0)),
+        max(0, int(value.get("allowed_min", 0) or 0)),
+        max(0, int(value.get("allowed_max", 0) or 0)),
+    ) for value in settings.prompt_ranges]
+    base = build_requests(
+        [title], settings.template, ranges,
+        settings.scenario_target_chars,
+        settings.scenario_allowed_min,
+        settings.scenario_allowed_max,
+    )[0]
+    narration_only = (
+        "\n\nФОРМАТ ОТВЕТА ОБЯЗАТЕЛЕН: верни только готовый цельный текст для озвучки. "
+        "Не добавляй рабочую концепцию, ядро новости, лейтмотив, план, структуру, подзаголовки, "
+        "Markdown, списки, технические комментарии или фразы вроде «если план согласован». "
+        "Допускаются только обычные связные абзацы самого сценария."
+    )
+    factual_context_available, dramatized_allowed = bridge._production_item_material_contract(item)
+    return ScenarioRequest(
+        base.index, base.title, base.prompt + bridge.production_item_prompt(item) + narration_only,
+        str(item.get("id", "")), base.target_chars, base.allowed_min, base.allowed_max,
+        factual_context_available, dramatized_allowed,
+    )
+
+
 def _read_budget_ledger(path: Path) -> dict[str, object]:
     if not path.exists():
         return {"version": 1, "runs": []}
@@ -115,7 +204,7 @@ def _budget_totals(ledger: dict[str, object]) -> tuple[int, int, int]:
     # ordinary pipeline runs without silently resetting either allowance.
     full_runs = sum(
         1 for item in runs
-        if isinstance(item, dict) and str(item.get("kind", "")).upper() != "D"
+        if isinstance(item, dict) and str(item.get("kind", "")).upper() not in {"D", "M"}
     )
     logical = sum(max(0, int(item.get("reserved_logical_calls", 0) or 0))
                   for item in runs if isinstance(item, dict))
@@ -149,7 +238,7 @@ def _reserve_budget(
         if reserved_http_attempts is not None
         else reserve_logical + 2  # bounded key/transport contingency
     )
-    is_full_run = str(run_kind).upper() != "D"
+    is_full_run = str(run_kind).upper() not in {"D", "M"}
     if (
         (is_full_run and full_runs >= max_full_runs)
         or logical + reserve_logical > max_logical_calls
@@ -192,18 +281,26 @@ def _complete_budget_reservation(
 class RecordingPool:
     """Transparent logical-call ledger; it does not change provider retries."""
 
-    def __init__(self, sessions, openai_keys, chat_url, model):
+    def __init__(self, sessions, openai_keys, chat_url, model, *, planner_model=None,
+                 planner_reasoning_effort=None):
         from scriptor.openai_client import HybridTextPool
 
         self.inner = HybridTextPool(sessions, openai_keys, chat_url, model)
         self.concurrency = self.inner.concurrency
         self.calls: list[dict[str, object]] = []
         self.max_logical_calls: int | None = None
+        self.planner_model = planner_model
+        self.planner_reasoning_effort = planner_reasoning_effort
 
     async def _call(self, method: str, prompt: str, *args, **kwargs):
         if self.max_logical_calls is not None and len(self.calls) >= self.max_logical_calls:
             raise RuntimeError("Scenario acceptance logical-call reservation exhausted")
-        instructions = kwargs.get("instructions")
+        routed_kwargs = _planner_test_route_kwargs(
+            kwargs,
+            model=self.planner_model,
+            reasoning_effort=self.planner_reasoning_effort,
+        )
+        instructions = routed_kwargs.get("instructions")
         entry = {
             "logical_call": len(self.calls) + 1,
             "method": method,
@@ -212,12 +309,14 @@ class RecordingPool:
             "input_sha256": _sha(prompt),
             "instructions_chars": len(str(instructions or "")),
             "instructions_sha256": _sha(str(instructions or "")),
-            "max_output_tokens": kwargs.get("max_output_tokens", "UNKNOWN"),
-            "text_format": _redact(kwargs.get("text_format", "NONE")),
+            "max_output_tokens": routed_kwargs.get("max_output_tokens", "UNKNOWN"),
+            "text_format": _redact(routed_kwargs.get("text_format", "NONE")),
+            "model_override": routed_kwargs.get("model", "NONE"),
+            "reasoning_effort": routed_kwargs.get("reasoning_effort", "NONE"),
         }
         self.calls.append(entry)
         try:
-            result = await getattr(self.inner, method)(prompt, *args, **kwargs)
+            result = await getattr(self.inner, method)(prompt, *args, **routed_kwargs)
         except Exception as error:
             entry.update({"result": "ERROR", "error_type": type(error).__name__})
             for key in ("status", "response_id", "incomplete_reason"):
@@ -272,7 +371,11 @@ def main() -> int:
     parser.add_argument("--target", type=int, default=12000)
     parser.add_argument("--minimum", type=int, default=11500)
     parser.add_argument("--maximum", type=int, default=12500)
-    parser.add_argument("--run-kind", choices=("A", "B", "R"), default="A")
+    parser.add_argument("--run-kind", choices=("A", "B", "M", "R"), default="A")
+    parser.add_argument("--planner-only", action="store_true")
+    parser.add_argument("--planner-model")
+    parser.add_argument("--planner-reasoning-effort", choices=("none", "low", "medium", "high", "xhigh"))
+    parser.add_argument("--planner-output-tokens", type=int)
     parser.add_argument("--suite-ledger", type=Path)
     parser.add_argument("--a-editorial-passed", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
@@ -282,6 +385,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.minimum > args.maximum:
         raise SystemExit("minimum must not exceed maximum")
+    if args.planner_only != (args.run_kind == "M"):
+        raise SystemExit("planner-only is required exactly for an M matrix cell")
+    if args.planner_only and (
+        not str(args.planner_model or "").strip()
+        or args.planner_reasoning_effort is None
+        or args.planner_output_tokens != 32768
+    ):
+        raise SystemExit("M cells require model, reasoning effort, and planner-output-tokens=32768")
 
     repo = Path.cwd().resolve()
     sys.path.insert(0, str(repo))
@@ -337,6 +448,12 @@ def main() -> int:
         "git_status_short": _git("git status --short"),
         "provider": settings.scenario_provider,
         "configured_model": settings.openai_model,
+        "test_planner_route": {
+            "enabled": bool(args.planner_model),
+            "model": args.planner_model or "NONE",
+            "reasoning_effort": args.planner_reasoning_effort or "NONE",
+            "max_output_tokens": args.planner_output_tokens or "RUNTIME_DEFAULT",
+        },
         "active_key_count": len(active_keys),
         "key_material": "NOT_CAPTURED_MEMORY_ONLY",
         "contract": {"target_chars": args.target, "allowed_min": args.minimum, "allowed_max": args.maximum},
@@ -360,6 +477,8 @@ def main() -> int:
         run_kind=args.run_kind,
         target=args.target,
         source_head=_git("git rev-parse HEAD"),
+        reserved_logical_calls=1 if args.planner_only else None,
+        reserved_http_attempts=1 if args.planner_only else None,
         max_full_runs=args.full_run_limit,
         max_logical_calls=args.logical_limit,
         max_http_attempts=args.http_limit,
@@ -410,18 +529,76 @@ def main() -> int:
     pool_box: dict[str, RecordingPool] = {}
 
     def pool_factory(*pool_args, **pool_kwargs):
-        pool = RecordingPool(*pool_args, **pool_kwargs)
+        pool = RecordingPool(
+            *pool_args,
+            **pool_kwargs,
+            planner_model=args.planner_model,
+            planner_reasoning_effort=args.planner_reasoning_effort,
+        )
         pool.max_logical_calls = int(reservation["reserved_logical_calls"])
         pool_box["pool"] = pool
         return pool
 
+    planner_only_calls: list[dict[str, object]] = []
     try:
-        with patch.object(bridge, "load_settings", return_value=settings), \
-             patch.object(bridge, "save_settings", return_value=None), \
-             patch.object(bridge, "HybridTextPool", side_effect=pool_factory), \
-             patch.object(OpenAITextClient, "_request", new=capture_request):
-            bridge.add_scenarios({"titles": args.title})
-            bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+        with patch.object(OpenAITextClient, "_request", new=capture_request):
+            if args.planner_only:
+                from scriptor.story_planner import (
+                    calculate_story_part_targets,
+                    parse_story_plan_response,
+                    split_story_planner_request,
+                    story_planner_response_format,
+                )
+
+                request = _test_scenario_request(settings, args.title, item, bridge)
+                part_targets = calculate_story_part_targets(max(request.target_chars, request.allowed_min))
+                instructions, planner_input = split_story_planner_request(request, part_targets)
+                response_format = story_planner_response_format()
+                _write_text(evidence / "03-planner-instructions.txt", instructions)
+                _write_text(evidence / "04-planner-input.txt", planner_input)
+                _write_json(evidence / "05-planner-response-format.json", response_format)
+                client = OpenAITextClient(active_keys[0].secret, settings.openai_model, active_keys[0].label)
+                planner_response = asyncio.run(client.generate(
+                    planner_input,
+                    instructions=instructions,
+                    text_format=response_format,
+                    max_output_tokens=args.planner_output_tokens,
+                    model=args.planner_model,
+                    reasoning_effort=args.planner_reasoning_effort,
+                ))
+                planner_only_calls.append({
+                    "logical_call": 1,
+                    "phase": "PLANNER",
+                    "method": "generate",
+                    "model_override": args.planner_model,
+                    "reasoning_effort": args.planner_reasoning_effort,
+                    "max_output_tokens": args.planner_output_tokens,
+                    "input_chars": len(planner_input),
+                    "input_sha256": _sha(planner_input),
+                    "instructions_chars": len(instructions),
+                    "instructions_sha256": _sha(instructions),
+                    "text_format": response_format,
+                    "result": "OK",
+                    "visible_response_chars": len(planner_response),
+                    "visible_response_sha256": _sha(planner_response),
+                })
+                try:
+                    parsed = parse_story_plan_response(
+                        planner_response, part_targets, require_state_transitions=True,
+                    )
+                    _write_json(evidence / "20-story-map-parsed.json", parsed.to_dict())
+                    _write_json(evidence / "21-planner-parse.json", {"result": "PASS"})
+                except (TypeError, ValueError) as error:
+                    _write_json(evidence / "21-planner-parse.json", {
+                        "result": "FAIL", "error_type": type(error).__name__,
+                        "message_chars": len(str(error)),
+                    })
+            else:
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "save_settings", return_value=None), \
+                     patch.object(bridge, "HybridTextPool", side_effect=pool_factory):
+                    bridge.add_scenarios({"titles": args.title})
+                    bridge.generate_scenarios({"provider": "openai", "indices": [0]})
     except Exception as error:  # noqa: BLE001 - preserve safe evidence on a provider/runtime failure
         _write_json(evidence / "98-harness-exception.json", {
             "type": type(error).__name__, "message_chars": len(str(error)),
@@ -429,7 +606,7 @@ def main() -> int:
 
     _titles, jobs = load_session()
     job = jobs[0] if jobs else None
-    calls = pool_box.get("pool").calls if pool_box.get("pool") else []
+    calls = planner_only_calls or (pool_box.get("pool").calls if pool_box.get("pool") else [])
     _write_json(evidence / "10-logical-calls.json", calls)
     _write_json(evidence / "11-transport-attempts.json", {
         "attempts": captured_requests, "responses": captured_responses, "sdk_retries": "UNKNOWN",
