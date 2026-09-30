@@ -2858,18 +2858,17 @@ export function Scenarios({
           />
           <Button
             kind="success"
-            disabled={importingManualScenario || !manualTitle.trim() || !manualText.trim()}
-            onClick={() => void importReady()}
+            disabled={importingManualScenario}
+            onClick={() => void importReadyFiles()}
           >
             <Upload size={17} />
             {importingManualScenario ? "Сохранение…" : "Добавить готовый"}
           </Button>
           <Button
-            disabled={importingManualScenario}
-            onClick={() => void importReadyFiles()}
+            disabled={importingManualScenario || !manualTitle.trim() || !manualText.trim()}
+            onClick={() => void importReady()}
           >
-            <Upload size={17} />
-            Импортировать TXT / ZIP
+            Добавить своё
           </Button>
         </div>
         <Textarea

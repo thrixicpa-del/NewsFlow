@@ -226,7 +226,7 @@ describe("Scenarios and scripts Light views", () => {
 
     fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
     fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
-    fireEvent.click(screen.getByRole("button", { name: "Добавить готовый" }));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить своё" }));
 
     await waitFor(() =>
       expect(command).toHaveBeenCalledWith("import-manual-scenario", {
@@ -244,7 +244,7 @@ describe("Scenarios and scripts Light views", () => {
 
     fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
     fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
-    fireEvent.click(screen.getByRole("button", { name: "Добавить готовый" }));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить своё" }));
 
     await waitFor(() =>
       expect(command).toHaveBeenCalledWith("import-manual-scenario", {
@@ -256,17 +256,23 @@ describe("Scenarios and scripts Light views", () => {
     expect((screen.getByLabelText("Полный текст сценария") as HTMLTextAreaElement).value).toBe("");
   });
 
-  it("requires a title and full text before enabling the ready-scenario action", () => {
+  it("keeps ready-file import active and requires a title and text for manual import", async () => {
+    const chooseScenarioTexts = vi.fn().mockResolvedValue([]);
+    Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
     render(<Scenarios data={fallback} go={vi.fn()} command={vi.fn()} refresh={async () => undefined} />);
 
-    const submit = screen.getByRole("button", { name: "Добавить готовый" });
-    expect(submit).toHaveProperty("disabled", true);
+    const readyFileImport = screen.getByRole("button", { name: "Добавить готовый" });
+    const manualSubmit = screen.getByRole("button", { name: "Добавить своё" });
+    expect(readyFileImport).toHaveProperty("disabled", false);
+    expect(manualSubmit).toHaveProperty("disabled", true);
+    fireEvent.click(readyFileImport);
+    await waitFor(() => expect(chooseScenarioTexts).toHaveBeenCalledTimes(1));
 
     fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
-    expect(submit).toHaveProperty("disabled", true);
+    expect(manualSubmit).toHaveProperty("disabled", true);
 
     fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
-    expect(submit).toHaveProperty("disabled", false);
+    expect(manualSubmit).toHaveProperty("disabled", false);
   });
 
   it("imports file-selected ready scenarios through the existing batch command", async () => {
@@ -278,7 +284,7 @@ describe("Scenarios and scripts Light views", () => {
     Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
     render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Импортировать TXT / ZIP" }));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить готовый" }));
 
     await waitFor(() =>
       expect(command).toHaveBeenCalledWith("import-manual-scenarios", {
@@ -296,7 +302,7 @@ describe("Scenarios and scripts Light views", () => {
 
     fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
     fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
-    const submit = screen.getByRole("button", { name: "Добавить готовый" });
+    const submit = screen.getByRole("button", { name: "Добавить своё" });
     act(() => {
       fireEvent.click(submit);
       fireEvent.click(submit);
