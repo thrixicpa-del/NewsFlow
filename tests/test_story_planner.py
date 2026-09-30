@@ -319,6 +319,10 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn("MATERIAL ALLOCATION: this part has 3 owned atoms; reserve roughly 1333 characters", prompt)
         self.assertIn("WRITER MATERIAL=объявление решения; порядок применения; первая реакция", prompt)
         self.assertIn("WRITER MATERIAL=перестройка очереди; проверка результата", prompt)
+        self.assertEqual(
+            plan.to_dict()["content_atoms"][0]["writer_material"],
+            ("объявление решения", "порядок применения", "первая реакция"),
+        )
 
     def test_cover_metadata_is_inert_for_a_scenario_story_map(self):
         """A valid story neither requires nor persists Covers-only fields."""
@@ -1229,6 +1233,9 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("semantic-density requirements", prompt)
         self.assertIn("minimum 3 distinct atoms", prompt)
         self.assertIn("terminal development", prompt)
+        self.assertIn("For EVERY atom in this NEW map, include writer_material", prompt)
+        self.assertIn("ordered JSON list of 4 to 6 distinct concrete coverage beats", prompt)
+        self.assertIn("not a parser gate", prompt)
         self.assertIn("Before returning JSON, check that every atom", prompt)
         self.assertIn("different declared states", prompt)
         self.assertIn("synonym swap", prompt)
