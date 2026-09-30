@@ -281,6 +281,16 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertIn("возможным развитием", prompt)
         self.assertNotIn("уже произошедшей хроникой", prompt)
 
+    def test_headline_only_contract_marks_that_no_factual_context_is_available(self):
+        prompt = bridge.production_item_prompt({
+            "framing_type": "EDITORIAL",
+            "topic": "Заголовок без подтверждающего контекста",
+            "supporting_context": [],
+        })
+
+        self.assertIn("FACTUAL_CONTEXT_AVAILABILITY: NONE", prompt)
+        self.assertIn("every planned atom must be DRAMATIZED", prompt)
+
     def test_legacy_results_are_projected_to_production_items(self):
         settings = Settings(
             idea_results=["Переговоры зашли в тупик: спор идёт вокруг главного условия"],

@@ -6629,6 +6629,12 @@ def production_item_prompt(item: dict) -> str:
         )
     if context:
         blocks.append("Опорный контекст: " + " | ".join(context[:3]))
+        blocks.append("FACTUAL_CONTEXT_AVAILABILITY: SUPPLIED")
+    else:
+        blocks.append(
+            "FACTUAL_CONTEXT_AVAILABILITY: NONE — there is no supplied factual context beyond the title/topic; "
+            "every planned atom must be DRAMATIZED."
+        )
     if item.get("promised_question"):
         blocks.append(f"Что обязан раскрыть сценарий: {item['promised_question']}")
     if requirements:

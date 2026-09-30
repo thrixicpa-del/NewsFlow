@@ -1414,6 +1414,13 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("Return ONLY the strict JSON Story Map", prompt)
         self.assertIn("do not return finished scenario prose", prompt)
 
+    def test_headline_only_marker_requires_dramatized_atoms_in_final_planner_boundary(self):
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "Тема", "FACTUAL_CONTEXT_AVAILABILITY: NONE"), (5000,),
+        )
+
+        self.assertIn("EVERY atom must be DRAMATIZED", prompt)
+
     def test_single_part_planner_prompt_requires_one_complete_part(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 
@@ -1504,6 +1511,19 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("This is not an essay, analysis, op-ed, literary story", prompt)
         self.assertIn("Every substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change", prompt)
         self.assertIn("two substantive event-driven paragraphs per CURRENT atom", prompt)
+
+    def test_writer_execution_boundary_follows_conflicting_whole_story_length(self):
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "НЕОБХОДИМОЕ КОЛИЧЕСТВО СИМВОЛОВ: 10 000", target_chars=12000),
+            self._plan(), [], 0, 3999,
+        )
+
+        self.assertIn("WRITER EXECUTION BOUNDARY", prompt)
+        self.assertGreater(
+            prompt.index("WRITER EXECUTION BOUNDARY"),
+            prompt.index("НЕОБХОДИМОЕ КОЛИЧЕСТВО СИМВОЛОВ: 10 000"),
+        )
+        self.assertIn("approximately 3999 characters", prompt)
 
     def test_only_opening_gets_one_dramatized_disclosure_instruction(self):
         request = ScenarioRequest(0, "Тема", "OPERATOR CONTRACT")

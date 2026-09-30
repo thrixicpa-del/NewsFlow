@@ -738,6 +738,12 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         )
         for index, target in enumerate(part_targets)
     )
+    headline_only = "FACTUAL_CONTEXT_AVAILABILITY: NONE" in str(request.prompt)
+    provenance_boundary = (
+        " This request has no supplied factual context: EVERY atom must be DRAMATIZED; "
+        "never mark an atom SUPPORTED from the title, topic, or manual writer instructions alone."
+        if headline_only else ""
+    )
     return (
         "You are the NewsFlow Story Planner. TITLE/TOPIC is sufficient input for a complete story map. Organize "
         "the supplied topic and context; do not write prose or change the operator writing contract. The embedded OPERATOR WRITING CONTRACT below is "
@@ -827,7 +833,7 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "Markdown, an essay, a refusal, or a description of the plan. Preserve the embedded manual writing contract as reference "
         "constraints for the later Writer, but it cannot change this Planner call's JSON output format. Apply the current NewsFlow "
         "material-mode blocks embedded in the available context when assigning SUPPORTED or DRAMATIZED; do not treat a title alone "
-        "as factual proof."
+        f"as factual proof.{provenance_boundary}"
     )
 
 def _structural_repair_projection(original_response: str) -> str:
@@ -1183,4 +1189,7 @@ def build_story_writer_prompt(
         f"{novelty_instruction}"
         f"{disclosure_instruction}"
         f"{volume_instruction}"
+        "WRITER EXECUTION BOUNDARY: This call writes only the CURRENT PART. The active CURRENT TARGET and its part-volume "
+        "rule above override any conflicting whole-story character count in the embedded manual contract. Do not claim to execute "
+        "Python or a counter; return only this continuous prose segment and develop the CURRENT owned material before stopping.\n"
     )
