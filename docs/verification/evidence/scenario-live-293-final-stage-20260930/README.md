@@ -27,13 +27,13 @@ no A satisfies both length and full editorial acceptance.
 
 | Bundle | SHA-256 |
 | --- | --- |
-| `scenario-live-293-a1-20260930-134000-safe.zip` | `7d39fd132c6003e00c424b79a604fab3cbd851a7e6ff007e865e21a67488fc05` |
-| `scenario-live-293-a2-20260930-135000-safe.zip` | `21e06ad4a281254750f013f2420d056b5c7e5688d4b007e7383c52f3d97db974` |
-| `scenario-live-293-a3-20260930-140000-safe.zip` | `648065fc9838e267e7a0d142646e45f1c5e2d054927f1aa33a787ca5e0576f6b` |
+| `scenario-live-293-a1-20260930-134000-published.zip` | `7004a0b7ba486325838f33a6f2b8f0e075275c0a5249b7c1074a3ceddbc7b160` |
+| `scenario-live-293-a2-20260930-135000-published.zip` | `b70ed1fa45dc3587994e5f6ac000d2847a7363571c16ab49c146b7e87f62bab1` |
+| `scenario-live-293-a3-20260930-140000-published.zip` | `d3944413e036bae2986108fc9890fd1958bf00e2f7098e52276cb4cfa47266fc` |
 
-Each `*-safe.zip` is freshly packaged from its published directory after
-omitting the disposable `runtime-root`; the original local bundle was never
-published. `30-assembly.json` is authoritative for the runtime Python-length and
+Each `*-published.zip` is freshly packaged from an explicit file allowlist
+after omitting the disposable `runtime-root`; the original local bundle was
+never published. `30-assembly.json` is authoritative for the runtime Python-length and
 assembled-string SHA.  A1 predates the LF-only capture fix: its copied
 `scenario.txt` has a different raw-file SHA because of CRLF serialisation,
 while its assembly SHA still identifies the original runtime string.  A2 and
