@@ -12,7 +12,9 @@ from scriptor.runner import (
     _planner_schema_reason,
     looks_like_action_required,
     scenario_length_status,
+    scenario_output_token_budget,
 )
+from scriptor.story_planner import calculate_story_part_targets, story_plan_from_dict
 
 
 class FakeClient:
@@ -192,7 +194,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("CURRENT ROLE: MIDDLE", middle_prompt)
                     self.assertIn("NO GLOBAL FINAL", middle_prompt)
 
-    async def test_remaining_part_targets_rebalance_after_a_shorter_accepted_part(self):
+    async def test_remaining_part_targets_stay_aligned_with_reserved_material_after_a_shorter_part(self):
         class RebalanceClient:
             def __init__(self):
                 self.prompts = []
@@ -217,10 +219,13 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         p2_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P2" in prompt)
         p3_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P3" in prompt)
-        self.assertIn("CURRENT TARGET: approximately 5498 characters", p2_prompt)
-        self.assertIn("CURRENT TARGET: approximately 5498 characters", p3_prompt)
-        self.assertEqual(jobs[0].actual_chars, 15000)
-        self.assertEqual(jobs[0].length_status, "READY")
+        # A short accepted prefix is immutable.  Its missing volume must not
+        # silently turn P2/P3 into larger assignments than their Story Map
+        # material was planned to support.
+        self.assertIn("CURRENT TARGET: approximately 4999 characters", p2_prompt)
+        self.assertIn("CURRENT TARGET: approximately 4998 characters", p3_prompt)
+        self.assertEqual(jobs[0].actual_chars, 14001)
+        self.assertEqual(jobs[0].length_status, "SHORT")
         self.assertEqual(jobs[0].state, RunState.DONE)
 
     async def test_early_overlong_part_is_accepted_without_length_retry(self):
@@ -442,11 +447,76 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         part_17_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P17" in prompt)
         self.assertIn("P18/M1: Смысловой блок 18", part_17_prompt)
         self.assertIn("C018 [SUPPORTED]: Новый материал 18", part_17_prompt)
-        self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Новый материал 1", part_17_prompt)
+        self.assertIn("EARLIER USED IDS: C001, C002", part_17_prompt)
+        self.assertIn("USED CONTENT (do not repeat): C011 [SUPPORTED]: Новый материал 11", part_17_prompt)
+        self.assertIn("FUTURE RESERVED IDS ONLY: P20: [C020]", part_17_prompt)
         self.assertIn("PREVIOUS SEAM TAIL", part_17_prompt)
         self.assertNotIn(chr(0x0401) * 5000, part_17_prompt)
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(len(jobs[0].accepted_story_parts), 30)
+
+    async def test_planner_material_and_writer_targets_scale_without_final_deficit_transfer(self):
+        """Every size plans complete material and keeps each Writer to its reserved budget."""
+        cases = (12000, 12501, 20000, 24999, 30000, 50000, 75001, 100000)
+
+        for target_chars in cases:
+            with self.subTest(target_chars=target_chars):
+                targets = calculate_story_part_targets(target_chars)
+
+                class MatrixClient:
+                    def __init__(self, planned_targets):
+                        self.planned_targets = planned_targets
+                        self.planner_budgets = []
+                        self.writer_prompts = []
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        if "NewsFlow Story Planner" in prompt:
+                            self.planner_budgets.append(max_output_tokens)
+                            return ParallelRunnerTests._story_plan_json(len(self.planned_targets))
+                        self.writer_prompts.append(prompt)
+                        current = int(__import__("re").search(
+                            r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                        ).group(1))
+                        # P1 is deliberately short. Later assignments must
+                        # still reflect their reserved material, not fill P1's
+                        # deficit in the FINAL part.
+                        if "CURRENT PART: P1" in prompt and len(self.planned_targets) > 1:
+                            return "А" * max(1, current // 2)
+                        return "Б" * current
+
+                client = MatrixClient(targets)
+                request = ScenarioRequest(
+                    0, "Масштабируемая тема", "CONTRACT",
+                    target_chars=target_chars,
+                    allowed_min=max(1, target_chars - 500),
+                    allowed_max=target_chars + 500,
+                )
+                job = (await ParallelRunner(client, 1).run([request]))[0]
+
+                self.assertEqual([part.id for part in story_plan_from_dict(job.story_plan).parts], [
+                    f"P{index}" for index in range(1, len(targets) + 1)
+                ])
+                self.assertEqual(len(client.writer_prompts), len(targets))
+                self.assertEqual(
+                    [row["target_chars"] for row in job.accepted_story_parts], list(targets),
+                )
+                self.assertTrue(all("MATERIAL ALLOCATION:" in prompt for prompt in client.writer_prompts))
+                self.assertTrue(all("WRITER MATERIAL=" in prompt for prompt in client.writer_prompts))
+                self.assertEqual(
+                    client.planner_budgets,
+                    [scenario_output_token_budget(request, 1536 + len(targets) * 768)],
+                )
+                self.assertEqual(job.state, RunState.DONE)
+
+        # 50k+ maps are complete multi-part maps; their Planner allowance must
+        # scale past the old 8192 ceiling instead of truncating tail atoms.
+        self.assertGreater(
+            scenario_output_token_budget(
+                ScenarioRequest(0, "T", "P", target_chars=50000),
+                1536 + len(calculate_story_part_targets(50000)) * 768,
+            ),
+            8192,
+        )
 
     async def test_headline_only_multipart_story_completes_without_capacity_pause(self):
         class HeadlineOnlyClient:
@@ -621,12 +691,14 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.structural_calls = 0
                 self.fresh_prompt = ""
+                self.planner_calls = 0
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
                     self.structural_calls += 1
                     raise AssertionError("invalid atoms must not be hidden by part-count repair")
                 if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
                     raw = json.loads(ParallelRunnerTests._story_plan_json(3))
                     raw["parts"] = raw["parts"][:1]
                     raw["content_atoms"][0].pop("state_after")
@@ -651,20 +723,22 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("EXACT_PART_COUNT=3; P1=OPENING; P2=MIDDLE; P3=FINAL", client.fresh_prompt)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
 
-    async def test_abstract_transition_skips_structural_repair_without_reusing_provider_payload(self):
-        """The retry receives a code, never the invalid Planner text or its marker."""
+    async def test_structured_transition_does_not_trigger_lexical_planner_recovery(self):
+        """A lexical diagnostic cannot spend a fresh Planner call."""
         marker = "UNIQUE_ABSTRACT_PLANNER_PAYLOAD_293"
 
         class AbstractTransitionClient:
             def __init__(self):
                 self.structural_calls = 0
                 self.fresh_prompt = ""
+                self.planner_calls = 0
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
                     self.structural_calls += 1
                     raise AssertionError("abstract transition must skip structural repair")
                 if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
                     raw = json.loads(ParallelRunnerTests._story_plan_json(2))
                     raw["thesis"] = marker
                     raw["content_atoms"][0].update({
@@ -690,8 +764,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
 
         self.assertEqual(client.structural_calls, 0)
-        self.assertIn("ABSTRACT_OR_NONCONCRETE_TRANSITION", client.fresh_prompt)
-        self.assertNotIn(marker, client.fresh_prompt)
+        self.assertEqual(client.fresh_prompt, "")
+        self.assertEqual(client.planner_calls, 1)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
 
     async def test_three_part_planner_has_budget_for_a_complete_transition_map(self):

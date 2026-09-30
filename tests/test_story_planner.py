@@ -4,6 +4,8 @@ import unittest
 from scriptor.core import ScenarioRequest
 from scriptor.story_planner import (
     StoryContentAtom,
+    StoryPartPlan,
+    StoryPlan,
     _has_concrete_story_development,
     build_story_plan_structure_repair_prompt,
     build_story_planner_prompt,
@@ -58,6 +60,131 @@ class StoryPartSizingTests(unittest.TestCase):
 
 
 class StoryPlanValidationTests(unittest.TestCase):
+    def test_writer_semantic_memory_stays_bounded_for_a_large_plan(self):
+        """A long plan reserves future material without dumping all prior detail."""
+        atoms = []
+        parts = []
+        for part_number in range(1, 21):
+            content_ids = []
+            for atom_number in range(1, 4):
+                atom_id = f"C{part_number:02d}_{atom_number}"
+                content_ids.append(atom_id)
+                atoms.append(StoryContentAtom(
+                    id=atom_id,
+                    summary=f"summary-{atom_id}-" + "s" * 800,
+                    owner_part_id=f"P{part_number}",
+                    content_kind="DRAMATIZED",
+                    novelty_question=f"question-{atom_id}",
+                    novelty_payload=f"payload-{atom_id}-" + "n" * 800,
+                    state_before=f"before-{atom_id}",
+                    changed_subject=f"subject-{atom_id}",
+                    development=f"development-{atom_id}",
+                    resulting_state=f"result-{atom_id}",
+                    state_after=f"after-{atom_id}",
+                    writer_material=(f"beat-{atom_id}",),
+                ))
+            role = "OPENING" if part_number == 1 else "FINAL" if part_number == 20 else "MIDDLE"
+            parts.append(StoryPartPlan(
+                id=f"P{part_number}", role=role, purpose=f"purpose-{part_number}", macro_id="M1",
+                content_ids=tuple(content_ids), target_chars=4999,
+                novelty_question=f"part-question-{part_number}",
+                novelty_payload=f"part-payload-{part_number}",
+            ))
+        plan = StoryPlan(
+            thesis="Большая история.", macro_blocks=({"id": "M1", "purpose": "развитие"},),
+            content_atoms=tuple(atoms), parts=tuple(parts),
+        )
+        accepted = [
+            {"part_id": part.id, "content_ids": list(part.content_ids),
+             "text": f"OLD_BODY_{part.id}_" + "x" * 3000}
+            for part in parts[:15]
+        ]
+
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "Контекст", target_chars=100000),
+            plan,
+            accepted,
+            15,
+        )
+
+        self.assertIn("EARLIER USED IDS:", prompt)
+        self.assertIn("FUTURE RESERVED IDS ONLY:", prompt)
+        self.assertIn("C16_1 [DRAMATIZED]", prompt)
+        self.assertNotIn("OLD_BODY_P1", prompt)
+        self.assertLess(len(prompt), 16000)
+
+    def test_structured_transition_with_system_subject_is_not_rejected_by_lexical_guessing(self):
+        """A valid state transition is not an analytical failure because of one noun."""
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Режим работы магазина меняется после решения владельца.",
+            "macro_blocks": [{"id": "M1", "purpose": "Изменение режима работы"}],
+            "content_atoms": [{
+                "id": "C001", "summary": "Магазин открывает ночную смену",
+                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
+                "state_before": "Магазин работал только днём.",
+                "changed_subject": "Режим работы магазина",
+                "development": "Владелец открыл ночную смену.",
+                "resulting_state": "Покупатели получили круглосуточный доступ.",
+                "state_after": "Магазин стал доступен круглосуточно.",
+                "novelty_question": "Как изменился режим работы?",
+                "novelty_payload": "После решения владельца магазин начал работать ночью.",
+                "do_not_repeat": "",
+            }],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Показать решение и результат",
+                "macro_id": "M1", "content_ids": ["C001"],
+                "novelty_question": "Что изменило режим работы?",
+                "novelty_payload": "Владелец открыл ночную смену, и магазин стал круглосуточным.",
+            }],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (2000,), require_state_transitions=True)
+
+        self.assertEqual(plan.content_atoms[0].changed_subject, "Режим работы магазина")
+
+    def test_novelty_duplicate_guard_preserves_numeric_and_negation_changes(self):
+        """10→20 and permits→does not permit are different story states."""
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Сервис меняет лимит и затем закрывает экспорт.",
+            "macro_blocks": [{"id": "M1", "purpose": "Последовательные изменения правил"}],
+            "content_atoms": [
+                {
+                    "id": "C001", "summary": "Лимит сервиса повышен с 10 до 20 запросов",
+                    "owner_part_id": "P1", "content_kind": "SUPPORTED",
+                    "state_before": "Сервис принимает до 10 запросов в минуту.",
+                    "changed_subject": "Лимит сервиса",
+                    "development": "Администратор повысил лимит до 20 запросов в минуту.",
+                    "resulting_state": "Пользователи могут отправлять 20 запросов в минуту.",
+                    "state_after": "Сервис принимает до 20 запросов в минуту.",
+                    "novelty_question": "Как изменился лимит?",
+                    "novelty_payload": "Лимит вырос с 10 до 20 запросов в минуту.",
+                },
+                {
+                    "id": "C002", "summary": "Сервис больше не разрешает экспорт отчётов",
+                    "owner_part_id": "P2", "content_kind": "SUPPORTED",
+                    "state_before": "Сервис разрешает клиентам экспортировать готовые отчёты.",
+                    "changed_subject": "Правило экспорта",
+                    "development": "Администратор запретил экспорт завершённых отчётов.",
+                    "resulting_state": "Клиенты не могут выгружать готовые отчёты.",
+                    "state_after": "Сервис не разрешает клиентам экспортировать готовые отчёты.",
+                    "novelty_question": "Что изменилось в экспорте?",
+                    "novelty_payload": "Экспорт завершённых отчётов больше не разрешён.",
+                },
+            ],
+            "parts": [
+                {"id": "P1", "role": "OPENING", "purpose": "Показать новый лимит", "macro_id": "M1", "content_ids": ["C001"],
+                 "novelty_question": "Как изменился лимит?", "novelty_payload": "Лимит вырос с 10 до 20."},
+                {"id": "P2", "role": "FINAL", "purpose": "Показать запрет", "macro_id": "M1", "content_ids": ["C002"],
+                 "novelty_question": "Как изменился экспорт?", "novelty_payload": "Экспорт больше не разрешён."},
+            ],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (2000, 2000), require_state_transitions=True)
+
+        self.assertEqual([atom.id for atom in plan.content_atoms], ["C001", "C002"])
+
     def _single_part_cover_response(self, *, candidates, primary, status="RESOLVED", required=True):
         return json.dumps({
             "thesis": "Проверяемая история.", "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
@@ -118,6 +245,80 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn(expected, repair)
         self.assertIn("Do not add or remove parts", planner)
         self.assertIn("Do not rename part IDs", planner)
+
+    def test_structural_repair_uses_complete_id_projection_not_a_truncated_raw_map(self):
+        atoms = [
+            {
+                "id": f"C{index:03d}",
+                "summary": "RAW_PROVIDER_TEXT_MUST_NOT_BE_COPIED " * 40,
+                "owner_part_id": "P1",
+                "content_kind": "DRAMATIZED",
+            }
+            for index in range(1, 161)
+        ]
+        original = json.dumps({
+            "thesis": "RAW_PROVIDER_TEXT_MUST_NOT_BE_COPIED " * 300,
+            "macro_blocks": [{"id": "M1", "purpose": "RAW_PROVIDER_TEXT_MUST_NOT_BE_COPIED"}],
+            "content_atoms": atoms,
+            "parts": [{"id": "P1", "role": "COMPLETE", "purpose": "raw", "macro_id": "M1",
+                       "content_ids": [atom["id"] for atom in atoms]}],
+        }, ensure_ascii=False)
+
+        prompt = build_story_plan_structure_repair_prompt(
+            ScenarioRequest(0, "Тема", "Контекст", target_chars=10000),
+            original,
+            (4999, 4999),
+        )
+
+        self.assertIn('"id":"C160"', prompt)
+        self.assertIn('"macro_blocks":[{"id":"M1"}]', prompt)
+        self.assertNotIn("RAW_PROVIDER_TEXT_MUST_NOT_BE_COPIED", prompt)
+
+    def test_writer_receives_ordered_material_and_a_per_atom_volume_allocation(self):
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Система проходит через два разных изменения.",
+            "macro_blocks": [{"id": "M1", "purpose": "Последовательность решений"}],
+            "content_atoms": [
+                {
+                    "id": "C001", "summary": "Оператор меняет правило", "owner_part_id": "P1",
+                    "content_kind": "SUPPORTED", "state_before": "Правило было старым.",
+                    "changed_subject": "Правило", "development": "Оператор ввёл новое правило.",
+                    "resulting_state": "Порядок обработки изменился.", "state_after": "Новое правило действует.",
+                    "writer_material": ["объявление решения", "порядок применения", "первая реакция"],
+                },
+                {
+                    "id": "C002", "summary": "Служба меняет процесс", "owner_part_id": "P1",
+                    "content_kind": "DRAMATIZED", "state_before": "Служба работала по старому порядку.",
+                    "changed_subject": "Процесс службы", "development": "Служба перестроила очередь.",
+                    "resulting_state": "Заявки проходят по новому маршруту.", "state_after": "Новый маршрут действует.",
+                    "writer_material": ["перестройка очереди", "проверка результата"],
+                },
+                {
+                    "id": "C003", "summary": "Пользователи получают итог", "owner_part_id": "P1",
+                    "content_kind": "DRAMATIZED", "state_before": "Результат перестройки неизвестен.",
+                    "changed_subject": "Доступ пользователей", "development": "Служба публикует новый порядок.",
+                    "resulting_state": "Пользователи видят новый маршрут.", "state_after": "Новый порядок доступен.",
+                    "writer_material": ["публикация порядка", "доступный результат"],
+                },
+            ],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Раскрыть цепочку изменений", "macro_id": "M1",
+                "content_ids": ["C001", "C002", "C003"],
+            }],
+        }, ensure_ascii=False)
+        plan = parse_story_plan_response(response, (3999,), require_state_transitions=True)
+
+        prompt = build_story_writer_prompt(
+            ScenarioRequest(0, "Тема", "Контекст", target_chars=3999),
+            plan,
+            [],
+            0,
+        )
+
+        self.assertIn("MATERIAL ALLOCATION: this part has 3 owned atoms; reserve roughly 1333 characters", prompt)
+        self.assertIn("WRITER MATERIAL=объявление решения; порядок применения; первая реакция", prompt)
+        self.assertIn("WRITER MATERIAL=перестройка очереди; проверка результата", prompt)
 
     def test_cover_metadata_is_inert_for_a_scenario_story_map(self):
         """A valid story neither requires nor persists Covers-only fields."""
@@ -469,8 +670,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "structured concrete change"):
             parse_story_plan_response(response, (2000,), require_state_transitions=True)
 
-    def test_parser_rejects_interpretive_transition_with_complete_fields(self):
-        """A filled schema cannot turn a perception of an event into an event."""
+    def test_parser_keeps_structurally_complete_transition_for_writer_material(self):
+        """Lexical interpretation is guidance, not a schema rejection path."""
         response = json.dumps({
             "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
             "thesis": "Один известный факт не должен стать несколькими трактовками.",
@@ -496,8 +697,8 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "observable concrete change"):
-            parse_story_plan_response(response, (2000,), require_state_transitions=True)
+        plan = parse_story_plan_response(response, (2000,), require_state_transitions=True)
+        self.assertEqual(plan.content_atoms[0].id, "C001")
 
     def test_parser_rejects_analytic_atoms_that_only_mention_event_nouns(self):
         response = json.dumps({
@@ -1028,8 +1229,8 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("semantic-density requirements", prompt)
         self.assertIn("minimum 3 distinct atoms", prompt)
         self.assertIn("terminal development", prompt)
-        self.assertIn("Before returning JSON, audit every atom", prompt)
-        self.assertIn("identifiable actor, institution, system or physical event", prompt)
+        self.assertIn("Before returning JSON, check that every atom", prompt)
+        self.assertIn("different declared states", prompt)
         self.assertIn("synonym swap", prompt)
 
     def test_twelve_thousand_plan_requires_event_density_before_writer(self):

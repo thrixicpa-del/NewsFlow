@@ -14,30 +14,27 @@ from typing import Any
 PREFERRED_PART_CHARS = 5_000
 _COMPACT_PURPOSE_CHARS = 180
 _COMPACT_ATOM_CHARS = 180
+_WRITER_MATERIAL_CHARS = 640
 _COMPACT_AVOID_CHARS = 140
+_WRITER_RECENT_USED_ATOMS = 6
+_WRITER_RECENT_USED_PARTS = 2
+_WRITER_DETAILED_FUTURE_PARTS = 2
+_WRITER_DETAILED_MACROS = 6
 _CONTENT_KINDS = frozenset({"SUPPORTED", "DRAMATIZED"})
 _STATE_TRANSITION_CONTRACT = "BEFORE_DEVELOPMENT_AFTER"
-# These are abstract *interpretive subjects*, not topics. They deliberately
-# catch only the narrow class where a Planner labels a reading of an event as
-# though it were an observable event itself. A concrete government position,
-# market price, court status or city service can still change normally.
+# These advisory lexical signatures are retained only for deterministic
+# diagnostics/tests. They are not parser acceptance criteria: a schema parser
+# cannot reliably decide that a natural-language development is insufficient.
 _ABSTRACT_INTERPRETIVE_SUBJECT_STEMS = frozenset({
     "смысл", "логик", "сигнал", "цен", "давлен", "баланс", "ситуац", "простр",
     "важнос", "тревож", "интерп", "meanin", "logic", "signal", "pressu", "balanc",
     "situat", "import", "tensio", "interp",
 })
-# This is deliberately a compact language-level guard, not a catalogue of
-# news domains or topics.  It catches the residual form of analytical filler
-# that declares an abstract subject ("intensity", "prospect", "window") and
-# then only says how an earlier event is *viewed*.  A concrete action against
-# the same subject remains valid; the two signals must occur together.
 _ABSTRACT_TRANSITION_SUBJECT_STEMS = frozenset({
     "интенс", "перспект", "корид", "окн", "состоян", "режим", "лини",
     "intens", "prospect", "corrid", "window", "state", "mode", "line",
 })
 _INTERPRETIVE_FRAME_STEMS = frozenset({
-    # _semantic_tokens keeps at most six characters, so every stem here uses
-    # that same compact representation.
     "воспри", "выгляд", "означа", "показыв", "демонс", "символ",
     "тракту", "смысл", "значен", "ожидан", "вероят", "итог",
     "станов", "усил", "сузило", "растет", "повыш",
@@ -65,6 +62,9 @@ class StoryContentAtom:
     changed_subject: str = ""
     development: str = ""
     resulting_state: str = ""
+    # Planner-supplied expansion beats are optional guidance for the first
+    # Writer pass.  They must never invalidate an otherwise resumable map.
+    writer_material: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,7 +177,11 @@ def _semantic_tokens(value: object) -> frozenset[str]:
     tokens: set[str] = set()
     for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", str(value or "").casefold()):
         stem = word[:6] if len(word) > 6 else word
-        if len(word) < 4 or word in _SEMANTIC_STOPWORDS or stem in _SEMANTIC_STOPWORDS:
+        # Numeric limits and explicit negation carry meaning even though they
+        # are short.  Losing either turns opposite states into a false
+        # near-copy (for example 10→20 or permits→does not permit).
+        meaningful_short = word.isdigit() or word in {"не", "нет", "not", "no"}
+        if (len(word) < 4 and not meaningful_short) or word in _SEMANTIC_STOPWORDS or stem in _SEMANTIC_STOPWORDS:
             continue
         tokens.add(stem)
     return frozenset(tokens)
@@ -192,6 +196,12 @@ def _obvious_semantic_duplicate(left: object, right: object) -> bool:
     """
     first = _semantic_tokens(left)
     second = _semantic_tokens(right)
+    # A changed number or polarity is never a duplicate, even when every
+    # surrounding topic word remains identical.
+    first_anchors = {token for token in first if token.isdigit() or token in {"не", "нет", "not", "no"}}
+    second_anchors = {token for token in second if token.isdigit() or token in {"не", "нет", "not", "no"}}
+    if first_anchors != second_anchors:
+        return False
     if min(len(first), len(second)) < 4:
         return False
     if first == second:
@@ -225,18 +235,7 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     ):
         return False
 
-    # A noun such as "situation", "state" or "pressure" does not by itself
-    # make a transition analytical.  It can legitimately be the *system that
-    # changed* when the declared development is an observable action and the
-    # resulting state is concrete.  Treat it as a problem only together with
-    # an interpretive frame below; otherwise a lexical label would reject
-    # valid maps from arbitrary news domains.
     subject_tokens = _semantic_tokens(changed_subject)
-
-    # Do not accept a dressed-up interpretation as a new state transition.
-    # This uses only the relation between a declared abstract subject and an
-    # interpretive predicate, so it neither depends on a news category nor
-    # rejects an ordinary concrete action because of a single word.
     frame_tokens = _semantic_tokens(
         f"{atom.summary} {development} {resulting_state}"
     )
@@ -431,6 +430,16 @@ def parse_story_plan_response(
             changed_subject=_optional_text(raw_atom.get("changed_subject")),
             development=_optional_text(raw_atom.get("development")),
             resulting_state=_optional_text(raw_atom.get("resulting_state")),
+            writer_material=tuple(
+                text for text in (
+                    _optional_text(item)
+                    for item in (
+                        raw_atom.get("writer_material", [])
+                        if isinstance(raw_atom.get("writer_material"), list)
+                        else [raw_atom.get("writer_material", "")]
+                    )
+                ) if text
+            ),
         )
         if atom.id in atom_by_id:
             raise ValueError("story plan content atom IDs must be unique")
@@ -452,8 +461,9 @@ def parse_story_plan_response(
                 and atom.resulting_state
             ):
                 raise ValueError("story plan atom requires structured concrete change")
-            if not _has_concrete_story_development(atom):
-                raise ValueError("story plan atom must describe an observable concrete change")
+            # The parser owns hard structure only.  _has_concrete_story_development
+            # remains an advisory diagnostic, not an acceptance blocker: stem
+            # matching cannot reliably classify an otherwise complete map.
 
     # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
     # persisted maps stay readable even if an older Planner used repetitive
@@ -769,6 +779,9 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "pressure, balance, importance or political price is not a changed_subject by itself. novelty_question is the concrete question that atom "
         "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
         "it must describe the new story state/development, not another interpretation of an earlier state. "
+        "For a long part, also include writer_material as an OPTIONAL ordered JSON list of concrete coverage beats "
+        "inside that atom: sequence, response, mechanism, result, or observable consequence. This is planning material "
+        "for the first Writer pass, not a new schema gate: if a legacy map lacks it, the map remains valid. "
         "do_not_repeat names the already-established conclusion/meaning this atom may reference briefly but must not "
         "explain again (use an empty string when there is no earlier meaning to protect). "
         "No two atoms may answer the same question or carry the same new information. SUPPORTED atoms must rely on "
@@ -798,10 +811,10 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "new content atom. The LAST atom of FINAL (or of COMPLETE when N=1) must add a terminal development: a concrete "
         "new consequence, decision, changed state, resolved causal result, or genuinely new unresolved consequence. "
         "It must not merely summarize why the story was important. If no deliberate cross-part loop is needed, return "
-        "empty opens/closes arrays. Before returning JSON, audit every atom: its development must state an "
-        "identifiable actor, institution, system or physical event, the new action/result it creates, and the changed "
-        "state afterward. If an atom only says that an earlier event changed the discussion, expectation, context or "
-        "overall state, replace it with the later distinct action, reaction, decision, recorded result or physical event.\n\n"
+        "empty opens/closes arrays. Before returning JSON, check that every atom has the requested fields and that its "
+        "BEFORE and AFTER name different declared states. Prefer a later distinct action, reaction, decision, recorded "
+        "result or physical event over repeating an earlier conclusion. Do not reject a valid structured transition merely "
+        "because a label sounds abstract.\n\n"
         f"TOPIC: {request.title}\n"
         f"TARGET: {request.target_chars}; MIN: {request.allowed_min}; MAX: {request.allowed_max}\n"
         f"RUNTIME TECHNICAL SKELETON: {skeleton}. Return exactly these parts. Do not add or remove parts. "
@@ -810,6 +823,51 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "OPERATOR WRITING CONTRACT AND AVAILABLE CONTEXT:\n"
         f"{request.prompt}"
     )
+
+def _structural_repair_projection(original_response: str) -> str:
+    """Return every immutable topology reference without copying provider prose.
+
+    Parts-only repair needs the complete atom-ID/macro-ID graph, not a raw
+    source string cut at an arbitrary character boundary.  The projection is
+    bounded by its fixed fields and preserves every identifier regardless of
+    where it appeared in the original JSON.
+    """
+    original = _load_json_object(
+        original_response,
+        invalid_message="story plan structural repair requires a JSON Story Map",
+        object_message="story plan structural repair requires an object Story Map",
+    )
+    raw_macros = original.get("macro_blocks")
+    raw_atoms = original.get("content_atoms")
+    raw_parts = original.get("parts")
+    macros = [
+        {"id": _optional_text(block.get("id"))}
+        for block in raw_macros if isinstance(block, dict)
+    ] if isinstance(raw_macros, list) else []
+    atoms = [
+        {
+            "id": _optional_text(atom.get("id")),
+            "owner_part_id": _optional_text(atom.get("owner_part_id")),
+        }
+        for atom in raw_atoms if isinstance(atom, dict)
+    ] if isinstance(raw_atoms, list) else []
+    parts = [
+        {
+            "id": _optional_text(part.get("id")),
+            "role": _optional_text(part.get("role")),
+            "macro_id": _optional_text(part.get("macro_id")),
+            "content_ids": [
+                _optional_text(item) for item in part.get("content_ids", [])
+            ] if isinstance(part.get("content_ids"), list) else [],
+        }
+        for part in raw_parts if isinstance(part, dict)
+    ] if isinstance(raw_parts, list) else []
+    return json.dumps(
+        {"macro_blocks": macros, "content_atoms": atoms, "parts": parts},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
 
 def build_story_plan_structure_repair_prompt(request: Any, original_response: str, part_targets: tuple[int, ...]) -> str:
     """Repair only invalid part topology, never narrative substance or cover metadata."""
@@ -824,7 +882,7 @@ def build_story_plan_structure_repair_prompt(request: Any, original_response: st
         "do not add atoms, and do not regenerate the story. Runtime technical skeleton: "
         f"{skeleton}. Return exactly these parts. Do not add or remove parts. Do not rename part IDs. "
         "Do not change roles.\n\n"
-        f"TITLE: {request.title}\nORIGINAL MAP:\n{_compact(original_response, 12000)}"
+        f"TITLE: {request.title}\nCOMPLETE STRUCTURAL PROJECTION:\n{_structural_repair_projection(original_response)}"
     )
 
 
@@ -853,6 +911,12 @@ def build_story_writer_prompt(
     def format_current_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
         avoid = _compact(atom.do_not_repeat, _COMPACT_AVOID_CHARS)
+        material = "; ".join(atom.writer_material) or " -> ".join((
+            f"before: {atom.state_before}",
+            f"development: {atom.development}",
+            f"result: {atom.resulting_state}",
+            f"after: {atom.state_after}",
+        ))
         return (
             f"{format_atom(atom_id)} "
             f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
@@ -862,35 +926,52 @@ def build_story_writer_prompt(
             f" | DEVELOPMENT={_compact(atom.development, _COMPACT_ATOM_CHARS)}"
             f" | RESULT={_compact(atom.resulting_state, _COMPACT_ATOM_CHARS)}"
             f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
+            f" | WRITER MATERIAL={_compact(material, _WRITER_MATERIAL_CHARS)}"
             f"{f' | DO_NOT_REPEAT={avoid}' if avoid else ''}"
         )
 
     current_atoms = "\n".join(
         f"- {format_current_atom(atom_id)}" for atom_id in part.content_ids
     )
+    material_budget = (
+        max(1, active_target // max(1, len(part.content_ids)))
+        if active_target else 0
+    )
     used_ids = [
         str(content_id)
         for accepted in accepted_parts
         for content_id in accepted.get("content_ids", [])
     ]
+    recent_used_ids = used_ids[-_WRITER_RECENT_USED_ATOMS:]
+    earlier_used_ids = used_ids[:-_WRITER_RECENT_USED_ATOMS]
     used_context = (
         "; ".join(
-            format_atom(content_id) for content_id in used_ids if content_id in atoms
+            format_atom(content_id)
+            for content_id in recent_used_ids
+            if content_id in atoms
         )
         or "none"
     )
+    earlier_used_index = ", ".join(earlier_used_ids) or "none"
+
+    accepted_plan_parts = plan.parts[:len(accepted_parts)]
+    recent_used_parts = accepted_plan_parts[-_WRITER_RECENT_USED_PARTS:]
+    earlier_used_parts = accepted_plan_parts[:-_WRITER_RECENT_USED_PARTS]
     used_semantic_meanings = (
         "; ".join(
             (
                 f"{past.id}: Q={_compact(past.novelty_question, _COMPACT_PURPOSE_CHARS)} | "
                 f"NEW={_compact(past.novelty_payload, _COMPACT_ATOM_CHARS)}"
             )
-            for past in plan.parts[:len(accepted_parts)]
+            for past in recent_used_parts
         )
         or "none"
     )
+    earlier_used_part_index = ", ".join(part.id for part in earlier_used_parts) or "none"
 
     future_parts = plan.parts[part_index + 1 :]
+    detailed_future_parts = future_parts[:_WRITER_DETAILED_FUTURE_PARTS]
+    reserved_future_parts = future_parts[_WRITER_DETAILED_FUTURE_PARTS:]
     future_index = (
         "; ".join(
             (
@@ -899,7 +980,14 @@ def build_story_writer_prompt(
                 f"| NEW={_compact(future.novelty_payload, _COMPACT_ATOM_CHARS)} "
                 f"[{'; '.join(format_atom(content_id) for content_id in future.content_ids)}]"
             )
-            for future in future_parts
+            for future in detailed_future_parts
+        )
+        or "none"
+    )
+    reserved_future_index = (
+        "; ".join(
+            f"{future.id}: [{', '.join(future.content_ids)}]"
+            for future in reserved_future_parts
         )
         or "none"
     )
@@ -907,10 +995,13 @@ def build_story_writer_prompt(
     previous_tail = (
         seam_tail(str(accepted_parts[-1].get("text", ""))) if accepted_parts else "none"
     )
+    detailed_macro_blocks = plan.macro_blocks[:_WRITER_DETAILED_MACROS]
+    reserved_macro_blocks = plan.macro_blocks[_WRITER_DETAILED_MACROS:]
     macro_index = "; ".join(
         f"{block['id']}: {_compact(block['purpose'], _COMPACT_PURPOSE_CHARS)}"
-        for block in plan.macro_blocks
+        for block in detailed_macro_blocks
     )
+    reserved_macro_index = ", ".join(block["id"] for block in reserved_macro_blocks) or "none"
 
     opened: list[str] = []
     for completed in plan.parts[: len(accepted_parts)]:
@@ -1028,6 +1119,7 @@ def build_story_writer_prompt(
         f"OPERATOR WRITING CONTRACT:\n{request.prompt}\n\n"
         f"STORY THESIS: {_compact(plan.thesis, 600)}\n"
         f"MACRO MAP: {macro_index}\n"
+        f"OTHER MACRO IDS (reserved): {reserved_macro_index}\n"
         f"CURRENT MACRO: {part.macro_id}: {_compact(blocks[part.macro_id], _COMPACT_PURPOSE_CHARS)}\n"
         f"CURRENT PART: {part.id}\n"
         f"CURRENT ROLE: {part.role}\n"
@@ -1035,15 +1127,21 @@ def build_story_writer_prompt(
         f"CURRENT NOVELTY QUESTION: {_compact(part.novelty_question, _COMPACT_PURPOSE_CHARS)}\n"
         f"CURRENT NEW INFORMATION: {_compact(part.novelty_payload, _COMPACT_ATOM_CHARS)}\n"
         f"{length_instruction}"
+        f"MATERIAL ALLOCATION: this part has {len(part.content_ids)} owned atoms; reserve roughly "
+        f"{material_budget} characters of event-led coverage for each atom before moving to the next. "
+        "Use each atom's WRITER MATERIAL as ordered first-pass coverage, not as a list to print.\n"
         "CURRENT CONTENT ORDER: consume the following atoms once, in listed order.\n"
         f"CURRENT CONTENT:\n{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
+        f"EARLIER USED IDS: {earlier_used_index}\n"
         f"USED SEMANTIC MEANINGS (forbidden to restate): {used_semantic_meanings}\n"
+        f"EARLIER USED PARTS: {earlier_used_part_index}\n"
         f"OPEN LOOPS BEFORE THIS PART: {', '.join(opened) or 'none'}\n"
         f"THIS PART OPENS: {', '.join(part.opens) or 'none'}\n"
         f"THIS PART CLOSES: {', '.join(part.closes) or 'none'}\n"
         f"TRANSITION DIRECTION: {_compact(part.transition_direction, _COMPACT_PURPOSE_CHARS) or 'continue naturally'}\n"
         f"FUTURE RESERVED (do not reveal fully): {future_index}\n"
+        f"FUTURE RESERVED IDS ONLY: {reserved_future_index}\n"
         f"PREVIOUS SEAM TAIL (continuity only, not material to repeat):\n{previous_tail}\n\n"
         f"POSITION RULE: {position_instruction}"
         f"{novelty_instruction}"

@@ -379,28 +379,15 @@ class ParallelRunner:
     def _next_story_part_target(
         self, job: Job, plan: StoryPlan, part_index: int,
     ) -> int:
-        """Rebalance only the remaining character budget; never rewrite accepted prose."""
-        part = plan.parts[part_index]
-        if not job.accepted_story_parts:
-            return max(0, int(part.target_chars or 0))
-        overall_target = self._story_target_chars(job.request)
-        if not overall_target:
-            return max(0, int(part.target_chars or 0))
-        accepted_text = self._assembled_story(plan, job.accepted_story_parts)
-        remaining_parts = len(plan.parts) - part_index
-        # Each future accepted part adds one deterministic "\n\n" separator
-        # to the already assembled prefix.
-        remaining_separators = 2 * remaining_parts
-        remaining_prose = max(
-            remaining_parts,
-            overall_target - len(accepted_text) - remaining_separators,
-        )
-        quotient, remainder = divmod(remaining_prose, remaining_parts)
-        balanced_target = max(1, quotient + (1 if remainder else 0))
-        # Length bounds are advisory for completed prose. If an earlier part
-        # runs long, never starve future planned content just to force the
-        # assembled story back under target; keep at least the planned budget.
-        return max(max(0, int(part.target_chars or 0)), balanced_target)
+        """Keep Writer volume aligned with material reserved in the Story Map.
+
+        Accepted prose is immutable.  Its length cannot manufacture new
+        content for later parts, so a short P1 must not turn a P3 designed for
+        ~4k of owned material into an impossible ~8k assignment.  Final
+        length remains an honest advisory diagnostic after all first passes.
+        """
+        del job
+        return max(0, int(plan.parts[part_index].target_chars or 0))
 
     @staticmethod
     def _assembled_story(plan: StoryPlan, accepted_parts: list[dict[str, Any]]) -> str:
@@ -517,7 +504,10 @@ class ParallelRunner:
             # truncate a valid JSON map before content_atoms/parts completed.
             # This is an output allowance only; it neither adds provider
             # attempts nor changes the Writer's one-call contract.
-            planner_budget = max(2304, min(8192, 1536 + len(part_targets) * 768))
+            # Scale with the complete immutable map.  The provider-budget
+            # helper remains the single global safety cap; an additional 8k
+            # ceiling here would truncate the tail atoms of 50k+ scenarios.
+            planner_budget = max(2304, 1536 + len(part_targets) * 768)
             planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
             if looks_like_action_required(planner_response):
                 job.result = planner_response
