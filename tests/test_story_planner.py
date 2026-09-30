@@ -977,13 +977,26 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("DRAMATIZED", prompt)
         self.assertIn("novelty_question", prompt)
         self.assertIn("novelty_payload", prompt)
-        self.assertIn("3-5 genuinely different atoms", prompt)
+        self.assertIn("4-5 genuinely different atoms", prompt)
         self.assertIn("5-7", prompt)
         self.assertIn("novelty_question, novelty_payload and do_not_repeat", prompt)
         self.assertIn("semantic-density requirements", prompt)
         self.assertIn("minimum 3 distinct atoms", prompt)
         self.assertIn("terminal development", prompt)
         self.assertIn("synonym swap", prompt)
+
+    def test_twelve_thousand_plan_requires_event_density_before_writer(self):
+        targets = calculate_story_part_targets(12000)
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "Тема", "Контекст", target_chars=12000),
+            targets,
+        )
+
+        self.assertEqual(targets, (3999, 3999, 3998))
+        self.assertIn("P1≈3999 chars; minimum 3 distinct atoms", prompt)
+        self.assertIn("P2≈3999 chars; minimum 3 distinct atoms", prompt)
+        self.assertIn("P3≈3998 chars; minimum 3 distinct atoms", prompt)
+        self.assertIn("not an essay outline, opinion column, literary narrative", prompt)
 
     def test_planner_prompt_contains_only_story_planning_contract(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
@@ -1078,6 +1091,9 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("NO GLOBAL FINAL", prompt)
         self.assertIn("first 30 seconds", prompt)
         self.assertNotIn("DRAMATIZED OPENING DISCLOSURE", prompt)
+        self.assertIn("EVENT-FIRST STYLE CONTRACT", prompt)
+        self.assertIn("This is not an essay, analysis, op-ed, literary story", prompt)
+        self.assertIn("Every substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change", prompt)
 
     def test_only_opening_gets_one_dramatized_disclosure_instruction(self):
         request = ScenarioRequest(0, "Тема", "OPERATOR CONTRACT")
