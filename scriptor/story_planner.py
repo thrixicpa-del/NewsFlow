@@ -284,7 +284,10 @@ def _minimum_semantic_atoms(target_chars: int, role: str) -> int:
         return 1
     if role == "COMPLETE" and target >= 6_000:
         return 5
-    if target >= 4_500:
+    # A 12k story is split into three ~4k parts. Two developments per
+    # part force the Writer to stretch each event into commentary; require
+    # enough real progression for event-first prose instead.
+    if target >= 3_500:
         return 3
     if target >= 2_500:
         return 2
@@ -741,8 +744,11 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "new action, decision, reaction, discovery, result, status change or other observable development; "
         "state_after says what is now different. A reference to an earlier event plus an interpretation of its "
         "importance is not a development by itself. Short analysis may connect two developments, but may not replace "
-        "one. When supplied context is thin, create logical DRAMATIZED transitions rather than several readings of "
-        "one known event. For each DRAMATIZED atom, name a new discrete occurrence in development: an actor takes "
+        "one. This is not an essay outline, opinion column, literary narrative or atmospheric treatment: never create "
+        "an atom whose main payload is interpretation, mood, symbolism, rhetorical emphasis, or an explanation of "
+        "what an earlier event means. When supplied context is thin, create logical DRAMATIZED transitions rather "
+        "than several readings of one known event. For each DRAMATIZED atom, name a new discrete occurrence in "
+        "development: an actor takes "
         "an action or decision, a response happens, a result is recorded, or a concrete status/process changes. "
         "Do not label an abstract intensity, prospect, window, mode, line or state as the changed subject and then "
         "only say how an earlier event is perceived, interpreted or expected; that is analysis, not a development. "
@@ -766,7 +772,7 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "and atom summaries compact. Use the smallest number of distinct transitions that makes a complete story; a "
         "compact roughly-2k COMPLETE story may need only an initial development, an immediate reaction, a next move and "
         "a resulting new state. Never invent extra atoms only to meet a pattern. Plan enough distinct developments for the requested long-form volume: for a roughly "
-        "5k-character part use at least 3 and normally 3-5 genuinely different atoms; for a 6-9k COMPLETE part use "
+        "4-5k-character part use at least 3 and normally 4-5 genuinely different atoms; for a 6-9k COMPLETE part use "
         "at least 5 and normally 5-7. These are semantic-density requirements, not fixed story templates. Treat content_ids "
         "as a one-way sequence of changed story states. For each next atom ask: what is now different after the previous "
         "one? If nothing is different, it is probably filler. If supplied facts are thin, add distinct DRAMATIZED "
@@ -973,6 +979,17 @@ def build_story_writer_prompt(
         "inside those atoms rather than padding with another explanation of the same point. A paragraph that adds no "
         "new story information should not be written. In FINAL, or at the end of COMPLETE, the last owned atom must be "
         "written as a genuinely new terminal development rather than a recap of the thesis or a final paraphrase.\n"
+        "EVENT-FIRST STYLE CONTRACT: Write direct, plain, concrete narration in the language requested by the operator. "
+        "This is not an essay, analysis, op-ed, literary story, atmospheric scene, or reflective commentary. Every "
+        "substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change from CURRENT "
+        "CONTENT. Start from what happened, who acted, what changed, and what happened next. Do not build paragraphs "
+        "around interpretation, symbolism, mood, metaphors, rhetorical questions, philosophical framing, or repeated "
+        "explanations of significance. Phrases equivalent to 'this shows', 'this means', 'the main point is', 'the logic "
+        "changes', 'a new signal', 'the political price', or 'the situation takes on new meaning' may appear only as a "
+        "brief connector after a concrete development and must never be the paragraph's new information. Do not add "
+        "cinematic scenery, emotional embellishment, invented inner thoughts, or authorial reflection. Use the available "
+        "space for additional sequence, actors, decisions, reactions, mechanisms and observable consequences already "
+        "owned by the Story Map.\n"
     )
 
     return (
