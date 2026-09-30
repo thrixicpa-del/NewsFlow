@@ -44,6 +44,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                  "state_before": f"Состояние до шага {index}.",
                  "state_after": f"Состояние после шага {index}.",
                  "changed_subject": f"Рабочий объект {index}",
+                 "development_actor": f"Исполнитель {index}",
                  "development": f"исполнитель выполнил действие {index}",
                  "resulting_state": f"рабочий объект {index} получил новый статус"}
                 for index in range(1, part_count + 1)
@@ -670,6 +671,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     raw["content_atoms"][0].update({
                         "summary": "Известное событие воспринимается как более жёсткая фаза",
                         "changed_subject": "смысл прежнего события",
+                        "development_actor": "участники обсуждения",
                         "development": "событие воспринимается как более важный сигнал",
                         "resulting_state": "политическая цена воспринимается как выросшая",
                     })
@@ -1025,6 +1027,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                                     "state_before": "Состояние до кульминации.",
                                     "state_after": "Состояние после кульминации.",
                                     "changed_subject": "Рабочий объект кульминации",
+                                    "development_actor": "Исполнитель кульминации",
                                     "development": "исполнитель выполнил кульминационное действие",
                                     "resulting_state": "рабочий объект получил новый статус",
                                 })

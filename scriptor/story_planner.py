@@ -63,6 +63,7 @@ class StoryContentAtom:
     state_before: str = ""
     state_after: str = ""
     changed_subject: str = ""
+    development_actor: str = ""
     development: str = ""
     resulting_state: str = ""
 
@@ -212,12 +213,14 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     before = _optional_text(atom.state_before)
     after = _optional_text(atom.state_after)
     changed_subject = _optional_text(atom.changed_subject)
+    development_actor = _optional_text(atom.development_actor)
     development = _optional_text(atom.development)
     resulting_state = _optional_text(atom.resulting_state)
     if not (
         before
         and after
         and changed_subject
+        and development_actor
         and development
         and resulting_state
         and before.casefold() != after.casefold()
@@ -429,6 +432,7 @@ def parse_story_plan_response(
             state_before=_optional_text(raw_atom.get("state_before")),
             state_after=_optional_text(raw_atom.get("state_after")),
             changed_subject=_optional_text(raw_atom.get("changed_subject")),
+            development_actor=_optional_text(raw_atom.get("development_actor")),
             development=_optional_text(raw_atom.get("development")),
             resulting_state=_optional_text(raw_atom.get("resulting_state")),
         )
@@ -448,6 +452,7 @@ def parse_story_plan_response(
                 atom.state_before
                 and atom.state_after
                 and atom.changed_subject
+                and atom.development_actor
                 and atom.development
                 and atom.resulting_state
             ):
@@ -763,9 +768,11 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
-        "state_before, state_after, changed_subject, development, resulting_state, novelty_question, "
+        "state_before, state_after, changed_subject, development_actor, development, resulting_state, novelty_question, "
         "novelty_payload and do_not_repeat. changed_subject is the actor/system/status that concretely changes; "
-        "development is what happened; resulting_state is the observable state afterward. An abstract meaning, signal, "
+        "development_actor names the actor, institution, system or physical event that actually initiates the "
+        "development; it cannot be a viewer, an abstract mood, a generic topic or a restatement of changed_subject. "
+        "development is what that actor did or what concretely happened; resulting_state is the observable state afterward. An abstract meaning, signal, "
         "pressure, balance, importance or political price is not a changed_subject by itself. novelty_question is the concrete question that atom "
         "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
         "it must describe the new story state/development, not another interpretation of an earlier state. "
@@ -856,6 +863,7 @@ def build_story_writer_prompt(
             f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
             f" | BEFORE={_compact(atom.state_before, _COMPACT_ATOM_CHARS)}"
             f" | SUBJECT={_compact(atom.changed_subject, _COMPACT_ATOM_CHARS)}"
+            f" | ACTOR={_compact(atom.development_actor, _COMPACT_ATOM_CHARS)}"
             f" | DEVELOPMENT={_compact(atom.development, _COMPACT_ATOM_CHARS)}"
             f" | RESULT={_compact(atom.resulting_state, _COMPACT_ATOM_CHARS)}"
             f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
