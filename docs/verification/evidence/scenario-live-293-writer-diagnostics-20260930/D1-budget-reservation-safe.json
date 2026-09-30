@@ -1,0 +1,10 @@
+{
+  "kind": "D",
+  "reserved_at_utc": "2026-09-30T14:53:30.919484+00:00",
+  "reserved_http_attempts": 1,
+  "reserved_logical_calls": 1,
+  "run_id": "D1",
+  "source_head": "087d41ee076be7537519f40fa0e31ab2a2ef6f6e",
+  "status": "RESERVED",
+  "target_chars": 12000
+}

@@ -1,0 +1,25 @@
+{
+  "headers": "NOT_CAPTURED",
+  "id": "resp_0dd1940389077e33006abd227d384087d28d00902398e43ae0",
+  "incomplete_details": null,
+  "method": "POST",
+  "model": "gpt-5.4-mini-2026-03-17",
+  "path": "/v1/responses",
+  "payload_sha256": "915d8601ef23a5fba339982cbe5aa682ab0c55a49cb96d9ab87569b791e25245",
+  "status": "completed",
+  "transport_attempt": 4,
+  "usage": {
+    "input_tokens": 3510,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+    },
+    "output_tokens": 601,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 4111
+  },
+  "visible_response_chars": 2500,
+  "visible_response_sha256": "3467c878a056c39f744c1d885b129a97ea2a25c96a5a6359377347f333cdf888"
+}
