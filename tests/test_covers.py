@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import threading
 import time
 import unittest
@@ -4270,6 +4271,125 @@ class CoverLocalCompositorTests(unittest.TestCase):
         for invented in ("crowd", "weapons", "military", "explosion", "protest", "press activity"):
             self.assertNotIn(invented, story_context.casefold())
         self.assertIn("Composition-only alternative", rewritten)
+
+    def test_every_enhanced_duplicate_direction_preserves_story_with_grounded_intensity(self):
+        """All local duplicate fallbacks retain their scene and amplify only its evidence."""
+        settings = Settings(cover_prompt_variant_count=4, cover_scene_intensity_mode=True)
+        provider_scenes = [
+            "Mayor Elena Petrova signs the River Bridge closure order beside the damaged bridge",
+            "Engineer Pavel Orlov inspects the blue safety valve in the pumping station",
+            "Courier Nina Volkova carries the sealed archive box into the municipal records room",
+            "Director Ilya Smirnov presents the revised timetable on the station information board",
+        ]
+        item = {
+            "production_item_id": "production:all-composition-directions",
+            "title": "Municipal infrastructure update",
+            "script": "Routine maintenance notice.",
+        }
+        prior_options = [_normalize_cover_photo_prompt(scene, item) for scene in provider_scenes]
+        provider_scene_snapshot = tuple(provider_scenes)
+        previous_option_snapshot = tuple(prior_options)
+        settings.cover_queue = [{
+            **item,
+            "image_prompt": prior_options[0],
+            "image_prompt_options": list(prior_options),
+        }]
+
+        async def unchanged_prompts(*_args, **_kwargs):
+            return json.dumps({"prompts": list(provider_scenes), "recommended": 1})
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=unchanged_prompts)):
+            generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:all-composition-directions"],
+                "provider": "agent",
+                "rewrite": True,
+            })
+
+        rewritten = settings.cover_queue[0]["image_prompt_options"]
+        self.assertEqual(provider_scene_snapshot, tuple(provider_scenes))
+        self.assertEqual(previous_option_snapshot, tuple(prior_options))
+        self.assertEqual(4, len(rewritten))
+        self.assertEqual(4, len(set(rewritten)))
+        forbidden = (
+            "people", "bystanders", "crowd", "reaction", "confrontation", "opposing sides",
+            "military", "weapons", "smoke", "destruction", "protest", "press", "rescuers",
+        )
+        for scene, old_prompt, new_prompt in zip(provider_scenes, prior_options, rewritten, strict=True):
+            story_context = new_prompt.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
+            composition = new_prompt.split("SELECTED COMPOSITION:\n", 1)[1].split("\n\nIDENTITY / REFERENCES:", 1)[0]
+            self.assertEqual(scene, story_context)
+            self.assertNotEqual(old_prompt, new_prompt)
+            self.assertIn("Composition-only alternative", composition)
+            self.assertIn("Context-grounded intensity", composition)
+            for forbidden_term in forbidden:
+                self.assertIsNone(re.search(rf"\b{re.escape(forbidden_term)}\b", composition.casefold()))
+
+    def test_enhanced_duplicate_intensity_keeps_each_supported_event_type_grounded(self):
+        """Local duplicate rewrites may amplify source-supported material, never another event."""
+        from scriptor import bridge
+
+        cases = (
+            (
+                "Протест против решения правительства",
+                "На площади собрались демонстранты с плакатами.",
+                "A dense crowd of demonstrators holds large protest signs in the city square",
+                ("crowd", "protest signs"),
+                ("weapons", "explosion", "military"),
+            ),
+            (
+                "Военные подразделения начали манёвры",
+                "На полигоне участвуют военнослужащие и бронетехника.",
+                "Soldiers move beside armoured vehicles during a military exercise",
+                ("soldiers", "armoured vehicles"),
+                ("protest", "explosion"),
+            ),
+            (
+                "Удар повредил жилой квартал",
+                "Спасатели работают среди разрушений и дыма.",
+                "Rescuers work through damaged buildings as smoke rises after the strike",
+                ("rescuers", "damaged buildings", "smoke"),
+                ("protest", "military parade"),
+            ),
+            (
+                "Компания опубликовала квартальный отчёт",
+                "Руководитель показывает инвесторам финансовую таблицу.",
+                "A company executive presents a quarterly financial chart to investors",
+                ("executive", "financial chart", "investors"),
+                ("weapons", "explosion", "crowd", "protest", "smoke"),
+            ),
+            (
+                "Дипломаты подписали соглашение",
+                "Делегации проводят встречу за столом переговоров.",
+                "Diplomats sign an agreement across a negotiation table",
+                ("diplomats", "agreement", "negotiation table"),
+                ("destruction", "smoke", "explosion", "weapons", "crowd"),
+            ),
+        )
+        for index, (title, script, scene, required, forbidden) in enumerate(cases):
+            with self.subTest(title=title):
+                item = {
+                    "production_item_id": f"production:grounded-intensity-{index}",
+                    "title": title,
+                    "script": script,
+                }
+                prior_prompt = _normalize_cover_photo_prompt(scene, item)
+                rewritten = bridge._cover_distinct_enhanced_rewrite_options(
+                    [prior_prompt], item, [prior_prompt],
+                )[0]
+                story_context = rewritten.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
+                composition = rewritten.split("SELECTED COMPOSITION:\n", 1)[1].split("\n\nIDENTITY / REFERENCES:", 1)[0]
+
+                self.assertEqual(scene, story_context)
+                self.assertIn("Context-grounded intensity", composition)
+                for term in required:
+                    self.assertIn(term, story_context.casefold())
+                for term in forbidden:
+                    self.assertNotIn(term, story_context.casefold())
 
     def test_standard_duplicate_rewrite_keeps_the_legacy_provider_output_path(self):
         """The composition-only fallback is strictly opt-in."""

@@ -8144,10 +8144,10 @@ def _cover_scene_intensity_instruction(settings: Settings) -> str:
 
 
 _COVER_ENHANCED_REWRITE_COMPOSITIONS = (
-    "wide elevated view with the main action in the foreground and a separate visible reaction layer behind it",
-    "eye-level foreground confrontation with a large contextual reaction in the middle distance",
-    "compressed telephoto scene with a clear central action, layered bystanders and visible evidence of the consequence",
-    "diagonal composition that separates the opposing sides while preserving one immediate readable action",
+    "wide elevated camera angle; preserve every existing subject, object and action; rearrange only framing and foreground/background depth",
+    "eye-level medium-wide framing; preserve the exact existing subjects, objects and action; shift only screen position and camera distance",
+    "compressed telephoto framing of the exact same subjects and objects; change only depth, crop and relative screen placement",
+    "diagonal camera framing of the exact same existing scene; preserve entity count, identities, objects and actions; change only camera angle and layout",
 )
 
 
@@ -8173,9 +8173,10 @@ def _cover_distinct_enhanced_rewrite_options(
                 item,
                 composition_notes=(
                     "Composition-only alternative: "
-                    f"{direction}. Preserve the existing subject, people, entities, objects, action, event and topic. "
-                    "Change only camera framing, distance, layers, foreground/background arrangement and visual composition; "
-                    "do not add people, weapons, crowds, destruction or a different event."
+                    f"{direction}. Preserve every existing subject, object and action exactly as described in STORY CONTEXT. "
+                    "Context-grounded intensity: only when TITLE, SCRIPT or STORY CONTEXT supports it, increase the scale, density, "
+                    "consequence and dramatic emphasis of existing topic-grounded scene material; do not introduce a new kind of event. "
+                    "Change only camera framing, distance, layers, foreground/background arrangement and visual composition."
                 ),
             )
             attempt = 1
@@ -8185,9 +8186,10 @@ def _cover_distinct_enhanced_rewrite_options(
                     item,
                     composition_notes=(
                         "Composition-only alternative: "
-                        f"{direction}; layout variant {attempt}. Preserve the existing subject, people, entities, objects, action, event and topic. "
-                        "Change only camera framing, distance, layers, foreground/background arrangement and visual composition; "
-                        "do not add people, weapons, crowds, destruction or a different event."
+                        f"{direction}; layout variant {attempt}. Preserve every existing subject, object and action exactly as described in STORY CONTEXT. "
+                        "Context-grounded intensity: only when TITLE, SCRIPT or STORY CONTEXT supports it, increase the scale, density, "
+                        "consequence and dramatic emphasis of existing topic-grounded scene material; do not introduce a new kind of event. "
+                        "Change only camera framing, distance, layers, foreground/background arrangement and visual composition."
                     ),
                 )
                 attempt += 1
