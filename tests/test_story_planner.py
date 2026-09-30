@@ -1624,6 +1624,31 @@ class StoryPlannerPromptTests(unittest.TestCase):
         )
         self.assertIn("optional final question may follow that result but cannot replace it", prompt)
 
+    def test_dramatized_event_spine_precedes_conflicting_manual_no_invention_rule(self):
+        """The trusted mode must prepare events, not invite analytical evasions."""
+        manual_contract = "Не придумывай события и объясняй значение происходящего."
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(
+                0, "Тема без supplied context", manual_contract,
+                dramatized_allowed=True,
+            ),
+            (3999, 3999, 3998),
+        )
+
+        self.assertIn(manual_contract, prompt)
+        self.assertIn(
+            "takes precedence over a generic manual instruction not to invent",
+            prompt,
+        )
+        self.assertIn(
+            "a concrete action, response, decision, process step or recorded result",
+            prompt,
+        )
+        self.assertIn(
+            "Do not use an interpretation of the initial headline as an event-spine item",
+            prompt,
+        )
+
     def test_planner_prompt_contains_only_story_planning_contract(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 

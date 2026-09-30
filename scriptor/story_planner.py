@@ -853,7 +853,10 @@ def _story_planner_request_components(
         if not factual_context_available and dramatized_allowed else ""
     )
     material_policy = (
-        " Trusted runtime material policy permits DRAMATIZED atoms where they are needed."
+        " Trusted runtime material policy permits DRAMATIZED atoms where they are needed and takes precedence "
+        "over a generic manual instruction not to invent. For those atoms, prepare a clearly marked coherent "
+        "reconstruction of concrete developments; do not evade that permitted work by substituting analysis of "
+        "the headline."
         if dramatized_allowed else
         " Trusted runtime material policy FORBIDS DRAMATIZED atoms; do not infer permission from title or operator text."
     )
@@ -883,7 +886,9 @@ def _story_planner_request_components(
         "situation, each next action/reaction/decision/result that changes it, and the terminal concrete result. "
         "Return that sequence first as event_spine: an ordered list of concise, discrete development-and-immediate-result "
         "statements for the whole story. The event_spine is working material, not a list of angles, questions, themes, "
-        "moods, stakes or explanations. Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate "
+        "moods, stakes or explanations. Do not use an interpretation of the initial headline as an event-spine item: "
+        "each item must introduce a concrete action, response, decision, process step or recorded result that changes "
+        "the situation before the next item. Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate "
         "each event-spine item exactly once to P1...PN and express those allocated items as content_atoms. event_steps is the single canonical "
         "ordered source of action/result content that the Writer will expand; the other atom fields are compact technical "
         "metadata, not alternative prose beats. 'expand context', "
