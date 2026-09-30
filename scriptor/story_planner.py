@@ -941,6 +941,25 @@ def build_story_writer_prompt(
         max(1, active_target // max(1, len(part.content_ids)))
         if active_target else 0
     )
+    local_volume_delta = max(1, round(active_target * 0.03))
+    writer_volume_min = max(1, active_target - local_volume_delta)
+    writer_volume_max = active_target + local_volume_delta
+    # Keep guidance compatible with a caller's whole-story contract at every
+    # scale. Each part owns a proportional share; the one-pass Writer must not
+    # be encouraged to make a narrow global maximum unattainable.
+    planned_total = max(1, sum(max(0, int(item.target_chars or 0)) for item in plan.parts))
+    if int(getattr(request, "allowed_min", 0) or 0) > 0:
+        minimum_share = (
+            int(request.allowed_min) * active_target + planned_total - 1
+        ) // planned_total
+        writer_volume_min = max(writer_volume_min, minimum_share)
+    if int(getattr(request, "allowed_max", 0) or 0) > 0:
+        maximum_share = int(request.allowed_max) * active_target // planned_total
+        writer_volume_max = min(writer_volume_max, maximum_share)
+    if writer_volume_min > writer_volume_max:
+        # Invalid/narrow historic contracts are still handled by the runtime's
+        # existing advisory status. Do not make prompt construction a blocker.
+        writer_volume_min = writer_volume_max = active_target
     used_ids = [
         str(content_id)
         for accepted in accepted_parts
@@ -1048,6 +1067,10 @@ def build_story_writer_prompt(
             f"CURRENT TARGET: approximately {active_target} characters\n"
             "ACTIVE LENGTH RULE FOR THIS CALL: write approximately CURRENT TARGET characters, not the overall "
             "scenario target.\n"
+            f"FIRST-PASS PART VOLUME: write roughly {writer_volume_min}-{writer_volume_max} characters for this "
+            "technical part. Do not end after a short summary of the atoms: consume the ordered coverage beats and "
+            "develop their sequence, response and consequence before closing this part. This is first-pass writing "
+            "guidance only; the runtime will preserve completed prose without a length retry, trim or rewrite.\n"
         )
         if active_target
         else (

@@ -101,7 +101,10 @@ class StoryPlanValidationTests(unittest.TestCase):
         ]
 
         prompt = build_story_writer_prompt(
-            ScenarioRequest(0, "Тема", "Контекст", target_chars=100000),
+            ScenarioRequest(
+                0, "Тема", "Контекст", target_chars=100000,
+                allowed_min=95000, allowed_max=100500,
+            ),
             plan,
             accepted,
             15,
@@ -110,6 +113,7 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn("EARLIER USED IDS:", prompt)
         self.assertIn("FUTURE RESERVED IDS ONLY:", prompt)
         self.assertIn("C16_1 [DRAMATIZED]", prompt)
+        self.assertIn("FIRST-PASS PART VOLUME: write roughly 4849-5025 characters", prompt)
         self.assertNotIn("OLD_BODY_P1", prompt)
         self.assertLess(len(prompt), 16000)
 
@@ -317,6 +321,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         )
 
         self.assertIn("MATERIAL ALLOCATION: this part has 3 owned atoms; reserve roughly 1333 characters", prompt)
+        self.assertIn("FIRST-PASS PART VOLUME: write roughly 3879-4119 characters", prompt)
+        self.assertIn("without a length retry, trim or rewrite", prompt)
         self.assertIn("WRITER MATERIAL=объявление решения; порядок применения; первая реакция", prompt)
         self.assertIn("WRITER MATERIAL=перестройка очереди; проверка результата", prompt)
         self.assertEqual(
