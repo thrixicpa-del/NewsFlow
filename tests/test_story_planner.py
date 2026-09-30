@@ -91,7 +91,7 @@ class StoryPlanValidationTests(unittest.TestCase):
             "content_atoms": [{
                 "id": "C001", "summary": "Новое действие", "owner_part_id": "P1",
                 "content_kind": "SUPPORTED", "state_before": "До действия.",
-                "changed_subject": "Сторона", "development_actor": "Сторона", "development": "приняла решение",
+                "changed_subject": "Сторона", "development": "приняла решение",
                 "resulting_state": "решение изменило статус",
             }],
             "parts": [{
@@ -339,7 +339,6 @@ class StoryPlanValidationTests(unittest.TestCase):
             after: str = "",
             *,
             changed_subject: str = "",
-            development_actor: str = "исполнитель",
             development: str = "",
             resulting_state: str = "",
         ) -> StoryContentAtom:
@@ -347,7 +346,6 @@ class StoryPlanValidationTests(unittest.TestCase):
             object.__setattr__(record, "state_before", before)
             object.__setattr__(record, "state_after", after)
             object.__setattr__(record, "changed_subject", changed_subject)
-            object.__setattr__(record, "development_actor", development_actor)
             object.__setattr__(record, "development", development)
             object.__setattr__(record, "resulting_state", resulting_state)
             return record
@@ -404,18 +402,6 @@ class StoryPlanValidationTests(unittest.TestCase):
             changed_subject="Оперативная ситуация в городе",
             development="городские службы перевели критические объекты на резервное питание",
             resulting_state="критические объекты перешли на резервное питание",
-        )))
-        # A prior event's aggregate consequences are not the actor of the
-        # next event.  Without a real initiator this is merely a new wording
-        # for an already-covered effect, regardless of news domain.
-        self.assertFalse(_has_concrete_story_development(atom(
-            "Ожидание решения сдвигается после прежнего события",
-            "Предыдущее событие уже было раскрыто.",
-            "Обсуждение снова сосредоточено на прежнем событии.",
-            changed_subject="Общее ожидание решения",
-            development_actor="последствия предыдущего события",
-            development="они сдвигают обсуждение к уже известному эпизоду",
-            resulting_state="ожидание меняется без нового действия",
         )))
         self.assertFalse(_has_concrete_story_development(atom(
             "Удар меняет политическую цену конфликта"
@@ -495,7 +481,6 @@ class StoryPlanValidationTests(unittest.TestCase):
                 "owner_part_id": "P1", "content_kind": "DRAMATIZED",
                 "state_before": "Событие уже произошло.",
                 "changed_subject": "Интенсивность процесса",
-                "development_actor": "участники",
                 "development": "Событие воспринимается как более жёсткая фаза.",
                 "resulting_state": "Участники действуют с ожиданием затяжного давления.",
                 "state_after": "Ожидания участников стали более тревожными.",
@@ -576,7 +561,6 @@ class StoryPlanValidationTests(unittest.TestCase):
             atom["state_before"] = f"Состояние до шага {index}."
             atom["state_after"] = f"Новое состояние после шага {index}."
             atom["changed_subject"] = f"Рабочий объект {index}"
-            atom["development_actor"] = f"Исполнитель {index}"
             atom["development"] = f"исполнитель выполнил действие {index}"
             atom["resulting_state"] = f"рабочий объект {index} получил новый статус"
         plan = parse_story_plan_response(
@@ -599,7 +583,6 @@ class StoryPlanValidationTests(unittest.TestCase):
                 "content_kind": "DRAMATIZED",
                 "state_before": "После атаки критические объекты работали по обычной схеме.",
                 "changed_subject": "Оперативная ситуация в городе",
-                "development_actor": "городские службы",
                 "development": "городские службы перевели критические объекты на резервное питание",
                 "resulting_state": "критические объекты перешли на резервное питание",
                 "state_after": "Критические объекты работают на резервном питании.",
@@ -618,35 +601,6 @@ class StoryPlanValidationTests(unittest.TestCase):
         plan = parse_story_plan_response(response, (2000,), require_state_transitions=True)
 
         self.assertEqual(plan.content_atoms[0].changed_subject, "Оперативная ситуация в городе")
-
-    def test_parser_requires_the_actor_for_each_fresh_concrete_transition(self):
-        """A named change without its actor still permits analytical filler."""
-        response = json.dumps({
-            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
-            "thesis": "Переход обязан называть, кто вызвал изменение.",
-            "macro_blocks": [{"id": "M1", "purpose": "Проверить источник действия"}],
-            "content_atoms": [{
-                "id": "C001", "summary": "Городские объекты переходят на резервное питание",
-                "owner_part_id": "P1", "content_kind": "DRAMATIZED",
-                "state_before": "Объекты работали по обычной схеме.",
-                "changed_subject": "Оперативная ситуация в городе",
-                "development": "критические объекты перевели на резервное питание",
-                "resulting_state": "объекты работают на резервном питании",
-                "state_after": "Город использует резервные схемы.",
-                "novelty_question": "Кто изменил режим работы объектов?",
-                "novelty_payload": "Режим работы объектов изменился.",
-                "do_not_repeat": "",
-            }],
-            "parts": [{
-                "id": "P1", "role": "COMPLETE", "purpose": "Показать действие",
-                "macro_id": "M1", "content_ids": ["C001"],
-                "novelty_question": "Что изменило режим работы?",
-                "novelty_payload": "Объекты перешли на резервное питание.",
-            }],
-        }, ensure_ascii=False)
-
-        with self.assertRaisesRegex(ValueError, "structured concrete change"):
-            parse_story_plan_response(response, (2000,), require_state_transitions=True)
 
     def test_parser_rejects_obvious_near_copy_part_novelty_contracts(self):
         response = json.dumps({
@@ -1066,7 +1020,6 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertNotIn("content_capacity_insufficient", prompt)
         self.assertIn("Even if only a headline is available", prompt)
         self.assertIn("DRAMATIZED", prompt)
-        self.assertIn("development_actor", prompt)
         self.assertIn("novelty_question", prompt)
         self.assertIn("novelty_payload", prompt)
         self.assertIn("4-5 genuinely different atoms", prompt)
@@ -1075,6 +1028,8 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("semantic-density requirements", prompt)
         self.assertIn("minimum 3 distinct atoms", prompt)
         self.assertIn("terminal development", prompt)
+        self.assertIn("Before returning JSON, audit every atom", prompt)
+        self.assertIn("identifiable actor, institution, system or physical event", prompt)
         self.assertIn("synonym swap", prompt)
 
     def test_twelve_thousand_plan_requires_event_density_before_writer(self):
@@ -1186,6 +1141,7 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("EVENT-FIRST STYLE CONTRACT", prompt)
         self.assertIn("This is not an essay, analysis, op-ed, literary story", prompt)
         self.assertIn("Every substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change", prompt)
+        self.assertIn("two substantive event-driven paragraphs per CURRENT atom", prompt)
 
     def test_only_opening_gets_one_dramatized_disclosure_instruction(self):
         request = ScenarioRequest(0, "Тема", "OPERATOR CONTRACT")

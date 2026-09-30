@@ -29,7 +29,6 @@ def _story_plan(part_count: int = 2) -> str:
              "state_before": f"Состояние до шага {index}.",
              "state_after": f"Состояние после шага {index}.",
              "changed_subject": f"Рабочий объект {index}",
-             "development_actor": f"Исполнитель {index}",
              "development": f"исполнитель выполнил действие {index}",
              "resulting_state": f"рабочий объект {index} получил новый статус"}
             for index in range(1, part_count + 1)

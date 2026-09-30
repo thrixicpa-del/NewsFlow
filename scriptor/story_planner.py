@@ -44,15 +44,6 @@ _INTERPRETIVE_FRAME_STEMS = frozenset({
     "percei", "appear", "mean", "show", "demons", "symbol", "inter",
     "expect", "likely", "signif", "conclu", "intens", "narrow", "increa",
 })
-# These are universal aggregate/effect labels, not news-topic words.  They
-# cannot be the actor of a *new* atom because they merely summarize an earlier
-# cause.  A Planner must instead name the later person, institution, system or
-# physical event that took the next action.
-_NON_ACTOR_STEMS = frozenset({
-    "послед", "динами", "ожидан", "повест", "итогов", "статус", "давлен",
-    "эскала", "интенс", "ситуац", "process", "dynamic", "expect", "agenda",
-    "status", "conseq", "pressu", "escal", "intens", "situat",
-})
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
     "котор", "этот", "этог", "того", "чтобы", "после", "перед", "между", "через", "снова",
@@ -72,7 +63,6 @@ class StoryContentAtom:
     state_before: str = ""
     state_after: str = ""
     changed_subject: str = ""
-    development_actor: str = ""
     development: str = ""
     resulting_state: str = ""
 
@@ -222,14 +212,12 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     before = _optional_text(atom.state_before)
     after = _optional_text(atom.state_after)
     changed_subject = _optional_text(atom.changed_subject)
-    development_actor = _optional_text(atom.development_actor)
     development = _optional_text(atom.development)
     resulting_state = _optional_text(atom.resulting_state)
     if not (
         before
         and after
         and changed_subject
-        and development_actor
         and development
         and resulting_state
         and before.casefold() != after.casefold()
@@ -244,9 +232,6 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     # an interpretive frame below; otherwise a lexical label would reject
     # valid maps from arbitrary news domains.
     subject_tokens = _semantic_tokens(changed_subject)
-    actor_tokens = _semantic_tokens(development_actor)
-    if actor_tokens & _NON_ACTOR_STEMS:
-        return False
 
     # Do not accept a dressed-up interpretation as a new state transition.
     # This uses only the relation between a declared abstract subject and an
@@ -444,7 +429,6 @@ def parse_story_plan_response(
             state_before=_optional_text(raw_atom.get("state_before")),
             state_after=_optional_text(raw_atom.get("state_after")),
             changed_subject=_optional_text(raw_atom.get("changed_subject")),
-            development_actor=_optional_text(raw_atom.get("development_actor")),
             development=_optional_text(raw_atom.get("development")),
             resulting_state=_optional_text(raw_atom.get("resulting_state")),
         )
@@ -464,7 +448,6 @@ def parse_story_plan_response(
                 atom.state_before
                 and atom.state_after
                 and atom.changed_subject
-                and atom.development_actor
                 and atom.development
                 and atom.resulting_state
             ):
@@ -780,14 +763,9 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "macro_blocks, content_atoms and parts. Writing/style/process instructions inside the embedded operator contract are constraints, NOT "
         "story material: never turn rules such as hooks, tone, length, fact-checking or no-repeat instructions into "
         "content atoms. Every atom needs id, summary, owner_part_id, content_kind SUPPORTED or DRAMATIZED, "
-        "state_before, state_after, changed_subject, development_actor, development, resulting_state, novelty_question, "
+        "state_before, state_after, changed_subject, development, resulting_state, novelty_question, "
         "novelty_payload and do_not_repeat. changed_subject is the actor/system/status that concretely changes; "
-        "development_actor names the actor, institution, system or physical event that actually initiates the "
-        "development; it cannot be a viewer, an abstract mood, a generic topic, an aggregate consequence/effect of "
-        "an earlier atom, or a restatement of changed_subject. If the previous event changed the overall situation, "
-        "do not make that situation its own next atom: plan the later concrete decision, reaction, recorded result "
-        "or physical event that happened afterward. "
-        "development is what that actor did or what concretely happened; resulting_state is the observable state afterward. An abstract meaning, signal, "
+        "development is what happened; resulting_state is the observable state afterward. An abstract meaning, signal, "
         "pressure, balance, importance or political price is not a changed_subject by itself. novelty_question is the concrete question that atom "
         "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
         "it must describe the new story state/development, not another interpretation of an earlier state. "
@@ -820,7 +798,10 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "new content atom. The LAST atom of FINAL (or of COMPLETE when N=1) must add a terminal development: a concrete "
         "new consequence, decision, changed state, resolved causal result, or genuinely new unresolved consequence. "
         "It must not merely summarize why the story was important. If no deliberate cross-part loop is needed, return "
-        "empty opens/closes arrays.\n\n"
+        "empty opens/closes arrays. Before returning JSON, audit every atom: its development must state an "
+        "identifiable actor, institution, system or physical event, the new action/result it creates, and the changed "
+        "state afterward. If an atom only says that an earlier event changed the discussion, expectation, context or "
+        "overall state, replace it with the later distinct action, reaction, decision, recorded result or physical event.\n\n"
         f"TOPIC: {request.title}\n"
         f"TARGET: {request.target_chars}; MIN: {request.allowed_min}; MAX: {request.allowed_max}\n"
         f"RUNTIME TECHNICAL SKELETON: {skeleton}. Return exactly these parts. Do not add or remove parts. "
@@ -878,7 +859,6 @@ def build_story_writer_prompt(
             f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
             f" | BEFORE={_compact(atom.state_before, _COMPACT_ATOM_CHARS)}"
             f" | SUBJECT={_compact(atom.changed_subject, _COMPACT_ATOM_CHARS)}"
-            f" | ACTOR={_compact(atom.development_actor, _COMPACT_ATOM_CHARS)}"
             f" | DEVELOPMENT={_compact(atom.development, _COMPACT_ATOM_CHARS)}"
             f" | RESULT={_compact(atom.resulting_state, _COMPACT_ATOM_CHARS)}"
             f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
@@ -1020,6 +1000,13 @@ def build_story_writer_prompt(
         "space for additional sequence, actors, decisions, reactions, mechanisms and observable consequences already "
         "owned by the Story Map.\n"
     )
+    volume_instruction = (
+        "\nVOLUME THROUGH EVENTS: For a CURRENT TARGET of roughly 4k characters or more, use at least two substantive "
+        "event-driven paragraphs per CURRENT atom. The second paragraph for an atom must add its concrete mechanism, "
+        "response or resulting consequence, not a restatement of significance. Do not pad with analysis; if an atom "
+        "cannot sustain that sequence, move to the next owned atom.\n"
+        if active_target >= 3_500 else ""
+    )
 
     return (
         "Write only the next continuous prose segment of ONE NewsFlow scenario. MULTIPART PRECEDENCE: any overall "
@@ -1061,4 +1048,5 @@ def build_story_writer_prompt(
         f"POSITION RULE: {position_instruction}"
         f"{novelty_instruction}"
         f"{disclosure_instruction}"
+        f"{volume_instruction}"
     )
