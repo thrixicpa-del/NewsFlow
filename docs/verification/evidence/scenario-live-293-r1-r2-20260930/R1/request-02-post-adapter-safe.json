@@ -1,0 +1,82 @@
+{
+  "input": "TITLE: МИР ОПЯТЬ ОТКЛАДЫВАЕТСЯ? — РОССИЯ УСИЛИЛА УДАРЫ ПО УКРАИНЕ — КИЕВ СНОВА ОКАЗАЛСЯ ПОД МАССИРОВАННОЙ АТАКОЙ\nCOMPLETE STRUCTURAL PROJECTION:\n{\"macro_blocks\":[{\"id\":\"M1\"},{\"id\":\"M2\"},{\"id\":\"M3\"}],\"content_atoms\":[{\"id\":\"A1\",\"owner_part_id\":\"P1\"},{\"id\":\"A2\",\"owner_part_id\":\"P1\"},{\"id\":\"A3\",\"owner_part_id\":\"P1\"},{\"id\":\"A4\",\"owner_part_id\":\"P2\"},{\"id\":\"A5\",\"owner_part_id\":\"P2\"}],\"parts\":[{\"id\":\"P1\",\"role\":\"OPENING\",\"macro_id\":\"M1\",\"content_ids\":[\"A1\",\"A2\",\"A3\"]},{\"id\":\"P2\",\"role\":\"MIDDLE\",\"macro_id\":\"M2\",\"content_ids\":[\"A4\",\"A5\"]},{\"id\":\"P3\",\"role\":\"FINAL\",\"macro_id\":\"M3\",\"content_ids\":[]}]}",
+  "instructions": "You are the NewsFlow Story Plan structural repairer. The original Story Map's thesis, macro_blocks and content_atoms are immutable. Return strict JSON with ONLY a corrected parts list. Keep every existing content atom assigned exactly once through the returned parts[].content_ids; those IDs define the repaired owner_part_id. Use only existing macro IDs, and fix only part count, IDs, roles and content ownership. opens/closes are advisory; set them to [] unless an exact short loop ID is deliberately paired from an earlier part to a later part. Do not write scenario prose, do not add atoms, and do not regenerate the story. Runtime technical skeleton: EXACT_PART_COUNT=3; P1=OPENING; P2=MIDDLE; P3=FINAL. Return exactly these parts. Do not add or remove parts. Do not rename part IDs. Do not change roles.",
+  "max_output_tokens": 6144,
+  "model": "gpt-5.4-mini",
+  "text": {
+    "format": {
+      "name": "newsflow_story_plan_parts_repair",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "parts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "closes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "content_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "macro_id": {
+                  "type": "string"
+                },
+                "novelty_payload": {
+                  "type": "string"
+                },
+                "novelty_question": {
+                  "type": "string"
+                },
+                "opens": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "purpose": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "transition_direction": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "role",
+                "purpose",
+                "macro_id",
+                "content_ids",
+                "opens",
+                "closes",
+                "transition_direction",
+                "novelty_question",
+                "novelty_payload"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "parts"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "json_schema"
+    }
+  }
+}
