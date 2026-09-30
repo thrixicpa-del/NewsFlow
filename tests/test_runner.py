@@ -47,7 +47,14 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                  "state_after": f"Состояние после шага {index}.",
                  "changed_subject": f"Рабочий объект {index}",
                  "development": f"исполнитель выполнил действие {index}",
-                 "resulting_state": f"рабочий объект {index} получил новый статус"}
+                 "resulting_state": f"рабочий объект {index} получил новый статус",
+                 "writer_material": [
+                     f"объект {index} работал в прежнем порядке",
+                     f"исполнитель выполнил действие {index} над объектом",
+                     f"ответственная служба проверила изменение объекта {index}",
+                     f"участники получили новый статус объекта {index}",
+                     f"следующий шаг использует результат действия {index}",
+                 ]}
                 for index in range(1, part_count + 1)
             ],
             "parts": [
@@ -501,7 +508,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     [row["target_chars"] for row in job.accepted_story_parts], list(targets),
                 )
                 self.assertTrue(all("MATERIAL ALLOCATION:" in prompt for prompt in client.writer_prompts))
-                self.assertTrue(all("WRITER MATERIAL=" in prompt for prompt in client.writer_prompts))
+                self.assertTrue(all(
+                    "WRITER MATERIAL=объект" in prompt
+                    and "ответственная служба проверила изменение" in prompt
+                    and "следующий шаг использует результат" in prompt
+                    for prompt in client.writer_prompts
+                ))
                 self.assertEqual(
                     client.planner_budgets,
                     [scenario_output_token_budget(request, 1536 + len(targets) * 1536)],
