@@ -261,6 +261,26 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertIn("предположением", prompt.casefold())
         self.assertIn("не выдавай прогноз за уже произошедшее событие", prompt.casefold())
 
+    def test_factual_contract_never_authorizes_dramatized_material(self):
+        prompt = bridge.production_item_prompt({
+            "framing_type": "FACTUAL",
+            "core_event": "Тема задаёт предмет без источника.",
+        })
+
+        self.assertIn("Режим подачи: FACTUAL", prompt)
+        self.assertIn("не создавай dramatized", prompt.casefold())
+        self.assertNotIn("Если опорного материала недостаточно, развивай историю только как DRAMATIZED", prompt)
+
+    def test_hypothetical_contract_labels_dramatized_events_as_possible_not_chronicle(self):
+        prompt = bridge.production_item_prompt({
+            "framing_type": "HYPOTHETICAL",
+            "core_event": "Тема задаёт возможное развитие.",
+        })
+
+        self.assertIn("DRAMATIZED", prompt)
+        self.assertIn("возможным развитием", prompt)
+        self.assertNotIn("уже произошедшей хроникой", prompt)
+
     def test_legacy_results_are_projected_to_production_items(self):
         settings = Settings(
             idea_results=["Переговоры зашли в тупик: спор идёт вокруг главного условия"],
