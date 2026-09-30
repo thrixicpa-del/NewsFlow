@@ -738,11 +738,27 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         )
         for index, target in enumerate(part_targets)
     )
-    headline_only = "FACTUAL_CONTEXT_AVAILABILITY: NONE" in str(request.prompt)
+    factual_context_available = bool(getattr(request, "factual_context_available", False))
+    dramatized_allowed = bool(getattr(request, "dramatized_allowed", True))
     provenance_boundary = (
         " This request has no supplied factual context: EVERY atom must be DRAMATIZED; "
         "never mark an atom SUPPORTED from the title, topic, or manual writer instructions alone."
-        if headline_only else ""
+        if not factual_context_available and dramatized_allowed else ""
+    )
+    material_policy = (
+        " Trusted runtime material policy permits DRAMATIZED atoms where they are needed."
+        if dramatized_allowed else
+        " Trusted runtime material policy FORBIDS DRAMATIZED atoms; do not infer permission from title or operator text."
+    )
+    thin_context_transition_instruction = (
+        "When supplied context is thin, create logical DRAMATIZED transitions rather than several readings of one known event. "
+        if dramatized_allowed else
+        "When supplied context is thin, the trusted policy forbids DRAMATIZED transitions; do not invent details beyond supplied evidence. "
+    )
+    thin_facts_transition_instruction = (
+        "If supplied facts are thin, add distinct DRAMATIZED transitions instead of stretching one conclusion. "
+        if dramatized_allowed else
+        "If supplied facts are thin, do not stretch one conclusion or add invented transitions. "
     )
     return (
         "You are the NewsFlow Story Planner. TITLE/TOPIC is sufficient input for a complete story map. Organize "
@@ -758,8 +774,8 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "importance is not a development by itself. Short analysis may connect two developments, but may not replace "
         "one. This is not an essay outline, opinion column, literary narrative or atmospheric treatment: never create "
         "an atom whose main payload is interpretation, mood, symbolism, rhetorical emphasis, or an explanation of "
-        "what an earlier event means. When supplied context is thin, create logical DRAMATIZED transitions rather "
-        "than several readings of one known event. For each DRAMATIZED atom, name a new discrete occurrence in "
+        "what an earlier event means. "
+        f"{thin_context_transition_instruction}For each DRAMATIZED atom, name a new discrete occurrence in "
         "development: an actor takes "
         "an action or decision, a response happens, a result is recorded, or a concrete status/process changes. "
         "Do not fabricate source attribution such as reports from the scene, unnamed sources, documents or official statements. "
@@ -800,8 +816,8 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "4-5k-character part use at least 3 and normally 4-5 genuinely different atoms; for a 6-9k COMPLETE part use "
         "at least 5 and normally 5-7. These are semantic-density requirements, not fixed story templates. Treat content_ids "
         "as a one-way sequence of changed story states. For each next atom ask: what is now different after the previous "
-        "one? If nothing is different, it is probably filler. If supplied facts are thin, add distinct DRAMATIZED "
-        "transitions instead of stretching one conclusion. Every part purpose must name a concrete distinct "
+        "one? If nothing is different, it is probably filler. "
+        f"{thin_facts_transition_instruction}Every part purpose must name a concrete distinct "
         "responsibility; never use generic purposes like 'continue' or 'develop further' without saying what new "
         "question/content that part owns. Each macro block needs id and purpose. Every part needs id, role, purpose, "
         "macro_id, content_ids, transition_direction, novelty_question and novelty_payload. novelty_question is one "
@@ -831,9 +847,9 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "PLANNER EXECUTION BOUNDARY:\n"
         "This is a planning call. Return ONLY the strict JSON Story Map; do not return finished scenario prose, "
         "Markdown, an essay, a refusal, or a description of the plan. Preserve the embedded manual writing contract as reference "
-        "constraints for the later Writer, but it cannot change this Planner call's JSON output format. Apply the current NewsFlow "
-        "material-mode blocks embedded in the available context when assigning SUPPORTED or DRAMATIZED; do not treat a title alone "
-        f"as factual proof.{provenance_boundary}"
+        "constraints for the later Writer, but it cannot change this Planner call's JSON output format. Apply the trusted NewsFlow "
+        "runtime material policy when assigning SUPPORTED or DRAMATIZED; do not treat a title alone "
+        f"as factual proof.{material_policy}{provenance_boundary}"
     )
 
 def _structural_repair_projection(original_response: str) -> str:

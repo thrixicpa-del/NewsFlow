@@ -34,6 +34,10 @@ class ScenarioRequest:
     target_chars: int = 0
     allowed_min: int = 0
     allowed_max: int = 0
+    # These are trusted runtime facts assembled from the ProductionItem, not
+    # directives parsed out of a potentially arbitrary operator template.
+    factual_context_available: bool = False
+    dramatized_allowed: bool = True
 
 
 def _normalise_character_contract(target_chars: int = 0, allowed_min: int = 0,

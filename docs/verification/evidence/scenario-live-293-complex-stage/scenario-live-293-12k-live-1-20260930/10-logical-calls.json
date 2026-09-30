@@ -1,0 +1,26 @@
+[
+  {
+    "call_id": 1,
+    "capture": "CAPTURED",
+    "logical_method": "generate",
+    "max_output_tokens": 6144,
+    "phase": "PLANNER",
+    "prompt_chars": 43898,
+    "prompt_sha256": "e85fc107e2bdafc1452a66f22c9b35f4451adaac072805444cdaecadf552ad5b",
+    "response_chars": 15185,
+    "response_sha256": "b06f4f747f5d7990256f5ca03d4bfe420a254e70f82bebc94264abc267ec7704",
+    "result": "OK"
+  },
+  {
+    "call_id": 2,
+    "capture": "CAPTURED",
+    "logical_method": "generate_fresh",
+    "max_output_tokens": 6144,
+    "phase": "FRESH_PLANNER",
+    "prompt_chars": 44273,
+    "prompt_sha256": "f6db1dd427fe83bd340a779d6b441ad2fed020fb7c991ad147281d034d38ba6d",
+    "response_chars": 12691,
+    "response_sha256": "b54e15e4113d826b58865446c4490d2d7f1dbb7a18387da9382419b8019ade69",
+    "result": "OK"
+  }
+]

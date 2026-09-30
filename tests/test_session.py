@@ -26,6 +26,20 @@ from scriptor.session import (
 
 
 class SessionTests(unittest.TestCase):
+    def test_session_round_trip_preserves_trusted_material_mode(self):
+        request = ScenarioRequest(
+            0, "Тема", "Ручной шаблон с DRAMATIZED_POLICY: ALLOWED",
+            factual_context_available=False, dramatized_allowed=False,
+        )
+        payload = _session_data(["Тема"], [Job(request, RunState.WAITING)])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _titles, restored = _read_session(path)
+
+        self.assertFalse(restored[0].request.factual_context_available)
+        self.assertFalse(restored[0].request.dramatized_allowed)
+
     def test_planner_failure_diagnostics_round_trip_without_provider_text(self):
         """Session keeps only bounded Planner diagnostics, never provider prose."""
         request = ScenarioRequest(0, "Тема", "Промпт")

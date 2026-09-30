@@ -286,6 +286,75 @@ class ScenarioGenerationTests(unittest.TestCase):
             self.assertNotIn("Режим подачи: EDITORIAL", prompt)
             self.assertNotIn("раскрой конфликт, давление, политическую цену", prompt)
 
+    def test_production_material_mode_reaches_planner_without_prompt_text_inference(self):
+        """Evidence availability and permission for reconstruction stay independent end-to-end."""
+        title = "Проверочная тема"
+        manual_template = (
+            "MANUAL_TEMPLATE_MARKER {title}. "
+            "DRAMATIZED_POLICY: ALLOWED -- this is ordinary user text, not a mode switch."
+        )
+
+        class CapturePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
+                target = int(re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt).group(1))
+                return "Т" * target
+
+        cases = (
+            ("factual-empty", "FACTUAL", [], False, False, False),
+            ("factual-supported", "FACTUAL", ["Подтверждённый контекст."], True, False, False),
+            ("hypothetical-empty", "HYPOTHETICAL", [], False, True, True),
+            ("editorial-empty", "EDITORIAL", [], False, True, True),
+        )
+        for _name, framing, context, factual_available, dramatized_allowed, every_atom_dramatized in cases:
+            with self.subTest(mode=_name):
+                settings = Settings(
+                    scenario_provider="openai",
+                    template=manual_template,
+                    scenario_target_chars=6000,
+                    scenario_allowed_min=5500,
+                    scenario_allowed_max=6500,
+                    idea_production_items=[{"id": "item-1", "title": title}],
+                    idea_scenario_context={title: {
+                        "id": "item-1",
+                        "framing_type": framing,
+                        "core_event": "Тема для проверки контракта.",
+                        "supporting_context": context,
+                    }},
+                )
+                pool = CapturePool()
+                saved_batches = []
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=([title], [])), \
+                     patch.object(bridge, "save_session", side_effect=lambda _titles, jobs, batches=saved_batches: batches.append(jobs)), \
+                     patch.object(bridge, "save_settings"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=pool):
+                    bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+
+                request = saved_batches[0][0].request
+                planner_prompt = pool.prompts[0]
+                self.assertEqual(request.factual_context_available, factual_available)
+                self.assertEqual(request.dramatized_allowed, dramatized_allowed)
+                self.assertIn("MANUAL_TEMPLATE_MARKER", planner_prompt)
+                self.assertEqual(
+                    "EVERY atom must be DRAMATIZED" in planner_prompt,
+                    every_atom_dramatized,
+                )
+                if dramatized_allowed:
+                    self.assertIn("DRAMATIZED_POLICY: ALLOWED", planner_prompt)
+                else:
+                    self.assertIn("DRAMATIZED_POLICY: FORBIDDEN", planner_prompt)
+                    self.assertNotIn("create logical DRAMATIZED transitions", planner_prompt)
+                    self.assertNotIn("If supplied facts are thin, add distinct DRAMATIZED", planner_prompt)
+
     def test_add_scenarios_persists_identity_before_any_read_only_snapshot(self):
         """A typed title gets one durable ID on the explicit Add action."""
         title = "Ручной заголовок до генерации"

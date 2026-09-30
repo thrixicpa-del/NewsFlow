@@ -1,0 +1,127 @@
+{
+  "attempts": [
+    {
+      "capture": "CAPTURED",
+      "headers": "REDACTED_NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_chars": 45951,
+      "payload_sha256": "93a3de4fce73b5d6eb4b746c53af7f12ddafa45ebea004eae42027e0553daf2e",
+      "transport_attempt": 1
+    },
+    {
+      "capture": "CAPTURED",
+      "headers": "REDACTED_NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_chars": 49734,
+      "payload_sha256": "45847dcea32f01669fa9a147bc613a021d905aa244a9746ffc9cba3a80d26574",
+      "transport_attempt": 2
+    },
+    {
+      "capture": "CAPTURED",
+      "headers": "REDACTED_NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_chars": 49628,
+      "payload_sha256": "448407a8a065a766ae2ed3f12847b98a7b063d73648f2b2580e86fd6fa36b1bc",
+      "transport_attempt": 3
+    },
+    {
+      "capture": "CAPTURED",
+      "headers": "REDACTED_NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_chars": 49630,
+      "payload_sha256": "98238b5637e98efc8ea8317881d66da5497ad76c37ff1f9067ac279ae050ed82",
+      "transport_attempt": 4
+    }
+  ],
+  "responses": [
+    {
+      "capture": "CAPTURED",
+      "id": "resp_02b1736c356ed984006abce3e7004887d282d1187e1518f502",
+      "incomplete_details": null,
+      "model": "gpt-5.4-mini-2026-03-17",
+      "output_text_chars": 0,
+      "status": "completed",
+      "transport_attempt": 1,
+      "usage": {
+        "input_tokens": 11605,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 9984
+        },
+        "output_tokens": 3822,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 15427
+      }
+    },
+    {
+      "capture": "CAPTURED",
+      "id": "resp_021e3487a1e7f742006abce405e6e087d2a56c7d5fb5aaae9b",
+      "incomplete_details": null,
+      "model": "gpt-5.4-mini-2026-03-17",
+      "output_text_chars": 0,
+      "status": "completed",
+      "transport_attempt": 2,
+      "usage": {
+        "input_tokens": 12624,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 8960
+        },
+        "output_tokens": 678,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 13302
+      }
+    },
+    {
+      "capture": "CAPTURED",
+      "id": "resp_006437ec716bf9f4006abce40d2a4c87d291ab536262f9ea74",
+      "incomplete_details": null,
+      "model": "gpt-5.4-mini-2026-03-17",
+      "output_text_chars": 0,
+      "status": "completed",
+      "transport_attempt": 3,
+      "usage": {
+        "input_tokens": 12570,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 9984
+        },
+        "output_tokens": 821,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 13391
+      }
+    },
+    {
+      "capture": "CAPTURED",
+      "id": "resp_0d5e466c213c03d3006abce418050487d28328863df8671604",
+      "incomplete_details": null,
+      "model": "gpt-5.4-mini-2026-03-17",
+      "output_text_chars": 0,
+      "status": "completed",
+      "transport_attempt": 4,
+      "usage": {
+        "input_tokens": 12635,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 9984
+        },
+        "output_tokens": 739,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 13374
+      }
+    }
+  ],
+  "sdk_retries": "UNKNOWN"
+}

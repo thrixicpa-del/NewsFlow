@@ -46,6 +46,8 @@ def remove_scenarios(titles: list[str], jobs: list[Job], indices: set[int]) -> t
             job.request.target_chars,
             job.request.allowed_min,
             job.request.allowed_max,
+            job.request.factual_context_available,
+            job.request.dramatized_allowed,
         )
         new_jobs.append(Job(
             request, job.state, job.result, job.error,
@@ -65,8 +67,11 @@ def rename_scenario(titles: list[str], jobs: list[Job], index: int, new_title: s
     updated_jobs = []
     for job in jobs:
         if job.request.index == index:
-            request = ScenarioRequest(index, cleaned, job.request.prompt, job.request.production_item_id,
-                                      job.request.target_chars, job.request.allowed_min, job.request.allowed_max)
+            request = ScenarioRequest(
+                index, cleaned, job.request.prompt, job.request.production_item_id,
+                job.request.target_chars, job.request.allowed_min, job.request.allowed_max,
+                job.request.factual_context_available, job.request.dramatized_allowed,
+            )
             updated_jobs.append(Job(
                 request, job.state, job.result, job.error,
                 job.actual_chars, job.length_status, job.length_repair_attempts,
@@ -91,6 +96,8 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
                 "target_chars": job.request.target_chars,
                 "allowed_min": job.request.allowed_min,
                 "allowed_max": job.request.allowed_max,
+                "factual_context_available": job.request.factual_context_available,
+                "dramatized_allowed": job.request.dramatized_allowed,
                 "state": job.state.value,
                 "result": job.result,
                 "error": job.error,
@@ -293,6 +300,8 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
                 max(0, int(item.get("target_chars", 0) or 0)),
                 max(0, int(item.get("allowed_min", 0) or 0)),
                 max(0, int(item.get("allowed_max", 0) or 0)),
+                bool(item.get("factual_context_available", False)),
+                bool(item.get("dramatized_allowed", True)),
             )
             state = RunState(item.get("state", RunState.WAITING.value))
             story_plan = item.get("story_plan")
@@ -488,6 +497,8 @@ def _recover_legacy_jobs(current_titles: list[str]) -> list[Job]:
                 by_title[_title_key(title)].request.target_chars,
                 by_title[_title_key(title)].request.allowed_min,
                 by_title[_title_key(title)].request.allowed_max,
+                by_title[_title_key(title)].request.factual_context_available,
+                by_title[_title_key(title)].request.dramatized_allowed,
             ),
             by_title[_title_key(title)].state,
             by_title[_title_key(title)].result,

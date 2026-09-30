@@ -1,0 +1,25 @@
+{
+  "parts": [
+    {
+      "chars": 2637,
+      "part_id": "P1",
+      "sha256": "3ad0fc4dae42e22457d4cf41000bd37c461d823c16e0e0787c5fc7046ce0a334",
+      "target_chars": 3999
+    },
+    {
+      "chars": 2919,
+      "part_id": "P2",
+      "sha256": "9b77f805c0f1abf61608b47679d7c890dc26548eefa824c1091d47d93f073e3e",
+      "target_chars": 3999
+    },
+    {
+      "chars": 2893,
+      "part_id": "P3",
+      "sha256": "71dbc22bb0b3cc4b9a6555dc5e2663135aa6a6a362742e6c2e19652d34477f19",
+      "target_chars": 3998
+    }
+  ],
+  "python_len_stripped": 8453,
+  "scenario_sha256": "b30fa3b29d2a5892439f5d36513a0f5f7ec9762859e055904a42cd45492046f5",
+  "separator": "\\n\\n"
+}

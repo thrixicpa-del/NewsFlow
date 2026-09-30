@@ -289,7 +289,8 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         })
 
         self.assertIn("FACTUAL_CONTEXT_AVAILABILITY: NONE", prompt)
-        self.assertIn("every planned atom must be DRAMATIZED", prompt)
+        self.assertIn("DRAMATIZED_POLICY: ALLOWED", prompt)
+        self.assertNotIn("every planned atom must be DRAMATIZED", prompt)
 
     def test_legacy_results_are_projected_to_production_items(self):
         settings = Settings(
