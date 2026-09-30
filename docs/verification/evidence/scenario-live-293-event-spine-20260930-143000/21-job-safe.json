@@ -1,0 +1,18 @@
+{
+  "accepted_story_parts": [],
+  "actual_chars": 0,
+  "error": "Планировщик не вернул совместимую карту истории после безопасного восстановления. Код диагностики: FRESH_SCHEMA:SEMANTIC_DENSITY.",
+  "length_status": "FAILED",
+  "state": "Нужно действие",
+  "story_planner_failure": {
+    "fresh_reason": "SEMANTIC_DENSITY",
+    "initial_reason": "SEMANTIC_DENSITY",
+    "phase": "FRESH_SCHEMA",
+    "reason": "SEMANTIC_DENSITY",
+    "recovery_route": "FRESH_DIRECT",
+    "response_chars": "13106",
+    "response_sha256": "3f5287922e38df3362b9ed5f625a37bffdf0952994789c8e2358937be646c49f",
+    "structural_repair_reason": ""
+  },
+  "story_planner_status": "SCHEMA_RECOVERY_EXHAUSTED"
+}
