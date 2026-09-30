@@ -1309,7 +1309,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].accepted_story_parts, [])
         self.assertIn("P1", jobs[0].error)
 
-    async def test_multipart_writer_refusal_retries_same_unaccepted_part_without_replanning(self):
+
+    async def test_multipart_writer_refusal_pauses_same_unaccepted_part_without_regeneration(self):
         class RetryMultipartClient:
             def __init__(self):
                 self.planner_calls = 0
@@ -1325,68 +1326,53 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.writer_calls.append(part_id)
                 if part_id == 1:
                     return "К сожалению, я не могу написать такой сценарий. Измените тему."
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "Б" * target
+                raise AssertionError("P2 must not start after an unaccepted P1")
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                if "NewsFlow Story Planner" in prompt:
-                    raise AssertionError("Writer retry must not regenerate the Story Map")
-                if "CURRENT PART: P1" not in prompt:
-                    raise AssertionError("retry must stay on the same unfinished part")
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "А" * target
+                raise AssertionError("Writer refusal must not trigger regeneration")
 
         client = RetryMultipartClient()
-        jobs = await ParallelRunner(client, 1).run([
+        job = (await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Военная тема", "CONTRACT", target_chars=10000,
                             allowed_min=9000, allowed_max=11000),
-        ])
+        ]))[0]
 
         self.assertEqual(client.planner_calls, 1)
-        self.assertEqual(client.fresh_calls, 1)
-        self.assertEqual(client.writer_calls, [1, 2])
-        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(client.writer_calls, [1])
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual(job.accepted_story_parts, [])
 
-    async def test_multipart_writer_structural_label_gets_fresh_retry_before_acceptance(self):
+    async def test_multipart_writer_structural_label_pauses_without_regeneration(self):
         class RetryLabelClient:
             def __init__(self):
                 self.fresh_calls = 0
+                self.writer_calls = []
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(2)
                 if "CURRENT PART: P1" in prompt:
+                    self.writer_calls.append("P1")
                     return "PART 1: техническая разметка вместо готового текста"
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "Б" * target
+                self.writer_calls.append("P2")
+                raise AssertionError("P2 must not start after a structural P1 response")
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                if "CURRENT PART: P1" not in prompt:
-                    raise AssertionError("structural retry must stay on P1")
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "А" * target
+                raise AssertionError("Structural Writer output must not trigger regeneration")
 
         client = RetryLabelClient()
-        jobs = await ParallelRunner(client, 1).run([
+        job = (await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
                             allowed_min=9000, allowed_max=11000),
-        ])
+        ]))[0]
 
-        self.assertEqual(client.fresh_calls, 1)
-        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
-
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(client.writer_calls, ["P1"])
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual(job.accepted_story_parts, [])
     def test_structural_writer_filter_rejects_part_labels_but_not_normal_part_prose(self):
         self.assertTrue(ParallelRunner._writer_output_is_structural("PART 1: техническая разметка"))
         self.assertTrue(ParallelRunner._writer_output_is_structural("Часть 2: продолжение"))
