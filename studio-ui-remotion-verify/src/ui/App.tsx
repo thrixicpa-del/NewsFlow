@@ -7688,9 +7688,10 @@ export function CoverGallery({
         }
       : {}),
   });
-  const newPromptsReadyCount = selectedTopicIndexes.filter(
+  const newPromptTopicIndexes = selectedTopicIndexes.filter(
     (index) => data.covers[index]?.status === "Новые промпты созданы",
-  ).length;
+  );
+  const newPromptsReadyCount = newPromptTopicIndexes.length;
   useEffect(
     () =>
       setSelectedPaths((current) =>
@@ -7780,6 +7781,17 @@ export function CoverGallery({
       ...coverSelectionPayload(selectedTopicIndexes),
       currentProfile: true,
       operation,
+    });
+  const repeatSelectedTopicsWithNewPrompts = () =>
+    void command("regenerate-covers", {
+      ...coverSelectionPayload(newPromptTopicIndexes),
+      currentProfile: false,
+      useBuildModeRanges: true,
+      operation,
+      buildMode: data.coverSettings.buildMode,
+      faceMode: "auto",
+      textMode: "fastgen",
+      localFaceOnly: false,
     });
   const createSelectedTopicPrompts = () =>
     void command("regenerate-covers-new-prompts", {
@@ -7894,7 +7906,11 @@ export function CoverGallery({
           </Button>
           <Button
             kind="success"
-            onClick={newPromptsReadyCount ? repeatSelectedTopics : undefined}
+            onClick={
+              newPromptsReadyCount
+                ? repeatSelectedTopicsWithNewPrompts
+                : undefined
+            }
           >
             <Sparkles size={16} />
             Повторить с новыми ({newPromptsReadyCount})
@@ -8018,11 +8034,22 @@ export function CoverGallery({
                       ? () => void command("retry-cover-generation", coverSelectionPayload([index]))
                       : isCoverRenderActive(cover)
                         ? undefined
-                        : () => void command("regenerate-covers", {
-                            ...coverSelectionPayload([index]),
-                            currentProfile: true,
-                            operation,
-                          })}
+                        : cover.status === "Новые промпты созданы"
+                          ? () => void command("regenerate-covers", {
+                              ...coverSelectionPayload([index]),
+                              currentProfile: false,
+                              useBuildModeRanges: true,
+                              operation,
+                              buildMode: data.coverSettings.buildMode,
+                              faceMode: "auto",
+                              textMode: "fastgen",
+                              localFaceOnly: false,
+                            })
+                          : () => void command("regenerate-covers", {
+                              ...coverSelectionPayload([index]),
+                              currentProfile: true,
+                              operation,
+                            })}
                   >
                     <Play size={15} />
                     {isCoverManualRetryEligible(cover)
