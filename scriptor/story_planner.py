@@ -278,10 +278,10 @@ def story_part_skeleton(part_targets: tuple[int, ...]) -> str:
 
 
 def _minimum_semantic_atoms(target_chars: int, role: str) -> int:
-    """Return a conservative material floor for a fresh novelty-aware Story Map.
+    """Return advisory coverage guidance for a fresh Story Map prompt.
 
-    This does not prescribe fixed story roles. It only prevents one broad idea
-    from being stretched across several thousand characters.
+    This is deliberately not a parser/runtime floor: atom count alone cannot
+    judge whether a structurally valid map has enough story material.
     """
     target = max(0, int(target_chars or 0))
     if not target:
@@ -394,12 +394,6 @@ def parse_story_plan_response(
     raw_atoms = raw.get("content_atoms")
     if not isinstance(raw_atoms, list) or not raw_atoms:
         raise ValueError("story plan requires content_atoms")
-    explicit_atom_novelty = all(
-        isinstance(raw_atom, dict)
-        and _optional_text(raw_atom.get("novelty_question"))
-        and _optional_text(raw_atom.get("novelty_payload"))
-        for raw_atom in raw_atoms
-    )
     atoms: list[StoryContentAtom] = []
     atom_by_id: dict[str, StoryContentAtom] = {}
     for index, raw_atom in enumerate(raw_atoms, start=1):
@@ -464,36 +458,12 @@ def parse_story_plan_response(
             # remains an advisory diagnostic, not an acceptance blocker: stem
             # matching cannot reliably classify an otherwise complete map.
 
-    # Reject only obvious near-copy semantic atoms on fresh planning. Legacy
-    # persisted maps stay readable even if an older Planner used repetitive
-    # summaries; accepted prose must never be invalidated by a new validator.
-    if validate_semantic_novelty and explicit_atom_novelty:
-        for atom_index, atom in enumerate(atoms):
-            atom_contract = f"{atom.novelty_question} {atom.novelty_payload}"
-            for previous in atoms[:atom_index]:
-                previous_contract = (
-                    f"{previous.novelty_question} {previous.novelty_payload}"
-                )
-                if (
-                    _obvious_semantic_duplicate(atom.novelty_payload, previous.novelty_payload)
-                    or _obvious_semantic_duplicate(atom_contract, previous_contract)
-                ):
-                    raise ValueError(
-                        "story plan content atoms must be materially distinct"
-                    )
-
     # Only after all atom fields, transitions and atom novelty are valid may
     # the runtime assess technical parts. The runtime knows this skeleton; it
     # is not a model-owned narrative choice.
     raw_parts = raw.get("parts")
     if not isinstance(raw_parts, list) or len(raw_parts) != part_count:
         raise ValueError(f"story plan requires exactly {part_count} parts")
-    explicit_part_novelty = all(
-        isinstance(raw_part, dict)
-        and _optional_text(raw_part.get("novelty_question"))
-        and _optional_text(raw_part.get("novelty_payload"))
-        for raw_part in raw_parts
-    )
     parts: list[StoryPartPlan] = []
     for index, (raw_part, expected_id, expected_role, target) in enumerate(
         zip(raw_parts, expected_ids, expected_roles, targets, strict=True),
@@ -540,15 +510,6 @@ def parse_story_plan_response(
         if atom.owner_part_id not in expected_ids:
             raise ValueError("story plan content atom owner must reference a planned part")
 
-    if validate_semantic_novelty and explicit_atom_novelty:
-        for part in parts:
-            minimum_atoms = _minimum_semantic_atoms(part.target_chars, part.role)
-            if len(part.content_ids) < minimum_atoms:
-                raise ValueError(
-                    f"story plan part {part.id} requires at least {minimum_atoms} "
-                    "distinct content atoms for semantic density"
-                )
-
     assigned_ids = [content_id for part in parts for content_id in part.content_ids]
     if len(set(assigned_ids)) != len(assigned_ids):
         raise ValueError("story plan content atom is assigned more than once")
@@ -587,21 +548,6 @@ def parse_story_plan_response(
             )
         )
     parts = enriched_parts
-
-    # A part may stay on the same topic, but on a fresh plan it must not carry
-    # an effectively identical novelty contract. Related vocabulary alone is
-    # never a failure: this guard exists only for obvious near-copies.
-    if validate_semantic_novelty and explicit_part_novelty:
-        for part_index, part in enumerate(parts):
-            contract = f"{part.novelty_question} {part.novelty_payload}"
-            for previous in parts[:part_index]:
-                previous_contract = (
-                    f"{previous.novelty_question} {previous.novelty_payload}"
-                )
-                if _obvious_semantic_duplicate(contract, previous_contract):
-                    raise ValueError(
-                        "story plan parts must own materially distinct semantic content"
-                    )
 
     # opens/closes are continuity hints, not story ownership. Keep strict
     # validation for parts/macros/atoms above, then locally discard malformed
@@ -730,11 +676,11 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
     part_rows = ", ".join(
         (
             (
-                f"P{index + 1}≈{target} chars; "
-                f"minimum {_minimum_semantic_atoms(target, roles[index])} distinct atoms"
+                f"P{index + 1}≈{target} chars; coverage guidance: normally "
+                f"{_minimum_semantic_atoms(target, roles[index])} or more distinct atoms"
             )
             if target
-            else f"P{index + 1}=natural complete length; minimum 1 distinct atom"
+            else f"P{index + 1}=natural complete length; coverage guidance: one or more distinct atoms"
         )
         for index, target in enumerate(part_targets)
     )
@@ -1226,3 +1172,61 @@ def build_story_writer_prompt(
         "rule above override any conflicting whole-story character count in the embedded manual contract. Do not claim to execute "
         "Python or a counter; return only this continuous prose segment and develop the CURRENT owned material before stopping.\n"
     )
+
+
+def split_story_planner_request(
+    request: Any,
+    part_targets: tuple[int, ...],
+) -> tuple[str, str]:
+    """Separate trusted Planner instructions from user-supplied request data.
+
+    ``build_story_planner_prompt`` remains the canonical combined rendering for
+    legacy providers and diagnostics.  Responses-capable clients receive this
+    split form so a manual template stays at user-input priority and cannot
+    redefine the stage protocol or the runtime-owned topology.
+    """
+    prompt = build_story_planner_prompt(request, part_targets)
+    prefix, tail = prompt.split("\n\nTOPIC:", 1)
+    request_data, operator_and_boundary = tail.split(
+        "\n\nOPERATOR WRITING CONTRACT AND AVAILABLE CONTEXT:\n", 1,
+    )
+    topic_and_target, topology = request_data.split(
+        "\nRUNTIME TECHNICAL SKELETON:", 1,
+    )
+    operator, boundary = operator_and_boundary.rsplit(
+        "\n\nPLANNER EXECUTION BOUNDARY:\n", 1,
+    )
+    instructions = (
+        f"{prefix}\n\n"
+        f"RUNTIME TECHNICAL SKELETON:{topology}\n\n"
+        f"PLANNER EXECUTION BOUNDARY:\n{boundary}"
+    )
+    user_input = (
+        f"TOPIC:{topic_and_target}\n\n"
+        f"OPERATOR WRITING CONTRACT AND AVAILABLE CONTEXT:\n{operator}"
+    )
+    return instructions.strip(), user_input.strip()
+
+
+def split_story_writer_request(
+    request: Any,
+    plan: StoryPlan,
+    accepted_parts: list[dict[str, Any]],
+    part_index: int,
+    current_target_chars: int | None = None,
+) -> tuple[str, str]:
+    """Separate trusted Writer stage rules from manual contract and story data."""
+    prompt = build_story_writer_prompt(
+        request, plan, accepted_parts, part_index, current_target_chars,
+    )
+    prefix, operator_and_data = prompt.split(
+        "\n\nOPERATOR WRITING CONTRACT:\n", 1,
+    )
+    operator, story_data = operator_and_data.split("\n\nSTORY THESIS:", 1)
+    story_data, position_and_boundary = story_data.split("\n\nPOSITION RULE: ", 1)
+    instructions = f"{prefix}\n\nPOSITION RULE: {position_and_boundary}"
+    user_input = (
+        f"OPERATOR WRITING CONTRACT:\n{operator}\n\n"
+        f"STORY THESIS:{story_data}"
+    )
+    return instructions.strip(), user_input.strip()

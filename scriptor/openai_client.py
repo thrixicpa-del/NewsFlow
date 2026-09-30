@@ -8,6 +8,40 @@ import urllib.error
 import urllib.request
 
 
+def extract_visible_response_text(response: object) -> str:
+    """Extract only user-visible text from a Responses payload.
+
+    This is shared by the runtime and opt-in acceptance capture so a nested
+    ``output[].content[].text`` response cannot be counted as an empty reply.
+    Reasoning summaries and refusal metadata deliberately never become
+    scenario prose or evidence output text.
+    """
+    if not isinstance(response, dict):
+        return ""
+    direct = response.get("output_text")
+    if isinstance(direct, str) and direct:
+        return direct
+    parts: list[str] = []
+    output = response.get("output")
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content_items = item.get("content")
+        if not isinstance(content_items, list):
+            continue
+        for content in content_items:
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") not in ("output_text", "text"):
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
 class OpenAIAPIError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
@@ -56,7 +90,7 @@ class OpenAITextClient:
                     image.save(encoded, format="JPEG", quality=84, optimize=True)
                 data_url = "data:image/jpeg;base64," + base64.b64encode(encoded.getvalue()).decode("ascii")
                 content.append({"type": "input_image", "image_url": data_url, "detail": "low"})
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - a bad optional image is non-fatal
                 # A broken or unsupported reference must not cancel a whole
                 # batch of thumbnails; FastGen still receives valid files.
                 continue
@@ -64,23 +98,19 @@ class OpenAITextClient:
 
     async def generate(self, prompt: str, on_progress=None, before_request=None,
                        image_paths: list[str] | None = None,
-                       max_output_tokens: int | None = None) -> str:
+                       max_output_tokens: int | None = None,
+                       instructions: str | None = None) -> str:
         content = [{"type": "input_text", "text": prompt}] + self._reference_content(image_paths)
         request_input: object = prompt if len(content) == 1 else [{"role": "user", "content": content}]
         payload = {"model": self.model, "input": request_input}
+        if instructions and instructions.strip():
+            payload["instructions"] = instructions.strip()
         if max_output_tokens and max_output_tokens > 0:
             payload["max_output_tokens"] = int(max_output_tokens)
         result = await asyncio.to_thread(
             self._request, "POST", "/v1/responses", payload
         )
-        text = result.get("output_text", "")
-        if not text:
-            parts = []
-            for output in result.get("output", []):
-                for content in output.get("content", []):
-                    if content.get("type") in ("output_text", "text") and content.get("text"):
-                        parts.append(content["text"])
-            text = "\n".join(parts)
+        text = extract_visible_response_text(result)
         if not text:
             raise OpenAIAPIError(f"{self.label}: OpenAI не вернул текст")
         if on_progress:
@@ -114,7 +144,8 @@ class HybridTextPool:
 
     async def generate(self, prompt: str, on_progress=None, before_request=None,
                        image_paths: list[str] | None = None,
-                       max_output_tokens: int | None = None) -> str:
+                       max_output_tokens: int | None = None,
+                       instructions: str | None = None) -> str:
         if self._queue is None:
             self._queue = asyncio.Queue()
             for client in self._slots:
@@ -124,6 +155,8 @@ class HybridTextPool:
             if before_request:
                 await before_request()
             output_kwargs = {"max_output_tokens": max_output_tokens} if max_output_tokens else {}
+            if instructions and instructions.strip():
+                output_kwargs["instructions"] = instructions.strip()
             # Preserve compatibility with lightweight provider adapters and
             # tests that implement the historical two-argument method.
             if image_paths is None:
@@ -144,16 +177,18 @@ class HybridTextPool:
                 except OpenAIAPIError as exc:
                     if not exc.key_unavailable:
                         raise
-            raise first
+            raise
         finally:
             self._queue.put_nowait(client)
 
     async def generate_fresh(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
-                             max_output_tokens: int | None = None) -> str:
+                             max_output_tokens: int | None = None,
+                             instructions: str | None = None) -> str:
         return await self.generate(prompt, on_progress, image_paths=image_paths,
-                                   max_output_tokens=max_output_tokens)
+                                   max_output_tokens=max_output_tokens, instructions=instructions)
 
     async def generate_openai(self, prompt: str, on_progress=None, image_paths: list[str] | None = None,
-                              max_output_tokens: int | None = None) -> str:
+                              max_output_tokens: int | None = None,
+                              instructions: str | None = None) -> str:
         return await self.generate(prompt, on_progress, image_paths=image_paths,
-                                   max_output_tokens=max_output_tokens)
+                                   max_output_tokens=max_output_tokens, instructions=instructions)

@@ -20,6 +20,8 @@ from .story_planner import (
     calculate_story_part_targets,
     parse_story_plan_response,
     repair_story_plan_parts_response,
+    split_story_planner_request,
+    split_story_writer_request,
     story_plan_from_dict,
 )
 
@@ -315,36 +317,83 @@ class ParallelRunner:
                    for parameter in parameters)
 
     async def _generate_for_request(
-        self, method, prompt: str, request: ScenarioRequest, expected_chars: int | None = None,
+        self,
+        method,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
     ) -> str:
-        budget = scenario_output_token_budget(request, expected_chars)
-        if budget and self._accepts_keyword(method, "max_output_tokens"):
-            return await method(prompt, max_output_tokens=budget)
-        return await method(prompt)
+        """Call modern Responses adapters with stages, legacy adapters with one prompt.
 
-    async def _generate_usable(self, prompt: str, request: ScenarioRequest, expected_chars: int | None = None) -> str:
+        The fallback is intentionally capability-based rather than exception-
+        based: a provider TypeError must never be misclassified as an old
+        signature and trigger a second logical request.
+        """
+        budget = scenario_output_token_budget(request, expected_chars)
+        supports_instructions = bool(instructions) and self._accepts_keyword(
+            method, "instructions",
+        )
+        call_prompt = prompt if supports_instructions else (legacy_prompt or prompt)
+        kwargs: dict[str, Any] = {}
+        if budget and self._accepts_keyword(method, "max_output_tokens"):
+            kwargs["max_output_tokens"] = budget
+        if supports_instructions:
+            kwargs["instructions"] = instructions
+        return await method(call_prompt, **kwargs)
+
+    async def _generate_usable(
+        self,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
+    ) -> str:
         """Retry an unusable provider reply before any scenario prose is accepted."""
-        result = await self._generate_for_request(self.client.generate, prompt, request, expected_chars)
+        result = await self._generate_for_request(
+            self.client.generate,
+            prompt,
+            request,
+            expected_chars,
+            instructions=instructions,
+            legacy_prompt=legacy_prompt,
+        )
         refused = looks_like_action_required(result)
         for attempt in range(1, 3):
             if not refused:
                 break
-            retry_prompt = (
+            retry_prefix = (
                 "This is a new standalone task. Complete it now without discussing prior replies. "
                 "Return only the requested result, with no questions or meta commentary.\n\n"
-                f"TASK:\n{prompt}"
             )
             generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-            result = await self._generate_for_request(generate_fresh, retry_prompt, request, expected_chars)
+            result = await self._generate_for_request(
+                generate_fresh,
+                prompt,
+                request,
+                expected_chars,
+                instructions=(retry_prefix + instructions) if instructions else None,
+                legacy_prompt=retry_prefix + f"TASK:\n{legacy_prompt or prompt}",
+            )
             refused = looks_like_action_required(result)
         if refused:
             generate_openai = getattr(self.client, "generate_openai", None)
             if generate_openai is not None:
-                openai_prompt = (
+                openai_prefix = (
                     "Return only the completed requested result. Do not ask questions or explain limitations.\n\n"
-                    f"TASK:\n{prompt}"
                 )
-                result = await self._generate_for_request(generate_openai, openai_prompt, request, expected_chars)
+                result = await self._generate_for_request(
+                    generate_openai,
+                    prompt,
+                    request,
+                    expected_chars,
+                    instructions=(openai_prefix + instructions) if instructions else None,
+                    legacy_prompt=openai_prefix + f"TASK:\n{legacy_prompt or prompt}",
+                )
         return result
 
     @staticmethod
@@ -442,17 +491,22 @@ class ParallelRunner:
         prompt: str,
         request: ScenarioRequest,
         expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
     ) -> str:
         """Run one bounded fresh-chat recovery before any new artifact is accepted."""
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
         result = await self._generate_for_request(
             generate_fresh, prompt, request, expected_chars,
+            instructions=instructions, legacy_prompt=legacy_prompt,
         )
         if looks_like_action_required(result):
             generate_openai = getattr(self.client, "generate_openai", None)
             if generate_openai is not None:
                 result = await self._generate_for_request(
                     generate_openai, prompt, request, expected_chars,
+                    instructions=instructions, legacy_prompt=legacy_prompt,
                 )
         return result
 
@@ -461,6 +515,9 @@ class ParallelRunner:
         prompt: str,
         request: ScenarioRequest,
         expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
     ) -> str:
         """Generate one Writer part exactly once.
 
@@ -471,6 +528,7 @@ class ParallelRunner:
         """
         return await self._generate_for_request(
             self.client.generate, prompt, request, expected_chars,
+            instructions=instructions, legacy_prompt=legacy_prompt,
         )
 
     async def _run_planned_story(self, job: Job) -> bool:
@@ -503,6 +561,9 @@ class ParallelRunner:
             job.story_planner_status = ""
             job.story_planner_failure = {}
             planner_prompt = build_story_planner_prompt(job.request, part_targets)
+            planner_instructions, planner_input = split_story_planner_request(
+                job.request, part_targets,
+            )
             # A Planner response carries every atom's transition fields plus
             # the complete technical topology.  Three 4k parts own at least
             # nine atoms, so the former ~2k expected-character budget could
@@ -517,7 +578,13 @@ class ParallelRunner:
             # that complete map at every supported target size; the provider
             # helper below remains the only global cap.
             planner_budget = max(3072, 1536 + len(part_targets) * 1536)
-            planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
+            planner_response = await self._generate_usable(
+                planner_input,
+                job.request,
+                planner_budget,
+                instructions=planner_instructions,
+                legacy_prompt=planner_prompt,
+            )
             if looks_like_action_required(planner_response):
                 job.result = planner_response
                 job.actual_chars = len(planner_response.strip())
@@ -569,8 +636,20 @@ class ParallelRunner:
                     fresh_planner_prompt = _fresh_planner_retry_prompt(
                         planner_prompt, initial_reason,
                     )
+                    fresh_planner_instructions = (
+                        "FRESH STORY PLANNER RETRY. The previous planning response failed a local "
+                        f"schema check with safe reason {initial_reason}. "
+                        f"{_FRESH_PLANNER_REASON_GUIDANCE[initial_reason]} "
+                        "Plan the SAME NewsFlow story again. Return only the complete JSON Story Map; "
+                        "do not write scenario prose or quote a previous provider response.\n\n"
+                        f"{planner_instructions}"
+                    )
                     fresh_planner_response = await self._generate_fresh_result(
-                        fresh_planner_prompt, job.request, planner_budget,
+                        planner_input,
+                        job.request,
+                        planner_budget,
+                        instructions=fresh_planner_instructions,
+                        legacy_prompt=fresh_planner_prompt,
                     )
                     if looks_like_action_required(fresh_planner_response):
                         job.result = fresh_planner_response
@@ -617,8 +696,19 @@ class ParallelRunner:
             writer_prompt = build_story_writer_prompt(
                 job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
+            writer_instructions, writer_input = split_story_writer_request(
+                job.request,
+                plan,
+                job.accepted_story_parts,
+                part_index,
+                active_target,
+            )
             writer_result = await self._generate_writer_usable(
-                writer_prompt, job.request, active_target,
+                writer_input,
+                job.request,
+                active_target,
+                instructions=writer_instructions,
+                legacy_prompt=writer_prompt,
             )
             writer_failure = self._writer_output_rejection_reason(writer_result)
             if writer_failure:

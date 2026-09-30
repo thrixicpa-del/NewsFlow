@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 
 from scriptor.core import ScenarioRequest
 from scriptor.story_planner import (
@@ -14,6 +15,8 @@ from scriptor.story_planner import (
     parse_story_plan_response,
     repair_story_plan_parts_response,
     seam_tail,
+    split_story_planner_request,
+    split_story_writer_request,
     story_part_skeleton,
     story_plan_from_dict,
 )
@@ -60,6 +63,24 @@ class StoryPartSizingTests(unittest.TestCase):
 
 
 class StoryPlanValidationTests(unittest.TestCase):
+    def test_saved_low_density_planner_maps_are_structurally_accepted(self):
+        """Atom counts guide planning but never invalidate a complete Story Map.
+
+        These are the two unmodified Responses returned during the prior
+        event-spine acceptance.  P2 in the first and P3 in the second have
+        fewer atoms than the old heuristic demanded, while their JSON,
+        topology, ownership and transition fields are all complete.
+        """
+        evidence_root = Path(__file__).resolve().parents[1] / "docs" / "verification" / "evidence" / "scenario-live-293-event-spine-20260930-143000"
+        for filename in ("response-01-visible.txt", "response-02-visible.txt"):
+            with self.subTest(filename=filename):
+                plan = parse_story_plan_response(
+                    (evidence_root / filename).read_text(encoding="utf-8"),
+                    (3999, 3999, 3998),
+                    require_state_transitions=True,
+                )
+                self.assertEqual([part.id for part in plan.parts], ["P1", "P2", "P3"])
+
     def test_writer_semantic_memory_stays_bounded_for_a_large_plan(self):
         """A long plan reserves future material without dumping all prior detail."""
         atoms = []
@@ -526,7 +547,7 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertEqual(restored.parts[0].novelty_question, "Раскрыть старый смысл")
         self.assertEqual(restored.parts[0].novelty_payload, "Старый самостоятельный смысл")
 
-    def test_parser_rejects_obvious_near_copy_semantic_atoms(self):
+    def test_parser_keeps_obvious_near_copy_semantic_atoms_as_editorial_advice(self):
         response = json.dumps({
             "thesis": "История без смысловых дублей.",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
@@ -548,8 +569,8 @@ class StoryPlanValidationTests(unittest.TestCase):
             ],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "materially distinct"):
-            parse_story_plan_response(response, (5000, 5000))
+        plan = parse_story_plan_response(response, (5000, 5000))
+        self.assertEqual([atom.id for atom in plan.content_atoms], ["C001", "C002"])
 
     def test_parser_rejects_analytic_atoms_without_declared_state_transitions(self):
         """Different interpretations cannot substitute for before/development/after."""
@@ -898,7 +919,7 @@ class StoryPlanValidationTests(unittest.TestCase):
 
         self.assertEqual(plan.content_atoms[0].changed_subject, "Оперативная ситуация в городе")
 
-    def test_parser_rejects_obvious_near_copy_part_novelty_contracts(self):
+    def test_parser_keeps_near_copy_part_novelty_as_editorial_advice(self):
         response = json.dumps({
             "thesis": "Части обязаны отвечать на разные вопросы.",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
@@ -920,8 +941,8 @@ class StoryPlanValidationTests(unittest.TestCase):
             ],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "parts must own materially distinct"):
-            parse_story_plan_response(response, (5000, 5000))
+        plan = parse_story_plan_response(response, (5000, 5000))
+        self.assertEqual([part.id for part in plan.parts], ["P1", "P2"])
 
 
     def test_related_story_atoms_with_shared_topic_words_are_not_false_duplicates(self):
@@ -1032,8 +1053,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn("single COMPLETE 6-9k story", prompt)
         self.assertIn("last owned atom must be written as a genuinely new terminal development", prompt)
 
-    def test_fresh_five_thousand_part_requires_multiple_distinct_atoms(self):
-        """A fresh 5k plan may not stretch one or two broad meanings into the whole part."""
+    def test_fresh_five_thousand_part_keeps_atom_count_as_advisory(self):
+        """A small map is a planning-quality signal, not a schema rejection."""
         response = json.dumps({
             "thesis": "Плотная история.",
             "macro_blocks": [{"id": "M1", "purpose": "Полная история"}],
@@ -1053,11 +1074,11 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "at least 3 distinct content atoms"):
-            parse_story_plan_response(response, (5000,))
+        plan = parse_story_plan_response(response, (5000,))
+        self.assertEqual(plan.parts[0].content_ids, ("C001", "C002"))
 
-    def test_fresh_six_to_nine_thousand_complete_requires_five_distinct_atoms(self):
-        """The 6-9k COMPLETE contract needs enough new material inside its single part."""
+    def test_fresh_six_to_nine_thousand_complete_keeps_atom_count_as_advisory(self):
+        """Coverage guidance must not create a paid Planner recovery loop."""
         atoms = [
             {
                 "id": "C001", "summary": "На рынке сохраняется высокий ценник",
@@ -1100,8 +1121,8 @@ class StoryPlanValidationTests(unittest.TestCase):
             }],
         }, ensure_ascii=False)
 
-        with self.assertRaisesRegex(ValueError, "at least 5 distinct content atoms"):
-            parse_story_plan_response(response, (7000,))
+        plan = parse_story_plan_response(response, (7000,))
+        self.assertEqual(len(plan.parts[0].content_ids), 4)
 
     def test_do_not_repeat_is_persisted_and_exposed_only_for_current_atoms(self):
         response = json.dumps({
@@ -1304,6 +1325,43 @@ class StoryPlanValidationTests(unittest.TestCase):
 
 
 class StoryPlannerPromptTests(unittest.TestCase):
+    def test_stage_requests_keep_manual_contract_in_user_input(self):
+        request = ScenarioRequest(
+            0,
+            "Тема",
+            "MANUAL_TEMPLATE_ONLY: сохраняй этот ручной контракт.",
+            target_chars=12000,
+            allowed_min=11500,
+            allowed_max=12500,
+        )
+        planner_instructions, planner_input = split_story_planner_request(
+            request, (3999, 3999, 3998),
+        )
+        self.assertIn("NewsFlow Story Planner", planner_instructions)
+        self.assertIn("RUNTIME TECHNICAL SKELETON", planner_instructions)
+        self.assertNotIn("MANUAL_TEMPLATE_ONLY", planner_instructions)
+        self.assertIn("MANUAL_TEMPLATE_ONLY", planner_input)
+
+        plan = StoryPlan(
+            thesis="Последовательность событий.",
+            macro_blocks=({"id": "M1", "purpose": "Развитие"},),
+            content_atoms=(StoryContentAtom(
+                id="C001", summary="Служба меняет статус", owner_part_id="P1",
+                content_kind="DRAMATIZED", state_before="Статус прежний.",
+                changed_subject="Статус службы", development="Служба меняет статус.",
+                resulting_state="Новый статус опубликован.", state_after="Статус обновлён.",
+            ),),
+            parts=(StoryPartPlan(
+                id="P1", role="COMPLETE", purpose="Завершить развитие", macro_id="M1",
+                content_ids=("C001",), target_chars=5000,
+            ),),
+        )
+        writer_instructions, writer_input = split_story_writer_request(request, plan, [], 0)
+        self.assertIn("MULTIPART PRECEDENCE", writer_instructions)
+        self.assertIn("WRITER EXECUTION BOUNDARY", writer_instructions)
+        self.assertNotIn("MANUAL_TEMPLATE_ONLY", writer_instructions)
+        self.assertIn("MANUAL_TEMPLATE_ONLY", writer_input)
+        self.assertIn("CURRENT CONTENT", writer_input)
     def test_operator_style_rules_are_reference_constraints_not_content_atoms(self):
         prompt = build_story_planner_prompt(
             ScenarioRequest(0, "Тема", "МИКРО-ХУКИ. НЕ ПОВТОРЯЙСЯ. Факт темы: объект повреждён."),
@@ -1322,7 +1380,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("5-7", prompt)
         self.assertIn("novelty_question, novelty_payload and do_not_repeat", prompt)
         self.assertIn("semantic-density requirements", prompt)
-        self.assertIn("minimum 3 distinct atoms", prompt)
+        self.assertIn("coverage guidance: normally 3 or more distinct atoms", prompt)
         self.assertIn("terminal development", prompt)
         self.assertIn("For EVERY atom in this NEW map, include writer_material", prompt)
         self.assertIn("ordered JSON list of 4 to 6 distinct concrete coverage beats", prompt)
@@ -1385,9 +1443,9 @@ class StoryPlannerPromptTests(unittest.TestCase):
         )
 
         self.assertEqual(targets, (3999, 3999, 3998))
-        self.assertIn("P1≈3999 chars; minimum 3 distinct atoms", prompt)
-        self.assertIn("P2≈3999 chars; minimum 3 distinct atoms", prompt)
-        self.assertIn("P3≈3998 chars; minimum 3 distinct atoms", prompt)
+        self.assertIn("P1≈3999 chars; coverage guidance: normally 3 or more distinct atoms", prompt)
+        self.assertIn("P2≈3999 chars; coverage guidance: normally 3 or more distinct atoms", prompt)
+        self.assertIn("P3≈3998 chars; coverage guidance: normally 3 or more distinct atoms", prompt)
         self.assertIn("not an essay outline, opinion column, literary narrative", prompt)
 
     def test_planner_builds_an_event_spine_before_allocating_parts(self):

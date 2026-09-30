@@ -3,6 +3,7 @@ import json
 import threading
 import unittest
 from hashlib import sha256
+from pathlib import Path
 
 from scriptor.core import ScenarioRequest
 from scriptor.runner import (
@@ -33,6 +34,53 @@ class FakeClient:
 
 
 class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_low_density_map_starts_one_writer_call_per_part_without_planner_recovery(self):
+        """The prior live map remains runnable; material density is advisory."""
+        evidence = (
+            Path(__file__).resolve().parents[1]
+            / "docs" / "verification" / "evidence"
+            / "scenario-live-293-event-spine-20260930-143000"
+            / "response-01-visible.txt"
+        ).read_text(encoding="utf-8")
+
+        class StageClient:
+            def __init__(self):
+                self.calls = []
+
+            async def generate(
+                self, prompt, on_progress=None, max_output_tokens=None, instructions=None,
+            ):
+                self.calls.append((prompt, instructions, max_output_tokens))
+                if instructions and "NewsFlow Story Planner" in instructions:
+                    return evidence
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 3999
+                if "CURRENT PART: P2" in prompt:
+                    return "Б" * 3999
+                if "CURRENT PART: P3" in prompt:
+                    return "В" * 3998
+                raise AssertionError("unexpected stage request")
+
+            async def generate_fresh(self, *_args, **_kwargs):
+                raise AssertionError("low atom count must not trigger Planner recovery")
+
+        client = StageClient()
+        request = ScenarioRequest(
+            0, "Тема", "MANUAL_STAGE_TEMPLATE", target_chars=12000,
+            allowed_min=11500, allowed_max=12500,
+        )
+        job = (await ParallelRunner(client, 1).run([request]))[0]
+
+        self.assertEqual(job.state, RunState.DONE)
+        self.assertEqual(len(client.calls), 4)
+        self.assertIn("NewsFlow Story Planner", client.calls[0][1])
+        self.assertNotIn("MANUAL_STAGE_TEMPLATE", client.calls[0][1])
+        self.assertIn("MANUAL_STAGE_TEMPLATE", client.calls[0][0])
+        self.assertEqual(
+            ["P1", "P2", "P3"],
+            [record["part_id"] for record in job.accepted_story_parts],
+        )
+
     @staticmethod
     def _story_plan_json(part_count: int) -> str:
         roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
@@ -464,7 +512,10 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_planner_material_and_writer_targets_scale_without_final_deficit_transfer(self):
         """Every size plans complete material and keeps each Writer to its reserved budget."""
-        cases = (12000, 12501, 20000, 24999, 30000, 50000, 75001, 100000)
+        cases = (
+            0, 2000, 6000, 9000, 9001, 10000, 12000, 12501,
+            20000, 24999, 30000, 50000, 75001, 100000,
+        )
 
         for target_chars in cases:
             with self.subTest(target_chars=target_chars):
@@ -481,9 +532,14 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                             self.planner_budgets.append(max_output_tokens)
                             return ParallelRunnerTests._story_plan_json(len(self.planned_targets))
                         self.writer_prompts.append(prompt)
-                        current = int(__import__("re").search(
+                        target_match = __import__("re").search(
                             r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                        ).group(1))
+                        )
+                        if target_match is None:
+                            if "CURRENT TARGET: no explicit character target" not in prompt:
+                                raise AssertionError("zero-target Writer prompt lost its natural-length contract")
+                            return "Б"
+                        current = int(target_match.group(1))
                         # P1 is deliberately short. Later assignments must
                         # still reflect their reserved material, not fill P1's
                         # deficit in the FINAL part.
@@ -495,8 +551,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 request = ScenarioRequest(
                     0, "Масштабируемая тема", "CONTRACT",
                     target_chars=target_chars,
-                    allowed_min=max(1, target_chars - 500),
-                    allowed_max=target_chars + 500,
+                    allowed_min=max(1, target_chars - 500) if target_chars else 0,
+                    allowed_max=target_chars + 500 if target_chars else 0,
                 )
                 job = (await ParallelRunner(client, 1).run([request]))[0]
 

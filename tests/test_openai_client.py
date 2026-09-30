@@ -4,10 +4,40 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from scriptor.config import OpenAIKey
-from scriptor.openai_client import HybridTextPool, OpenAIAPIError, OpenAITextClient
+from scriptor.openai_client import (
+    HybridTextPool,
+    OpenAIAPIError,
+    OpenAITextClient,
+    extract_visible_response_text,
+)
 
 
 class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
+    def test_visible_response_extractor_uses_nested_text_without_reasoning_or_refusal(self):
+        response = {
+            "output": [
+                {"content": [
+                    {"type": "reasoning", "summary": "hidden"},
+                    {"type": "output_text", "text": "Первая видимая часть."},
+                ]},
+                {"content": [
+                    {"type": "refusal", "refusal": "not scenario prose"},
+                    {"type": "text", "text": "Вторая видимая часть."},
+                ]},
+            ],
+        }
+
+        self.assertEqual(
+            extract_visible_response_text(response),
+            "Первая видимая часть.\nВторая видимая часть.",
+        )
+
+    def test_visible_response_extractor_prefers_direct_output_text_and_handles_missing_text(self):
+        self.assertEqual(
+            extract_visible_response_text({"output_text": "Прямой ответ", "output": []}),
+            "Прямой ответ",
+        )
+        self.assertEqual(extract_visible_response_text({"output": [{"content": [{"type": "refusal"}]}]}), "")
     async def test_works_without_chrome_when_api_key_exists(self):
         pool = HybridTextPool([], [OpenAIKey("Резерв", "sk-test", True)], "https://claude.ai/new")
         pool.openai_clients[0].generate = AsyncMock(return_value="готово")
@@ -103,6 +133,20 @@ class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "готово")
         self.assertEqual(request.call_args.args[2]["max_output_tokens"], 9216)
+
+    async def test_responses_api_keeps_trusted_instructions_outside_user_input(self):
+        client = OpenAITextClient("sk-test")
+        with patch.object(client, "_request", return_value={"output_text": "готово"}) as request:
+            result = await client.generate(
+                "TOPIC: пользовательская тема\nOPERATOR: ручной шаблон",
+                instructions="TRUSTED PLANNER CONTRACT: return strict JSON only.",
+            )
+
+        self.assertEqual(result, "готово")
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["instructions"], "TRUSTED PLANNER CONTRACT: return strict JSON only.")
+        self.assertEqual(payload["input"], "TOPIC: пользовательская тема\nOPERATOR: ручной шаблон")
+        self.assertNotIn("TRUSTED PLANNER CONTRACT", payload["input"])
 
     def test_text_request_times_out_after_two_minutes_instead_of_blocking_the_batch(self):
         response = MagicMock()
