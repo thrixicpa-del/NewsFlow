@@ -23,6 +23,7 @@ from .story_planner import (
     story_plan_from_dict,
 )
 
+
 def looks_like_action_required(text: str) -> bool:
     if not text:
         return False
