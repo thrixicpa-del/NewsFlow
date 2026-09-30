@@ -63,6 +63,27 @@ class StoryPartSizingTests(unittest.TestCase):
 
 
 class StoryPlanValidationTests(unittest.TestCase):
+    def test_parser_normalizes_provider_nested_part_atoms_without_relaxing_ownership(self):
+        """Responses may place the complete atom records beside their part IDs."""
+        response = json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
+            "thesis": "Одна последовательность.",
+            "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
+            "parts": [{
+                "id": "P1", "role": "COMPLETE", "purpose": "Завершить", "macro_id": "M1",
+                "content_ids": ["C001"], "content_atoms": [{
+                    "id": "C001", "summary": "Служба публикует итог", "owner_part_id": "P1",
+                    "content_kind": "DRAMATIZED", "state_before": "Проверка идёт.",
+                    "changed_subject": "Статус проверки", "development": "Служба завершает проверку.",
+                    "resulting_state": "Итог опубликован.", "state_after": "Проверка закрыта.",
+                }],
+            }],
+        }, ensure_ascii=False)
+
+        plan = parse_story_plan_response(response, (5000,), require_state_transitions=True)
+        self.assertEqual(plan.content_atoms[0].id, "C001")
+        self.assertEqual(plan.parts[0].content_ids, ("C001",))
+
     def test_saved_low_density_planner_maps_are_structurally_accepted(self):
         """Atom counts guide planning but never invalidate a complete Story Map.
 

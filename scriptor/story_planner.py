@@ -344,6 +344,27 @@ def _normalise_advisory_loops(parts: list[StoryPartPlan]) -> list[StoryPartPlan]
     ]
 
 
+def _normalise_nested_part_atoms(raw: dict[str, Any]) -> dict[str, Any]:
+    """Lift a complete provider ``parts[].content_atoms`` transport shape.
+
+    The canonical persisted Story Map remains top-level ``content_atoms``.  A
+    few valid Responses payloads place the same records beside each part; this
+    bounded normalization accepts that representation only when the canonical
+    field is absent and every declared part supplies an atom list.  All normal
+    ID, role, macro and exact-ownership validation still runs afterward.
+    """
+    if "content_atoms" in raw:
+        return raw
+    parts = raw.get("parts")
+    if not isinstance(parts, list) or not parts or not all(
+        isinstance(part, dict) and isinstance(part.get("content_atoms"), list)
+        for part in parts
+    ):
+        return raw
+    atoms = [atom for part in parts for atom in part["content_atoms"]]
+    return {**raw, "content_atoms": atoms}
+
+
 def parse_story_plan_response(
     text: str,
     part_targets: tuple[int, ...],
@@ -362,6 +383,7 @@ def parse_story_plan_response(
         invalid_message="story planner must return strict JSON",
         object_message="story planner response must be an object",
     )
+    raw = _normalise_nested_part_atoms(raw)
     state_transition_contract = _optional_text(raw.get("state_transition_contract"))
 
     targets = tuple(max(0, int(target or 0)) for target in part_targets) or (0,)
