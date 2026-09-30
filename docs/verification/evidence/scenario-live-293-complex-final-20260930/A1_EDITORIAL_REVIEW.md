@@ -1,7 +1,7 @@
 # A1 same-run map → payload → prose audit
 
-Run: `scenario-live-293-complex-a1-live-20260930-150704`  
-Source: `c28b22288ba4bf59f3b84ea0348b47f2d40913ef`  
+Run: `scenario-live-293-complex-a1-live-20260930-150704`<br>
+Source: `c28b22288ba4bf59f3b84ea0348b47f2d40913ef`<br>
 Contract: target `12000`, allowed `11500..12500`; P1/P2/P3 targets
 `3999/3999/3998`; all atoms are `DRAMATIZED`.
 
