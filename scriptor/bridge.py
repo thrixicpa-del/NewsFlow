@@ -2906,6 +2906,7 @@ def snapshot() -> dict:
             "referenceModeComposition": settings.cover_fastgen_reference_mode_composition,
             "referenceModeMoodLighting": settings.cover_fastgen_reference_mode_mood_lighting,
             "referenceModeAuto": settings.cover_fastgen_reference_mode_auto,
+            "sceneIntensityMode": settings.cover_scene_intensity_mode,
             "referenceMissingPaths": [path for path in settings.cover_fastgen_reference_paths
                                       if not Path(path).expanduser().is_file()],
             "referenceProviderLimit": _cover_operation_reference_limit(settings, settings.cover_operation) or 10,
@@ -7432,6 +7433,8 @@ def save_cover_settings(payload: dict) -> dict:
                 setattr(settings, setting_name, bool(payload[payload_key]))
         if any(key in payload for key in ("referenceModeStyle", "referenceModeComposition", "referenceModeMoodLighting")):
             settings.cover_fastgen_reference_mode_auto = False
+    if isinstance(payload.get("sceneIntensityMode"), bool):
+        settings.cover_scene_intensity_mode = bool(payload["sceneIntensityMode"])
     if isinstance(payload.get("tabloidMode"), bool):
         settings.cover_tabloid_mode = bool(payload["tabloidMode"])
     if "faceLibraryFolder" in payload:
@@ -8125,6 +8128,80 @@ def _cover_topic_visual_plan(item: dict) -> str:
     )
 
 
+def _cover_scene_intensity_instruction(settings: Settings) -> str:
+    """Return the user's optional amplification for newly authored scene briefs."""
+    if not settings.cover_scene_intensity_mode:
+        return ""
+    return (
+        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ: пользователь просит более масштабную и плотную визуальную подачу. "
+        "Покажи заметную коллективную реакцию и ясное противостояние, только когда это следует из темы или сценария. "
+        "Для подтверждённого протеста используй большую недовольную толпу и читаемые издалека плакаты; "
+        "для подтверждённого вооружённого конфликта — больше релевантной техники, военных и масштаба столкновения; "
+        "для подтверждённых ударов — видимые последствия, разрушения, дым или спасательные действия. "
+        "Не добавляй людей, оружие, взрывы, разрушения или митинг к теме, которая их не содержит; вместо этого усили "
+        "контекстно уместные масштаб, реакцию, контраст, действие и композиционное противостояние. "
+    )
+
+
+_COVER_ENHANCED_REWRITE_COMPOSITIONS = (
+    "wide elevated camera angle; preserve every existing subject, object and action; rearrange only framing and foreground/background depth",
+    "eye-level medium-wide framing; preserve the exact existing subjects, objects and action; shift only screen position and camera distance",
+    "compressed telephoto framing of the exact same subjects and objects; change only depth, crop and relative screen placement",
+    "diagonal camera framing of the exact same existing scene; preserve entity count, identities, objects and actions; change only camera angle and layout",
+)
+
+
+def _cover_distinct_prompt_options(
+    options: list[str], item: dict, avoided_options: list[object], *, scene_intensity: bool,
+) -> list[str]:
+    """Resolve duplicate final prompts locally after every prompt transformation.
+
+    Text-provider output is only one stage: V2 normalization, optional intensity,
+    local fills and safe fallbacks may independently converge on the same final
+    payload.  This bounded pass is therefore deliberately last.  It preserves
+    the scene itself and changes only the presentation direction; enhanced mode
+    keeps its separate, topic-grounded amplification instruction.
+    """
+    used = {_cover_prompt_key(value) for value in avoided_options if _cover_prompt_key(value)}
+    result: list[str] = []
+    for index, option in enumerate(options):
+        candidate = option
+        result_keys = {_cover_prompt_key(value) for value in result}
+        if _cover_prompt_key(candidate) in used or _cover_prompt_key(candidate) in result_keys:
+            for attempt in range(1, 9):
+                direction = _COVER_ENHANCED_REWRITE_COMPOSITIONS[(index + attempt - 1) % len(_COVER_ENHANCED_REWRITE_COMPOSITIONS)]
+                intensity = (
+                    " Context-grounded intensity: only when TITLE, SCRIPT or STORY CONTEXT supports it, increase the scale, density, "
+                    "consequence and dramatic emphasis of existing topic-grounded scene material; do not introduce a new kind of event."
+                    if scene_intensity else ""
+                )
+                candidate = build_final_provider_prompt(
+                    option,
+                    item,
+                    composition_notes=(
+                        "Composition-only alternative: "
+                        f"{direction}; layout variant {attempt}. Preserve every existing subject, object and action exactly as described in STORY CONTEXT."
+                        f"{intensity} Change only camera framing, distance, layers, foreground/background arrangement and visual composition."
+                    ),
+                )
+                key = _cover_prompt_key(candidate)
+                if key not in used and key not in result_keys:
+                    break
+            else:  # pragma: no cover - layout marker guarantees a bounded unique payload.
+                raise RuntimeError("Не удалось получить уникальный визуальный промпт")
+        result.append(candidate)
+    return result
+
+
+def _cover_distinct_enhanced_rewrite_options(
+    options: list[str], item: dict, previous_options: list[object],
+) -> list[str]:
+    """Compatibility entry point for the #297 enhanced duplicate contract."""
+    return _cover_distinct_prompt_options(
+        options, item, previous_options, scene_intensity=True,
+    )
+
+
 def _cover_news_conflict_requirement(item: dict) -> str:
     """Require a visible story stake without imposing a pre-classified scene."""
     del item
@@ -8156,6 +8233,7 @@ def _cover_instruction(item: dict, position: int, settings) -> str:
         "ракурсом, дистанцией камеры и расположением людей/объектов от остальных вариантов.\n\n"
         f"ТЕМА: {title}\n{_cover_structured_context(item)}\n{_cover_topic_visual_plan(item)}"
     )
+    request += _cover_scene_intensity_instruction(settings)
     if base:
         request += f"\nДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ ПОЛЬЗОВАТЕЛЯ: {base}"
     request += _cover_ai_reference_instruction(item, position, settings)
@@ -8224,6 +8302,64 @@ def _cover_text_revision(item: dict) -> str:
 def _cover_prompt_revision(item: dict) -> str:
     prompt = " ".join(str(item.get("image_prompt", "")).split())
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16] if prompt else ""
+
+
+_COVER_PROMPT_HISTORY_LIMIT = 5
+
+
+def _normalise_cover_prompt(value: object) -> str:
+    """Canonical text for durable visual do-not-repeat evidence."""
+    return " ".join(str(value or "").split())
+
+
+def _cover_prompt_key(value: object) -> str:
+    return _normalise_cover_prompt(value).casefold()
+
+
+def _cover_active_prompt_options(item: dict) -> list[str]:
+    """Return every active visual option, including legacy single-prompt rows."""
+    values = item.get("image_prompt_options")
+    candidates = list(values) if isinstance(values, list) else []
+    candidates.append(item.get("image_prompt", ""))
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        prompt = _normalise_cover_prompt(value)
+        key = _cover_prompt_key(prompt)
+        if prompt and key not in seen:
+            result.append(prompt)
+            seen.add(key)
+    return result
+
+
+def _cover_recent_prompt_history(item: dict) -> list[str]:
+    """Read bounded durable history without reviving it as an active prompt."""
+    values = item.get("recent_visual_prompt_history")
+    if not isinstance(values, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        prompt = _normalise_cover_prompt(value)
+        key = _cover_prompt_key(prompt)
+        if prompt and key not in seen:
+            result.append(prompt)
+            seen.add(key)
+    return result[-_COVER_PROMPT_HISTORY_LIMIT:]
+
+
+def _remember_cover_prompt_history(item: dict, values: list[object]) -> None:
+    """Append superseded active prompts to the row's small do-not-repeat window."""
+    history = _cover_recent_prompt_history(item)
+    for value in values:
+        prompt = _normalise_cover_prompt(value)
+        key = _cover_prompt_key(prompt)
+        if not prompt:
+            continue
+        history = [record for record in history if _cover_prompt_key(record) != key]
+        history.append(prompt)
+    if history:
+        item["recent_visual_prompt_history"] = history[-_COVER_PROMPT_HISTORY_LIMIT:]
 
 
 def _mark_cover_prompt_stale_for_current_text(item: dict) -> None:
@@ -8334,6 +8470,17 @@ class _BoundedCoverTextProvider:
         raise RuntimeError("Provider retry limit exhausted")
 
 
+def _cover_prompt_provider_attempt(item: dict, attempt: int, settings: Settings, *, persist: bool) -> None:
+    """Expose provider progress without persisting a staged fresh rewrite."""
+    item.update(prompt_provider_attempt_count=attempt)
+    _cover_step(
+        item, "Повтор промпта" if attempt > 1 else "ИИ готовит промпт", 5,
+        f"Попытка провайдера: {attempt}/4",
+    )
+    if persist:
+        _save_cover_state(settings)
+
+
 def generate_cover_prompts(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
@@ -8358,39 +8505,57 @@ def generate_cover_prompts(payload: dict) -> dict:
         pool = HybridTextPool([], settings.openai_api_keys, "", settings.openai_model)
     except _BRIDGE_OPERATION_ERRORS as exc:
         pool_error = exc
-    settings.cover_prompt_provider = provider
     rewrite = bool(payload.get("rewrite"))
-    for _index, item in selected:
-        _cover_step(item, "ИИ готовит промпт", 5)
-        item.update(error="")
-
-    _save_cover_state(settings)
+    # Fresh-prompt replacement has a stricter contract than ordinary
+    # missing-only generation: it stages every provider result and does not
+    # mutate the durable cover row until the replacement can be committed
+    # together with invalidation of its old FastGen contract.
+    stage_fresh_rewrite = bool(payload.get("_stage_fresh_prompt_rewrite"))
+    staged: dict[int, dict] = {}
+    staging_errors: dict[int, str] = {}
+    if not stage_fresh_rewrite:
+        settings.cover_prompt_provider = provider
+        for _index, item in selected:
+            _cover_step(item, "ИИ готовит промпт", 5)
+            item.update(error="")
+        _save_cover_state(settings)
 
     async def build_one(index: int, item: dict) -> None:
+        # A shallow copy is sufficient: prompt construction writes only
+        # scalar/list fields on the cover row, never nested source material.
+        # It lets all provider/normalisation work happen without a visible
+        # half-new prompt if this is a fresh replacement.
+        target = dict(item) if stage_fresh_rewrite else item
+        previous_options = _cover_active_prompt_options(item)
+        recent_history = _cover_recent_prompt_history(item)
+        do_not_repeat = list(previous_options)
+        for value in recent_history:
+            if _cover_prompt_key(value) not in {_cover_prompt_key(current) for current in do_not_repeat}:
+                do_not_repeat.append(value)
         provider_call = _BoundedCoverTextProvider(
             pool,
-            lambda attempt: (
-                item.update(prompt_provider_attempt_count=attempt),
-                _cover_step(item, "Повтор промпта" if attempt > 1 else "ИИ готовит промпт", 5,
-                            f"Попытка провайдера: {attempt}/4"),
-                _save_cover_state(settings),
+            lambda attempt: _cover_prompt_provider_attempt(
+                target, attempt, settings, persist=not stage_fresh_rewrite,
             ),
         )
         try:
-            prompt = _cover_instruction(item, index, settings)
-            if rewrite and item.get("image_prompt_options"):
-                previous = "\n".join(f"- {value}" for value in item.get("image_prompt_options", [])[:5])
-                prompt += ("\nПредыдущие варианты не подошли. Сделай новый визуальный ход, заметно отличный от них, "
-                           "но сохрани фактическую тему и выбранные слова.\nПРЕДЫДУЩИЕ ВАРИАНТЫ:\n" + previous)
+            prompt = _cover_instruction(target, index, settings)
+            if do_not_repeat:
+                previous = "\n".join(f"- {value}" for value in do_not_repeat)
+                prompt += (
+                    "\nВИЗУАЛЬНЫЕ ВАРИАНТЫ, КОТОРЫЕ НЕЛЬЗЯ ПОВТОРЯТЬ: сделай новый визуальный ход, "
+                    "заметно отличный от них, но сохрани фактическую тему и выбранные слова. "
+                    "НЕ ПОВТОРЯЙ ни один вариант ниже.\nПРЕДЫДУЩИЕ ВАРИАНТЫ:\n" + previous
+                )
             if provider == "agent":
                 prompt = "Работай как специализированный агент NewsFlow. " + prompt
             if pool_error is not None:
                 raise pool_error
-            reference_paths = _cover_ai_reference_paths_for_item(item, index, settings)
+            reference_paths = _cover_ai_reference_paths_for_item(target, index, settings)
             options, chosen = _clean_cover_prompts(
                 await provider_call.generate(prompt, image_paths=reference_paths[:6]), settings.cover_prompt_variant_count,
             )
-            options = [_normalize_cover_photo_prompt(value, item) for value in options]
+            options = [_normalize_cover_photo_prompt(value, target) for value in options]
             if not options:
                 raise ValueError("ИИ вернул слишком короткий промпт обложки")
             requested_count = max(1, int(settings.cover_prompt_variant_count or 1))
@@ -8399,32 +8564,49 @@ def generate_cover_prompts(payload: dict) -> dict:
                 # requested batch.  The local brief remains topic-specific
                 # and renderable, while the original answer stays first.
                 options.extend(
-                    _normalize_cover_photo_prompt(_fallback_cover_prompt(item, variant), item)
+                    _normalize_cover_photo_prompt(_fallback_cover_prompt(target, variant), target)
                     for variant in range(len(options), requested_count)
                 )
             options = options[:requested_count]
+            options = _cover_distinct_prompt_options(
+                options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
+            )
             # An explicit terminal state lets the editor see that FastGen can
             # start; it is not merely an intermediate LLM progress label.
-            _cover_step(item, "Промпты готовы", 100,
+            _cover_step(target, "Промпты готовы", 100,
                         f"Подготовлено вариантов: {len(options)}")
-            item.update(image_prompt_options=options, selected_prompt_index=chosen, image_prompt=options[chosen],
-                        prompt_provider=provider, prompt_text_signature=_cover_text_revision(item), error="")
-            item["prompt_revision_id"] = _cover_prompt_revision(item)
+            target.update(image_prompt_options=options, selected_prompt_index=chosen, image_prompt=options[chosen],
+                          prompt_provider=provider, prompt_text_signature=_cover_text_revision(target), error="")
+            target["prompt_revision_id"] = _cover_prompt_revision(target)
+            if rewrite:
+                _remember_cover_prompt_history(target, previous_options)
+            if stage_fresh_rewrite:
+                staged[index] = target
         except _BRIDGE_OPERATION_ERRORS as exc:
             if _cover_prompt_safety_blocked(exc):
                 fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
-                options = [_normalize_cover_photo_prompt(_fallback_cover_prompt(item, variant), item) for variant in range(fallback_count)]
-                _cover_step(item, "Промпты готовы", 100,
+                options = [_normalize_cover_photo_prompt(_fallback_cover_prompt(target, variant), target) for variant in range(fallback_count)]
+                options = _cover_distinct_prompt_options(
+                    options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
+                )
+                _cover_step(target, "Промпты готовы", 100,
                             "Провайдер отклонил формулировку: создан безопасный локальный вариант")
-                item.update(image_prompt_options=options, selected_prompt_index=0,
+                target.update(image_prompt_options=options, selected_prompt_index=0,
                             image_prompt=options[0], prompt_provider="local-fallback",
-                            prompt_text_signature=_cover_text_revision(item), error="")
-                item["prompt_revision_id"] = _cover_prompt_revision(item)
+                            prompt_text_signature=_cover_text_revision(target), error="")
+                target["prompt_revision_id"] = _cover_prompt_revision(target)
+                if rewrite:
+                    _remember_cover_prompt_history(target, previous_options)
+                if stage_fresh_rewrite:
+                    staged[index] = target
             else:
                 reason = _cover_provider_error_message(exc)
-                _cover_step(item, "Ошибка промпта", 100, reason)
-                item.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
-        _save_cover_state(settings)
+                _cover_step(target, "Ошибка промпта", 100, reason)
+                target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
+                if stage_fresh_rewrite:
+                    staging_errors[index] = reason
+        if not stage_fresh_rewrite:
+            _save_cover_state(settings)
 
     async def run_batch() -> None:
         # HybridTextPool owns two queue slots per active key.  Starting all
@@ -8433,6 +8615,8 @@ def generate_cover_prompts(payload: dict) -> dict:
         await asyncio.gather(*(build_one(index, item) for index, item in selected))
 
     asyncio.run(run_batch())
+    if stage_fresh_rewrite:
+        return {"_fresh_prompt_staging": staged, "_fresh_prompt_errors": staging_errors}
     return snapshot()
 
 
@@ -11128,6 +11312,69 @@ def _clear_cover_render_state(item: dict, *, status: str) -> None:
     _advance_cover_revision(item)
 
 
+def _clear_obsolete_fresh_prompt_contract(item: dict) -> None:
+    """Drop the exact FastGen request that belonged to a replaced visual prompt.
+
+    This deliberately leaves operator-owned identity/reference choices and all
+    editorial text intact.  Those inputs are reused by the next ordinary
+    Covers resolution; only the old render's provider contract is invalid.
+    """
+    for key in (
+        "final_provider_prompt", "final_provider_prompt_options",
+        "final_provider_reference_paths", "final_provider_face_label",
+        "final_provider_face_reference_count", "reference_final_provider_count",
+        "render_profile",
+    ):
+        item.pop(key, None)
+
+
+def _commit_fresh_prompt_rewrite(
+    settings: Settings,
+    selected_rows: list[tuple[int, dict]],
+    staged: dict[int, dict],
+    staging_errors: dict[int, str],
+    *,
+    provider: str,
+) -> set[int]:
+    """Commit staged replacement prompts in one cover-state mutation.
+
+    The caller removes physical files only after this returns.  Thus a crash
+    before the mutation retains the complete old prompt/render contract, and
+    a crash after it cannot make the old image current again.
+    """
+    committed: set[int] = set()
+    for index, item in selected_rows:
+        replacement = staged.get(index)
+        if replacement is None:
+            reason = staging_errors.get(index, "Не удалось создать новый промпт")
+            # A provider failure may be reported, but it does not alter the
+            # accepted prompt, render profile or rendered files.
+            _cover_step(item, "Ошибка промпта", 100, reason)
+            item.update(error=reason)
+            continue
+        old_options = _cover_active_prompt_options(item)
+        item.update(
+            image_prompt_options=list(replacement["image_prompt_options"]),
+            selected_prompt_index=int(replacement["selected_prompt_index"]),
+            image_prompt=str(replacement["image_prompt"]),
+            prompt_provider=str(replacement["prompt_provider"]),
+            prompt_text_signature=str(replacement["prompt_text_signature"]),
+            prompt_revision_id=str(replacement["prompt_revision_id"]),
+            prompt_provider_attempt_count=int(replacement.get("prompt_provider_attempt_count", 1)),
+            error="",
+        )
+        _remember_cover_prompt_history(item, old_options)
+        _clear_obsolete_fresh_prompt_contract(item)
+        _clear_cover_render_state(item, status="Новые промпты созданы")
+        item.update(status="Новые промпты созданы", progress=0, error="")
+        _cover_step(item, "Новые промпты созданы", 0, "Нажмите «Повторить с новыми» или запустите выбранный режим")
+        committed.add(index)
+    if committed:
+        settings.cover_prompt_provider = provider
+    _save_cover_state(settings)
+    return committed
+
+
 def remove_cover_results(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
@@ -11449,8 +11696,6 @@ def regenerate_cover_with_face(payload: dict) -> dict:
 
 def regenerate_covers_new_prompts(payload: dict) -> dict:
     """Rewrite visual prompts and leave the selected topics ready for a deliberate render."""
-    # Rewriting is a clean new attempt: old previews must not remain mixed
-    # with prompts that describe a different visual concept.
     settings = load_settings()
     _hydrate_cover_library(settings)
     selected_rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
@@ -11460,40 +11705,64 @@ def regenerate_covers_new_prompts(payload: dict) -> dict:
     ]
     chosen = [index for index, _identity in selected_pairs]
     chosen_ids = [identity for _index, identity in selected_pairs]
-    chosen_id_set = set(chosen_ids)
     if not selected_pairs:
         raise ValueError("Выберите актуальные темы для новых промптов")
-    output = Path(settings.cover_output_folder)
-    removed = 0
-    for index in chosen:
-        if not 0 <= index < len(settings.cover_queue):
-            continue
-        item = settings.cover_queue[index]
-        for path in _cover_render_paths(item):
-            if Path(path).is_file():
-                removed += 1
-            _safe_remove_cover_file(path, output)
-        _clear_cover_render_state(item, status="Промпты переписываются")
-    _save_cover_state(settings)
-    generate_cover_prompts({
+    # Do not touch an accepted render until a complete replacement prompt set
+    # exists.  A provider failure must leave the prior prompt and preview
+    # usable, rather than converting a failed rewrite into data loss.
+    previous_render_paths = {
+        identity: _cover_render_paths(item)
+        for _index, item in selected_rows
+        if (identity := str(item.get("production_item_id", "")).strip())
+    }
+    staging_result = generate_cover_prompts({
         "indices": chosen,
         "productionItemIds": chosen_ids,
         "provider": payload.get("provider", "agent"),
         "rewrite": True,
+        "_stage_fresh_prompt_rewrite": True,
     })
-    settings = load_settings()
-    _hydrate_cover_library(settings)
-    for item in settings.cover_queue:
-        if str(item.get("production_item_id", "")).strip() not in chosen_id_set:
+    staged = staging_result.get("_fresh_prompt_staging", {})
+    staging_errors = staging_result.get("_fresh_prompt_errors", {})
+    # The commit seam is intentionally narrow and separately testable.  No
+    # active prompt/render field has changed before it succeeds.
+    row_backups = {index: dict(item) for index, item in selected_rows}
+    try:
+        committed = _commit_fresh_prompt_rewrite(
+            settings, selected_rows, staged, staging_errors,
+            provider=str(payload.get("provider", "agent")).strip().casefold(),
+        )
+    except Exception:
+        for index, previous in row_backups.items():
+            settings.cover_queue[index].clear()
+            settings.cover_queue[index].update(previous)
+        raise
+
+    output = Path(settings.cover_output_folder)
+    removed = 0
+    cleanup_errors: list[str] = []
+    for index, item in selected_rows:
+        if index not in committed:
             continue
-        if item.get("error") or not str(item.get("image_prompt", "")).strip():
-            # Keep a real provider failure visible; do not turn it into a
-            # misleading success just because the rewrite command ended.
-            _cover_step(item, "Ошибка промпта", 100, str(item.get("error") or "Не удалось создать новый промпт"))
-            continue
-        item.update(status="Новые промпты созданы", progress=0, error="")
-        _cover_step(item, "Новые промпты созданы", 0, "Нажмите «Повторить с новыми» или запустите выбранный режим")
-    _save_cover_state(settings)
+        identity = str(item.get("production_item_id", "")).strip()
+        # The durable state already makes these paths non-current.  Failure to
+        # delete a file is a cleanup diagnostic, never a reason to roll back
+        # the newly committed prompt contract.
+        row_cleanup_errors: list[str] = []
+        for path in previous_render_paths.get(identity, []):
+            path_object = Path(path)
+            try:
+                existed_before_cleanup = path_object.is_file()
+                _safe_remove_cover_file(path, output)
+                if existed_before_cleanup and not path_object.is_file():
+                    removed += 1
+            except OSError as exc:
+                row_cleanup_errors.append(f"{path_object.name}: {exc}")
+        if row_cleanup_errors:
+            cleanup_errors.extend(row_cleanup_errors)
+            item["render_cleanup_error"] = "; ".join(row_cleanup_errors[-3:])
+    if cleanup_errors:
+        _save_cover_state(settings)
     return {**snapshot(), "operationResult": {
         "kind": "cover-prompts-rewritten", "count": len(chosen),
         "message": f"Новые промпты созданы. Удалено старых картинок: {removed}. Нажмите «Повторить с новыми» или выберите режим генерации."
@@ -11529,6 +11798,7 @@ def remove_cover_prompts(payload: dict) -> dict:
         if index not in requested:
             continue
         if item.get("image_prompt") or item.get("image_prompt_options"):
+            _remember_cover_prompt_history(item, _cover_active_prompt_options(item))
             item.pop("image_prompt", None)
             item.pop("image_prompt_options", None)
             item.pop("selected_prompt_index", None)
@@ -11539,7 +11809,7 @@ def remove_cover_prompts(payload: dict) -> dict:
             # The library may be read by a polling bridge that started with an
             # older settings snapshot.  A per-row revision makes this explicit
             # removal win over that stale copy during the next hydration.
-            item["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            _advance_cover_revision(item)
             removed += 1
     if not removed:
         raise ValueError("Нет промптов для удаления")

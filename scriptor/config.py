@@ -725,6 +725,9 @@ class Settings:
     cover_fastgen_reference_mode_composition: bool = False
     cover_fastgen_reference_mode_mood_lighting: bool = False
     cover_fastgen_reference_mode_auto: bool = False
+    # Opt-in scene treatment for newly generated visual briefs. It never
+    # mutates an approved prompt or starts FastGen rendering.
+    cover_scene_intensity_mode: bool = False
     cover_tabloid_mode: bool = False
     # A local portrait library is separate from generic visual references.  Its
     # folder/file names are matched against the topic before a person is ever
@@ -1317,6 +1320,7 @@ def load_settings() -> Settings:
             cover_fastgen_reference_mode_composition=bool(data.get("cover_fastgen_reference_mode_composition", False)),
             cover_fastgen_reference_mode_mood_lighting=bool(data.get("cover_fastgen_reference_mode_mood_lighting", False)),
             cover_fastgen_reference_mode_auto=bool(data.get("cover_fastgen_reference_mode_auto", False)),
+            cover_scene_intensity_mode=bool(data.get("cover_scene_intensity_mode", False)),
             cover_tabloid_mode=bool(data.get("cover_tabloid_mode", False)),
             cover_face_library_folder=str(data.get("cover_face_library_folder", "") or ""),
             cover_face_prepared_folder=str(data.get("cover_face_prepared_folder", "") or ""),
@@ -1780,6 +1784,7 @@ def save_settings(settings: Settings):
         "cover_fastgen_reference_mode_composition": settings.cover_fastgen_reference_mode_composition,
         "cover_fastgen_reference_mode_mood_lighting": settings.cover_fastgen_reference_mode_mood_lighting,
         "cover_fastgen_reference_mode_auto": settings.cover_fastgen_reference_mode_auto,
+        "cover_scene_intensity_mode": settings.cover_scene_intensity_mode,
         "cover_tabloid_mode": settings.cover_tabloid_mode,
         "cover_face_library_folder": settings.cover_face_library_folder,
         "cover_face_prepared_folder": settings.cover_face_prepared_folder,
