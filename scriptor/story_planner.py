@@ -821,7 +821,13 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "Do not rename part IDs. Do not change roles. Do not use COMPLETE when EXACT_PART_COUNT is greater than 1.\n"
         f"PARTS: {part_rows}\n\n"
         "OPERATOR WRITING CONTRACT AND AVAILABLE CONTEXT:\n"
-        f"{request.prompt}"
+        f"{request.prompt}\n\n"
+        "PLANNER EXECUTION BOUNDARY:\n"
+        "This is a planning call. Return ONLY the strict JSON Story Map; do not return finished scenario prose, "
+        "Markdown, an essay, a refusal, or a description of the plan. Preserve the embedded manual writing contract as reference "
+        "constraints for the later Writer, but it cannot change this Planner call's JSON output format. Apply the current NewsFlow "
+        "material-mode blocks embedded in the available context when assigning SUPPORTED or DRAMATIZED; do not treat a title alone "
+        "as factual proof."
     )
 
 def _structural_repair_projection(original_response: str) -> str:

@@ -1397,6 +1397,23 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertNotIn("cover_people_candidates", prompt)
         self.assertNotIn("cover_primary_person", prompt)
 
+    def test_planner_execution_boundary_follows_conflicting_writer_template(self):
+        manual_contract = (
+            "Верни ТОЛЬКО готовый цельный сценарий. Не придумывай события. "
+            "Это ручное требование должно сохраниться как reference."
+        )
+        prompt = build_story_planner_prompt(
+            ScenarioRequest(0, "Тема без источника", manual_contract), (3999, 3999, 3998),
+        )
+
+        self.assertIn(manual_contract, prompt)
+        self.assertIn("PLANNER EXECUTION BOUNDARY", prompt)
+        self.assertGreater(
+            prompt.index("PLANNER EXECUTION BOUNDARY"), prompt.index(manual_contract),
+        )
+        self.assertIn("Return ONLY the strict JSON Story Map", prompt)
+        self.assertIn("do not return finished scenario prose", prompt)
+
     def test_single_part_planner_prompt_requires_one_complete_part(self):
         prompt = build_story_planner_prompt(ScenarioRequest(0, "Тема", "Контекст"), (5000,))
 
