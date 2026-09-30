@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureTclRuntime } from './core-runtime.js';
 import { environmentWindowTitle, isolatedElectronUserDataRoot } from './test-user-data.js';
 import { ALLOWED_CORE_COMMANDS } from './allowed-core-commands.js';
+import { readReadyScenarioFiles } from './scenario-import.js';
 
 const isolatedUserDataRoot = isolatedElectronUserDataRoot(process.env);
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
@@ -353,14 +354,10 @@ handleTrusted('newsflow:choose-prompt-text', async () => {
 handleTrusted('newsflow:choose-scenario-texts', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Сценарии TXT / Markdown', extensions: ['txt', 'md', 'markdown'] }],
+    filters: [{ name: 'Сценарии TXT / Markdown / ZIP', extensions: ['txt', 'md', 'markdown', 'zip'] }],
   });
   if (result.canceled) return [];
-  return result.filePaths.map(file => {
-    const text = readFileSync(file, 'utf8');
-    if (text.length > 1_000_000) throw new Error(`Файл «${path.basename(file)}» больше 1 МБ. Разделите его на несколько TXT.`);
-    return { title: path.parse(file).name, text };
-  }).filter(item => item.text.trim());
+  return readReadyScenarioFiles(result.filePaths);
 });
 handleTrusted('newsflow:choose-save-path', async (_event, suggestedName: string) => {
   const result = await dialog.showSaveDialog({

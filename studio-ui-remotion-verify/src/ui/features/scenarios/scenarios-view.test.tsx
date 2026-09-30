@@ -256,6 +256,40 @@ describe("Scenarios and scripts Light views", () => {
     expect((screen.getByLabelText("Полный текст сценария") as HTMLTextAreaElement).value).toBe("");
   });
 
+  it("requires a title and full text before enabling the ready-scenario action", () => {
+    render(<Scenarios data={fallback} go={vi.fn()} command={vi.fn()} refresh={async () => undefined} />);
+
+    const submit = screen.getByRole("button", { name: "Добавить готовый" });
+    expect(submit).toHaveProperty("disabled", true);
+
+    fireEvent.change(screen.getByLabelText("Название сценария"), { target: { value: "Ручной заголовок" } });
+    expect(submit).toHaveProperty("disabled", true);
+
+    fireEvent.change(screen.getByLabelText("Полный текст сценария"), { target: { value: "Ручной текст" } });
+    expect(submit).toHaveProperty("disabled", false);
+  });
+
+  it("imports file-selected ready scenarios through the existing batch command", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const chooseScenarioTexts = vi.fn().mockResolvedValue([
+      { title: "Сценарий из TXT", text: "Текст из файла" },
+      { title: "Сценарий из ZIP", text: "Текст из архива" },
+    ]);
+    Object.assign(window, { newsflowDesktop: { chooseScenarioTexts } });
+    render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Импортировать TXT / ZIP" }));
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("import-manual-scenarios", {
+        items: [
+          { title: "Сценарий из TXT", text: "Текст из файла" },
+          { title: "Сценарий из ZIP", text: "Текст из архива" },
+        ],
+      }),
+    );
+  });
+
   it("submits manual import once and disables its button while pending", () => {
     const command = vi.fn(() => new Promise<typeof fallback>(() => {}));
     render(<Scenarios data={fallback} go={vi.fn()} command={command} refresh={async () => undefined} />);

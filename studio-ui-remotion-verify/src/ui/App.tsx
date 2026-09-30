@@ -2665,6 +2665,20 @@ export function Scenarios({
       }
     }
   };
+  const importReadyFiles = async () => {
+    if (manualImportLock.current) return;
+    const items = await window.newsflowDesktop?.chooseScenarioTexts();
+    if (!items?.length) return;
+    manualImportLock.current = true;
+    setImportingManualScenario(true);
+    try {
+      const result = await command("import-manual-scenarios", { items });
+      if (result) setSelected([]);
+    } finally {
+      manualImportLock.current = false;
+      setImportingManualScenario(false);
+    }
+  };
   const write = async (indices?: number[], force = false) => {
     if (scenarioGenerationLock.current) return;
     scenarioGenerationLock.current = true;
@@ -2844,11 +2858,18 @@ export function Scenarios({
           />
           <Button
             kind="success"
-            disabled={importingManualScenario}
+            disabled={importingManualScenario || !manualTitle.trim() || !manualText.trim()}
             onClick={() => void importReady()}
           >
             <Upload size={17} />
             {importingManualScenario ? "Сохранение…" : "Добавить готовый"}
+          </Button>
+          <Button
+            disabled={importingManualScenario}
+            onClick={() => void importReadyFiles()}
+          >
+            <Upload size={17} />
+            Импортировать TXT / ZIP
           </Button>
         </div>
         <Textarea
