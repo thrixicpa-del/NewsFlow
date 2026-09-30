@@ -5799,6 +5799,140 @@ class CoverPromptFreshnessTests(unittest.TestCase):
             self.assertEqual(unselected["paths"], [str(other_image)])
             render.assert_not_called()
 
+    def test_fresh_rewrite_invalidates_old_final_fastgen_contract_but_keeps_operator_choices(self):
+        """A new scene must never retain a Final FastGen request for the old scene."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            old_image = Path(directory) / "old.png"
+            old_image.write_bytes(b"old")
+            manual_face = Path(directory) / "manual-face.png"
+            manual_face.write_bytes(b"face")
+            old_prompt = "Old accepted visual prompt"
+            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+                0, image_prompt=old_prompt, image_prompt_options=[old_prompt],
+                paths=[str(old_image)], path=str(old_image), selected_path=str(old_image),
+                final_provider_prompt="OLD FINAL FASTGEN PROMPT",
+                final_provider_prompt_options=["OLD FINAL FASTGEN PROMPT"],
+                final_provider_reference_paths=[str(manual_face)],
+                final_provider_face_label="Manual person",
+                final_provider_face_reference_count=1,
+                render_profile={"build_mode": "fastgen-full-my-face", "operation": "old-op"},
+                cover_headline="РУЧНОЙ ЗАГОЛОВОК", headline_source="MANUAL",
+                cover_subheadline="Ручной подзаголовок", subheadline_source="MANUAL",
+                face_reference_path=str(manual_face), face_reference_label="Manual person",
+                face_reference_source="manual",
+            )])
+
+            async def fresh_provider(*_args, **_kwargs):
+                return '{"prompts":["A distinct new briefing scene with signed documents"],"recommended":1}'
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=fresh_provider)):
+                bridge.regenerate_covers_new_prompts({
+                    "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
+                })
+
+            row = settings.cover_queue[0]
+            self.assertNotEqual(row["image_prompt"], old_prompt)
+            self.assertIn(old_prompt, row["recent_visual_prompt_history"])
+            for key in (
+                "final_provider_prompt", "final_provider_prompt_options", "final_provider_reference_paths",
+                "final_provider_face_label", "final_provider_face_reference_count", "render_profile",
+            ):
+                self.assertNotIn(key, row)
+            self.assertEqual(row["cover_headline"], "РУЧНОЙ ЗАГОЛОВОК")
+            self.assertEqual(row["cover_subheadline"], "Ручной подзаголовок")
+            self.assertEqual(row["face_reference_path"], str(manual_face))
+            self.assertEqual(row["face_reference_source"], "manual")
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 self.assertRaisesRegex(ValueError, "Нет сохранённого render profile"):
+                bridge.regenerate_covers({
+                    "indices": [0], "productionItemIds": ["production:fresh-0"], "currentProfile": True,
+                })
+
+    def test_fresh_rewrite_commit_failure_leaves_old_prompt_render_and_files_intact(self):
+        """Staged provider output cannot create a half-new durable cover row."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            old_image = Path(directory) / "old.png"
+            old_image.write_bytes(b"old")
+            old_prompt = "Old accepted visual prompt"
+            old_final = "OLD FINAL FASTGEN PROMPT"
+            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+                0, image_prompt=old_prompt, image_prompt_options=[old_prompt],
+                paths=[str(old_image)], path=str(old_image), selected_path=str(old_image),
+                final_provider_prompt=old_final, final_provider_prompt_options=[old_final],
+                render_profile={"build_mode": "fastgen-full", "operation": "old-op"},
+            )])
+
+            async def fresh_provider(*_args, **_kwargs):
+                return '{"prompts":["A distinct new briefing scene with signed documents"],"recommended":1}'
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=fresh_provider)), \
+                 patch.object(bridge, "_commit_fresh_prompt_rewrite", side_effect=RuntimeError("durable commit fault"), create=True), \
+                 self.assertRaisesRegex(RuntimeError, "durable commit fault"):
+                bridge.regenerate_covers_new_prompts({
+                    "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
+                })
+
+            row = settings.cover_queue[0]
+            self.assertEqual(row["image_prompt"], old_prompt)
+            self.assertEqual(row["image_prompt_options"], [old_prompt])
+            self.assertEqual(row["final_provider_prompt"], old_final)
+            self.assertEqual(row["paths"], [str(old_image)])
+            self.assertEqual(row["selected_path"], str(old_image))
+            self.assertTrue(old_image.is_file())
+
+    def test_fresh_rewrite_keeps_new_contract_when_old_file_cleanup_fails(self):
+        """A post-commit file error is diagnostic-only and cannot restore the old render."""
+        from scriptor import bridge
+
+        with TemporaryDirectory() as directory:
+            old_image = Path(directory) / "old.png"
+            old_image.write_bytes(b"old")
+            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+                0, image_prompt="Old accepted visual prompt", image_prompt_options=["Old accepted visual prompt"],
+                paths=[str(old_image)], path=str(old_image), selected_path=str(old_image),
+                final_provider_prompt="OLD FINAL FASTGEN PROMPT",
+                final_provider_prompt_options=["OLD FINAL FASTGEN PROMPT"],
+                render_profile={"build_mode": "fastgen-full", "operation": "old-op"},
+            )])
+
+            async def fresh_provider(*_args, **_kwargs):
+                return '{"prompts":["A distinct new briefing scene with signed documents"],"recommended":1}'
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+                 patch.object(bridge, "_save_cover_state"), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=fresh_provider)), \
+                 patch.object(bridge, "_safe_remove_cover_file", side_effect=PermissionError("file in use")):
+                result = bridge.regenerate_covers_new_prompts({
+                    "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
+                })
+
+            row = settings.cover_queue[0]
+            self.assertNotIn("final_provider_prompt", row)
+            self.assertNotIn("render_profile", row)
+            self.assertEqual(row["paths"], [])
+            self.assertEqual(row["selected_path"], "")
+            self.assertIn("file in use", row["render_cleanup_error"])
+            self.assertTrue(old_image.is_file())
+            self.assertIn("Удалено старых картинок: 0", result["operationResult"]["message"])
+
 
 class CoverRenderQueueSafetyTests(unittest.TestCase):
     @staticmethod
@@ -6759,13 +6893,23 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         settings = Settings(cover_queue=[self._row(index, image_prompt=f"Старая сцена {index}") for index in range(20)])
 
         def rewrite(payload):
+            staged = {}
+            errors = {}
             for index in payload["indices"]:
                 row = settings.cover_queue[index]
                 if index == 19:
-                    row.update(error="provider rejected prompt", status="Ошибка промпта")
+                    errors[index] = "provider rejected prompt"
                 else:
-                    row.update(image_prompt=f"Новая сцена {index}", error="", status="Промпты готовы")
-            return {}
+                    staged[index] = {
+                        **row,
+                        "image_prompt": f"Новая сцена {index}",
+                        "image_prompt_options": [f"Новая сцена {index}"],
+                        "selected_prompt_index": 0,
+                        "prompt_provider": "agent",
+                        "prompt_text_signature": "test-signature",
+                        "prompt_revision_id": "test-revision",
+                    }
+            return {"_fresh_prompt_staging": staged, "_fresh_prompt_errors": errors}
 
         selected_ids = [f"production:{index}" for index in range(20)]
         with patch.object(bridge, "load_settings", return_value=settings), \
@@ -6866,9 +7010,18 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
         settings = Settings(cover_queue=[self._row(index, image_prompt=f"Старая сцена {index}") for index in range(20)])
 
         def rewrite(payload):
-            for index in payload["indices"]:
-                settings.cover_queue[index].update(image_prompt=f"Новая сцена {index}", error="")
-            return {}
+            return {"_fresh_prompt_staging": {
+                index: {
+                    **settings.cover_queue[index],
+                    "image_prompt": f"Новая сцена {index}",
+                    "image_prompt_options": [f"Новая сцена {index}"],
+                    "selected_prompt_index": 0,
+                    "prompt_provider": "agent",
+                    "prompt_text_signature": "test-signature",
+                    "prompt_revision_id": "test-revision",
+                }
+                for index in payload["indices"]
+            }, "_fresh_prompt_errors": {}}
 
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
