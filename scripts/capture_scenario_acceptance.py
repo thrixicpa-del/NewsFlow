@@ -109,7 +109,14 @@ def _budget_totals(ledger: dict[str, object]) -> tuple[int, int, int]:
     runs = ledger.get("runs", [])
     if not isinstance(runs, list):
         return 0, 0, 0
-    full_runs = len(runs)
+    # A fixed one-call diagnostic cell consumes model/API budget but is not a
+    # full Scenario acceptance run.  Keeping that distinction in the shared
+    # ledger lets a bounded diagnostic precede at most the approved number of
+    # ordinary pipeline runs without silently resetting either allowance.
+    full_runs = sum(
+        1 for item in runs
+        if isinstance(item, dict) and str(item.get("kind", "")).upper() != "D"
+    )
     logical = sum(max(0, int(item.get("reserved_logical_calls", 0) or 0))
                   for item in runs if isinstance(item, dict))
     http = sum(max(0, int(item.get("reserved_http_attempts", 0) or 0))
@@ -119,6 +126,11 @@ def _budget_totals(ledger: dict[str, object]) -> tuple[int, int, int]:
 
 def _reserve_budget(
     path: Path, *, run_id: str, run_kind: str, target: int, source_head: str,
+    reserved_logical_calls: int | None = None,
+    reserved_http_attempts: int | None = None,
+    max_full_runs: int = _MAX_FULL_RUNS,
+    max_logical_calls: int = _MAX_LOGICAL_CALLS,
+    max_http_attempts: int = _MAX_HTTP_ATTEMPTS,
 ) -> dict[str, object]:
     """Persist a conservative reservation before the first external request."""
     ledger = _read_budget_ledger(path)
@@ -127,12 +139,21 @@ def _reserve_budget(
     # planner recovery room too, so an interrupted capture cannot silently
     # consume a new allowance from another disposable profile.
     part_count = max(1, (target + 4999) // 5000)
-    reserve_logical = 3 + part_count  # initial + repair + fresh + Writers
-    reserve_http = reserve_logical + 2  # bounded key/transport contingency
+    reserve_logical = (
+        max(0, int(reserved_logical_calls))
+        if reserved_logical_calls is not None
+        else 3 + part_count  # initial + repair + fresh + Writers
+    )
+    reserve_http = (
+        max(0, int(reserved_http_attempts))
+        if reserved_http_attempts is not None
+        else reserve_logical + 2  # bounded key/transport contingency
+    )
+    is_full_run = str(run_kind).upper() != "D"
     if (
-        full_runs >= _MAX_FULL_RUNS
-        or logical + reserve_logical > _MAX_LOGICAL_CALLS
-        or http + reserve_http > _MAX_HTTP_ATTEMPTS
+        (is_full_run and full_runs >= max_full_runs)
+        or logical + reserve_logical > max_logical_calls
+        or http + reserve_http > max_http_attempts
     ):
         raise RuntimeError("Scenario acceptance paid-call budget is exhausted")
     entry = {
@@ -251,10 +272,13 @@ def main() -> int:
     parser.add_argument("--target", type=int, default=12000)
     parser.add_argument("--minimum", type=int, default=11500)
     parser.add_argument("--maximum", type=int, default=12500)
-    parser.add_argument("--run-kind", choices=("A", "B"), default="A")
+    parser.add_argument("--run-kind", choices=("A", "B", "R"), default="A")
     parser.add_argument("--suite-ledger", type=Path)
     parser.add_argument("--a-editorial-passed", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--full-run-limit", type=int, default=_MAX_FULL_RUNS)
+    parser.add_argument("--logical-limit", type=int, default=_MAX_LOGICAL_CALLS)
+    parser.add_argument("--http-limit", type=int, default=_MAX_HTTP_ATTEMPTS)
     args = parser.parse_args()
     if args.minimum > args.maximum:
         raise SystemExit("minimum must not exceed maximum")
@@ -336,14 +360,17 @@ def main() -> int:
         run_kind=args.run_kind,
         target=args.target,
         source_head=_git("git rev-parse HEAD"),
+        max_full_runs=args.full_run_limit,
+        max_logical_calls=args.logical_limit,
+        max_http_attempts=args.http_limit,
     )
     _write_json(evidence / "12-budget-reservation-safe.json", {
         "ledger_name": ledger_path.name,
         "reservation": reservation,
         "limits": {
-            "full_runs": _MAX_FULL_RUNS,
-            "logical_calls": _MAX_LOGICAL_CALLS,
-            "http_attempts": _MAX_HTTP_ATTEMPTS,
+            "full_runs": args.full_run_limit,
+            "logical_calls": args.logical_limit,
+            "http_attempts": args.http_limit,
         },
     })
 

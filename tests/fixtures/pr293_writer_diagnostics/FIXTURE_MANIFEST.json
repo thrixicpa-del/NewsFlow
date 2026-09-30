@@ -1,0 +1,15 @@
+{
+  "origin": "assistant_authored_proposed_test_material",
+  "paid_calls": 0,
+  "project_tests_run": false,
+  "content_is_fictional": true,
+  "checks": {
+    "ownership_unique": true,
+    "ordered_parts": true,
+    "target_sum_includes_separators": 12000
+  },
+  "files": {
+    "DIAGNOSTIC_SHORT_TEMPLATE.txt": "bd0311ee18c180b4157b6108a726a150f4cd9c9c1961421f5976fa5e5720ca1a",
+    "CONTROL_FIXTURE.json": "29d4920f8dbab191f22319e8e0a98b8aeb19a456465bebc969c0104e7be6e53c"
+  }
+}
