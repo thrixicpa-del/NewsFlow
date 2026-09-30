@@ -158,6 +158,11 @@ def _post_adapter_payload_comparison(payload: object) -> object:
     }
 
 
+def _mark_logical_call_error(entry: dict[str, object], error: BaseException) -> None:
+    """Keep a started paid logical call visible even when transport fails."""
+    entry.update({"result": "ERROR", "error_type": type(error).__name__})
+
+
 def _test_scenario_request(settings, title: str, item: dict, bridge):
     """Use the same request constructors and trusted item contract as bridge."""
     from scriptor.core import PromptRange, ScenarioRequest, build_requests
@@ -564,15 +569,7 @@ def main() -> int:
                 _write_text(evidence / "04-planner-input.txt", planner_input)
                 _write_json(evidence / "05-planner-response-format.json", response_format)
                 client = OpenAITextClient(active_keys[0].secret, settings.openai_model, active_keys[0].label)
-                planner_response = asyncio.run(client.generate(
-                    planner_input,
-                    instructions=instructions,
-                    text_format=response_format,
-                    max_output_tokens=args.planner_output_tokens,
-                    model=args.planner_model,
-                    reasoning_effort=args.planner_reasoning_effort,
-                ))
-                planner_only_calls.append({
+                logical_entry = {
                     "logical_call": 1,
                     "phase": "PLANNER",
                     "method": "generate",
@@ -584,6 +581,22 @@ def main() -> int:
                     "instructions_chars": len(instructions),
                     "instructions_sha256": _sha(instructions),
                     "text_format": response_format,
+                    "result": "PENDING",
+                }
+                planner_only_calls.append(logical_entry)
+                try:
+                    planner_response = asyncio.run(client.generate(
+                        planner_input,
+                        instructions=instructions,
+                        text_format=response_format,
+                        max_output_tokens=args.planner_output_tokens,
+                        model=args.planner_model,
+                        reasoning_effort=args.planner_reasoning_effort,
+                    ))
+                except Exception as error:
+                    _mark_logical_call_error(logical_entry, error)
+                    raise
+                logical_entry.update({
                     "result": "OK",
                     "visible_response_chars": len(planner_response),
                     "visible_response_sha256": _sha(planner_response),

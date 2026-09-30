@@ -1,0 +1,18 @@
+{
+  "runs": [
+    {
+      "actual_http_attempts": 1,
+      "actual_logical_calls": 1,
+      "completed_at_utc": "2026-09-30T15:59:16.997494+00:00",
+      "kind": "M",
+      "reserved_at_utc": "2026-09-30T15:58:44.456861+00:00",
+      "reserved_http_attempts": 1,
+      "reserved_logical_calls": 1,
+      "run_id": "scenario-live-293-matrix-m0-20260930-200001",
+      "source_head": "73ff54f929d7de74ac1b25064017b222425d107a",
+      "status": "COMPLETED",
+      "target_chars": 12000
+    }
+  ],
+  "version": 1
+}

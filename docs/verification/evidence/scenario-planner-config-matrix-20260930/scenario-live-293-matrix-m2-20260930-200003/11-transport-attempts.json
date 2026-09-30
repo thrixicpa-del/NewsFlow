@@ -1,0 +1,14 @@
+{
+  "attempts": [
+    {
+      "headers": "NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_chars": 51782,
+      "payload_sha256": "a3eb544be46164d1e81f9de5c8a6d1bc71f50600d79382a29e8142024afa885a",
+      "transport_attempt": 1
+    }
+  ],
+  "responses": [],
+  "sdk_retries": "UNKNOWN"
+}

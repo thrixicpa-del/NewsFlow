@@ -1,0 +1,183 @@
+{
+  "name": "newsflow_story_plan",
+  "schema": {
+    "additionalProperties": false,
+    "properties": {
+      "content_atoms": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "changed_subject": {
+              "type": "string"
+            },
+            "content_kind": {
+              "enum": [
+                "DRAMATIZED",
+                "SUPPORTED"
+              ],
+              "type": "string"
+            },
+            "development": {
+              "type": "string"
+            },
+            "do_not_repeat": {
+              "type": "string"
+            },
+            "event_steps": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "novelty_payload": {
+              "type": "string"
+            },
+            "novelty_question": {
+              "type": "string"
+            },
+            "owner_part_id": {
+              "type": "string"
+            },
+            "resulting_state": {
+              "type": "string"
+            },
+            "state_after": {
+              "type": "string"
+            },
+            "state_before": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "summary",
+            "owner_part_id",
+            "content_kind",
+            "state_before",
+            "changed_subject",
+            "development",
+            "resulting_state",
+            "state_after",
+            "novelty_question",
+            "novelty_payload",
+            "do_not_repeat",
+            "event_steps"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "event_spine": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "macro_blocks": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "purpose": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "purpose"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "parts": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "closes": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "content_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "macro_id": {
+              "type": "string"
+            },
+            "novelty_payload": {
+              "type": "string"
+            },
+            "novelty_question": {
+              "type": "string"
+            },
+            "opens": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "purpose": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "transition_direction": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "role",
+            "purpose",
+            "macro_id",
+            "content_ids",
+            "opens",
+            "closes",
+            "transition_direction",
+            "novelty_question",
+            "novelty_payload"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "state_transition_contract": {
+        "enum": [
+          "BEFORE_DEVELOPMENT_AFTER"
+        ],
+        "type": "string"
+      },
+      "thesis": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "state_transition_contract",
+      "thesis",
+      "event_spine",
+      "macro_blocks",
+      "content_atoms",
+      "parts"
+    ],
+    "type": "object"
+  },
+  "strict": true,
+  "type": "json_schema"
+}

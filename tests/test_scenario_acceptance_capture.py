@@ -5,6 +5,7 @@ from pathlib import Path
 from scripts.capture_scenario_acceptance import (
     _budget_totals,
     _estimate_max_call_usd,
+    _mark_logical_call_error,
     _planner_test_route_kwargs,
     _post_adapter_payload_comparison,
     _reserve_budget,
@@ -13,6 +14,13 @@ from scripts.capture_scenario_acceptance import (
 
 
 class ScenarioAcceptanceCaptureTests(unittest.TestCase):
+    def test_started_planner_cell_remains_a_logical_attempt_after_transport_error(self):
+        entry = {"logical_call": 1, "result": "PENDING"}
+        _mark_logical_call_error(entry, TimeoutError())
+
+        self.assertEqual(entry["result"], "ERROR")
+        self.assertEqual(entry["error_type"], "TimeoutError")
+
     def test_cost_reservation_counts_reasoning_inside_output_once(self):
         estimate = _estimate_max_call_usd(
             "gpt-5.4", input_chars=1000, max_output_tokens=32768,
