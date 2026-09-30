@@ -23,21 +23,6 @@ from .story_planner import (
     story_plan_from_dict,
 )
 
-_ANALYTIC_FILLER_PATTERNS = (
-    "в этом и заключается", "именно поэтому", "в этой точке", "здесь важно понять",
-    "главный нерв", "по сути", "меняет саму логику", "пространство для манёвра",
-    "пространство для маневра", "политическая рамка", "новая конфигурация",
-    "поле выбора", "архитектура давления", "политическая цена", "новый сигнал",
-    "баланс становится", "баланс стал", "менее устойчив",
-)
-_ANALYTIC_SENTENCE_SHAPE = re.compile(
-    r"\b(?:это|этот|эта|эти|такой|такая|такие|new)\b.{0,120}"
-    r"\b(?:показыва\w*|означа\w*|меня\w*|дела\w*|станов\w*|повыша\w*|"
-    r"сужа\w*|отража\w*|shows?|means?|changes?|becomes?)\b",
-    re.IGNORECASE,
-)
-
-
 def looks_like_action_required(text: str) -> bool:
     if not text:
         return False
@@ -441,70 +426,19 @@ class ParallelRunner:
             str(text or "").strip(),
         ))
 
-    @staticmethod
-    def _writer_output_quality_unusable(
-        text: str,
-        *,
-        require_dramatized_disclosure: bool = False,
-    ) -> bool:
-        """Reject only unmistakable analytical filler before a part is durable.
+    def _writer_output_rejection_reason(self, text: str) -> str:
+        """Reject only technically unusable Writer responses.
 
-        This is intentionally a small local guard, not a second model or a
-        factuality judge.  Short/ambiguous prose remains accepted.  A retry is
-        warranted only when a substantial response is overwhelmingly composed
-        of known analytical-transition language and contains almost no named
-        analytical transitions, or when it puts a dramatized disclosure in a
-        position that violates the opening contract.
+        Scenario quality is owned upstream by the Story Map and Writer prompt.
+        The runtime never rewrites or regenerates a completed Writer response
+        merely because its style is analytical, literary, or otherwise weak.
         """
-        cleaned = " ".join(str(text or "").split())
-        if not cleaned:
-            return False
-        sentences = [
-            sentence.strip() for sentence in re.split(r"(?<=[.!?…])\s+", cleaned)
-            if sentence.strip()
-        ]
-        disclosure_positions = [
-            index for index, sentence in enumerate(sentences)
-            if "драматизирован" in sentence.casefold() and "реконструкц" in sentence.casefold()
-        ]
-        if require_dramatized_disclosure and not disclosure_positions:
-            return True
-        if disclosure_positions and (len(disclosure_positions) != 1 or disclosure_positions[0] not in {1, 2}):
-            return True
-        # A local detector cannot reliably score terse prose, verse, or test
-        # fixtures without normal sentence boundaries.  Let the Writer prompt
-        # govern those instead of creating a false blocker.
-        if len(sentences) < 6:
-            return False
-        analytic_sentences = sum(
-            (
-                any(pattern in sentence.casefold() for pattern in _ANALYTIC_FILLER_PATTERNS)
-                or bool(_ANALYTIC_SENTENCE_SHAPE.search(sentence))
-            )
-            for sentence in sentences
-        )
-        return (
-            analytic_sentences >= 5
-            and analytic_sentences * 2 >= len(sentences)
-        )
-
-    def _writer_output_rejection_reason(
-        self,
-        text: str,
-        *,
-        require_dramatized_disclosure: bool = False,
-    ) -> str:
         if looks_like_action_required(text):
             return "ACTION_REQUIRED"
         if not str(text or "").strip():
             return "EMPTY"
         if self._writer_output_is_structural(text):
             return "STRUCTURAL"
-        if self._writer_output_quality_unusable(
-            text,
-            require_dramatized_disclosure=require_dramatized_disclosure,
-        ):
-            return "QUALITY_UNUSABLE"
         return ""
 
     def _writer_output_unusable(self, text: str) -> bool:
@@ -534,69 +468,17 @@ class ParallelRunner:
         prompt: str,
         request: ScenarioRequest,
         expected_chars: int | None = None,
-        *,
-        require_dramatized_disclosure: bool = False,
     ) -> str:
-        """Retry only the current unaccepted Writer part.
+        """Generate one Writer part exactly once.
 
-        This is not continuation or regeneration of accepted prose: every retry
-        receives the same bounded Story Map/ledger/seam prompt and happens
-        before the current part is appended to accepted_story_parts.
+        Planner recovery may happen before prose exists, but Writer prose is
+        never regenerated. A technical failure pauses the job; a style defect
+        must be fixed in the planning/writing architecture and verified by a
+        new end-to-end run, not hidden by rewriting the same part.
         """
-        result = await self._generate_for_request(
+        return await self._generate_for_request(
             self.client.generate, prompt, request, expected_chars,
         )
-        for _attempt in range(2):
-            reason = self._writer_output_rejection_reason(
-                result,
-                require_dramatized_disclosure=require_dramatized_disclosure,
-            )
-            if not reason:
-                return result
-            if reason == "QUALITY_UNUSABLE":
-                retry_prompt = (
-                    "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
-                    "Rewrite SAME unfinished segment as concrete event progression: name actors, actions or "
-                    "decisions, reactions and a new consequence. Do not restart the whole story, do not repeat "
-                    "accepted material, do not emit a part label or JSON, and return only the requested continuous "
-                    "prose segment.\n\n"
-                    f"TASK:\n{prompt}"
-                )
-            else:
-                retry_prompt = (
-                    "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
-                    "Do not restart the whole story, do not emit a part label or JSON, "
-                    "and return only the requested continuous prose segment.\n\n"
-                    f"TASK:\n{prompt}"
-                )
-            generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-            result = await self._generate_for_request(
-                generate_fresh, retry_prompt, request, expected_chars,
-            )
-        reason = self._writer_output_rejection_reason(
-            result,
-            require_dramatized_disclosure=require_dramatized_disclosure,
-        )
-        if reason:
-            generate_openai = getattr(self.client, "generate_openai", None)
-            if generate_openai is not None:
-                if reason == "QUALITY_UNUSABLE":
-                    openai_prompt = (
-                        "Write only the SAME unfinished NewsFlow story segment below as concrete event progression. "
-                        "Name actors, actions or decisions, reactions and a new consequence. Do not restart the "
-                        "story, repeat accepted material, ask questions, emit labels/JSON, or explain limitations.\n\n"
-                        f"TASK:\n{prompt}"
-                    )
-                else:
-                    openai_prompt = (
-                        "Write only the SAME unfinished NewsFlow story segment below. "
-                        "Do not restart the story, ask questions, emit labels/JSON, or explain limitations.\n\n"
-                        f"TASK:\n{prompt}"
-                    )
-                result = await self._generate_for_request(
-                    generate_openai, openai_prompt, request, expected_chars,
-                )
-        return result
 
     async def _run_planned_story(self, job: Job) -> bool:
         """Plan long work once, then accept and persist a contiguous writer prefix."""
@@ -722,9 +604,6 @@ class ParallelRunner:
             self._notify(job)
 
         self._assembled_story(plan, job.accepted_story_parts)
-        plan_has_dramatized_atoms = any(
-            atom.content_kind == "DRAMATIZED" for atom in plan.content_atoms
-        )
         for part_index, part in enumerate(plan.parts):
             if part_index < len(job.accepted_story_parts):
                 continue
@@ -734,30 +613,14 @@ class ParallelRunner:
             )
             writer_result = await self._generate_writer_usable(
                 writer_prompt, job.request, active_target,
-                require_dramatized_disclosure=(
-                    plan_has_dramatized_atoms and part.role in {"OPENING", "COMPLETE"}
-                ),
             )
-            writer_failure = self._writer_output_rejection_reason(
-                writer_result,
-                require_dramatized_disclosure=(
-                    plan_has_dramatized_atoms and part.role in {"OPENING", "COMPLETE"}
-                ),
-            )
+            writer_failure = self._writer_output_rejection_reason(writer_result)
             if writer_failure:
                 job.state = RunState.PAUSED
-                job.error = (
-                    f"Писатель части {part.id} вернул аналитический текст без событийного развития"
-                    if writer_failure == "QUALITY_UNUSABLE"
-                    else f"Писатель части {part.id} не вернул готовый фрагмент"
-                )
+                job.error = f"Писатель части {part.id} не вернул готовый фрагмент"
                 job.result = self._assembled_story(plan, job.accepted_story_parts)
                 job.actual_chars = len(job.result)
-                job.length_status = (
-                    "QUALITY_UNUSABLE"
-                    if writer_failure == "QUALITY_UNUSABLE"
-                    else f"PART {part_index + 1}/{len(plan.parts)}"
-                )
+                job.length_status = f"PART {part_index + 1}/{len(plan.parts)}"
                 return False
 
             accepted_text = writer_result.strip()
