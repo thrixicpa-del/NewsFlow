@@ -469,8 +469,8 @@ class StoryPlanValidationTests(unittest.TestCase):
         self.assertIn("FIRST-PASS PART VOLUME: write roughly 3879-4119 characters", prompt)
         self.assertIn("NewsFlow independently records the actual length after this response", prompt)
         self.assertNotIn("without a length retry, trim or rewrite", prompt)
-        self.assertIn("CANONICAL EVENT STEPS=объявление решения; порядок применения; первая реакция", prompt)
-        self.assertIn("CANONICAL EVENT STEPS=перестройка очереди; проверка результата", prompt)
+        self.assertIn("C001 [SUPPORTED]:\n  1. объявление решения\n  2. порядок применения\n  3. первая реакция", prompt)
+        self.assertIn("C002 [DRAMATIZED]:\n  1. перестройка очереди\n  2. проверка результата", prompt)
         self.assertEqual(
             plan.to_dict()["content_atoms"][0]["writer_material"],
             ("объявление решения", "порядок применения", "первая реакция"),
@@ -1167,13 +1167,13 @@ class StoryPlanValidationTests(unittest.TestCase):
         )
 
         self.assertIn("CURRENT ROLE: COMPLETE", prompt)
-        self.assertIn("CURRENT CONTENT ORDER: consume the following atoms once, in listed order.", prompt)
-        self.assertIn("CURRENT CONTENT:\n", prompt)
+        self.assertIn("CURRENT EVENT SEQUENCE (the only content to develop):", prompt)
+        self.assertIn("TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):", prompt)
         self.assertIn("C001 [SUPPORTED]", prompt)
         self.assertIn("C005 [DRAMATIZED]", prompt)
-        self.assertIn("Q=Что произошло первым?", prompt)
-        self.assertIn("NEW=Уличный эпизод превращается", prompt)
-        self.assertIn("Once an atom's question/new information has been explained", prompt)
+        self.assertNotIn("CURRENT NOVELTY QUESTION:", prompt)
+        self.assertNotIn("CURRENT NEW INFORMATION:", prompt)
+        self.assertIn("Once an event's result has been explained", prompt)
         self.assertIn("single COMPLETE 6-9k story", prompt)
         self.assertIn("last owned atom must be written as a genuinely new terminal development", prompt)
 
@@ -1477,7 +1477,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         for marker in ("MANUAL_MARKER_MUST_REMAIN_USER_DATA", "STORY THESIS: quoted heading", "{brace}"):
             self.assertNotIn(marker, planner_instructions)
             self.assertIn(marker, planner_input)
-        for marker in ("MANUAL_MARKER_MUST_REMAIN_USER_DATA", "model-owned quoted heading", "CURRENT CONTENT: model heading", "POSITION RULE: внутри материала"):
+        for marker in ("MANUAL_MARKER_MUST_REMAIN_USER_DATA", "model-owned quoted heading", "POSITION RULE: внутри материала"):
             self.assertNotIn(marker, writer_instructions)
             self.assertIn(marker, writer_input)
 
@@ -1517,7 +1517,7 @@ class StoryPlannerPromptTests(unittest.TestCase):
         self.assertIn("WRITER EXECUTION BOUNDARY", writer_instructions)
         self.assertNotIn("MANUAL_TEMPLATE_ONLY", writer_instructions)
         self.assertIn("MANUAL_TEMPLATE_ONLY", writer_input)
-        self.assertIn("CURRENT CONTENT", writer_input)
+        self.assertIn("CURRENT EVENT SEQUENCE", writer_input)
     def test_operator_style_rules_are_reference_constraints_not_content_atoms(self):
         prompt = build_story_planner_prompt(
             ScenarioRequest(0, "Тема", "МИКРО-ХУКИ. НЕ ПОВТОРЯЙСЯ. Факт темы: объект повреждён."),
@@ -1745,21 +1745,20 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("not the overall scenario target", prompt)
         self.assertIn("FINAL ASSEMBLED STORY", prompt)
         self.assertIn("CURRENT PART: P2", prompt)
-        self.assertIn("CURRENT NOVELTY QUESTION: Как работает новый механизм давления?", prompt)
-        self.assertIn("CURRENT NEW INFORMATION: Механизм, участники и реакция", prompt)
-        self.assertIn("CURRENT CONTENT ORDER: consume the following atoms once, in listed order.", prompt)
-        self.assertIn("CURRENT CONTENT:\n", prompt)
-        self.assertIn("Q=", prompt)
-        self.assertIn("NEW=", prompt)
+        self.assertIn("CURRENT EVENT SEQUENCE (the only content to develop):", prompt)
+        self.assertIn("TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):", prompt)
+        self.assertNotIn("CURRENT NOVELTY QUESTION:", prompt)
+        self.assertNotIn("CURRENT NEW INFORMATION:", prompt)
         self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Начальное событие уже раскрыто", prompt)
         self.assertIn("USED SEMANTIC MEANINGS (forbidden to restate): P1:", prompt)
         self.assertIn("PARAPHRASE DOES NOT COUNT AS NEW INFORMATION", prompt)
         self.assertIn("A paragraph that adds no new story information should not be written", prompt)
         self.assertIn("P3/M2: Завершить историю", prompt)
-        self.assertIn("C002 [DRAMATIZED]: Новый механизм для текущей части", prompt)
+        self.assertIn("C002 [DRAMATIZED] (legacy state path):", prompt)
+        self.assertIn("Новый механизм для текущей части", prompt)
         self.assertIn("C003 [DRAMATIZED]: Будущее последствие, которое ещё нельзя раскрывать", prompt)
         self.assertIn("OPEN LOOPS BEFORE THIS PART: L1", prompt)
-        self.assertIn("CURRENT MACRO: M1: Событие и развитие", prompt)
+        self.assertIn("MACRO MAP: M1: Событие и развитие", prompt)
         self.assertNotIn(first_part, prompt)
         self.assertIn(seam_tail(first_part), prompt)
         self.assertLessEqual(len(seam_tail(first_part)), 500)
@@ -1771,10 +1770,11 @@ class StoryWriterContextTests(unittest.TestCase):
         self.assertIn("Every substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change", prompt)
         self.assertIn("two substantive event-driven paragraphs per CURRENT atom", prompt)
 
-    def test_writer_receives_the_part_event_sequence_before_coverage_beats(self):
-        """The Writer sees its ordered state changes as content, not author tasks."""
+    def test_writer_receives_one_ordered_event_sequence_without_competing_current_map(self):
+        """Only canonical steps are Writer prose material; metadata stays technical."""
         persisted = self._plan().to_dict()
         persisted["content_atoms"][1].update({
+            "summary": "ANALYTIC_SUMMARY_MUST_NOT_BECOME_CURRENT_PROSE",
             "state_before": "Заявка ждёт решения.",
             "changed_subject": "Комиссия",
             "development": "Комиссия утверждает новый порядок.",
@@ -1793,17 +1793,25 @@ class StoryWriterContextTests(unittest.TestCase):
             1,
         )
 
-        self.assertIn("PART EVENT SEQUENCE (content, not author tasks):", prompt)
+        self.assertIn("CURRENT EVENT SEQUENCE (the only content to develop):", prompt)
         self.assertIn(
-            "C002: Комиссия получает заявку с прежним порядком. -> "
-            "Комиссия утверждает новый порядок обработки. -> "
-            "STEP_THREE: исполнители получают утверждённый маршрут.",
+            "C002 [DRAMATIZED]:\n"
+            "  1. Комиссия получает заявку с прежним порядком.\n"
+            "  2. Комиссия утверждает новый порядок обработки.\n"
+            "  3. STEP_THREE: исполнители получают утверждённый маршрут.",
             prompt,
         )
-        self.assertIn("STEP_THREE: исполнители получают утверждённый маршрут.", prompt)
+        self.assertEqual(prompt.count("STEP_THREE: исполнители получают утверждённый маршрут."), 1)
+        self.assertEqual(prompt.count("Комиссия получает заявку с прежним порядком."), 1)
+        self.assertEqual(prompt.count("Комиссия утверждает новый порядок обработки."), 1)
+        self.assertNotIn("ANALYTIC_SUMMARY_MUST_NOT_BECOME_CURRENT_PROSE", prompt)
+        self.assertNotIn("CURRENT PURPOSE:", prompt)
+        self.assertNotIn("CURRENT NOVELTY QUESTION:", prompt)
+        self.assertNotIn("CURRENT NEW INFORMATION:", prompt)
+        self.assertIn("TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):", prompt)
         self.assertLess(
-            prompt.index("PART EVENT SEQUENCE (content, not author tasks):"),
-            prompt.index("CURRENT CONTENT ORDER:"),
+            prompt.index("CURRENT EVENT SEQUENCE (the only content to develop):"),
+            prompt.index("TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):"),
         )
 
     def test_new_canonical_event_steps_reach_writer_in_order_and_keep_terminal_result(self):
@@ -1833,7 +1841,7 @@ class StoryWriterContextTests(unittest.TestCase):
         prompt = build_story_writer_prompt(ScenarioRequest(0, "Тема", "CONTRACT"), plan, [], 0)
         restored = story_plan_from_dict(plan.to_dict())
 
-        self.assertIn("CANONICAL EVENT STEPS", prompt)
+        self.assertIn("CURRENT EVENT SEQUENCE (the only content to develop):", prompt)
         self.assertIn("EVENT_TERMINAL_RESULT", prompt)
         self.assertNotIn("LEGACY_MATERIAL_MUST_NOT_WIN", prompt)
         self.assertLess(prompt.index("Комиссия получает материалы"), prompt.index("EVENT_TERMINAL_RESULT"))

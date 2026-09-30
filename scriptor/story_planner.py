@@ -889,7 +889,13 @@ def _story_planner_request_components(
         "moods, stakes or explanations. Do not use an interpretation of the initial headline as an event-spine item: "
         "each item must introduce a concrete action, response, decision, process step or recorded result that changes "
         "the situation before the next item. Choose the FINAL terminal result before allocating FINAL. Only AFTER that allocate "
-        "each event-spine item exactly once to P1...PN and express those allocated items as content_atoms. event_steps is the single canonical "
+        "each event-spine item exactly once to P1...PN and express those allocated items as content_atoms. EVENT MATERIAL WORK ORDER: "
+        "first prepare the ordered event sequence; then allocate its contiguous developments to parts; only after that write compact "
+        "thesis, macro purpose, summary, novelty and transition labels that describe the already prepared material. Those labels cannot "
+        "introduce a separate author task such as explain significance, widen context, collect a conclusion or leave a question. "
+        "For each event step, record the available participant or process, what it did or what changed, the affected object/process, and "
+        "the immediate observable result. If an actor or causal link is unknown, leave it unknown rather than inventing one merely to fit a pattern. "
+        "event_steps is the single canonical "
         "ordered source of action/result content that the Writer will expand; the other atom fields are compact technical "
         "metadata, not alternative prose beats. 'expand context', "
         "'show significance' or 'leave a question' are presentation tasks, not event steps. An optional final question "
@@ -915,6 +921,7 @@ def _story_planner_request_components(
         "it must describe the new story state/development, not another interpretation of an earlier state. "
         "For EVERY atom in this NEW map, include event_steps as the ordered JSON list of 4 to 6 distinct concrete "
         "coverage beats. Each beat must be declarative chronological content, not a writing command such as 'show', 'describe', 'frame', 'keep', 'use' or 'avoid'. "
+        "Write every beat as one direct event record: available participant or process -> action or changed state -> affected object/process -> immediate result. "
         "Each beat must be a specific clause about this atom's people/institutions/objects: what was done or "
         "became known, what it affected, and its immediate observable result. Make each beat detailed enough to develop into "
         "a paragraph, rather than a label such as 'background', 'mechanism', 'result' or 'transition'. Do not simply restate "
@@ -1091,8 +1098,6 @@ def _story_writer_request_components(
     )
     active_target = max(0, int(raw_active_target or 0))
     atoms = {atom.id: atom for atom in plan.content_atoms}
-    blocks = {block["id"]: block["purpose"] for block in plan.macro_blocks}
-
     def format_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
         return f"{atom_id} [{atom.content_kind}]: {_compact(atom.summary, _COMPACT_ATOM_CHARS)}"
@@ -1100,51 +1105,48 @@ def _story_writer_request_components(
     def format_current_atom(atom_id: str) -> str:
         atom = atoms[atom_id]
         avoid = _compact(atom.do_not_repeat, _COMPACT_AVOID_CHARS)
-        canonical_steps = atom.event_steps or atom.writer_material
-        if canonical_steps:
-            # CURRENT material is the Writer's only complete coverage plan for
-            # this atom.  It is deliberately not compacted: cutting a late beat
-            # silently loses an assigned action or result.  Past/future memory
-            # remains bounded elsewhere and this does not add a schema gate.
-            material = "; ".join(str(beat).strip() for beat in canonical_steps)
-        else:
-            material = " -> ".join((
-                f"before: {atom.state_before}",
-                f"development: {atom.development}",
-                f"result: {atom.resulting_state}",
-                f"after: {atom.state_after}",
-            ))
+        # This index deliberately contains no summary/state/novelty prose.
+        # event_steps below are the single model-visible story sequence. Keeping
+        # metadata here would present a rival, often analytical outline to the
+        # Writer and can pull it away from its allocated concrete material.
         return (
-            f"{format_atom(atom_id)} "
-            f"| Q={_compact(atom.novelty_question, _COMPACT_PURPOSE_CHARS)} "
-            f"| NEW={_compact(atom.novelty_payload, _COMPACT_ATOM_CHARS)}"
-            f" | BEFORE={_compact(atom.state_before, _COMPACT_ATOM_CHARS)}"
-            f" | SUBJECT={_compact(atom.changed_subject, _COMPACT_ATOM_CHARS)}"
-            f" | DEVELOPMENT={_compact(atom.development, _COMPACT_ATOM_CHARS)}"
-            f" | RESULT={_compact(atom.resulting_state, _COMPACT_ATOM_CHARS)}"
-            f" | AFTER={_compact(atom.state_after, _COMPACT_ATOM_CHARS)}"
-            f" | CANONICAL EVENT STEPS={material}"
+            f"{atom_id} [{atom.content_kind}]"
             f"{f' | DO_NOT_REPEAT={avoid}' if avoid else ''}"
         )
 
     current_atoms = "\n".join(
         f"- {format_current_atom(atom_id)}" for atom_id in part.content_ids
     )
-    event_sequence = "\n".join(
-        (
-            f"- {atom_id}: " + " -> ".join(
-                atoms[atom_id].event_steps or atoms[atom_id].writer_material,
+    def format_event_sequence(atom_id: str) -> str:
+        atom = atoms[atom_id]
+        canonical_steps = atom.event_steps or atom.writer_material
+        if canonical_steps:
+            # Do not compact CURRENT material: every late action/result belongs
+            # to the Writer's only content sequence for this part.
+            numbered_steps = "\n".join(
+                f"  {step_index}. {str(step).strip()}"
+                for step_index, step in enumerate(canonical_steps, start=1)
             )
-            if (atoms[atom_id].event_steps or atoms[atom_id].writer_material) else
-            (
-                f"- {atom_id}: before={_compact(atoms[atom_id].state_before, _COMPACT_ATOM_CHARS)}; "
-                f"subject={_compact(atoms[atom_id].changed_subject, _COMPACT_ATOM_CHARS)}; "
-                f"development={_compact(atoms[atom_id].development, _COMPACT_ATOM_CHARS)}; "
-                f"result={_compact(atoms[atom_id].resulting_state, _COMPACT_ATOM_CHARS)}; "
-                f"after={_compact(atoms[atom_id].state_after, _COMPACT_ATOM_CHARS)}"
-            )
+            return f"{atom_id} [{atom.content_kind}]:\n{numbered_steps}"
+        # Resumable legacy maps may not have either optional material field.
+        # Their existing state-transition data remains one sequence, rather
+        # than becoming a new validation requirement or migration.
+        legacy_steps = [
+            text for text in (
+                _compact(atom.summary, _COMPACT_ATOM_CHARS),
+                _compact(atom.state_before, _COMPACT_ATOM_CHARS),
+                _compact(atom.development, _COMPACT_ATOM_CHARS),
+                _compact(atom.resulting_state, _COMPACT_ATOM_CHARS),
+                _compact(atom.state_after, _COMPACT_ATOM_CHARS),
+            ) if text
+        ]
+        return "\n".join(
+            [f"{atom_id} [{atom.content_kind}] (legacy state path):"]
+            + [f"  {index}. {step}" for index, step in enumerate(legacy_steps, start=1)]
         )
-        for atom_id in part.content_ids
+
+    event_sequence = "\n".join(
+        format_event_sequence(atom_id) for atom_id in part.content_ids
     )
     material_budget = (
         max(1, active_target // max(1, len(part.content_ids)))
@@ -1300,14 +1302,14 @@ def _story_writer_request_components(
         )
 
     novelty_instruction = (
-        "\nSEMANTIC NOVELTY RULE: Every substantive paragraph must advance the CURRENT CONTENT by adding at least "
-        "one genuinely new story state or development. For each CURRENT atom, move from its BEFORE state through its "
-        "named development to its AFTER state; analysis may connect that movement but cannot replace it. PARAPHRASE "
+        "\nSEMANTIC NOVELTY RULE: Every substantive paragraph must advance the CURRENT EVENT SEQUENCE by adding at least "
+        "one genuinely new story state or development. Follow each ordered event step to its immediate result; analysis may "
+        "connect that movement but cannot replace it. PARAPHRASE "
         "DOES NOT COUNT AS NEW INFORMATION. "
         "Do not restate the thesis, re-summarize an earlier conclusion, or repeat USED SEMANTIC MEANINGS with synonyms. "
         "Use the requested volume to deepen sequence, mechanism, actors, reactions and consequences inside the current "
-        "owned atoms. CURRENT CONTENT is an ordered one-way progression: consume its atoms in listed order. Once an "
-        "atom's question/new information has been explained, move forward and do not reopen that atom as filler; only "
+        "owned steps. CURRENT EVENT SEQUENCE is an ordered one-way progression: consume its steps in listed order. Once an "
+        "event's result has been explained, move forward and do not reopen that event as filler; only "
         "a short connective reference is allowed. Obey each atom's DO_NOT_REPEAT boundary: do not create a fresh paragraph "
         "whose only purpose is to restate that protected conclusion using stronger wording, symbolism, or another "
         "analytical angle. This one-pass rule also applies to a single COMPLETE 6-9k story, where cross-part memory does "
@@ -1318,7 +1320,7 @@ def _story_writer_request_components(
         "EVENT-FIRST STYLE CONTRACT: Write direct, plain, concrete narration in the language requested by the operator. "
         "This is not an essay, analysis, op-ed, literary story, atmospheric scene, or reflective commentary. Every "
         "substantive paragraph must contain a concrete actor/action/decision/reaction/result/state change from CURRENT "
-        "CONTENT. Start from what happened, who acted, what changed, and what happened next. Do not build paragraphs "
+        "EVENT SEQUENCE. Start from what happened, who acted, what changed, and what happened next. Do not build paragraphs "
         "around interpretation, symbolism, mood, metaphors, rhetorical questions, philosophical framing, or repeated "
         "explanations of significance. Phrases equivalent to 'this shows', 'this means', 'the main point is', 'the logic "
         "changes', 'a new signal', 'the political price', or 'the situation takes on new meaning' may appear only as a "
@@ -1358,21 +1360,16 @@ def _story_writer_request_components(
         f"STORY THESIS: {_compact(plan.thesis, 600)}\n"
         f"MACRO MAP: {macro_index}\n"
         f"OTHER MACRO IDS (reserved): {reserved_macro_index}\n"
-        f"CURRENT MACRO: {part.macro_id}: {_compact(blocks[part.macro_id], _COMPACT_PURPOSE_CHARS)}\n"
         f"CURRENT PART: {part.id}\n"
         f"CURRENT ROLE: {part.role}\n"
-        f"CURRENT PURPOSE: {_compact(part.purpose, _COMPACT_PURPOSE_CHARS)}\n"
-        f"CURRENT NOVELTY QUESTION: {_compact(part.novelty_question, _COMPACT_PURPOSE_CHARS)}\n"
-        f"CURRENT NEW INFORMATION: {_compact(part.novelty_payload, _COMPACT_ATOM_CHARS)}\n"
         f"{length_instruction}"
         f"MATERIAL ALLOCATION: this part has {len(part.content_ids)} owned atoms; reserve roughly "
         f"{material_budget} characters of event-led coverage for each atom before moving to the next. "
-        "Use each atom's CANONICAL EVENT STEPS as the ordered first-pass event coverage, not as a list to print. "
-        "The compact summary/novelty/transition labels are technical orientation, not extra alternative beats.\n"
-        "PART EVENT SEQUENCE (content, not author tasks):\n"
+        "Expand the ordered steps below in direct prose; do not print their numbers or turn them into a checklist.\n"
+        "CURRENT EVENT SEQUENCE (the only content to develop):\n"
         f"{event_sequence}\n"
-        "CURRENT CONTENT ORDER: consume the following atoms once, in listed order.\n"
-        f"CURRENT CONTENT:\n{current_atoms}\n"
+        "TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):\n"
+        f"{current_atoms}\n"
         f"USED CONTENT (do not repeat): {used_context}\n"
         f"EARLIER USED IDS: {earlier_used_index}\n"
         f"USED SEMANTIC MEANINGS (forbidden to restate): {used_semantic_meanings}\n"
@@ -1380,7 +1377,6 @@ def _story_writer_request_components(
         f"OPEN LOOPS BEFORE THIS PART: {', '.join(opened) or 'none'}\n"
         f"THIS PART OPENS: {', '.join(part.opens) or 'none'}\n"
         f"THIS PART CLOSES: {', '.join(part.closes) or 'none'}\n"
-        f"TRANSITION DIRECTION: {_compact(part.transition_direction, _COMPACT_PURPOSE_CHARS) or 'continue naturally'}\n"
         f"FUTURE RESERVED (do not reveal fully): {future_index}\n"
         f"FUTURE RESERVED IDS ONLY: {reserved_future_index}\n"
         f"PREVIOUS SEAM TAIL (continuity only, not material to repeat):\n{previous_tail}"

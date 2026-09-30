@@ -637,7 +637,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(all("MATERIAL ALLOCATION:" in prompt for prompt in client.writer_prompts))
                 self.assertTrue(all(
-                    "CANONICAL EVENT STEPS=объект" in prompt
+                    "CURRENT EVENT SEQUENCE (the only content to develop):" in prompt
+                    and "[SUPPORTED]:\n  1. объект" in prompt
                     and "ответственная служба проверила изменение" in prompt
                     and "следующий шаг использует результат" in prompt
                     for prompt in client.writer_prompts
@@ -1969,7 +1970,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
-                if "CURRENT CONTENT:\n- C001 [SUPPORTED]" not in prompt:
+                if "TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):\n- C001 [SUPPORTED]" not in prompt:
                     raise AssertionError("single Writer must receive SUPPORTED content kind")
                 if "DRAMATIZED OPENING DISCLOSURE" in prompt:
                     raise AssertionError("supported-only story must not disclose dramatization")
