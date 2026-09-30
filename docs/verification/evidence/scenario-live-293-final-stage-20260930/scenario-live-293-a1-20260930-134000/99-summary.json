@@ -1,0 +1,10 @@
+{
+  "captured_responses": 4,
+  "evidence_dir": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-a1-20260930-134000",
+  "job_state": "Готово",
+  "logical_calls": 4,
+  "production_write_guard": "PASS",
+  "secret_export_scan": "PASS",
+  "transport_attempts": 4,
+  "zip": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-a1-20260930-134000.zip"
+}

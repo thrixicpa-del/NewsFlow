@@ -1,0 +1,240 @@
+[
+  {
+    "input_chars": 35700,
+    "input_sha256": "379c7aaec902545e2c08db25e1669e828671b326ae2821f1ff2d07c4dd9974e5",
+    "instructions_chars": 11167,
+    "instructions_sha256": "a12f444efdeb683d2a7096adf6f502fd5883918b062d6f71f2f28ae5fbf86e98",
+    "logical_call": 1,
+    "max_output_tokens": 6144,
+    "method": "generate",
+    "phase": "PLANNER",
+    "result": "OK",
+    "text_format": {
+      "name": "newsflow_story_plan",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_atoms": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "changed_subject": {
+                  "type": "string"
+                },
+                "content_kind": {
+                  "enum": [
+                    "DRAMATIZED",
+                    "SUPPORTED"
+                  ],
+                  "type": "string"
+                },
+                "development": {
+                  "type": "string"
+                },
+                "do_not_repeat": {
+                  "type": "string"
+                },
+                "event_steps": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "novelty_payload": {
+                  "type": "string"
+                },
+                "novelty_question": {
+                  "type": "string"
+                },
+                "owner_part_id": {
+                  "type": "string"
+                },
+                "resulting_state": {
+                  "type": "string"
+                },
+                "state_after": {
+                  "type": "string"
+                },
+                "state_before": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "summary",
+                "owner_part_id",
+                "content_kind",
+                "state_before",
+                "changed_subject",
+                "development",
+                "resulting_state",
+                "state_after",
+                "novelty_question",
+                "novelty_payload",
+                "do_not_repeat",
+                "event_steps"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "event_spine": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "macro_blocks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "purpose"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "parts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "closes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "content_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "macro_id": {
+                  "type": "string"
+                },
+                "novelty_payload": {
+                  "type": "string"
+                },
+                "novelty_question": {
+                  "type": "string"
+                },
+                "opens": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "purpose": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "transition_direction": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "role",
+                "purpose",
+                "macro_id",
+                "content_ids",
+                "opens",
+                "closes",
+                "transition_direction",
+                "novelty_question",
+                "novelty_payload"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "state_transition_contract": {
+            "enum": [
+              "BEFORE_DEVELOPMENT_AFTER"
+            ],
+            "type": "string"
+          },
+          "thesis": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state_transition_contract",
+          "thesis",
+          "event_spine",
+          "macro_blocks",
+          "content_atoms",
+          "parts"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "json_schema"
+    },
+    "visible_response_chars": 9014,
+    "visible_response_sha256": "e59f240ecffaa255b4d868b9ddaec0cf02f0f88a119decabb1e7620347b8974d"
+  },
+  {
+    "input_chars": 42546,
+    "input_sha256": "a9b6f7bec3c96a0e595958613262184bb9fed33cc22c2e14c7d90185d8b49c02",
+    "instructions_chars": 5685,
+    "instructions_sha256": "596750c00182151f546fad8622ede25e2ce4ce4c958c3305a044b53ea2f72ff4",
+    "logical_call": 2,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "phase": "WRITER_P1",
+    "result": "OK",
+    "text_format": "NONE",
+    "visible_response_chars": 3156,
+    "visible_response_sha256": "f2282a42453b05c3301a4b47cf9f51f87d27735df623d49204a102dc9f2f6e98"
+  },
+  {
+    "input_chars": 41345,
+    "input_sha256": "7e84e797a14552ddc25d77028ba7384807d3fbbdfd8f27e08d6e84a5d181a4c0",
+    "instructions_chars": 5371,
+    "instructions_sha256": "026a4d33761b7ec1e1841c4ee1783493732bcc1f56b192acbc3a41d136f30330",
+    "logical_call": 3,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "phase": "WRITER_P2",
+    "result": "OK",
+    "text_format": "NONE",
+    "visible_response_chars": 4434,
+    "visible_response_sha256": "c491807769f3e410a72ac6919c06866fc1b54958d58bb81c3b759e2a4e0d7765"
+  },
+  {
+    "input_chars": 41316,
+    "input_sha256": "03cab453fedcc32d0fa89e2142b94830a586a1b8a9ed54845a6f9186cceac108",
+    "instructions_chars": 5284,
+    "instructions_sha256": "44699ad89cdd119ba296b16ed98aa98d24a2fd4f5acc70eaa7bb0bf2feadfc1b",
+    "logical_call": 4,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "phase": "WRITER_P3",
+    "result": "OK",
+    "text_format": "NONE",
+    "visible_response_chars": 2902,
+    "visible_response_sha256": "70a7e187dbd62dd515696921cfb10f7ce9ca67939254f3a449ad05a421fbc4ab"
+  }
+]

@@ -1,0 +1,31 @@
+{
+  "runs": [
+    {
+      "actual_http_attempts": 4,
+      "actual_logical_calls": 4,
+      "completed_at_utc": "2026-09-30T13:38:11.953145+00:00",
+      "kind": "A",
+      "reserved_at_utc": "2026-09-30T13:37:36.243958+00:00",
+      "reserved_http_attempts": 8,
+      "reserved_logical_calls": 6,
+      "run_id": "scenario-live-293-a1-20260930-134000",
+      "source_head": "a066bf6eb1ca73e88cc104fbabf38e2ccc0efd66",
+      "status": "COMPLETED",
+      "target_chars": 12000
+    },
+    {
+      "actual_http_attempts": 4,
+      "actual_logical_calls": 4,
+      "completed_at_utc": "2026-09-30T13:42:46.046751+00:00",
+      "kind": "A",
+      "reserved_at_utc": "2026-09-30T13:42:04.874765+00:00",
+      "reserved_http_attempts": 8,
+      "reserved_logical_calls": 6,
+      "run_id": "scenario-live-293-a2-20260930-135000",
+      "source_head": "87892f681c7b2c067d7e58d661c98f289129bcf9",
+      "status": "COMPLETED",
+      "target_chars": 12000
+    }
+  ],
+  "version": 1
+}
