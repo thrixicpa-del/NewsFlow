@@ -113,7 +113,7 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
 _SESSION_REPLACE_TIMEOUT_SECONDS = 3.0
 _SESSION_REPLACE_RETRY_SECONDS = 0.05
 _SESSION_WRITE_LOCK_GUARD = threading.Lock()
-_SESSION_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_SESSION_WRITE_LOCKS: dict[str, threading.RLock] = {}
 _SESSION_OBSERVED_REVISIONS: dict[str, str | None] = {}
 _TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32})
 
@@ -142,13 +142,17 @@ def _remember_session_revision(path: Path, revision: str | None) -> None:
     _SESSION_OBSERVED_REVISIONS[str(path.resolve()).casefold()] = revision
 
 
+def _session_thread_lock(path: Path):
+    """Share a reentrant in-process lock across snapshot binding and publication."""
+    key = str(path.resolve()).casefold()
+    with _SESSION_WRITE_LOCK_GUARD:
+        return _SESSION_WRITE_LOCKS.setdefault(key, threading.RLock())
+
+
 @contextmanager
 def _exclusive_session_write(path: Path, timeout: float = 12.0):
     """Serialize publication across threads and independent Windows bridge processes."""
-    key = str(path.resolve()).casefold()
-    with _SESSION_WRITE_LOCK_GUARD:
-        thread_lock = _SESSION_WRITE_LOCKS.setdefault(key, threading.Lock())
-    with thread_lock:
+    with _session_thread_lock(path):
         lock_path = path.with_name(f".{path.name}.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -533,6 +537,16 @@ def migrate_legacy_session() -> tuple[list[str], list[Job]]:
 
 def load_session() -> tuple[list[str], list[Job]]:
     path = session_path()
+    # Bind the observed revision before another thread in this process can
+    # publish. Otherwise a delayed reader can replace a newer publication's
+    # revision with its old snapshot and cause a false write conflict.
+    # Only the in-process lock spans parsing/recovery. The OS sidecar lock
+    # stays short, and genuine external changes still fail the revision check.
+    with _session_thread_lock(path):
+        return _load_session_locked(path)
+
+
+def _load_session_locked(path: Path) -> tuple[list[str], list[Job]]:
     # Prefer the NewsFlow file.  If an interrupted write or disk problem ever
     # damages it, recover from the last good NewsFlow backup instead of showing
     # an empty queue.  Legacy Scriptor state is deliberately excluded: it can
