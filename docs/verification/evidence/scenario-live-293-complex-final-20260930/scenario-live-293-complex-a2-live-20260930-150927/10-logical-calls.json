@@ -1,0 +1,28 @@
+[
+  {
+    "input_chars": 35701,
+    "input_sha256": "bfe611feeceb5b84b5d296c9a3eff723d258cafe8d69e8ac9a82aa81338014fb",
+    "instructions_chars": 10092,
+    "instructions_sha256": "d9544f2f97ece9404b3a616b109a68c431a47111cf5f9ee98d748e5cc7ffae62",
+    "logical_call": 1,
+    "max_output_tokens": 6144,
+    "method": "generate",
+    "phase": "PLANNER",
+    "result": "OK",
+    "visible_response_chars": 4633,
+    "visible_response_sha256": "6ff4d593f2f77e14c5f63ed6ed15a648f8f46a3d04938876bd597793e9f656d2"
+  },
+  {
+    "input_chars": 35701,
+    "input_sha256": "bfe611feeceb5b84b5d296c9a3eff723d258cafe8d69e8ac9a82aa81338014fb",
+    "instructions_chars": 10386,
+    "instructions_sha256": "656da6e80f8041f6b955790795fed1c537bfea263ad66a05accbbe5334051284",
+    "logical_call": 2,
+    "max_output_tokens": 6144,
+    "method": "generate_fresh",
+    "phase": "FRESH_PLANNER",
+    "result": "OK",
+    "visible_response_chars": 15329,
+    "visible_response_sha256": "6b8d84956a32102735b1107e8d9f8fd28f23f5bd8360795ac324ac18953cf48d"
+  }
+]

@@ -1,0 +1,67 @@
+[
+  {
+    "input_chars": 35701,
+    "input_sha256": "bfe611feeceb5b84b5d296c9a3eff723d258cafe8d69e8ac9a82aa81338014fb",
+    "instructions_chars": 9785,
+    "instructions_sha256": "13ae298f7b406f85ca1b17626f40d4eeabc3a440b605979a98934f0070211b91",
+    "logical_call": 1,
+    "max_output_tokens": 6144,
+    "method": "generate",
+    "phase": "PLANNER",
+    "result": "OK",
+    "visible_response_chars": 10131,
+    "visible_response_sha256": "8ff1eb83d57b3e57313d64f62457681f77da5211c298e9bdb5f29e9ca7d645d1"
+  },
+  {
+    "input_chars": 35701,
+    "input_sha256": "bfe611feeceb5b84b5d296c9a3eff723d258cafe8d69e8ac9a82aa81338014fb",
+    "instructions_chars": 10326,
+    "instructions_sha256": "726a9609fc9acd422125d5ff71b0b933db4d2d48f4998fdd947c1d027242ff7c",
+    "logical_call": 2,
+    "max_output_tokens": 6144,
+    "method": "generate_fresh",
+    "phase": "FRESH_PLANNER",
+    "result": "OK",
+    "visible_response_chars": 9363,
+    "visible_response_sha256": "72a260536a2fe1c6b1107800f32d54ad4c47f0d93df912ce9a31864fbdd6649f"
+  },
+  {
+    "input_chars": 42812,
+    "input_sha256": "1c3946874c9e63a2e28571e5c30c7fad46b9c330f8e36dd7051e609204b80877",
+    "instructions_chars": 5685,
+    "instructions_sha256": "596750c00182151f546fad8622ede25e2ce4ce4c958c3305a044b53ea2f72ff4",
+    "logical_call": 3,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "phase": "WRITER_P1",
+    "result": "OK",
+    "visible_response_chars": 2194,
+    "visible_response_sha256": "b0d8ed975caee62941aac0b1fc551264485411bac2d3d6ddefff37d24cc08524"
+  },
+  {
+    "input_chars": 42207,
+    "input_sha256": "65157fa9a8ce48909fe81fa60244742b9c7510e07574517d5d32880ce8b03849",
+    "instructions_chars": 5371,
+    "instructions_sha256": "026a4d33761b7ec1e1841c4ee1783493732bcc1f56b192acbc3a41d136f30330",
+    "logical_call": 4,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "phase": "WRITER_P2",
+    "result": "OK",
+    "visible_response_chars": 3415,
+    "visible_response_sha256": "5c892c861c5d509454f4942104e66acd8de07800f6bd5eec409ea6558588694a"
+  },
+  {
+    "input_chars": 40844,
+    "input_sha256": "f64d877d042319e1fe951423bfb3b848069cdcc48de06c5e71da1fc265fac34a",
+    "instructions_chars": 5284,
+    "instructions_sha256": "44699ad89cdd119ba296b16ed98aa98d24a2fd4f5acc70eaa7bb0bf2feadfc1b",
+    "logical_call": 5,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "phase": "WRITER_P3",
+    "result": "OK",
+    "visible_response_chars": 2552,
+    "visible_response_sha256": "6fa7a3860df69075b20c787b2c34b2480ded2b2b41c6e8979fc148928ac54375"
+  }
+]

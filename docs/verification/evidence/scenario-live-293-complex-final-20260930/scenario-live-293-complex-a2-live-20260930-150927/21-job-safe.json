@@ -1,0 +1,18 @@
+{
+  "accepted_story_parts": [],
+  "actual_chars": 0,
+  "error": "Планировщик не вернул совместимую карту истории после безопасного восстановления. Код диагностики: FRESH_SCHEMA:MISSING_CONTENT_ATOMS.",
+  "length_status": "FAILED",
+  "state": "Нужно действие",
+  "story_planner_failure": {
+    "fresh_reason": "MISSING_CONTENT_ATOMS",
+    "initial_reason": "NON_JSON",
+    "phase": "FRESH_SCHEMA",
+    "reason": "MISSING_CONTENT_ATOMS",
+    "recovery_route": "FRESH_DIRECT",
+    "response_chars": "15329",
+    "response_sha256": "6b8d84956a32102735b1107e8d9f8fd28f23f5bd8360795ac324ac18953cf48d",
+    "structural_repair_reason": ""
+  },
+  "story_planner_status": "SCHEMA_RECOVERY_EXHAUSTED"
+}
