@@ -68,6 +68,34 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(restored[0].story_planner_failure, job.story_planner_failure)
 
+    def test_writer_partial_response_round_trips_outside_accepted_story_prefix(self):
+        """Observed incomplete prose is reviewable but cannot masquerade as P2."""
+        request = ScenarioRequest(0, "Тема", "Промпт")
+        job = Job(
+            request,
+            RunState.PAUSED,
+            accepted_story_parts=[{
+                "part_id": "P1", "text": "Принятая первая часть.",
+                "content_ids": ["C001"], "target_chars": 5000,
+            }],
+            writer_partial_response={
+                "part_id": "P2", "status": "incomplete",
+                "response_id": "resp_partial_1", "incomplete_reason": "max_output_tokens",
+                "response_chars": "27", "response_sha256": "b" * 64,
+                "text": "Незавершённый видимый фрагмент.",
+            },
+        )
+        payload = _session_data(["Тема"], [job])
+        self.assertEqual(len(payload["jobs"][0]["accepted_story_parts"]), 1)
+        self.assertEqual(payload["jobs"][0]["writer_partial_response"]["part_id"], "P2")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            _titles, restored = _read_session(path)
+
+        self.assertEqual(restored[0].accepted_story_parts, job.accepted_story_parts)
+        self.assertEqual(restored[0].writer_partial_response, job.writer_partial_response)
+
     def test_legacy_cover_marker_is_not_restored_as_scenario_status(self):
         """Covers-only r27 status must not leak back into the Scenario table."""
         request = ScenarioRequest(0, "Тема", "Промпт")

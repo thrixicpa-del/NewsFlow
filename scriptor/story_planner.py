@@ -226,25 +226,48 @@ def _load_json_object(
     so could turn a truncated Story Map into an unrelated macro block.
     """
     text = str(value or "").strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
+    # A short prose preface/suffix around one fenced body is a documented
+    # transport wrapper used by older repair adapters.  The delimiter-free
+    # prefix/suffix make a second fenced candidate impossible here.
+    fenced = re.fullmatch(
+        r"[^`]*```(?:json)?\s*\n?(.*?)\s*```[^`]*",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
     if fenced:
         text = fenced.group(1).strip()
+    elif text.startswith("```"):
+        # A fence is an explicit wrapper only when it encloses one complete
+        # body.  In particular, two fenced candidates must not select the
+        # first one as if the second had not been returned.
+        raise ValueError(invalid_message)
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as first_error:
+        # Only a plainly textual prefix may wrap a root object.  Once a JSON
+        # root opener is present, parsing that root either succeeds in full or
+        # fails: searching inside a damaged object/array could substitute a
+        # nested macro, part, or atom for the Story Map itself.
+        if text.startswith(("{", "[")):
+            raise ValueError(invalid_message) from first_error
         decoder = json.JSONDecoder()
         root_start = text.find("{")
         if root_start < 0:
+            raise ValueError(invalid_message) from first_error
+        prefix = text[:root_start]
+        if any(marker in prefix for marker in ("{", "[", "```")):
             raise ValueError(invalid_message) from first_error
         try:
             candidate, end = decoder.raw_decode(text[root_start:])
         except json.JSONDecodeError as wrapper_error:
             raise ValueError(invalid_message) from wrapper_error
-        # A wrapper may contain prose before/after the one root, but a second
-        # object/array would be a second response, not a wrapper.  Reject it
-        # rather than silently choosing whichever map happened to be first.
+        # An explicit prose wrapper may contain prose before/after exactly one
+        # JSON object.  It may not hide another object, array or Markdown
+        # fence, because that would make the parser choose a provider answer
+        # arbitrarily.  This is intentionally stricter than brace balancing:
+        # quotes and escaped braces are handled only by the JSON decoder.
         suffix = text[root_start + end:].strip()
-        if suffix.startswith(("{", "[")):
+        if any(marker in suffix for marker in ("{", "[", "```")):
             raise ValueError(invalid_message) from first_error
         parsed = candidate
     if not isinstance(parsed, dict):

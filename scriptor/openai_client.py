@@ -42,6 +42,29 @@ def extract_visible_response_text(response: object) -> str:
     return "\n".join(parts)
 
 
+def extract_response_refusal(response: object) -> str:
+    """Return a visible Responses refusal without treating it as prose."""
+    if not isinstance(response, dict):
+        return ""
+    refusals: list[str] = []
+    output = response.get("output")
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content_items = item.get("content")
+        if not isinstance(content_items, list):
+            continue
+        for content in content_items:
+            if not isinstance(content, dict) or content.get("type") != "refusal":
+                continue
+            refusal = content.get("refusal")
+            if isinstance(refusal, str) and refusal.strip():
+                refusals.append(refusal.strip())
+    return "\n".join(refusals)
+
+
 class OpenAIAPIError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
@@ -51,6 +74,39 @@ class OpenAIAPIError(RuntimeError):
     def key_unavailable(self):
         value = str(self).lower()
         return self.status_code in (401, 403, 429) or "quota" in value or "billing" in value
+
+
+class OpenAIResponseStatusError(OpenAIAPIError):
+    """A delivered Responses object whose terminal state is not usable prose.
+
+    The visible fragment is deliberately available to the Scenario runtime for
+    review/persistence, but it is never returned as a completed Writer part.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: str,
+        visible_text: str = "",
+        response_id: str = "",
+        incomplete_reason: str = "",
+        refusal: str = "",
+    ):
+        super().__init__(message)
+        self.status = status
+        self.visible_text = visible_text
+        self.response_id = response_id
+        self.incomplete_reason = incomplete_reason
+        self.refusal = refusal
+
+
+class OpenAIResponseIncompleteError(OpenAIResponseStatusError):
+    """The API observed an incomplete response, optionally with partial text."""
+
+
+class OpenAIResponseRefusalError(OpenAIResponseStatusError):
+    """The API returned an explicit refusal rather than scenario prose."""
 
 
 class OpenAITextClient:
@@ -118,6 +174,38 @@ class OpenAITextClient:
             self._request, "POST", "/v1/responses", payload
         )
         text = extract_visible_response_text(result)
+        response_id = str(result.get("id", "") or "") if isinstance(result, dict) else ""
+        status = str(result.get("status", "") or "").strip().lower() if isinstance(result, dict) else ""
+        incomplete_details = result.get("incomplete_details") if isinstance(result, dict) else None
+        incomplete_reason = (
+            str(incomplete_details.get("reason", "") or "")
+            if isinstance(incomplete_details, dict) else ""
+        )
+        refusal = extract_response_refusal(result)
+        if refusal:
+            raise OpenAIResponseRefusalError(
+                f"{self.label}: OpenAI отказался выполнить запрос",
+                status=status or "refusal",
+                visible_text=text,
+                response_id=response_id,
+                refusal=refusal,
+            )
+        if status == "incomplete":
+            raise OpenAIResponseIncompleteError(
+                f"{self.label}: OpenAI вернул незавершённый ответ",
+                status=status,
+                visible_text=text,
+                response_id=response_id,
+                incomplete_reason=incomplete_reason,
+            )
+        if status in {"failed", "cancelled"}:
+            raise OpenAIResponseStatusError(
+                f"{self.label}: OpenAI завершил ответ со статусом {status}",
+                status=status,
+                visible_text=text,
+                response_id=response_id,
+                incomplete_reason=incomplete_reason,
+            )
         if not text:
             raise OpenAIAPIError(f"{self.label}: OpenAI не вернул текст")
         if on_progress:

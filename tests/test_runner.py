@@ -6,6 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from scriptor.core import ScenarioRequest
+from scriptor.openai_client import OpenAIResponseIncompleteError
 from scriptor.runner import (
     Job,
     ParallelRunner,
@@ -34,6 +35,49 @@ class FakeClient:
 
 
 class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incomplete_writer_part_is_durable_but_never_accepted_or_retried_on_resume(self):
+        """A delivered partial P2 is reviewable, not a new Writer attempt."""
+        class IncompleteWriterClient:
+            def __init__(self):
+                self.calls = []
+
+            async def generate(self, prompt, on_progress=None, **kwargs):
+                self.calls.append(prompt)
+                if "NewsFlow Story Planner" in (kwargs.get("instructions") or prompt):
+                    return ParallelRunnerTests._story_plan_json(3)
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 4999
+                if "CURRENT PART: P2" in prompt:
+                    raise OpenAIResponseIncompleteError(
+                        "OpenAI returned incomplete response",
+                        status="incomplete",
+                        visible_text="Частичный текст P2",
+                        response_id="resp_p2_partial",
+                        incomplete_reason="max_output_tokens",
+                    )
+                raise AssertionError("P3 must not start after a partial P2")
+
+        request = ScenarioRequest(0, "Тема", "Шаблон", target_chars=15000)
+        client = IncompleteWriterClient()
+        job = (await ParallelRunner(client, 1).run([request]))[0]
+
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual([part["part_id"] for part in job.accepted_story_parts], ["P1"])
+        self.assertEqual(job.writer_partial_response["part_id"], "P2")
+        self.assertEqual(job.writer_partial_response["text"], "Частичный текст P2")
+        self.assertEqual(job.writer_partial_response["status"], "incomplete")
+        self.assertEqual(sum("CURRENT PART: P3" in call for call in client.calls), 0)
+
+        class NoReplayClient:
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError("ordinary resume must not repeat a delivered Writer call")
+
+        resumed = (await ParallelRunner(NoReplayClient(), 1).run(
+            [request], resume_jobs={0: job},
+        ))[0]
+        self.assertEqual(resumed.state, RunState.PAUSED)
+        self.assertEqual([part["part_id"] for part in resumed.accepted_story_parts], ["P1"])
+
     async def test_planner_adapter_without_text_format_uses_explicit_legacy_request(self):
         """Do not silently send a split Planner request after dropping its schema."""
         class LegacyPlannerClient:

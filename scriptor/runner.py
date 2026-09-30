@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 
 from .core import ScenarioRequest
+from .openai_client import OpenAIResponseStatusError
 from .story_planner import (
     StoryPlan,
     build_story_plan_structure_repair_prompt,
@@ -111,6 +112,10 @@ class Job:
     # Bounded, non-content diagnostics for a Planner response which exhausted
     # the accepted schema-recovery path. Provider prose never belongs here.
     story_planner_failure: dict[str, str] = field(default_factory=dict)
+    # A Responses request that reached the provider but ended without a
+    # completed Writer part.  It is deliberately separate from the immutable
+    # accepted prefix so a normal resume cannot silently send Pn again.
+    writer_partial_response: dict[str, str] = field(default_factory=dict)
 
 
 def _planner_schema_reason(error: BaseException) -> str:
@@ -505,6 +510,23 @@ class ParallelRunner:
     def _writer_output_unusable(self, text: str) -> bool:
         return bool(self._writer_output_rejection_reason(text))
 
+    @staticmethod
+    def _writer_partial_diagnostic(part_id: str, error: OpenAIResponseStatusError) -> dict[str, str]:
+        """Keep an observed non-complete Writer response outside accepted prose."""
+        text = str(error.visible_text or "")
+        return {
+            "part_id": part_id,
+            "status": str(error.status or "UNKNOWN"),
+            "response_id": str(error.response_id or ""),
+            "incomplete_reason": str(error.incomplete_reason or ""),
+            "response_chars": str(len(text)),
+            "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            # This is user-visible partial scenario prose, not an API key,
+            # hidden reasoning, or provider diagnostic.  It remains separate
+            # from accepted_story_parts for an explicit future user action.
+            "text": text,
+        }
+
     async def _generate_fresh_result(
         self,
         prompt: str,
@@ -576,6 +598,16 @@ class ParallelRunner:
                 job.result = self._assembled_story(plan, job.accepted_story_parts)
                 job.actual_chars = len(job.result)
                 job.length_status = "PLAN_LENGTH_CHANGED"
+                return False
+            if job.writer_partial_response:
+                job.state = RunState.PAUSED
+                job.error = (
+                    "Писатель ранее вернул незавершённый фрагмент; "
+                    "сохранённый префикс не перезаписан. Нужен явный перезапуск."
+                )
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = "WRITER_INCOMPLETE"
                 return False
         else:
             # A user-triggered retry starts a new bounded Planner attempt. Never
@@ -713,6 +745,7 @@ class ParallelRunner:
                 job.request,
             )
             job.accepted_story_parts = []
+            job.writer_partial_response = {}
             job.story_planner_status = "READY"
             job.story_planner_failure = {}
             # Persist the complete plan before a prose part is accepted.
@@ -733,13 +766,22 @@ class ParallelRunner:
                 part_index,
                 active_target,
             )
-            writer_result = await self._generate_writer_usable(
-                writer_input,
-                job.request,
-                active_target,
-                instructions=writer_instructions,
-                legacy_prompt=writer_prompt,
-            )
+            try:
+                writer_result = await self._generate_writer_usable(
+                    writer_input,
+                    job.request,
+                    active_target,
+                    instructions=writer_instructions,
+                    legacy_prompt=writer_prompt,
+                )
+            except OpenAIResponseStatusError as error:
+                job.state = RunState.PAUSED
+                job.error = f"Писатель части {part.id} не завершил ответ ({error.status})"
+                job.writer_partial_response = self._writer_partial_diagnostic(part.id, error)
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = "WRITER_INCOMPLETE"
+                return False
             writer_failure = self._writer_output_rejection_reason(writer_result)
             if writer_failure:
                 job.state = RunState.PAUSED

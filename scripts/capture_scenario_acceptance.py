@@ -36,6 +36,9 @@ SECRET_PATTERNS = (
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 )
+_MAX_FULL_RUNS = 4
+_MAX_LOGICAL_CALLS = 32
+_MAX_HTTP_ATTEMPTS = 40
 
 
 def _sha(value: str | bytes) -> str:
@@ -87,6 +90,78 @@ def _phase(prompt: str, instructions: object, method: str) -> str:
     return f"WRITER_{match.group(1)}" if match else f"UNKNOWN:{method}"
 
 
+def _read_budget_ledger(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {"version": 1, "runs": []}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or not isinstance(value.get("runs"), list):
+        raise TypeError("scenario acceptance budget ledger is invalid")
+    return value
+
+
+def _budget_totals(ledger: dict[str, object]) -> tuple[int, int, int]:
+    runs = ledger.get("runs", [])
+    if not isinstance(runs, list):
+        return 0, 0, 0
+    full_runs = len(runs)
+    logical = sum(max(0, int(item.get("reserved_logical_calls", 0) or 0))
+                  for item in runs if isinstance(item, dict))
+    http = sum(max(0, int(item.get("reserved_http_attempts", 0) or 0))
+               for item in runs if isinstance(item, dict))
+    return full_runs, logical, http
+
+
+def _reserve_budget(
+    path: Path, *, run_id: str, run_kind: str, target: int, source_head: str,
+) -> dict[str, object]:
+    """Persist a conservative reservation before the first external request."""
+    ledger = _read_budget_ledger(path)
+    full_runs, logical, http = _budget_totals(ledger)
+    # The normal route is Planner + one Writer per part.  Reserve its bounded
+    # planner recovery room too, so an interrupted capture cannot silently
+    # consume a new allowance from another disposable profile.
+    part_count = max(1, (target + 4999) // 5000)
+    reserve_logical = 3 + part_count  # initial + repair + fresh + Writers
+    reserve_http = reserve_logical + 2  # bounded key/transport contingency
+    if (
+        full_runs >= _MAX_FULL_RUNS
+        or logical + reserve_logical > _MAX_LOGICAL_CALLS
+        or http + reserve_http > _MAX_HTTP_ATTEMPTS
+    ):
+        raise RuntimeError("Scenario acceptance paid-call budget is exhausted")
+    entry = {
+        "run_id": run_id,
+        "kind": run_kind,
+        "target_chars": target,
+        "source_head": source_head,
+        "reserved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "reserved_logical_calls": reserve_logical,
+        "reserved_http_attempts": reserve_http,
+        "status": "RESERVED",
+    }
+    ledger["runs"].append(entry)
+    _write_json(path, ledger)
+    return entry
+
+
+def _complete_budget_reservation(
+    path: Path, run_id: str, *, logical_calls: int, http_attempts: int,
+    result: str,
+) -> dict[str, object]:
+    ledger = _read_budget_ledger(path)
+    for entry in reversed(ledger["runs"]):
+        if isinstance(entry, dict) and entry.get("run_id") == run_id:
+            entry.update({
+                "status": result,
+                "actual_logical_calls": logical_calls,
+                "actual_http_attempts": http_attempts,
+                "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            break
+    _write_json(path, ledger)
+    return ledger
+
+
 class RecordingPool:
     """Transparent logical-call ledger; it does not change provider retries."""
 
@@ -96,8 +171,11 @@ class RecordingPool:
         self.inner = HybridTextPool(sessions, openai_keys, chat_url, model)
         self.concurrency = self.inner.concurrency
         self.calls: list[dict[str, object]] = []
+        self.max_logical_calls: int | None = None
 
     async def _call(self, method: str, prompt: str, *args, **kwargs):
+        if self.max_logical_calls is not None and len(self.calls) >= self.max_logical_calls:
+            raise RuntimeError("Scenario acceptance logical-call reservation exhausted")
         instructions = kwargs.get("instructions")
         entry = {
             "logical_call": len(self.calls) + 1,
@@ -108,12 +186,16 @@ class RecordingPool:
             "instructions_chars": len(str(instructions or "")),
             "instructions_sha256": _sha(str(instructions or "")),
             "max_output_tokens": kwargs.get("max_output_tokens", "UNKNOWN"),
+            "text_format": _redact(kwargs.get("text_format", "NONE")),
         }
         self.calls.append(entry)
         try:
             result = await getattr(self.inner, method)(prompt, *args, **kwargs)
         except Exception as error:
             entry.update({"result": "ERROR", "error_type": type(error).__name__})
+            for key in ("status", "response_id", "incomplete_reason"):
+                if hasattr(error, key):
+                    entry[key] = str(getattr(error, key) or "")
             raise
         entry.update({
             "result": "OK",
@@ -163,6 +245,9 @@ def main() -> int:
     parser.add_argument("--target", type=int, default=12000)
     parser.add_argument("--minimum", type=int, default=11500)
     parser.add_argument("--maximum", type=int, default=12500)
+    parser.add_argument("--run-kind", choices=("A", "B"), default="A")
+    parser.add_argument("--suite-ledger", type=Path)
+    parser.add_argument("--a-editorial-passed", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     args = parser.parse_args()
     if args.minimum > args.maximum:
@@ -179,7 +264,8 @@ def main() -> int:
     if source_settings.scenario_provider != "openai" or not active_keys:
         raise SystemExit("configured OpenAI Scenario route with an active key is required")
 
-    evidence = Path(r"D:\NewsFlow-RC\test-profiles") / args.run_id
+    evidence_parent = Path(r"D:\NewsFlow-RC\test-profiles")
+    evidence = evidence_parent / args.run_id
     if evidence.exists():
         raise SystemExit(f"evidence path already exists: {evidence}")
     evidence.mkdir(parents=True)
@@ -235,12 +321,34 @@ def main() -> int:
         _write_json(evidence / "99-preflight.json", {"result": "PASS", "provider_calls": 0})
         return _finish(evidence, before, production_localappdata, [], [], None)
 
+    if args.run_kind == "B" and not args.a_editorial_passed:
+        raise SystemExit("B requires a completed editorially accepted A run")
+    ledger_path = args.suite_ledger or evidence_parent / "scenario-live-293-stage-budget-ledger.json"
+    reservation = _reserve_budget(
+        ledger_path,
+        run_id=args.run_id,
+        run_kind=args.run_kind,
+        target=args.target,
+        source_head=_git("git rev-parse HEAD"),
+    )
+    _write_json(evidence / "12-budget-reservation-safe.json", {
+        "ledger_name": ledger_path.name,
+        "reservation": reservation,
+        "limits": {
+            "full_runs": _MAX_FULL_RUNS,
+            "logical_calls": _MAX_LOGICAL_CALLS,
+            "http_attempts": _MAX_HTTP_ATTEMPTS,
+        },
+    })
+
     captured_requests: list[dict[str, object]] = []
     captured_responses: list[dict[str, object]] = []
     original_request = OpenAITextClient._request
 
     def capture_request(client, method, path, payload=None):
         number = len(captured_requests) + 1
+        if number > int(reservation["reserved_http_attempts"]):
+            raise RuntimeError("Scenario acceptance HTTP-attempt reservation exhausted")
         safe_payload = _redact(payload)
         _write_json(evidence / f"request-{number:02d}-post-adapter-safe.json", safe_payload)
         captured_requests.append({
@@ -270,6 +378,7 @@ def main() -> int:
 
     def pool_factory(*pool_args, **pool_kwargs):
         pool = RecordingPool(*pool_args, **pool_kwargs)
+        pool.max_logical_calls = int(reservation["reserved_logical_calls"])
         pool_box["pool"] = pool
         return pool
 
@@ -315,7 +424,21 @@ def main() -> int:
                 for row in job.accepted_story_parts
             ],
         })
-    return _finish(evidence, before, production_localappdata, captured_requests, captured_responses, job)
+    result = _finish(evidence, before, production_localappdata, captured_requests, captured_responses, job)
+    ledger = _complete_budget_reservation(
+        ledger_path, args.run_id,
+        logical_calls=len(calls), http_attempts=len(captured_requests),
+        result="COMPLETED" if result == 0 else "FAILED",
+    )
+    ledger_export = evidence / "13-budget-ledger-safe.json"
+    _write_json(ledger_export, ledger)
+    if result == 0:
+        # _finish has already created the immutable archive.  Append the
+        # completion record so the published ZIP contains both reservation and
+        # actual usage without rewriting any captured request/response file.
+        with zipfile.ZipFile(evidence.with_suffix(".zip"), "a", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.write(ledger_export, ledger_export.relative_to(evidence))
+    return result
 
 
 def _finish(evidence: Path, before: dict[str, str | None], local_appdata: Path, requests: list, responses: list, job: object) -> int:

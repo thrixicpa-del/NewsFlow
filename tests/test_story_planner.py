@@ -114,6 +114,22 @@ class StoryPlanValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must return strict JSON"):
             parse_story_plan_response(f"{response}\n{response}", (5000,))
 
+    def test_parser_rejects_nested_object_in_damaged_array_and_multiple_wrapped_roots(self):
+        """A complete child is not a root and a wrapper never selects one reply."""
+        response = self._single_part_cover_response(
+            candidates=[], primary=None, status="NEEDS_REVIEW",
+        )
+        damaged_array = f"[{response},"
+        multiple_prose_roots = f"Planner reply follows:\n{response}\nSecond reply:\n{response}"
+        multiple_fenced_roots = f"```json\n{response}\n```\n```json\n{response}\n```"
+
+        for malformed in (damaged_array, multiple_prose_roots, multiple_fenced_roots):
+            with (
+                self.subTest(malformed=malformed[:32]),
+                self.assertRaisesRegex(ValueError, "must return strict JSON"),
+            ):
+                parse_story_plan_response(malformed, (5000,))
+
     def test_parser_keeps_braces_in_json_strings_and_rejects_wrong_or_truncated_roots(self):
         raw = json.loads(self._single_part_cover_response(
             candidates=[], primary=None, status="NEEDS_REVIEW",

@@ -7,6 +7,8 @@ from scriptor.config import OpenAIKey
 from scriptor.openai_client import (
     HybridTextPool,
     OpenAIAPIError,
+    OpenAIResponseIncompleteError,
+    OpenAIResponseRefusalError,
     OpenAITextClient,
     extract_visible_response_text,
 )
@@ -165,6 +167,52 @@ class HybridTextPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["text"], {"format": response_format})
         self.assertNotIn("json_schema", payload["input"])
         self.assertEqual(payload["instructions"], "trusted planner instructions")
+
+    async def test_incomplete_responses_text_is_not_accepted_as_completed_output(self):
+        client = OpenAITextClient("sk-test")
+        response = {
+            "id": "resp_incomplete_test",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{"type": "message", "content": [{
+                "type": "output_text", "text": "Незавершённый видимый фрагмент",
+            }]}],
+        }
+        with (
+            patch.object(client, "_request", return_value=response),
+            self.assertRaises(OpenAIResponseIncompleteError) as caught,
+        ):
+            await client.generate("Напиши часть")
+
+        self.assertEqual(caught.exception.status, "incomplete")
+        self.assertEqual(caught.exception.visible_text, "Незавершённый видимый фрагмент")
+        self.assertEqual(caught.exception.response_id, "resp_incomplete_test")
+
+    async def test_explicit_responses_refusal_is_typed_and_never_falls_back_to_another_key(self):
+        client = OpenAITextClient("sk-test")
+        response = {
+            "id": "resp_refusal_test", "status": "completed",
+            "output": [{"type": "message", "content": [{
+                "type": "refusal", "refusal": "Cannot comply.",
+            }]}],
+        }
+        with (
+            patch.object(client, "_request", return_value=response),
+            self.assertRaises(OpenAIResponseRefusalError) as caught,
+        ):
+            await client.generate("Напиши часть")
+        self.assertEqual(caught.exception.status, "completed")
+        self.assertEqual(caught.exception.response_id, "resp_refusal_test")
+
+        pool = HybridTextPool([], [
+            OpenAIKey("Первый", "sk-first", True),
+            OpenAIKey("Второй", "sk-second", True),
+        ], "")
+        pool.openai_clients[0].generate = AsyncMock(side_effect=caught.exception)
+        pool.openai_clients[1].generate = AsyncMock(return_value="нельзя использовать fallback")
+        with self.assertRaises(OpenAIResponseRefusalError):
+            await pool.generate("Та же часть")
+        pool.openai_clients[1].generate.assert_not_awaited()
 
     def test_text_request_times_out_after_two_minutes_instead_of_blocking_the_batch(self):
         response = MagicMock()
