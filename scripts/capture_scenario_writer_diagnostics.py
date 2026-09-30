@@ -238,7 +238,7 @@ def _preflight(cases: tuple[DiagnosticCase, ...]) -> list[dict[str, object]]:
 
     records: list[dict[str, object]] = []
     for case in cases:
-        client = OpenAITextClient("sk-diagnostic-preflight", str(case.payload["model"]))
+        client = OpenAITextClient("diagnostic-preflight-key", str(case.payload["model"]))
         response = {
             "id": f"preflight-{case.id}", "model": case.payload["model"],
             "status": "completed", "output_text": "PREFLIGHT_ONLY",
