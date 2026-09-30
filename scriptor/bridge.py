@@ -8168,13 +8168,27 @@ def _cover_distinct_enhanced_rewrite_options(
         result_keys = {" ".join(value.split()) for value in result}
         if key in used or key in result_keys:
             direction = _COVER_ENHANCED_REWRITE_COMPOSITIONS[index % len(_COVER_ENHANCED_REWRITE_COMPOSITIONS)]
-            candidate = _normalize_cover_photo_prompt(
-                f"{_fallback_cover_prompt(item, index + 1)} Composition change: {direction}.", item,
+            candidate = build_final_provider_prompt(
+                candidate,
+                item,
+                composition_notes=(
+                    "Composition-only alternative: "
+                    f"{direction}. Preserve the existing subject, people, entities, objects, action, event and topic. "
+                    "Change only camera framing, distance, layers, foreground/background arrangement and visual composition; "
+                    "do not add people, weapons, crowds, destruction or a different event."
+                ),
             )
             attempt = 1
             while " ".join(candidate.split()) in used or " ".join(candidate.split()) in result_keys:
-                candidate = _normalize_cover_photo_prompt(
-                    f"{_fallback_cover_prompt(item, index + attempt + 1)} Composition alternative {attempt}: {direction}.", item,
+                candidate = build_final_provider_prompt(
+                    option,
+                    item,
+                    composition_notes=(
+                        "Composition-only alternative: "
+                        f"{direction}; layout variant {attempt}. Preserve the existing subject, people, entities, objects, action, event and topic. "
+                        "Change only camera framing, distance, layers, foreground/background arrangement and visual composition; "
+                        "do not add people, weapons, crowds, destruction or a different event."
+                    ),
                 )
                 attempt += 1
         result.append(candidate)

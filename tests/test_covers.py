@@ -51,7 +51,13 @@ from scriptor.bridge import (
     select_cover_visual_reference,
     set_cover_visual_reference_target,
 )
-from scriptor.config import FastGenKey, OpenAIKey, Settings, load_settings
+from scriptor.config import (
+    FastGenKey,
+    OpenAIKey,
+    Settings,
+    load_settings,
+    save_settings,
+)
 from scriptor.cover_rate_limit import cover_rate_limit_decision, next_fastgen_resume_at
 from scriptor.covers import (
     FastGenClient,
@@ -4185,6 +4191,13 @@ class CoverLocalCompositorTests(unittest.TestCase):
         self.assertIn("УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ", enhanced)
         self.assertIn("только когда это следует из темы", enhanced)
 
+    def test_scene_intensity_mode_round_trips_through_settings_storage(self):
+        with TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            with patch("scriptor.config.config_path", return_value=settings_path):
+                save_settings(Settings(cover_scene_intensity_mode=True))
+                self.assertTrue(load_settings().cover_scene_intensity_mode)
+
     def test_enhanced_new_prompt_replaces_an_unchanged_provider_scene_with_a_distinct_composition(self):
         """A deliberate enhanced rewrite never silently keeps the old scene prompt."""
         settings = Settings(cover_prompt_variant_count=1)
@@ -4214,6 +4227,82 @@ class CoverLocalCompositorTests(unittest.TestCase):
         rewritten = settings.cover_queue[0]["image_prompt"]
         self.assertNotEqual(rewritten.strip(), prior_prompt.strip())
         self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", rewritten)
+
+    def test_enhanced_duplicate_rewrite_preserves_the_scene_and_changes_only_composition(self):
+        """An exact duplicate must retain its scene facts, not fall back to a new story."""
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True)
+        provider_scene = (
+            "Mayor Elena Petrova signs the River Bridge closure order beside the damaged bridge, "
+            "while engineers inspect the barrier"
+        )
+        item = {
+            "production_item_id": "production:scene-preservation",
+            "title": "Municipal infrastructure update",
+            "script": "Routine maintenance notice.",
+        }
+        prior_prompt = _normalize_cover_photo_prompt(provider_scene, item)
+        settings.cover_queue = [{
+            **item,
+            "image_prompt": prior_prompt,
+            "image_prompt_options": [prior_prompt],
+        }]
+
+        async def unchanged_prompt(*_args, **_kwargs):
+            return json.dumps({"prompts": [provider_scene], "recommended": 1})
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=unchanged_prompt)):
+            generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:scene-preservation"],
+                "provider": "agent",
+                "rewrite": True,
+            })
+
+        rewritten = settings.cover_queue[0]["image_prompt"]
+        self.assertNotEqual(rewritten.strip(), prior_prompt.strip())
+        for preserved in ("Mayor Elena Petrova", "River Bridge", "signs", "engineers inspect the barrier"):
+            self.assertIn(preserved, rewritten)
+        story_context = rewritten.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
+        for invented in ("crowd", "weapons", "military", "explosion", "protest", "press activity"):
+            self.assertNotIn(invented, story_context.casefold())
+        self.assertIn("Composition-only alternative", rewritten)
+
+    def test_standard_duplicate_rewrite_keeps_the_legacy_provider_output_path(self):
+        """The composition-only fallback is strictly opt-in."""
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=False)
+        provider_scene = "Mayor Elena Petrova signs the River Bridge closure order"
+        item = {
+            "production_item_id": "production:standard-duplicate",
+            "title": "Municipal infrastructure update",
+            "script": "Routine maintenance notice.",
+        }
+        prior_prompt = _normalize_cover_photo_prompt(provider_scene, item)
+        settings.cover_queue = [{
+            **item,
+            "image_prompt": prior_prompt,
+            "image_prompt_options": [prior_prompt],
+        }]
+
+        async def unchanged_prompt(*_args, **_kwargs):
+            return json.dumps({"prompts": [provider_scene], "recommended": 1})
+
+        with patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
+             patch("scriptor.bridge.save_settings"), \
+             patch("scriptor.bridge.snapshot", return_value={}), \
+             patch("scriptor.bridge.HybridTextPool", return_value=SimpleNamespace(generate=unchanged_prompt)):
+            generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:standard-duplicate"],
+                "provider": "agent",
+                "rewrite": True,
+            })
+
+        self.assertEqual(settings.cover_queue[0]["image_prompt"], prior_prompt)
 
     def test_cover_build_mode_ranges_reject_overlaps(self):
         settings = Settings()
