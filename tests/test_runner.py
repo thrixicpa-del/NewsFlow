@@ -609,6 +609,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.structural_calls = 0
                 self.fresh_calls = 0
                 self.writer_calls = 0
+                self.fresh_prompt = ""
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
@@ -670,6 +671,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
                 self.fresh_calls += 1
+                self.fresh_prompt = prompt
                 if "MISSING_TRANSITION_FIELDS" not in prompt:
                     raise AssertionError("fresh retry must carry only a safe normalized reason")
                 return ParallelRunnerTests._story_plan_json(2)
@@ -682,6 +684,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.structural_calls, 0)
         self.assertEqual(client.fresh_calls, 1)
+        self.assertIn("state_before, changed_subject, development, resulting_state and state_after", client.fresh_prompt)
+        self.assertIn("state_transition_contract=BEFORE_DEVELOPMENT_AFTER", client.fresh_prompt)
         self.assertEqual(client.writer_calls, 2)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
 

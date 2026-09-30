@@ -157,7 +157,12 @@ _PARTS_ONLY_PLANNER_REASONS = frozenset({
 
 _FRESH_PLANNER_REASON_GUIDANCE = {
     "INVALID_TRANSITION_CONTRACT": "Include the exact BEFORE_DEVELOPMENT_AFTER transition contract.",
-    "MISSING_TRANSITION_FIELDS": "Give every atom all required before/development/after fields.",
+    "MISSING_TRANSITION_FIELDS": (
+        "For EVERY content_atoms[] object include non-empty exact keys "
+        "state_before, changed_subject, development, resulting_state and state_after, "
+        "plus top-level state_transition_contract=BEFORE_DEVELOPMENT_AFTER. "
+        "Before returning JSON, check those five keys on every atom."
+    ),
     "ABSTRACT_OR_NONCONCRETE_TRANSITION": "Make every atom an observable concrete change, not an interpretation.",
     "ATOM_SEMANTIC_DUPLICATE": "Keep every content atom materially distinct from the others.",
     "PART_SEMANTIC_DUPLICATE": "Give every part distinct semantic ownership and novelty.",
