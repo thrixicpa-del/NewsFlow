@@ -405,6 +405,18 @@ class StoryPlanValidationTests(unittest.TestCase):
             development="городские службы перевели критические объекты на резервное питание",
             resulting_state="критические объекты перешли на резервное питание",
         )))
+        # A prior event's aggregate consequences are not the actor of the
+        # next event.  Without a real initiator this is merely a new wording
+        # for an already-covered effect, regardless of news domain.
+        self.assertFalse(_has_concrete_story_development(atom(
+            "Ожидание решения сдвигается после прежнего события",
+            "Предыдущее событие уже было раскрыто.",
+            "Обсуждение снова сосредоточено на прежнем событии.",
+            changed_subject="Общее ожидание решения",
+            development_actor="последствия предыдущего события",
+            development="они сдвигают обсуждение к уже известному эпизоду",
+            resulting_state="ожидание меняется без нового действия",
+        )))
         self.assertFalse(_has_concrete_story_development(atom(
             "Удар меняет политическую цену конфликта"
         )))

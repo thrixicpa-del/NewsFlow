@@ -44,6 +44,15 @@ _INTERPRETIVE_FRAME_STEMS = frozenset({
     "percei", "appear", "mean", "show", "demons", "symbol", "inter",
     "expect", "likely", "signif", "conclu", "intens", "narrow", "increa",
 })
+# These are universal aggregate/effect labels, not news-topic words.  They
+# cannot be the actor of a *new* atom because they merely summarize an earlier
+# cause.  A Planner must instead name the later person, institution, system or
+# physical event that took the next action.
+_NON_ACTOR_STEMS = frozenset({
+    "послед", "динами", "ожидан", "повест", "итогов", "статус", "давлен",
+    "эскала", "интенс", "ситуац", "process", "dynamic", "expect", "agenda",
+    "status", "conseq", "pressu", "escal", "intens", "situat",
+})
 _SEMANTIC_STOPWORDS = frozenset({
     "this", "that", "with", "from", "into", "over", "under", "then", "than", "their", "there",
     "котор", "этот", "этог", "того", "чтобы", "после", "перед", "между", "через", "снова",
@@ -235,6 +244,9 @@ def _has_concrete_story_development(atom: StoryContentAtom) -> bool:
     # an interpretive frame below; otherwise a lexical label would reject
     # valid maps from arbitrary news domains.
     subject_tokens = _semantic_tokens(changed_subject)
+    actor_tokens = _semantic_tokens(development_actor)
+    if actor_tokens & _NON_ACTOR_STEMS:
+        return False
 
     # Do not accept a dressed-up interpretation as a new state transition.
     # This uses only the relation between a declared abstract subject and an
@@ -771,7 +783,10 @@ def build_story_planner_prompt(request: Any, part_targets: tuple[int, ...]) -> s
         "state_before, state_after, changed_subject, development_actor, development, resulting_state, novelty_question, "
         "novelty_payload and do_not_repeat. changed_subject is the actor/system/status that concretely changes; "
         "development_actor names the actor, institution, system or physical event that actually initiates the "
-        "development; it cannot be a viewer, an abstract mood, a generic topic or a restatement of changed_subject. "
+        "development; it cannot be a viewer, an abstract mood, a generic topic, an aggregate consequence/effect of "
+        "an earlier atom, or a restatement of changed_subject. If the previous event changed the overall situation, "
+        "do not make that situation its own next atom: plan the later concrete decision, reaction, recorded result "
+        "or physical event that happened afterward. "
         "development is what that actor did or what concretely happened; resulting_state is the observable state afterward. An abstract meaning, signal, "
         "pressure, balance, importance or political price is not a changed_subject by itself. novelty_question is the concrete question that atom "
         "answers; novelty_payload is the one-sentence information the viewer learns for the first time from that atom; "
