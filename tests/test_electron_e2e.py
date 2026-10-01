@@ -59,7 +59,14 @@ class ElectronE2ESmokeTests(unittest.TestCase):
 
     def _wait_for_cdp(self) -> None:
         endpoint = f"http://127.0.0.1:{self.port}/json/version"
-        deadline = time.monotonic() + 25
+        # A portable Windows build first unpacks its immutable payload into the
+        # disposable test root.  On a cold disk that extraction can exceed the
+        # source-Electron startup budget even though the packaged application
+        # and its CDP endpoint start normally.  Keep the fast source feedback
+        # loop while giving the actual portable artifact a bounded launch
+        # window.
+        launch_timeout = 60 if os.environ.get("NEWSFLOW_E2E_TARGET") == "packaged" else 25
+        deadline = time.monotonic() + launch_timeout
         while time.monotonic() < deadline:
             if self.process and self.process.poll() is not None:
                 self.fail(f"Electron ended before CDP became available: {self.process.returncode}")
