@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import unittest
 
@@ -96,7 +97,21 @@ class VoiceQueueSchedulingPerformanceTests(unittest.IsolatedAsyncioTestCase):
         class LocalClient:
             async def generate(self, prompt: str) -> str:
                 await asyncio.sleep(0)
-                return prompt
+                if "NewsFlow Story Planner" in prompt:
+                    return json.dumps({
+                        "thesis": "Одна последовательная история.",
+                        "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
+                        "content_atoms": [{
+                            "id": "C001", "summary": "Новое событие", "owner_part_id": "P1",
+                            "content_kind": "SUPPORTED",
+                        }],
+                        "parts": [{
+                            "id": "P1", "role": "COMPLETE", "purpose": "Цельная история",
+                            "macro_id": "M1", "content_ids": ["C001"], "opens": [], "closes": [],
+                            "transition_direction": "финал",
+                        }],
+                    }, ensure_ascii=False)
+                return "Готовый сценарий."
 
         requests = [ScenarioRequest(index, f"Тема {index}", f"Промпт {index}") for index in range(100)]
         started = time.perf_counter()
