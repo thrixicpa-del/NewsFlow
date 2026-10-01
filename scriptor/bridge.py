@@ -5169,6 +5169,11 @@ def import_manual_scenario(payload: dict) -> dict:
     jobs.append(Job(ScenarioRequest(index, title, "", production_item_id), RunState.DONE, text, ""))
     save_settings(settings)
     save_session(titles, jobs)
+    # The import result immediately exposes this completed script in Covers.
+    # Persist that same current Scenario -> Covers projection before returning:
+    # the next Covers command starts from durable state, not this snapshot.
+    if _sync_current_scenario_covers(settings):
+        save_settings(settings)
     return snapshot()
 
 
@@ -5221,6 +5226,11 @@ def import_manual_scenarios(payload: dict) -> dict:
         settings.voice_task_statuses[str(index + 1)] = {"label": "Ожидает озвучки", "progress": 0, "updatedAt": ""}
     save_settings(settings)
     save_session(titles, list(jobs_by_index.values()))
+    # Keep the durable Covers queue in lockstep with the snapshot returned to
+    # the desktop.  Without this, imported rows were visible once but the next
+    # prompt/text command reloaded an empty queue and rejected its scope.
+    if _sync_current_scenario_covers(settings):
+        save_settings(settings)
     return {**snapshot(), "operationResult": {
         "kind": "voice-text-import", "count": imported,
         "message": f"В очередь добавлено TXT-сценариев: {imported}. Выделите их и запустите озвучку.",
