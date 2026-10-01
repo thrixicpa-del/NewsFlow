@@ -67,7 +67,9 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("Invoke-GitLfs -Arguments @('fsck')", script)
         self.assertIn("Invoke-GitLfs -Arguments @('ls-files', '--long')", script)
         self.assertIn("version https://git-lfs.github.com/spec/v1", script)
-        self.assertIn("Get-FileHash -LiteralPath $path -Algorithm SHA256", script)
+        self.assertIn("function Get-Sha256Hex", script)
+        self.assertIn("[System.Security.Cryptography.SHA256]::Create()", script)
+        self.assertIn("$actual = Get-Sha256Hex -Path $path", script)
         self.assertIn("assets/ffmpeg.exe", script)
         self.assertIn("GIT_LFS_VERIFY=PASS", script)
 
