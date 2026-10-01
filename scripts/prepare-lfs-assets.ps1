@@ -36,6 +36,25 @@ function Test-LfsPointerFile {
     }
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # This release gate is deliberately launched in a fresh Windows
+    # PowerShell host.  Do not depend on cmdlet autoload there: some hardened
+    # hosts expose the .NET cryptography API while `Get-FileHash` is not made
+    # available.  Hash the stream directly so the LFS integrity contract is
+    # the same in interactive and release-gate processes.
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $hash = $algorithm.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($hash) -replace '-', '').ToUpperInvariant()
+    } finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 Invoke-GitLfs -Arguments @('version') | Out-Null
 Invoke-GitLfs -Arguments @('pull') | Out-Null
 Invoke-GitLfs -Arguments @('fsck') | Out-Null
@@ -68,7 +87,7 @@ foreach ($entry in $entries) {
     if (Test-LfsPointerFile -Path $path) {
         throw "Git LFS payload is still a pointer: $($entry.RelativePath)"
     }
-    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $actual = Get-Sha256Hex -Path $path
     if ($actual -ne $entry.Oid) {
         throw "Git LFS payload hash mismatch: $($entry.RelativePath); expected $($entry.Oid); found $actual"
     }
