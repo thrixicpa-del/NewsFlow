@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { Cutter, fallback, Footage } from "../../App";
 import { describe, expect, it, vi } from "vitest";
 
@@ -60,12 +60,12 @@ describe("Media ingest workspaces", () => {
       />,
     );
 
-    screen.getByRole("button", { name: "Проверить English/Latin текст" }).click();
-
-    await waitFor(() => {
-      expect(command).toHaveBeenCalledWith("index-footage", { screenText: true });
+    await act(async () => {
+      screen.getByRole("button", { name: "Проверить English/Latin текст" }).click();
     });
-    expect(screen.getByText(/Проверка English\/Latin текста завершена/i)).toBeTruthy();
+
+    expect(command).toHaveBeenCalledWith("index-footage", { screenText: true });
+    expect(await screen.findByText(/Проверка English\/Latin текста завершена/i)).toBeTruthy();
   });
 
   it("does not describe an unavailable local text model as an up-to-date check", async () => {
