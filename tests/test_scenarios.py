@@ -304,6 +304,68 @@ class ScenarioGenerationTests(unittest.TestCase):
         self.assertEqual(jobs[0].request.production_item_id, production_item_id)
         self.assertEqual(result["covers"][0]["production_item_id"], production_item_id)
 
+    def test_manual_scenario_import_persists_cover_scope_for_the_next_covers_action(self):
+        """Imported ready scripts must be selectable by the next Covers command.
+
+        The import snapshot can project new cover rows in memory, but the
+        following bridge command deliberately starts from durable state.  It
+        must therefore observe the same current rows for both an all-items
+        action and a durable-ID selected action.
+        """
+        entries = [
+            {"title": "Импортированный сценарий A", "text": "Готовый текст A."},
+            {"title": "Импортированный сценарий B", "text": "Готовый текст B."},
+        ]
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {
+                    "NEWSFLOW_TEST_MODE": "1",
+                    "NEWSFLOW_TEST_ROOT": directory,
+                    "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(directory) / "production"),
+                    "LOCALAPPDATA": directory,
+                }), \
+                patch("scriptor.config._newsflow_auth_library_candidates", return_value=[]), \
+                patch("scriptor.config.storyflow_documents_root", return_value=Path(directory) / "media"):
+            result = bridge.import_manual_scenarios({"items": entries})
+            settings = load_settings()
+            production_item_ids = [cover["production_item_id"] for cover in result["covers"]]
+            all_rows = bridge._current_cover_generation_scope(
+                settings, {}, "Выберите сценарии для текстов обложки",
+            )
+            selected_rows = bridge._current_cover_generation_scope(
+                settings,
+                {"indices": [0, 1], "productionItemIds": production_item_ids},
+                "Выберите сценарии для текстов обложки",
+            )
+
+        self.assertEqual([item["title"] for _index, item in all_rows], [entry["title"] for entry in entries])
+        self.assertEqual([item["title"] for _index, item in selected_rows], [entry["title"] for entry in entries])
+
+    def test_pasted_ready_scenario_persists_cover_scope_for_the_next_covers_action(self):
+        """The manual Add flow has the same durable Covers contract as TXT."""
+        title = "Вставленный готовый сценарий"
+        text = "Готовый текст, добавленный пользователем вручную."
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {
+                    "NEWSFLOW_TEST_MODE": "1",
+                    "NEWSFLOW_TEST_ROOT": directory,
+                    "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(directory) / "production"),
+                    "LOCALAPPDATA": directory,
+                }), \
+                patch("scriptor.config._newsflow_auth_library_candidates", return_value=[]), \
+                patch("scriptor.config.storyflow_documents_root", return_value=Path(directory) / "media"):
+            result = bridge.import_manual_scenario({"title": title, "text": text})
+            settings = load_settings()
+            production_item_id = result["covers"][0]["production_item_id"]
+            selected_rows = bridge._current_cover_generation_scope(
+                settings,
+                {"indices": [0], "productionItemIds": [production_item_id]},
+                "Выберите сценарии для промптов обложек",
+            )
+
+        self.assertEqual([(index, item["title"]) for index, item in selected_rows], [(0, title)])
+
     def test_template_length_contract_is_persisted_and_used_by_generation(self):
         template = "Напиши сценарий по теме {title}."
         settings = Settings(scenario_provider="openai", template=template, prompt_ranges=[])
