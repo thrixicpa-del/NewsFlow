@@ -1,10 +1,10 @@
 {
   "format": 1,
   "appVersion": "2.1.152",
-  "coreRevision": "core-bin-2.1.152-observability-r31",
-  "coreExeSha256": "c12ff1a8d3b91296a1def002ed052272fed8442e1408cf810b0b475579fb4df2",
+  "coreRevision": "core-bin-2.1.152-observability-r33",
+  "coreExeSha256": "419f0aee379c3e843d9a7878de318aea8eac4197e8a6d439ed0fbe41fa51e5f4",
   "coreExeSize": 34344082,
-  "builtFromGitSha": "abb7480662eb5b32223a1daab32da8c05349db5c",
+  "builtFromGitSha": "76a8ddbec3d6d9e33c7080915a2d83c325162e2a",
   "sourceGitBlobs": {
     "scriptor/bridge.py": "aff6d4f3a0894d9b8e0eb1bb6c31d99e5f6ea178",
     "scriptor/ai_index.py": "c9da2a83ea5724eaa28ee8401b1eb303e597cd1f",
