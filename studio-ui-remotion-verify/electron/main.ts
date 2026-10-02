@@ -8,6 +8,7 @@ import { ensureTclRuntime } from './core-runtime.js';
 import { environmentWindowTitle, isolatedElectronUserDataRoot } from './test-user-data.js';
 import { ALLOWED_CORE_COMMANDS } from './allowed-core-commands.js';
 import { readReadyScenarioFiles } from './scenario-import.js';
+import { readStrictUtf8CoverText } from './strict-text-file.js';
 
 const isolatedUserDataRoot = isolatedElectronUserDataRoot(process.env);
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
@@ -350,6 +351,14 @@ handleTrusted('newsflow:choose-prompt-text', async () => {
   const text = readFileSync(file, 'utf8');
   if (text.length > 1_000_000) throw new Error('Файл промпта больше 1 МБ. Разделите его на несколько TXT-файлов.');
   return text;
+});
+handleTrusted('newsflow:choose-cover-text-triples', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'Тексты обложек TXT', extensions: ['txt'] }],
+  });
+  const file = result.canceled ? '' : result.filePaths[0] || '';
+  return file ? readStrictUtf8CoverText(file) : '';
 });
 handleTrusted('newsflow:choose-scenario-texts', async () => {
   const result = await dialog.showOpenDialog({

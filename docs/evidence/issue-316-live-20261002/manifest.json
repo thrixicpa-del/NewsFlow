@@ -1,0 +1,9 @@
+{
+  "source_sha": "a2982ba58efb4cd0bc9d7ad795b7067cf40ecaed",
+  "configured_model": "gpt-5.4-mini",
+  "max_http_attempts": 24,
+  "provider": "OpenAI",
+  "input_provenance": "Synthetic diagnostic fixtures, not verified real news",
+  "run_id": "issue316-cover-live-20261002",
+  "secrets_included": false
+}

@@ -9,6 +9,48 @@ const coverStyles = readFileSync(resolve(process.cwd(), "src/ui/covers.css"), "u
 const responsiveStyles = readFileSync(resolve(process.cwd(), "src/ui/layout/app-shell-responsive.css"), "utf8");
 
 describe("Covers Light view", () => {
+  it("imports complete manual cover-text triples through one chooser and one durable command", async () => {
+    let finishChoose: (value: string) => void = () => undefined;
+    const chooseCoverTextTriples = vi.fn(() => new Promise<string>((resolve) => {
+      finishChoose = resolve;
+    }));
+    Object.assign(window, { newsflowDesktop: { chooseCoverTextTriples } });
+    const command = vi.fn(async () => fallback);
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    const button = await screen.findByRole("button", { name: "Импортировать тексты TXT" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(chooseCoverTextTriples).toHaveBeenCalledTimes(1);
+
+    finishChoose("Тема\nМОЙ HEADLINE\nМОЙ SUBHEADLINE");
+    await waitFor(() => expect(command).toHaveBeenCalledWith("import-cover-text-triples", {
+      text: "Тема\nМОЙ HEADLINE\nМОЙ SUBHEADLINE",
+    }));
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+  });
+
+  it("treats cancellation as a no-op and keeps binary TXT errors out of the core command", async () => {
+    const chooseCoverTextTriples = vi.fn()
+      .mockResolvedValueOnce("")
+      .mockRejectedValueOnce(new Error("TXT содержит недопустимые управляющие символы."));
+    Object.assign(window, { newsflowDesktop: { chooseCoverTextTriples } });
+    const command = vi.fn();
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    const button = await screen.findByRole("button", { name: "Импортировать тексты TXT" });
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+    expect(command).not.toHaveBeenCalled();
+
+    fireEvent.click(button);
+    expect((await screen.findByRole("alert")).textContent).toContain("недопустимые управляющие символы");
+    expect(command).not.toHaveBeenCalled();
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+  });
+
   it("preserves durable identities in paired cover-word payloads", () => {
     expect(coverWordPairGenerationPayload({
       indices: [7],

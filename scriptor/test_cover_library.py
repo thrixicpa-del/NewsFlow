@@ -61,7 +61,7 @@ class CoverLibraryTests(unittest.TestCase):
             async def generate(self, prompt, before_request=None):
                 if before_request:
                     await before_request()
-                return "Тарифы бьют по импорту" if "УЖЕ УТВЕРЖДЁННЫЙ HEADLINE" in prompt else "ТРАМП ДАВИТ"
+                return "Импорт: что известно сейчас" if "УЖЕ УТВЕРЖДЁННЫЙ HEADLINE" in prompt else "Трамп ввёл тарифы"
 
         settings = Settings(openai_api_keys=["test"], idea_scenario_context={
             "Трамп повысил тарифы на импорт": {"id": "flow-1"},
@@ -82,9 +82,9 @@ class CoverLibraryTests(unittest.TestCase):
             bridge.generate_cover_subheadlines({"indices": [0], "productionItemIds": ["flow-1"], "provider": "agent"})
 
         generated = settings.cover_queue[0]
-        self.assertEqual(generated["cover_headline"], "ТРАМП ДАВИТ")
+        self.assertEqual(generated["cover_headline"], "Трамп ввёл тарифы")
         self.assertEqual(generated["headline_status"], "READY")
-        self.assertEqual(generated["cover_subheadline"], "Тарифы бьют по импорту")
+        self.assertEqual(generated["cover_subheadline"], "Импорт: что известно сейчас")
         self.assertEqual(generated["subheadline_status"], "READY")
         self.assertNotIn("image_prompt", generated)
         self.assertEqual(settings.cover_queue[1]["cover_headline"], "ГОТОВО")
@@ -117,7 +117,7 @@ class CoverLibraryTests(unittest.TestCase):
              patch.object(bridge, "HybridTextPool", FakeWordPool):
             bridge.generate_cover_headlines({"indices": [0], "productionItemIds": ["headline-after-sub"], "provider": "agent"})
 
-        self.assertEqual(settings.cover_queue[0]["cover_headline"], "ТРАМП ДАВИТ")
+        self.assertEqual(settings.cover_queue[0]["cover_headline"], "Трамп повысил тарифы на импорт")
         self.assertEqual(settings.cover_queue[0]["headline_status"], "READY")
 
     def test_word_engine_v2_does_not_overwrite_manual_subheadline_in_normal_batch(self):
@@ -183,8 +183,8 @@ class CoverLibraryTests(unittest.TestCase):
         self.assertEqual(item["headline_status"], "MANUAL")
         self.assertFalse(bridge._cover_word_should_generate(item, "headline"))
 
-    def test_word_engine_v2_repairs_invalid_output_twice_then_keeps_the_valid_clickable_hook(self):
-        """Two bounded repairs may recover a bad model response without changing source facts."""
+    def test_word_engine_v2_repairs_invalid_output_once_then_uses_a_grounded_fallback(self):
+        """A bounded repair failure degrades to literal source text without inventing a claim."""
         class ScriptedPool:
             def __init__(self):
                 self.responses = iter(["ВАЖНЫЕ НОВОСТИ", "ТАРИФЫ МЕНЯЮТСЯ УЖЕ СЕГОДНЯ", "ТРАМП ДАВИТ"])
@@ -207,13 +207,13 @@ class CoverLibraryTests(unittest.TestCase):
             bridge._generate_cover_word_v2(pool, "headline", item, "", structure)
         )
 
-        self.assertEqual(value, "ТРАМП ДАВИТ")
+        self.assertEqual(value, "Трамп повысил тарифы на импорт")
         self.assertTrue(validation["valid"])
-        self.assertEqual(pool.calls, 3)
-        self.assertEqual(len(history), 3)
+        self.assertEqual(pool.calls, 2)
+        self.assertEqual(len(history), 2)
 
-    def test_word_engine_v2_stops_after_two_repairs_and_does_not_create_a_fallback_phrase(self):
-        """A permanently generic model response must surface as failed after three calls."""
+    def test_word_engine_v2_stops_after_two_repairs_and_uses_a_grounded_fallback(self):
+        """A permanently generic response degrades safely to literal source text."""
         class GenericPool:
             def __init__(self):
                 self.calls = 0
@@ -225,11 +225,14 @@ class CoverLibraryTests(unittest.TestCase):
         item = {"title": "Поставки газа на рынок", "script": "Поставки газа сократились.", "production_item_id": "repair-2"}
         pool = GenericPool()
 
-        with self.assertRaisesRegex(ValueError, "NOT_GROUNDED"):
-            asyncio.run(bridge._generate_cover_word_v2(
-                pool, "headline", item, "", bridge._cover_word_structure_pair(item),
-            ))
-        self.assertEqual(pool.calls, 3)
+        value, validation, history = asyncio.run(bridge._generate_cover_word_v2(
+            pool, "headline", item, "", bridge._cover_word_structure_pair(item),
+        ))
+        self.assertEqual(value, "Поставки газа на рынок")
+        self.assertTrue(validation["valid"])
+        self.assertTrue(validation["selection_evidence"]["fallback"])
+        self.assertEqual(len(history), 2)
+        self.assertEqual(pool.calls, 2)
 
     def test_word_engine_v2_assigns_stable_and_varied_complementary_structures(self):
         """Same topic is stable, while explicit regenerate changes the compatible pair."""
@@ -286,7 +289,8 @@ class CoverLibraryTests(unittest.TestCase):
         }
 
         self.assertFalse(bridge._cover_word_should_generate(item, "headline", force=False))
-        self.assertTrue(bridge._cover_word_should_generate(item, "headline", force=True))
+        self.assertFalse(bridge._cover_word_should_generate(item, "headline", force=True))
+        self.assertTrue(bridge._cover_word_should_generate(item, "headline", replace_manual=True))
 
     def test_word_engine_v2_reads_pattern_cooldown_from_persisted_headlines(self):
         """Restarted queues lack transient signatures, so cooldown must derive them from saved words."""

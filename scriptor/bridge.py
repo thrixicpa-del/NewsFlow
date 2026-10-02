@@ -8899,10 +8899,110 @@ def _cover_word_strengthens_source(value: str, item: dict) -> bool:
     """Detect materially stronger cover claims than the source carries."""
     phrase = " ".join(str(value or "").casefold().split())
     source = " ".join(_cover_word_source_text(item).casefold().split())
+    # A universal quantifier must be supported for that object, not merely
+    # occur somewhere in a source about another object (e.g. all shops).
+    universal = r"\b(?:весь|вся|все|всё|всех|всего|всему|всю|целый|целая|целое|целые)\s+([а-яёa-z]{3,})"
+    # "всё ещё" is an aspectual expression, not a claim about all objects.
+    def affirmative_scope(text: str) -> set[str]:
+        return {match[1][:4] for match in re.finditer(universal, text)
+                if match[1] not in {"ещё", "еще"}
+                and not re.search(r"\bне\s+$", text[:match.start()])}
+
+    source_scope = affirmative_scope(source)
+    if affirmative_scope(phrase) - source_scope:
+        return True
     for output_markers, source_markers in _COVER_WORD_STRENGTHENING_RULES:
         if any(marker in phrase for marker in output_markers) and not any(
             marker in source for marker in source_markers
         ):
+            return True
+    return False
+
+
+def _cover_word_subject_state_pass(value: str, item: dict) -> bool:
+    """Conservative relation guard, not a blacklist of events or subjects.
+
+    For compact prepositional states compare their grammatical bearer with
+    the bearer of the same state in source clauses. Word presence alone is
+    insufficient: an event cannot inherit its participant's state. Unknown
+    constructions remain outside this bounded guard, not universal NLP claims.
+    """
+    text = value.casefold().rsplit(":", 1)[-1]
+    match = re.search(r"\b(под|без)\s+([а-яёa-z]{4,})", text)
+    source = ". ".join(_cover_word_source_text({key: value}).casefold()
+                       for key, value in item.items() if value and _cover_word_source_text({key: value}))
+    if not match:
+        # Exact finite predicate in the source: preserve its grammatical
+        # subject rather than promoting its object/modifier into the actor.
+        # Unresolved morphology, passive/inverted and introductory clauses
+        # stay outside this conservative local check.
+        verbs = list(re.finditer(
+            r"\b[а-яё]{3,}(?:ает|яет|еет|ует|ит|ят|ют|ил|ила|или|ал|ала|али|ыл|ыла|ыли|ется|ются)\b", text,
+        ))
+        for verb in verbs:
+            subject = re.findall(r"[а-яёa-z]{3,}", text[:verb.start()])
+            if not subject:
+                continue
+            subjects = set()
+            for clause in re.split(r"[.!?;,:—–]|\s+-\s+", source):
+                predicate = re.search(rf"\b{re.escape(verb[0])}\b", clause)
+                if not predicate:
+                    continue
+                current_object = _cover_meaningful_word_stems(text[verb.end():])
+                source_object = _cover_meaningful_word_stems(clause[predicate.end():])
+                # Different complements may describe different supported
+                # relations; only reject a demonstrable role transfer.
+                if (current_object and source_object and not current_object & source_object
+                        and subject[0][:4] not in source_object):
+                    continue
+                prefix = clause[:predicate.start()].strip()
+                if re.search(r"\b(?:после|до|из-за|когда|если|согласно|перед|при|и)\b", prefix):
+                    continue
+                words = re.findall(r"[а-яёa-z]{3,}", prefix)
+                # Attributive adjective, not a second political/person alias.
+                if len(words) > 1 and re.search(r"(?:ский|ская|ские|ской|ная|ный|ное|ные)$", words[0]):
+                    words = words[1:]
+                if words and words[0] not in {"его", "ему", "её", "это", "они", "она", "оно"}:
+                    structured_names = _cover_meaningful_word_stems(_cover_context_values(
+                        item.get("primary_entities") or item.get("primary_entity") or item.get("entities")
+                    ))
+                    if subject[0][:4] in structured_names and words[0][:4] not in _cover_word_named_source_entities(item):
+                        continue  # Anonymous source bearer with an explicit item-level name.
+                    subjects.add(words[0][:4])
+                    # An appositive name ("компания Lumira") belongs to the
+                    # same subject; never take a prepositional object as it.
+                    if not re.search(r"\b(?:на|для|от|с|у|о|об|в|по|из)\b", prefix):
+                        subjects.update(word[:4] for word in words if word[:4] in _cover_word_named_source_entities(item))
+            if subjects and subject[0][:4] not in subjects:
+                return False
+        return True
+    subject_words = re.findall(r"[а-яёa-z]{3,}", text[:match.start()])
+    if not subject_words:
+        return True
+    bearers: set[str] = set()
+    # Split before extracting the bearer; a place/event in a previous clause
+    # is not the subject of the current state. Keep genitive modifiers out.
+    for clause in re.split(r"[.!?;,:—–]|\s+-\s+", source):
+        state = re.search(rf"\b{match[1]}\s+{re.escape(match[2][:4])}[а-яёa-z]*", clause)
+        if not state:
+            continue
+        prefix = clause[:state.start()]
+        verbs = list(re.finditer(r"\b(?:отправ\w+|остав\w+|оста\w+|оказ\w+|наход\w+|попа\w+)\b", prefix))
+        words = re.findall(r"[а-яёa-z]{3,}", prefix[verbs[-1].end():] if verbs and verbs[-1][0].startswith("отправ") else prefix)
+        if words and words[0] not in {"его", "ему", "её", "это", "они", "она", "оно"}:
+            bearers.add(words[0][:4])
+        elif words and words[0] in {"его", "ему", "её"}:
+            opening = re.findall(r"[а-яёa-z]{3,}", str(item.get("script", "")).casefold().split(".", 1)[0])
+            if opening:
+                bearers.add(opening[0][:4])
+    if not bearers or subject_words[0][:4] in bearers:
+        return True
+    # An explicit pronominal continuation can retain the opening actor.
+    # Do not infer aliases from a location/event appearing anywhere in title.
+    clauses = re.split(r"[.!?;]", str(item.get("script", "")).casefold())
+    if clauses and any(re.match(r"\s*(?:его|её|он|она|они)\b", clause) for clause in clauses[1:]):
+        opening = re.findall(r"[а-яёa-z]{3,}", clauses[0])
+        if opening and opening[0][:4] == subject_words[0][:4]:
             return True
     return False
 
@@ -8936,9 +9036,18 @@ def _cover_word_editorial_evaluation(
         "реша", "соглас", "отказ", "треб", "сниж", "раст", "постав", "закры",
     }
     explicit_action_stems = ("держ",)
+    def supported_inflected_action(word: str) -> bool:
+        # оплатить/оплачивать/платить: productive prefix and т/ч alternation.
+        # This is source-dependent morphology, not a license for a familiar
+        # financial action to appear without evidence.
+        return bool(re.match(r"^(?:о|вы)?пла[тч]", word) and any(
+            re.match(r"^(?:о|вы)?пла[тч]", source_word) for source_word in source_words
+        ))
+
     unknown_action = any(
         (
             word[:4] in unknown_stems
+            and not supported_inflected_action(word)
             and (
                 word.startswith(explicit_action_stems)
                 or (
@@ -8993,7 +9102,8 @@ def _cover_word_editorial_evaluation(
     plain_language_pass = not (
         metaphorical_language or editorial_language or incomplete_action or list_like_nominal
     )
-    semantic_coherence_pass = not unknown_action and not bare_abstract_state
+    subject_state_pass = _cover_word_subject_state_pass(value, item)
+    semantic_coherence_pass = not unknown_action and not bare_abstract_state and subject_state_pass
     literal_clarity_pass = not bare_abstract_state and bool(source_matches)
     naturalness_pass = semantic_coherence_pass and literal_clarity_pass and plain_language_pass
     cliche_penalty = int(negative_example_signal) + int(
@@ -9031,6 +9141,8 @@ def _cover_word_editorial_evaluation(
     reasons: list[str] = []
     if unknown_action:
         reasons.append("unsourced_action_pairing")
+    if not subject_state_pass:
+        reasons.append("predicate_assigned_to_wrong_subject")
     if bare_abstract_state:
         reasons.append("unclear_abstract_state")
     if negative_example_signal:
@@ -9050,6 +9162,7 @@ def _cover_word_editorial_evaluation(
     return {
         "naturalness_pass": naturalness_pass,
         "semantic_coherence_pass": semantic_coherence_pass,
+        "subject_state_pass": subject_state_pass,
         "literal_clarity_pass": literal_clarity_pass,
         "plain_language_pass": plain_language_pass,
         "cliche_penalty": cliche_penalty,
@@ -9115,10 +9228,10 @@ def _validate_cover_word(kind: str, value: str, item: dict, *, headline: str = "
         result.update(reason_code="GENERIC_ONLY", reason_detail="Фраза состоит только из общего кликбейта")
         return result
     source = _cover_word_source_text(item).casefold()
-    if kind == "headline" and _cover_word_strengthens_source(raw, item):
+    if _cover_word_strengthens_source(raw, item):
         result.update(
             reason_code="CLAIM_STRENGTH_ERROR",
-            reason_detail="Headline усиливает исходный факт более жёстким действием, которого нет в теме или контексте",
+            reason_detail="Строка усиливает действие или расширяет охват факта без подтверждения в теме или контексте",
         )
         return result
     if (any(token in raw.casefold() for token in _COVER_WORD_ASSERTIVE_TERMS)
@@ -9434,13 +9547,61 @@ def _cover_word_editorial_selection_score(
     emotion = int(evaluation.get("emotion_score", 0) or 0)
     directness = int(evaluation.get("directness_score", 0) or 0)
     literalness = int(evaluation.get("literalness_score", 0) or 0)
-    # Both modes prefer plain, factual, direct copy over mere shortness.
-    # TABLOID then promotes the strongest supported emotional/hook angle.
-    return (
-        (natural, factual, directness, emotion, hook, specificity, literalness, -len(value))
-        if tabloid_mode else
-        (natural, factual, directness, literalness, specificity, hook, emotion, -len(value))
+    # Safety and literal source support precede the style preference in BOTH
+    # modes. Emotion cannot buy weaker grounding or semantic coherence.
+    quality = (
+        factual, int(bool(evaluation.get("grounding_pass"))), natural,
+        int(bool(evaluation.get("semantic_coherence_pass"))),
+        int(bool(evaluation.get("literal_clarity_pass"))), specificity, literalness,
     )
+    return (
+        (*quality, hook, emotion, directness, -len(value))
+        if tabloid_mode else
+        (*quality, directness, -len(value))
+    )
+
+
+def _select_cover_word_candidate(
+    accepted: list[tuple[str, dict[str, object]]], *, tabloid_mode: bool,
+) -> tuple[str, dict[str, object]]:
+    """Compare TABLOID to the safe STANDARD baseline of this same batch.
+
+    No extra generation. A material gain requires at least one rubric point
+    in hook/emotion/directness, with no loss in the other two or any safety
+    score. A different spelling alone is never advertised as enhancement.
+    """
+    baseline = max(accepted, key=lambda pair: _cover_word_editorial_selection_score(
+        pair[0], pair[1], tabloid_mode=False,
+    ))
+    baseline_eval = baseline[1]["editorial_evaluation"]
+    strength_keys = ("hook_score", "emotion_score", "directness_score")
+    quality_keys = ("factual_pass", "grounding_pass", "naturalness_pass", "semantic_coherence_pass",
+                    "literal_clarity_pass", "specificity_score", "literalness_score")
+    stronger = [pair for pair in accepted if pair[0] != baseline[0]
+                and all(pair[1]["editorial_evaluation"].get(key, 0) >= baseline_eval.get(key, 0)
+                        for key in (*quality_keys, *strength_keys))
+                and any(pair[1]["editorial_evaluation"].get(key, 0) > baseline_eval.get(key, 0)
+                        for key in strength_keys)]
+    selected = max(stronger, key=lambda pair: _cover_word_editorial_selection_score(
+        pair[0], pair[1], tabloid_mode=True,
+    )) if tabloid_mode and stronger else baseline
+    value, validation = selected
+    validation = dict(validation)
+    evidence = dict(validation["editorial_evaluation"])
+    differentiated = bool(tabloid_mode and stronger)
+    validation.update(
+        selection_reason=("materially stronger grounded tabloid hook than safe standard baseline" if differentiated
+                          else "tabloid differentiation unavailable; safe standard result" if tabloid_mode
+                          else "best direct standard candidate after editorial quality evaluation"),
+        selection_evidence={
+            "style": "TABLOID" if tabloid_mode else "STANDARD",
+            **{key: evidence.get(key, 0) for key in (*quality_keys, *strength_keys)},
+            "tabloid_differentiation": "AVAILABLE" if differentiated else "UNAVAILABLE" if tabloid_mode else "NOT_REQUESTED",
+            "degraded_result": bool(tabloid_mode and not differentiated),
+            "standard_baseline": baseline[0],
+        },
+    )
+    return value, validation
 
 
 def _cover_word_source_fallback(
@@ -9530,29 +9691,8 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
             if validation["valid"]:
                 accepted.append((candidate, validation))
         if accepted:
-            value, validation = max(
-                accepted,
-                key=lambda pair: _cover_word_editorial_selection_score(
-                    pair[0], pair[1], tabloid_mode=tabloid_mode,
-                ),
-            )
-            validation = dict(validation)
-            evidence = dict(validation.get("editorial_evaluation", {}))
-            validation.update(
-                candidate_count=len(_cover_word_candidates(raw, kind)),
-                selection_reason=("best supported tabloid hook after editorial quality evaluation"
-                                  if tabloid_mode else "best direct standard candidate after editorial quality evaluation"),
-                selection_evidence={
-                    "style": "TABLOID" if tabloid_mode else "STANDARD",
-                    "naturalness_pass": bool(evidence.get("naturalness_pass")),
-                    "specificity_score": int(evidence.get("specificity_score", 0) or 0),
-                    "hook_score": int(evidence.get("hook_score", 0) or 0),
-                    "emotion_score": int(evidence.get("emotion_score", 0) or 0),
-                    "directness_score": int(evidence.get("directness_score", 0) or 0),
-                    "literalness_score": int(evidence.get("literalness_score", 0) or 0),
-                    "factual_pass": bool(evidence.get("factual_pass")),
-                },
-            )
+            value, validation = _select_cover_word_candidate(accepted, tabloid_mode=tabloid_mode)
+            validation["candidate_count"] = len(_cover_word_candidates(raw, kind))
             return value, validation, attempts
         if repair_index == 1:
             break
@@ -9572,10 +9712,13 @@ async def _generate_cover_word_v2(pool: HybridTextPool, kind: str, item: dict, t
         evidence = dict(validation.get("editorial_evaluation", {}))
         validation.update(
             candidate_count=len(attempts),
-            selection_reason="safe grounded local fallback after bounded editorial repairs",
+            selection_reason=("safe grounded local fallback after bounded editorial repairs"
+                              + ("; tabloid differentiation unavailable" if tabloid_mode else "")),
             selection_evidence={
                 "style": "TABLOID" if tabloid_mode else "STANDARD",
                 "fallback": True,
+                "tabloid_differentiation": "UNAVAILABLE" if tabloid_mode else "NOT_REQUESTED",
+                "degraded_result": tabloid_mode,
                 "naturalness_pass": bool(evidence.get("naturalness_pass")),
                 "specificity_score": int(evidence.get("specificity_score", 0) or 0),
                 "hook_score": int(evidence.get("hook_score", 0) or 0),
@@ -10070,6 +10213,102 @@ def import_cover_headlines(payload: dict) -> dict:
     _save_cover_state(settings)
     return {**snapshot(), "operationResult": {"kind": "cover-own-headlines", "count": applied,
                                                 "message": f"Ваши слова загружены в темы: {applied}."}}
+
+
+_COVER_TEXT_IMPORT_LINE_LIMIT = 4_096
+
+
+def _normalise_cover_text_import_title(value: object) -> str:
+    """Technical-only identity key for an imported title, never a fuzzy match."""
+    return " ".join(str(value or "").removeprefix("\ufeff").split())
+
+
+def _parse_cover_text_triples(value: object) -> list[tuple[str, str, str]]:
+    """Parse the documented title/headline/subheadline TXT triples exactly."""
+    raw = str(value or "").removeprefix("\ufeff")
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("INVALID_TRIPLES: TXT не содержит непустых строк")
+    if len(lines) % 3:
+        raise ValueError("INVALID_TRIPLES: после удаления пустых строк число строк должно быть кратно 3")
+    records: list[tuple[str, str, str]] = []
+    seen: dict[str, tuple[str, str]] = {}
+    for offset in range(0, len(lines), 3):
+        title, headline, subheadline = lines[offset:offset + 3]
+        normalized_title = _normalise_cover_text_import_title(title)
+        if not normalized_title or not headline or not subheadline:
+            raise ValueError("INVALID_TRIPLES: тема, headline и subheadline должны быть непустыми")
+        if max(len(headline), len(subheadline)) > _COVER_TEXT_IMPORT_LINE_LIMIT:
+            raise ValueError(f"TEXT_TOO_LONG: каждая строка headline/subheadline не больше {_COVER_TEXT_IMPORT_LINE_LIMIT} символов")
+        prior = seen.get(normalized_title)
+        current = (headline, subheadline)
+        if prior is not None:
+            if prior != current:
+                raise ValueError(f"CONFLICTING_DUPLICATE: тема «{title}» встречается с разными текстами")
+            continue
+        seen[normalized_title] = current
+        records.append((normalized_title, headline, subheadline))
+    return records
+
+
+def import_cover_text_triples(payload: dict) -> dict:
+    """Atomically attach user-owned cover text to current rows by durable ID."""
+    records = _parse_cover_text_triples(payload.get("text", ""))
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    by_title: dict[str, list[str]] = {}
+    by_production_item_id: dict[str, list[dict]] = {}
+    for item in settings.cover_queue:
+        if not isinstance(item, dict):
+            continue
+        normalized_title = _normalise_cover_text_import_title(item.get("title"))
+        production_item_id = str(item.get("production_item_id") or item.get("productionItemId") or "").strip()
+        if normalized_title:
+            # Resolve identity first.  Nothing below relies on a queue index or
+            # the row's original location, so sorting/filtering cannot redirect
+            # a manual import to a neighbouring topic.
+            by_title.setdefault(normalized_title, []).append(production_item_id)
+        if production_item_id:
+            by_production_item_id.setdefault(production_item_id, []).append(item)
+
+    resolved: list[tuple[str, str, str]] = []
+    for normalized_title, headline, subheadline in records:
+        candidates = by_title.get(normalized_title, [])
+        if not candidates:
+            raise ValueError(f"UNKNOWN_TOPIC: тема «{normalized_title}» отсутствует в текущей очереди обложек")
+        if len(candidates) != 1:
+            raise ValueError(f"AMBIGUOUS_TOPIC: тема «{normalized_title}» соответствует нескольким строкам обложек")
+        production_item_id = candidates[0]
+        if not production_item_id:
+            raise ValueError(f"MISSING_PRODUCTION_ITEM_ID: у темы «{normalized_title}» нет durable ProductionItem ID")
+        item_candidates = by_production_item_id.get(production_item_id, [])
+        if not item_candidates:
+            raise ValueError(f"MISSING_PRODUCTION_ITEM_ID: ProductionItem ID «{production_item_id}» отсутствует в текущей очереди")
+        if len(item_candidates) != 1:
+            raise ValueError(f"AMBIGUOUS_PRODUCTION_ITEM_ID: ProductionItem ID «{production_item_id}» встречается в нескольких строках")
+        resolved.append((production_item_id, headline, subheadline))
+
+    # All validation above completes before the first mutation or persistence.
+    for production_item_id, headline, subheadline in resolved:
+        item = by_production_item_id[production_item_id][0]
+        item.update(
+            cover_headline=headline,
+            headline_source="MANUAL",
+            headline_status="MANUAL",
+            headline_error="",
+            cover_subheadline=subheadline,
+            subheadline_source="MANUAL",
+            subheadline_status="MANUAL",
+            subheadline_error="",
+        )
+        _mark_cover_prompt_stale_for_current_text(item)
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-text-triples-import",
+        "count": len(resolved),
+        "message": f"Ручные headline и subheadline импортированы: {len(resolved)}.",
+        "productionItemIds": [production_item_id for production_item_id, _headline, _subheadline in resolved],
+    }}
 
 
 def remove_cover_headlines(payload: dict) -> dict:
@@ -19746,6 +19985,8 @@ def main() -> None:
             result = remove_cover_headline_suggestions(payload if isinstance(payload, dict) else {})
         elif command == "import-cover-headlines":
             result = import_cover_headlines(payload if isinstance(payload, dict) else {})
+        elif command == "import-cover-text-triples":
+            result = import_cover_text_triples(payload if isinstance(payload, dict) else {})
         elif command == "remove-cover-headlines":
             result = remove_cover_headlines(payload if isinstance(payload, dict) else {})
         elif command == "import-cover-topics":

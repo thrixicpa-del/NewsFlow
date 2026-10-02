@@ -43,6 +43,9 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "generate-voice-range": CommandRegistration("generate_voice_range", "scriptor.tts_ranges", _NO_LEGACY),
     "rebuild-voice-map": CommandRegistration("rebuild_voice_map", "scriptor.voice_map", _NO_LEGACY),
     "generate-covers": CommandRegistration("generate_covers", "scriptor.thumbnail_prompt_v2", _NO_LEGACY),
+    "import-cover-text-triples": CommandRegistration(
+        "import_cover_text_triples", "scriptor.bridge manual cover-text import", _NO_LEGACY,
+    ),
     "run-montage-queue": CommandRegistration("run_montage_queue", "scriptor.timeline canonical montage path", _NO_LEGACY),
     "package-outputs": CommandRegistration("package_outputs", "scriptor.bridge output packager", _NO_LEGACY),
     "export-results-batch": CommandRegistration("export_results_batch", "scriptor.bridge batch results exporter", _NO_LEGACY),
