@@ -2516,7 +2516,7 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             "naturalness_pass", "semantic_coherence_pass", "literal_clarity_pass", "plain_language_pass",
             "cliche_penalty", "editorial_plausibility_pass", "specificity_score", "hook_score",
             "emotion_score", "directness_score", "literalness_score", "factual_pass", "grounding_pass",
-            "duplicate_pass", "quality_reasons",
+            "duplicate_pass", "quality_reasons", "subject_state_pass",
         })
 
     def test_editorial_quality_selects_strong_natural_candidate_from_safe_batch(self):
@@ -2627,11 +2627,11 @@ class CoverHeadlineGuardTests(unittest.TestCase):
     def test_standard_and_tabloid_select_different_safe_editorial_strength(self):
         from scriptor import bridge
 
-        item = {"title": "Трамп повысил тарифы для Китая: торговый спор усилился"}
+        item = {"title": "Альфа вернула файл и повысила цены"}
 
         async def generate(_prompt, **_kwargs):
             return json.dumps({"candidates": [
-                "Трамп повысил тарифы", "Трамп усилил торговый спор",
+                "Альфа вернула файл", "Альфа повысила цены",
             ]}, ensure_ascii=False)
 
         standard, standard_evidence, _ = asyncio.run(bridge._generate_cover_word_v2(
@@ -2643,8 +2643,9 @@ class CoverHeadlineGuardTests(unittest.TestCase):
             tabloid_mode=True,
         ))
 
-        self.assertEqual(standard, "Трамп повысил тарифы")
-        self.assertEqual(tabloid, "Трамп усилил торговый спор")
+        self.assertEqual(standard, "Альфа вернула файл")
+        self.assertEqual(tabloid, "Альфа повысила цены")
+        self.assertEqual(tabloid_evidence["selection_evidence"]["tabloid_differentiation"], "AVAILABLE")
         self.assertLess(
             standard_evidence["editorial_evaluation"]["hook_score"],
             tabloid_evidence["editorial_evaluation"]["hook_score"],
