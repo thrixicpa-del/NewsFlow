@@ -145,6 +145,7 @@ interface Window {
     snapshot: () => Promise<NewsFlowSnapshot>;
     footageIndexStatus: () => Promise<NonNullable<NewsFlowSnapshot['footageIndex']['status']>>;
     saveSettings: (patch: unknown) => Promise<NewsFlowSnapshot>;
+    revealApiKey: (input: { kind: string; index: number; fingerprint: string }) => Promise<{ label: string; secret: string; revision: string }>;
     command: <K extends import("./contracts/newsflowCommands").NewsFlowCommand>(
       command: K,
       payload?: import("./contracts/newsflowCommands").CommandRequest<K>,

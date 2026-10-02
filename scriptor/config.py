@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -1374,6 +1375,12 @@ def load_settings() -> Settings:
          settings.voice_default_profile_id, _changed) = migrate_voice_range_settings(
             settings.voice_profiles, settings.voice_ranges, settings.voice_default_profile_id,
         )
+        # Memory-only baseline: an old worker must not resurrect a replaced key.
+        settings._observed_api_keys = {
+            name: data.get(name, []) for name in _API_KEY_FIELDS
+        }
+        settings._observed_youtube_key = data.get("youtube_api_key_protected", "")
+        settings._observed_cover_key_labels = list(settings.cover_selected_key_labels)
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
@@ -1431,12 +1438,29 @@ def _api_key_record_identity(record: dict, position: int) -> str:
     return f"fallback:{label}:{protected or position}"
 
 
-def _merge_api_key_records(persisted: object, incoming: object) -> list[dict]:
+_API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
+                   "lumean_api_keys", "voicegen_api_keys", "wproject_api_keys")
+
+
+def _merge_api_key_records(persisted: object, incoming: object, observed: object = None) -> list[dict]:
     """Keep newly saved API keys when an older worker writes its snapshot."""
     disk_rows = [dict(item) for item in (persisted or []) if isinstance(item, dict)] \
         if isinstance(persisted, list) else []
     memory_rows = [dict(item) for item in (incoming or []) if isinstance(item, dict)] \
         if isinstance(incoming, list) else []
+    if isinstance(observed, list):
+        # Rows are append-only; rotation preserves positions even for duplicate
+        # secrets. Compare each loaded row, not a set of secret identities.
+        for index, item in enumerate(memory_rows):
+            if index >= len(observed) or index >= len(disk_rows) or not isinstance(observed[index], dict):
+                continue
+            baseline = observed[index]
+            disk = disk_rows[index]
+            same_loaded_secret = _api_key_record_identity(item, index) == _api_key_record_identity(baseline, index)
+            disk_changed = (_api_key_record_identity(disk, index) != _api_key_record_identity(baseline, index)
+                            or disk.get("label") != baseline.get("label"))
+            if same_loaded_secret and disk_changed:
+                memory_rows[index] = disk
     if not disk_rows:
         return memory_rows
     if not memory_rows:
@@ -1845,6 +1869,12 @@ def save_settings(settings: Settings):
         else:
             raw_on_disk = ""
             on_disk = {}
+        replacement = getattr(settings, "_api_key_replacement", None)
+        if replacement:
+            # A credential edit is a narrow mutation, not a stale whole-profile
+            # save. Start from the current locked disk snapshot so concurrent
+            # settings changes and other credential selections survive.
+            data = dict(on_disk)
         disk_generation = max(0, int(on_disk.get("production_reset_generation", 0) or 0))
         incoming_generation = max(0, int(data.get("production_reset_generation", 0) or 0))
         stale_release_snapshot = incoming_generation < disk_generation
@@ -1869,11 +1899,49 @@ def save_settings(settings: Settings):
                     on_disk.get(key_name), data.get(key_name),
                     allow_empty=key_name in allowed_empty_fields,
                 )
-        for key_name in (
-            "cover_api_keys", "openai_api_keys", "secret_voicer_keys",
-            "lumean_api_keys", "voicegen_api_keys", "wproject_api_keys",
-        ):
-            data[key_name] = _merge_api_key_records(on_disk.get(key_name), data.get(key_name))
+        for key_name in _API_KEY_FIELDS:
+            if replacement and replacement["field"] == key_name:
+                rows = [dict(row) for row in on_disk.get(key_name, [])]
+                index = replacement["index"]
+                if not 0 <= index < len(rows):
+                    raise ValueError("Ключ изменён. Обновите список и откройте его заново.")
+                old_secret = unprotect(rows[index].get("secret_protected", ""))
+                old_label = str(rows[index].get("label", ""))
+                revision = hashlib.sha256(f"{old_secret}\0{old_label}".encode()).hexdigest()
+                if revision != replacement["revision"]:
+                    raise ValueError("Ключ изменён. Обновите список и откройте его заново.")
+                rows[index]["secret_protected"] = protect(replacement["secret"])
+                rows[index]["label"] = replacement["label"]
+                data[key_name] = rows
+                if key_name == "cover_api_keys":
+                    selected = list(on_disk.get("cover_selected_key_labels", []))
+                    if old_label in selected:
+                        still_used = any(row.get("label") == old_label for row in rows)
+                        data["cover_selected_key_labels"] = list(dict.fromkeys([
+                            *[value for value in selected if value != old_label or still_used],
+                            replacement["label"],
+                        ]))
+            else:
+                data[key_name] = _merge_api_key_records(
+                    on_disk.get(key_name), data.get(key_name),
+                    getattr(settings, "_observed_api_keys", {}).get(key_name),
+                )
+        if replacement and replacement["field"] == "youtube_api_key_protected":
+            old_secret = unprotect(on_disk.get("youtube_api_key_protected", ""))
+            revision = hashlib.sha256(f"{old_secret}\0YouTube Data API".encode()).hexdigest()
+            if revision != replacement["revision"]:
+                raise ValueError("Ключ изменён. Обновите список и откройте его заново.")
+            data["youtube_api_key_protected"] = protect(replacement["secret"])
+            data["youtube_api_enabled"] = on_disk.get("youtube_api_enabled", True)
+        elif hasattr(settings, "_observed_youtube_key"):
+            observed = unprotect(settings._observed_youtube_key)
+            disk_secret = unprotect(on_disk.get("youtube_api_key_protected", ""))
+            if settings.youtube_api_key == observed and disk_secret != observed:
+                data["youtube_api_key_protected"] = on_disk.get("youtube_api_key_protected", "")
+                data["youtube_api_enabled"] = on_disk.get("youtube_api_enabled", True)
+        if (not replacement and hasattr(settings, "_observed_cover_key_labels")
+                and settings.cover_selected_key_labels == settings._observed_cover_key_labels):
+            data["cover_selected_key_labels"] = on_disk.get("cover_selected_key_labels", [])
         tombstones = {
             str(value).strip()
             for value in [*(on_disk.get("cover_queue_tombstones") or []), *(data.get("cover_queue_tombstones") or [])]

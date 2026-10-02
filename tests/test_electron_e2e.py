@@ -174,6 +174,46 @@ class ElectronE2ESmokeTests(unittest.TestCase):
         persisted = json.loads(settings.read_text(encoding="utf-8"))
         self.assertEqual(template.strip(), persisted["template"])
 
+    def test_api_key_edit_reveal_and_reload_through_real_ui_ipc_storage(self):
+        """Synthetic secrets cross the real source runtime; no providers invoked."""
+        if os.environ.get("NEWSFLOW_E2E_TARGET", "source") != "source":
+            self.skipTest("new credential command requires updated source runtime")
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import expect, sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            page.get_by_role("button", name="НАСТРОЙКИ", exact=True).click()
+            page.get_by_role("button", name="API-ключи", exact=True).click()
+            page.get_by_role("button", name="Добавить ключ", exact=True).click()
+            page.get_by_label("Название ключа", exact=True).fill("E2E synthetic")
+            page.get_by_label("API-ключ", exact=True).fill("e2e-synthetic-old")
+            page.get_by_role("button", name="Сохранить ключ", exact=True).click()
+            page.get_by_role("button", name="Редактировать ключ E2E synthetic", exact=True).click()
+            expect(page.get_by_label("API-ключ", exact=True)).to_have_value("e2e-synthetic-old")
+            self.assertEqual(page.get_by_label("API-ключ", exact=True).get_attribute("type"), "password")
+            page.get_by_role("button", name="Показать ключ", exact=True).click()
+            self.assertEqual(page.get_by_label("API-ключ", exact=True).get_attribute("type"), "text")
+            page.get_by_label("API-ключ", exact=True).fill("e2e-synthetic-new")
+            page.get_by_label("Название ключа", exact=True).fill("E2E updated")
+            page.get_by_role("button", name="Сохранить ключ", exact=True).click()
+            expect(page.get_by_label("API-ключ", exact=True)).to_have_count(0)
+            page.reload()
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            if page.get_by_role("button", name="API-ключи", exact=True).count() == 0:
+                page.get_by_role("button", name="НАСТРОЙКИ", exact=True).click()
+            page.get_by_role("button", name="API-ключи", exact=True).click()
+            page.get_by_role("button", name="Редактировать ключ E2E updated", exact=True).click()
+            expect(page.get_by_label("API-ключ", exact=True)).to_have_value("e2e-synthetic-new")
+            safe = page.evaluate("async () => JSON.stringify(await window.newsflowDesktop.snapshot())")
+            self.assertNotIn("e2e-synthetic-new", safe)
+            self.assertNotIn("e2e-synthetic-old", safe)
+            page.get_by_role("button", name="Отмена", exact=True).click()
+            browser.close()
+
     def test_screen_text_maintenance_round_trip_does_not_require_footage_roots(self):
         """The existing-vector maintenance action remains safe for an empty library."""
         self._launch()
