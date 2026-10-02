@@ -10215,6 +10215,102 @@ def import_cover_headlines(payload: dict) -> dict:
                                                 "message": f"Ваши слова загружены в темы: {applied}."}}
 
 
+_COVER_TEXT_IMPORT_LINE_LIMIT = 4_096
+
+
+def _normalise_cover_text_import_title(value: object) -> str:
+    """Technical-only identity key for an imported title, never a fuzzy match."""
+    return " ".join(str(value or "").removeprefix("\ufeff").split())
+
+
+def _parse_cover_text_triples(value: object) -> list[tuple[str, str, str]]:
+    """Parse the documented title/headline/subheadline TXT triples exactly."""
+    raw = str(value or "").removeprefix("\ufeff")
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("INVALID_TRIPLES: TXT не содержит непустых строк")
+    if len(lines) % 3:
+        raise ValueError("INVALID_TRIPLES: после удаления пустых строк число строк должно быть кратно 3")
+    records: list[tuple[str, str, str]] = []
+    seen: dict[str, tuple[str, str]] = {}
+    for offset in range(0, len(lines), 3):
+        title, headline, subheadline = lines[offset:offset + 3]
+        normalized_title = _normalise_cover_text_import_title(title)
+        if not normalized_title or not headline or not subheadline:
+            raise ValueError("INVALID_TRIPLES: тема, headline и subheadline должны быть непустыми")
+        if max(len(headline), len(subheadline)) > _COVER_TEXT_IMPORT_LINE_LIMIT:
+            raise ValueError(f"TEXT_TOO_LONG: каждая строка headline/subheadline не больше {_COVER_TEXT_IMPORT_LINE_LIMIT} символов")
+        prior = seen.get(normalized_title)
+        current = (headline, subheadline)
+        if prior is not None:
+            if prior != current:
+                raise ValueError(f"CONFLICTING_DUPLICATE: тема «{title}» встречается с разными текстами")
+            continue
+        seen[normalized_title] = current
+        records.append((normalized_title, headline, subheadline))
+    return records
+
+
+def import_cover_text_triples(payload: dict) -> dict:
+    """Atomically attach user-owned cover text to current rows by durable ID."""
+    records = _parse_cover_text_triples(payload.get("text", ""))
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    by_title: dict[str, list[str]] = {}
+    by_production_item_id: dict[str, list[dict]] = {}
+    for item in settings.cover_queue:
+        if not isinstance(item, dict):
+            continue
+        normalized_title = _normalise_cover_text_import_title(item.get("title"))
+        production_item_id = str(item.get("production_item_id") or item.get("productionItemId") or "").strip()
+        if normalized_title:
+            # Resolve identity first.  Nothing below relies on a queue index or
+            # the row's original location, so sorting/filtering cannot redirect
+            # a manual import to a neighbouring topic.
+            by_title.setdefault(normalized_title, []).append(production_item_id)
+        if production_item_id:
+            by_production_item_id.setdefault(production_item_id, []).append(item)
+
+    resolved: list[tuple[str, str, str]] = []
+    for normalized_title, headline, subheadline in records:
+        candidates = by_title.get(normalized_title, [])
+        if not candidates:
+            raise ValueError(f"UNKNOWN_TOPIC: тема «{normalized_title}» отсутствует в текущей очереди обложек")
+        if len(candidates) != 1:
+            raise ValueError(f"AMBIGUOUS_TOPIC: тема «{normalized_title}» соответствует нескольким строкам обложек")
+        production_item_id = candidates[0]
+        if not production_item_id:
+            raise ValueError(f"MISSING_PRODUCTION_ITEM_ID: у темы «{normalized_title}» нет durable ProductionItem ID")
+        item_candidates = by_production_item_id.get(production_item_id, [])
+        if not item_candidates:
+            raise ValueError(f"MISSING_PRODUCTION_ITEM_ID: ProductionItem ID «{production_item_id}» отсутствует в текущей очереди")
+        if len(item_candidates) != 1:
+            raise ValueError(f"AMBIGUOUS_PRODUCTION_ITEM_ID: ProductionItem ID «{production_item_id}» встречается в нескольких строках")
+        resolved.append((production_item_id, headline, subheadline))
+
+    # All validation above completes before the first mutation or persistence.
+    for production_item_id, headline, subheadline in resolved:
+        item = by_production_item_id[production_item_id][0]
+        item.update(
+            cover_headline=headline,
+            headline_source="MANUAL",
+            headline_status="MANUAL",
+            headline_error="",
+            cover_subheadline=subheadline,
+            subheadline_source="MANUAL",
+            subheadline_status="MANUAL",
+            subheadline_error="",
+        )
+        _mark_cover_prompt_stale_for_current_text(item)
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-text-triples-import",
+        "count": len(resolved),
+        "message": f"Ручные headline и subheadline импортированы: {len(resolved)}.",
+        "productionItemIds": [production_item_id for production_item_id, _headline, _subheadline in resolved],
+    }}
+
+
 def remove_cover_headlines(payload: dict) -> dict:
     """Clear rendered headlines, regardless of whether AI or the user wrote them."""
     settings = load_settings()
@@ -19889,6 +19985,8 @@ def main() -> None:
             result = remove_cover_headline_suggestions(payload if isinstance(payload, dict) else {})
         elif command == "import-cover-headlines":
             result = import_cover_headlines(payload if isinstance(payload, dict) else {})
+        elif command == "import-cover-text-triples":
+            result = import_cover_text_triples(payload if isinstance(payload, dict) else {})
         elif command == "remove-cover-headlines":
             result = remove_cover_headlines(payload if isinstance(payload, dict) else {})
         elif command == "import-cover-topics":

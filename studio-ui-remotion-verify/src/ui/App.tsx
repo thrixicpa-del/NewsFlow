@@ -4068,6 +4068,9 @@ export function Covers({
   );
   const [headlinePresetName, setHeadlinePresetName] = useState("");
   const [selectedHeadlinePreset, setSelectedHeadlinePreset] = useState("");
+  const [coverTextImportError, setCoverTextImportError] = useState("");
+  const [coverTextImporting, setCoverTextImporting] = useState(false);
+  const coverTextImportLock = useRef(false);
   const [textMode, setTextMode] = useState<"overlay" | "fastgen">(
     data.coverSettings.textMode,
   );
@@ -4601,6 +4604,29 @@ export function Covers({
   const importCoverTopics = async () => {
     const text = await window.newsflowDesktop?.choosePromptText();
     if (text) void command("import-cover-topics", { text });
+  };
+  const importCoverTextTriples = async () => {
+    if (coverTextImportLock.current) return;
+    coverTextImportLock.current = true;
+    setCoverTextImporting(true);
+    setCoverTextImportError("");
+    try {
+      const text = await window.newsflowDesktop?.chooseCoverTextTriples();
+      if (!text) return;
+      const result = await command("import-cover-text-triples", { text });
+      if (!result) {
+        setCoverTextImportError("Не удалось импортировать тексты обложек. Исходные строки не изменены.");
+      }
+    } catch (error) {
+      setCoverTextImportError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Не удалось открыть TXT с текстами обложек.",
+      );
+    } finally {
+      coverTextImportLock.current = false;
+      setCoverTextImporting(false);
+    }
   };
   const generate = async (
     mode: CoverBuildMode = coverBuildMode,
@@ -6714,6 +6740,13 @@ export function Covers({
             </span>
             <em>{tabloidMode ? "TABLOID" : "STANDARD"}</em>
           </label>
+          <Button
+            onClick={coverTextImporting ? undefined : importCoverTextTriples}
+            aria-busy={coverTextImporting}
+          >
+            <Upload size={16} />
+            Импортировать тексты TXT
+          </Button>
           <select
             value={selectedHeadlinePreset}
             onChange={(event) => applyHeadlinePreset(event.target.value)}
@@ -6739,6 +6772,7 @@ export function Covers({
             Удалить
           </Button>
         </div>
+        {coverTextImportError ? <div className="knowledge-status" role="alert">{coverTextImportError}</div> : null}
         <div className="cover-headline-settings">
           <ProviderSwitch
             value={headlineProvider}
