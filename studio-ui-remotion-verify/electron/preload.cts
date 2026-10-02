@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('newsflowDesktop', {
   snapshot: () => ipcRenderer.invoke('newsflow:snapshot'),
   footageIndexStatus: () => ipcRenderer.invoke('newsflow:footage-index-status'),
   saveSettings: (patch: unknown) => ipcRenderer.invoke('newsflow:save-settings', patch),
+  revealApiKey: (input: { kind: string; index: number; fingerprint: string }) => ipcRenderer.invoke('newsflow:reveal-api-key', input),
   command: (command: string, payload: unknown = {}) => ipcRenderer.invoke('newsflow:command', command, payload),
   startYoutubeOAuthHandoff: (input: { index: number; includeMonetary: boolean }) => ipcRenderer.invoke('newsflow:youtube-oauth-start', input),
   youtubeOAuthHandoffStatus: (id: string) => ipcRenderer.invoke('newsflow:youtube-oauth-status', id),
