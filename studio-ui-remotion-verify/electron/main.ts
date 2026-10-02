@@ -301,6 +301,16 @@ handleTrusted('newsflow:snapshot', () => callCore('snapshot'));
 handleTrusted('newsflow:footage-index-status', () => readFootageIndexStatus());
 handleTrusted('newsflow:open-path', (_event, target: unknown) => openApprovedPath(target));
 handleTrusted('newsflow:save-settings', (_event, patch: unknown) => callCore('save-settings', patch));
+// Credential responses never enter snapshots or the generic renderer command state.
+handleTrusted('newsflow:reveal-api-key', async (_event, input: unknown) => {
+  try {
+    const result = await callCore('reveal-api-key', input) as { label?: unknown; secret?: unknown; revision?: unknown };
+    if (typeof result.label !== 'string' || typeof result.secret !== 'string' || typeof result.revision !== 'string') throw new Error();
+    return { label: result.label, secret: result.secret, revision: result.revision };
+  } catch {
+    throw new Error('Не удалось открыть ключ. Обновите список и попробуйте снова.');
+  }
+});
 handleTrusted('newsflow:command', async (_event, command: unknown, payload: unknown) => {
   assertAllowedCoreCommand(command);
   if (command === 'run-montage-queue') {

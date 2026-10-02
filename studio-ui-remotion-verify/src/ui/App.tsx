@@ -15319,6 +15319,12 @@ export function Keys({
   const [keyDirty, setKeyDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [discardKeyOpen, setDiscardKeyOpen] = useState(false);
+  const [editingKey, setEditingKey] = useState<{ index: number; fingerprint: string; revision: string } | null>(null);
+  const [secretVisible, setSecretVisible] = useState(false);
+  const [loadingKey, setLoadingKey] = useState(false);
+  const keyOperation = useRef(false);
+  const keyRequest = useRef(0);
+  useEffect(() => () => { keyRequest.current += 1; }, []);
   const titles = {
     fastgen: "FastGen",
     openai: "OpenAI / ChatGPT",
@@ -15347,6 +15353,9 @@ export function Keys({
     onDirtyChange?.(true);
   };
   const openAdd = () => {
+    if (keyOperation.current || adding) return;
+    setEditingKey(null);
+    setSecretVisible(false);
     setLabel(defaultLabel());
     setSecret("");
     setFormError("");
@@ -15354,11 +15363,37 @@ export function Keys({
     onDirtyChange?.(false);
     setAdding(true);
   };
+  const openEdit = async (index: number, fingerprint: string) => {
+    if (keyOperation.current || adding) return;
+    keyOperation.current = true;
+    setLoadingKey(true);
+    setFormError("");
+    const requestId = ++keyRequest.current;
+    try {
+      const result = await window.newsflowDesktop?.revealApiKey({ kind, index, fingerprint });
+      if (requestId !== keyRequest.current) return;
+      if (!result || typeof result.secret !== "string" || typeof result.label !== "string" || typeof result.revision !== "string") throw new Error();
+      setEditingKey({ index, fingerprint, revision: result.revision });
+      setLabel(result.label);
+      setSecret(result.secret);
+      setSecretVisible(false);
+      setKeyDirty(false);
+      setAdding(true);
+    } catch {
+      if (requestId === keyRequest.current) setFormError("Не удалось открыть ключ. Обновите список и попробуйте снова.");
+    } finally {
+      keyOperation.current = false;
+      if (requestId === keyRequest.current) setLoadingKey(false);
+    }
+  };
   const closeAdd = () => {
     if (keyDirty) {
       setDiscardKeyOpen(true);
       return;
     }
+    setSecret("");
+    setSecretVisible(false);
+    setEditingKey(null);
     setAdding(false);
   };
   const discardAdd = () => {
@@ -15366,6 +15401,8 @@ export function Keys({
     setKeyDirty(false);
     onDirtyChange?.(false);
     setSecret("");
+    setSecretVisible(false);
+    setEditingKey(null);
     setFormError("");
     setAdding(false);
   };
@@ -15374,20 +15411,32 @@ export function Keys({
     if (adding) setLabel(defaultLabel(nextKind));
   };
   const save = async () => {
-    if (saving) return false;
+    if (keyOperation.current) return false;
     if (!secret.trim()) {
-      setFormError("Вставьте API-ключ. Он не будет показан после сохранения.");
+      setFormError("Вставьте API-ключ.");
       return false;
     }
+    keyOperation.current = true;
     setSaving(true);
-    const result = await command("add-api-key", {
-      kind,
-      label: label.trim() || defaultLabel(),
-      secret: secret.trim(),
-    });
-    setSaving(false);
+    let result: NewsFlowSnapshot | undefined;
+    try {
+      result = await command(editingKey ? "update-api-key" : "add-api-key", {
+        kind,
+        ...(editingKey || {}),
+        label: label.trim() || defaultLabel(),
+        secret: secret.trim(),
+      });
+    } catch {
+      // Do not render arbitrary transport errors beside a secret input.
+      result = undefined;
+    } finally {
+      keyOperation.current = false;
+      setSaving(false);
+    }
     if (result) {
       setSecret("");
+      setSecretVisible(false);
+      setEditingKey(null);
       setKeyDirty(false);
       onDirtyChange?.(false);
       setAdding(false);
@@ -15476,7 +15525,7 @@ export function Keys({
                   : "ключ не добавлен"}
               </small>
             </span>
-            <Button onClick={() => setKind(service.kind)}>Управлять</Button>
+            <Button disabled={adding || loadingKey} onClick={() => changeKind(service.kind)}>Управлять</Button>
           </div>
         ))}
       </div>
@@ -15487,6 +15536,7 @@ export function Keys({
       {apiOverview}
       <div className="toolbar">
         <select
+          disabled={adding || loadingKey}
           value={kind}
           onChange={(event) => changeKind(event.target.value as typeof kind)}
         >
@@ -15498,7 +15548,7 @@ export function Keys({
           <option value="wproject">WProject</option>
           <option value="youtube">YouTube Data API</option>
         </select>
-        <Button kind="primary" onClick={openAdd}>
+        <Button kind="primary" disabled={adding || loadingKey} onClick={openAdd}>
           <KeyRound size={17} />
           Добавить ключ
         </Button>
@@ -15507,19 +15557,19 @@ export function Keys({
         <section className="panel key-add-form">
           <div className="panel-title">
             <div>
-              <b>Новый ключ {titles[kind]}</b>
+              <b>{editingKey ? "Редактировать ключ" : "Новый ключ"} {titles[kind]}</b>
               <small>
-                Секрет сохраняется зашифрованным в профиле Windows и не
-                показывается после сохранения.
+                Секрет сохраняется зашифрованным в профиле Windows.
+                Просмотр — только по вашему запросу.
               </small>
             </div>
-            <Button onClick={closeAdd}>Отмена</Button>
+            <Button disabled={saving} onClick={closeAdd}>Отмена</Button>
           </div>
           <div className="key-add-fields">
             <label>
               Название ключа
               <input
-                disabled={kind === "youtube"}
+                disabled={kind === "youtube" || saving}
                 value={label}
                 onChange={(event) => {
                   setLabel(event.target.value);
@@ -15532,7 +15582,10 @@ export function Keys({
               API-ключ
               <input
                 autoFocus
-                type="password"
+                type={secretVisible ? "text" : "password"}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={saving}
                 value={secret}
                 onChange={(event) => {
                   setSecret(event.target.value);
@@ -15545,6 +15598,9 @@ export function Keys({
                 placeholder="Вставьте ключ сюда"
               />
             </label>
+            <Button onClick={() => setSecretVisible((value) => !value)}>
+              {secretVisible ? "Скрыть ключ" : "Показать ключ"}
+            </Button>
             <Button kind="primary" onClick={saving ? undefined : () => void save()}>
               <Check size={16} />
               {saving ? "Сохранение…" : "Сохранить ключ"}
@@ -15556,9 +15612,9 @@ export function Keys({
               используется для поиска и публичной статистики роликов.
             </small>
           ) : null}
-          {formError ? <div className="key-form-error">{formError}</div> : null}
         </section>
       ) : null}
+      {formError ? <div role="alert" className="key-form-error">{formError}</div> : null}
       <section className="panel key-panel">
         <div className="panel-title">
           <div>
@@ -15598,6 +15654,10 @@ export function Keys({
                     }
                   />
                 </span>
+                <Button disabled={adding || loadingKey} ariaLabel={`Редактировать ключ ${key.label}`}
+                  onClick={() => void openEdit(index, key.fingerprint || "")}>
+                  Редактировать
+                </Button>
                 <Button
                   onClick={() =>
                     void command("set-key-active", {
