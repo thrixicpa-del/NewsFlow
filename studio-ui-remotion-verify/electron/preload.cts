@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('newsflowDesktop', {
   chooseJson: () => ipcRenderer.invoke('newsflow:choose-json'),
   choosePromptText: () => ipcRenderer.invoke('newsflow:choose-prompt-text'),
   chooseCoverTextTriples: () => ipcRenderer.invoke('newsflow:choose-cover-text-triples'),
+  chooseCoverPromptPairs: () => ipcRenderer.invoke('newsflow:choose-cover-prompt-pairs'),
   chooseScenarioTexts: () => ipcRenderer.invoke('newsflow:choose-scenario-texts'),
   chooseSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-save-path', suggestedName),
   chooseZipSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-zip-save-path', suggestedName),

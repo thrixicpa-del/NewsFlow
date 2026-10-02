@@ -4071,6 +4071,9 @@ export function Covers({
   const [coverTextImportError, setCoverTextImportError] = useState("");
   const [coverTextImporting, setCoverTextImporting] = useState(false);
   const coverTextImportLock = useRef(false);
+  const [coverPromptImportError, setCoverPromptImportError] = useState("");
+  const [coverPromptImporting, setCoverPromptImporting] = useState(false);
+  const coverPromptImportLock = useRef(false);
   const [textMode, setTextMode] = useState<"overlay" | "fastgen">(
     data.coverSettings.textMode,
   );
@@ -4628,6 +4631,29 @@ export function Covers({
       setCoverTextImporting(false);
     }
   };
+  const importCoverPromptPairs = async () => {
+    if (coverPromptImportLock.current) return;
+    coverPromptImportLock.current = true;
+    setCoverPromptImporting(true);
+    setCoverPromptImportError("");
+    try {
+      const text = await window.newsflowDesktop?.chooseCoverPromptPairs();
+      if (!text) return;
+      const result = await command("import-cover-prompt-pairs", { text });
+      if (!result) {
+        setCoverPromptImportError("Не удалось импортировать промпты. Существующие промпты не изменены.");
+      }
+    } catch (error) {
+      setCoverPromptImportError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "Не удалось открыть TXT с промптами обложек.",
+      );
+    } finally {
+      coverPromptImportLock.current = false;
+      setCoverPromptImporting(false);
+    }
+  };
   const generate = async (
     mode: CoverBuildMode = coverBuildMode,
   ) => {
@@ -5101,6 +5127,13 @@ export function Covers({
               {" всем"}
             </Button>
             <Button
+              onClick={coverPromptImporting ? undefined : importCoverPromptPairs}
+              aria-busy={coverPromptImporting}
+            >
+              <Upload size={16} />
+              Импортировать промпты TXT
+            </Button>
+            <Button
               kind="primary"
               onClick={selected.length ? () => void generatePrompts(selected) : undefined}
             >
@@ -5521,6 +5554,7 @@ export function Covers({
             </Button>
           </article>
         </div>
+        {coverPromptImportError ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
       </section>
       <section className="panel cover-settings-launcher">
         <div>
@@ -7536,6 +7570,37 @@ export function Covers({
                     </span>
                   </label>
                   <Button type="submit">Сохранить вручную</Button>
+                </form>
+                <form
+                  className="cover-headline-row cover-manual-prompt-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const productionItemId = String(cover.production_item_id || "").trim();
+                    if (!productionItemId) return;
+                    const value = new FormData(event.currentTarget).get("manualPrompt");
+                    void command("save-cover-manual-prompt", {
+                      productionItemId,
+                      prompt: String(value || ""),
+                    });
+                  }}
+                >
+                  <label>
+                    <small>Визуальный промпт для обложки</small>
+                    <textarea
+                      name="manualPrompt"
+                      key={`${cover.production_item_id}-${cover.image_prompt || ""}`}
+                      defaultValue={cover.image_prompt || ""}
+                      placeholder="Вставьте или отредактируйте ручной визуальный промпт"
+                    />
+                    <span>
+                      {cover.prompt_provider === "manual"
+                        ? "Вручную · сохранено"
+                        : cover.image_prompt ? "Выбранный prompt" : "Промпт ещё не создан"}
+                    </span>
+                  </label>
+                  <Button type="submit" disabled={!cover.production_item_id}>
+                    Сохранить промпт вручную
+                  </Button>
                 </form>
                 {cover.image_prompt_options?.length ? (
                   <div className="cover-prompt-cards">

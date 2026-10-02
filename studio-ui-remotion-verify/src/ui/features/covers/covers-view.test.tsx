@@ -9,6 +9,40 @@ const coverStyles = readFileSync(resolve(process.cwd(), "src/ui/covers.css"), "u
 const responsiveStyles = readFileSync(resolve(process.cwd(), "src/ui/layout/app-shell-responsive.css"), "utf8");
 
 describe("Covers Light view", () => {
+  it("imports manual prompt pairs through one chooser and one durable command", async () => {
+    let finishChoose: (value: string) => void = () => undefined;
+    const chooseCoverPromptPairs = vi.fn(() => new Promise<string>((resolve) => {
+      finishChoose = resolve;
+    }));
+    Object.assign(window, { newsflowDesktop: { chooseCoverPromptPairs } });
+    const command = vi.fn(async () => fallback);
+    render(<Covers data={fallback} command={command} />);
+
+    const button = screen.getByRole("button", { name: "Импортировать промпты TXT" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(chooseCoverPromptPairs).toHaveBeenCalledTimes(1);
+
+    finishChoose("Тема\nManual visual prompt");
+    await waitFor(() => expect(command).toHaveBeenCalledWith("import-cover-prompt-pairs", {
+      text: "Тема\nManual visual prompt",
+    }));
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+  });
+
+  it("keeps prompt import local when the chooser rejects a binary TXT", async () => {
+    const chooseCoverPromptPairs = vi.fn().mockRejectedValue(
+      new Error("TXT содержит недопустимые управляющие символы."),
+    );
+    Object.assign(window, { newsflowDesktop: { chooseCoverPromptPairs } });
+    const command = vi.fn();
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Импортировать промпты TXT" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("недопустимые управляющие символы");
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("imports complete manual cover-text triples through one chooser and one durable command", async () => {
     let finishChoose: (value: string) => void = () => undefined;
     const chooseCoverTextTriples = vi.fn(() => new Promise<string>((resolve) => {
@@ -660,6 +694,30 @@ describe("Covers Light view", () => {
       headline: "НОВЫЙ РУЧНОЙ ЗАГОЛОВОК",
     }));
 
+  });
+
+  it("saves an edited visual prompt against the inspected ProductionItem ID", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [{
+        production_item_id: "production:manual-prompt",
+        title: "Ручной visual prompt",
+        image_prompt: "Old visual prompt",
+        paths: [],
+      }],
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "1. Ручной visual prompt" }));
+    const prompt = screen.getByRole("textbox", { name: /Визуальный промпт для обложки/ });
+    fireEvent.change(prompt, { target: { value: "Edited visual prompt" } });
+    fireEvent.submit(prompt.closest("form")!);
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-cover-manual-prompt", {
+      productionItemId: "production:manual-prompt",
+      prompt: "Edited visual prompt",
+    }));
   });
 
   it("opens a cover inspector with FastGen prompt provenance", () => {
