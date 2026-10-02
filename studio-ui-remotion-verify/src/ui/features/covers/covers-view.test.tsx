@@ -31,10 +31,10 @@ describe("Covers Light view", () => {
     await waitFor(() => expect(button).toHaveProperty("disabled", false));
   });
 
-  it("treats cancellation as a no-op and surfaces a chooser read error locally", async () => {
+  it("treats cancellation as a no-op and keeps binary TXT errors out of the core command", async () => {
     const chooseCoverTextTriples = vi.fn()
       .mockResolvedValueOnce("")
-      .mockRejectedValueOnce(new Error("TXT не является корректным UTF-8."));
+      .mockRejectedValueOnce(new Error("TXT содержит недопустимые управляющие символы."));
     Object.assign(window, { newsflowDesktop: { chooseCoverTextTriples } });
     const command = vi.fn();
     render(<Covers data={fallback} command={command} />);
@@ -46,7 +46,7 @@ describe("Covers Light view", () => {
     expect(command).not.toHaveBeenCalled();
 
     fireEvent.click(button);
-    expect((await screen.findByRole("alert")).textContent).toContain("корректным UTF-8");
+    expect((await screen.findByRole("alert")).textContent).toContain("недопустимые управляющие символы");
     expect(command).not.toHaveBeenCalled();
     await waitFor(() => expect(button).toHaveProperty("disabled", false));
   });
