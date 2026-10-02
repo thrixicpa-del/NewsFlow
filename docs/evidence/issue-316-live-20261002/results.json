@@ -1,0 +1,3368 @@
+[
+  {
+    "case": "tariffs",
+    "mode": "STANDARD",
+    "title": "ТРАМП ПОВЫСИЛ ПОШЛИНЫ ДЛЯ КИТАЯ — ПЕКИН ВВЁЛ ОТВЕТНЫЕ СБОРЫ",
+    "row": {
+      "id": "tariffs",
+      "title": "ТРАМП ПОВЫСИЛ ПОШЛИНЫ ДЛЯ КИТАЯ — ПЕКИН ВВЁЛ ОТВЕТНЫЕ СБОРЫ",
+      "script": "Трамп повысил пошлины на китайские товары. Пекин ввёл ответные сборы на американские товары. Импортёры оплачивают более высокие сборы, торговый спор усилился.",
+      "entities": [
+        "Трамп",
+        "Китай",
+        "Пекин"
+      ],
+      "production_item_id": "synthetic:tariffs",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Трамп поднял пошлины",
+      "headline_source": "AI",
+      "headline_structure_id": "H07",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 5,
+      "headline_semantic_slots": [
+        "subject",
+        "conflict"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Трамп поднял пошлины",
+          "validation": {
+            "valid": true,
+            "value": "Трамп поднял пошлины",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "subject",
+              "conflict"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Китай ответил сборами",
+          "validation": {
+            "valid": true,
+            "value": "Китай ответил сборами",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "subject",
+              "conflict"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пекин дал ответ",
+          "validation": {
+            "valid": true,
+            "value": "Пекин дал ответ",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "subject",
+              "conflict"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пошлины бьют по Китаю",
+          "validation": {
+            "valid": false,
+            "value": "Пошлины бьют по Китаю",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: китаю",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Торговая драка США и Китая",
+          "validation": {
+            "valid": false,
+            "value": "Торговая драка США и Китая",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: сша",
+            "semantic_slots": []
+          }
+        }
+      ],
+      "headline_pattern_signature": "price-rise",
+      "text_style": "STANDARD",
+      "headline_candidate_count": 5,
+      "headline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 4,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 4,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:55:40+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Китай ввёл ответные сборы",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S10",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 5,
+      "subheadline_semantic_slots": [
+        "second_side"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Пекин ответил новыми сборами",
+          "validation": {
+            "valid": true,
+            "value": "Пекин ответил новыми сборами",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "second_side"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 25,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Китай ввёл ответные сборы",
+          "validation": {
+            "valid": true,
+            "value": "Китай ввёл ответные сборы",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "second_side"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Ответные сборы бьют по импорту",
+          "validation": {
+            "valid": false,
+            "value": "Ответные сборы бьют по импорту",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Торговый спор снова усилился",
+          "validation": {
+            "valid": true,
+            "value": "Торговый спор снова усилился",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "second_side"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 2,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 75,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Импортёрам придётся платить больше",
+          "validation": {
+            "valid": true,
+            "value": "Импортёрам придётся платить больше",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "second_side"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 3,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "ввёл кита",
+      "subheadline_candidate_count": 5,
+      "subheadline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 1,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 1,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:55:43+03:00"
+    }
+  },
+  {
+    "case": "tariffs",
+    "mode": "TABLOID",
+    "title": "ТРАМП ПОВЫСИЛ ПОШЛИНЫ ДЛЯ КИТАЯ — ПЕКИН ВВЁЛ ОТВЕТНЫЕ СБОРЫ",
+    "row": {
+      "id": "tariffs",
+      "title": "ТРАМП ПОВЫСИЛ ПОШЛИНЫ ДЛЯ КИТАЯ — ПЕКИН ВВЁЛ ОТВЕТНЫЕ СБОРЫ",
+      "script": "Трамп повысил пошлины на китайские товары. Пекин ввёл ответные сборы на американские товары. Импортёры оплачивают более высокие сборы, торговый спор усилился.",
+      "entities": [
+        "Трамп",
+        "Китай",
+        "Пекин"
+      ],
+      "production_item_id": "synthetic:tariffs",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Ответ Пекина Трампу",
+      "headline_source": "AI",
+      "headline_structure_id": "H07",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 6,
+      "headline_semantic_slots": [
+        "subject",
+        "conflict"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Трамп бьёт по Китаю",
+          "validation": {
+            "valid": false,
+            "value": "Трамп бьёт по Китаю",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: китаю",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пекин отвечает",
+          "validation": {
+            "valid": true,
+            "value": "Пекин отвечает",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "subject",
+              "conflict"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Торговая драка США-Китай",
+          "validation": {
+            "valid": false,
+            "value": "Торговая драка США-Китай",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: сша",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Китай платит больше",
+          "validation": {
+            "valid": false,
+            "value": "Китай платит больше",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пошлины ударили по Китаю",
+          "validation": {
+            "valid": false,
+            "value": "Пошлины ударили по Китаю",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: китаю",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Ответ Пекина Трампу",
+          "validation": {
+            "valid": true,
+            "value": "Ответ Пекина Трампу",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "subject",
+              "conflict"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 1,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "отве пеки",
+      "text_style": "TABLOID",
+      "headline_candidate_count": 6,
+      "headline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 1,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 0,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 1,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 0,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:55:45+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Дороже станет весь импорт",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S10",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 6,
+      "subheadline_semantic_slots": [
+        "second_side"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Импортёры платят больше",
+          "validation": {
+            "valid": false,
+            "value": "Импортёры платят больше",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 3,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Сборы бьют по товару",
+          "validation": {
+            "valid": false,
+            "value": "Сборы бьют по товару",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Дороже станет весь импорт",
+          "validation": {
+            "valid": true,
+            "value": "Дороже станет весь импорт",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "second_side"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 1,
+              "directness_score": 3,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Китайские товары подорожали",
+          "validation": {
+            "valid": false,
+            "value": "Китайские товары подорожали",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Торговая война дорожает",
+          "validation": {
+            "valid": false,
+            "value": "Торговая война дорожает",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 1,
+              "directness_score": 3,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Платить придётся больше",
+          "validation": {
+            "valid": false,
+            "value": "Платить придётся больше",
+            "reason_code": "NOT_GROUNDED",
+            "reason_detail": "Нет значимой связи с темой или контекстом",
+            "semantic_slots": []
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "price-rise",
+      "subheadline_candidate_count": 6,
+      "subheadline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 2,
+        "hook_score": 0,
+        "emotion_score": 1,
+        "directness_score": 3,
+        "literalness_score": 0,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 2,
+        "hook_score": 0,
+        "emotion_score": 1,
+        "directness_score": 3,
+        "literalness_score": 0,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:55:47+03:00"
+    }
+  },
+  {
+    "case": "prices",
+    "mode": "STANDARD",
+    "title": "ЦЕНЫ НА ПОМИДОРЫ НЕ ПАДАЮТ — ПОКУПАТЕЛИ НЕДОВОЛЬНЫ",
+    "row": {
+      "id": "prices",
+      "title": "ЦЕНЫ НА ПОМИДОРЫ НЕ ПАДАЮТ — ПОКУПАТЕЛИ НЕДОВОЛЬНЫ",
+      "script": "Помидоры остаются дорогими. Покупатели жалуются на высокие цены и сокращают покупки. Магазины пока не снизили стоимость помидоров.",
+      "entities": [
+        "покупатели",
+        "магазины",
+        "помидоры"
+      ],
+      "production_item_id": "synthetic:prices",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Цены не падают",
+      "headline_source": "AI",
+      "headline_structure_id": "H12",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 5,
+      "headline_semantic_slots": [
+        "object",
+        "breakdown"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Помидоры всё ещё дорогие",
+          "validation": {
+            "valid": true,
+            "value": "Помидоры всё ещё дорогие",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 25,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Цены не падают",
+          "validation": {
+            "valid": true,
+            "value": "Цены не падают",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Покупатели недовольны",
+          "validation": {
+            "valid": true,
+            "value": "Покупатели недовольны",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Магазины не снижают",
+          "validation": {
+            "valid": true,
+            "value": "Магазины не снижают",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Помидоры не дешевеют",
+          "validation": {
+            "valid": false,
+            "value": "Помидоры не дешевеют",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "пада цены",
+      "text_style": "STANDARD",
+      "headline_candidate_count": 5,
+      "headline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 3,
+        "hook_score": 1,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 3,
+        "hook_score": 1,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:55:49+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Покупатели жалуются в магазинах",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S18",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 6,
+      "subheadline_semantic_slots": [
+        "stake",
+        "cost"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Покупатели режут покупки",
+          "validation": {
+            "valid": true,
+            "value": "Покупатели режут покупки",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Магазины цену не снижают",
+          "validation": {
+            "valid": true,
+            "value": "Магазины цену не снижают",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Люди недовольны ценами",
+          "validation": {
+            "valid": true,
+            "value": "Люди недовольны ценами",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 3,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Помидоры всё ещё дорогие",
+          "validation": {
+            "valid": true,
+            "value": "Помидоры всё ещё дорогие",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 25,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Покупатели жалуются в магазинах",
+          "validation": {
+            "valid": true,
+            "value": "Покупатели жалуются в магазинах",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Спрос на помидоры падает",
+          "validation": {
+            "valid": false,
+            "value": "Спрос на помидоры падает",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "жалу мага",
+      "subheadline_candidate_count": 6,
+      "subheadline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:55:51+03:00"
+    }
+  },
+  {
+    "case": "prices",
+    "mode": "TABLOID",
+    "title": "ЦЕНЫ НА ПОМИДОРЫ НЕ ПАДАЮТ — ПОКУПАТЕЛИ НЕДОВОЛЬНЫ",
+    "row": {
+      "id": "prices",
+      "title": "ЦЕНЫ НА ПОМИДОРЫ НЕ ПАДАЮТ — ПОКУПАТЕЛИ НЕДОВОЛЬНЫ",
+      "script": "Помидоры остаются дорогими. Покупатели жалуются на высокие цены и сокращают покупки. Магазины пока не снизили стоимость помидоров.",
+      "entities": [
+        "покупатели",
+        "магазины",
+        "помидоры"
+      ],
+      "production_item_id": "synthetic:prices",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Помидоры всё ещё дорогие",
+      "headline_source": "AI",
+      "headline_structure_id": "H12",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 6,
+      "headline_semantic_slots": [
+        "object",
+        "breakdown"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Помидоры не падают",
+          "validation": {
+            "valid": true,
+            "value": "Помидоры не падают",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Цены стоят мёртво",
+          "validation": {
+            "valid": false,
+            "value": "Цены стоят мёртво",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Покупатели злятся",
+          "validation": {
+            "valid": false,
+            "value": "Покупатели злятся",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Магазины не снижают",
+          "validation": {
+            "valid": true,
+            "value": "Магазины не снижают",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Помидоры всё ещё дорогие",
+          "validation": {
+            "valid": true,
+            "value": "Помидоры всё ещё дорогие",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 25,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Покупки режут",
+          "validation": {
+            "valid": true,
+            "value": "Покупки режут",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "breakdown"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "доро поми",
+      "text_style": "TABLOID",
+      "headline_candidate_count": 6,
+      "headline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 3,
+        "hook_score": 0,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 25,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 3,
+        "hook_score": 0,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 25,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:55:53+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Покупатели недовольны ценой",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S18",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 6,
+      "subheadline_semantic_slots": [
+        "stake",
+        "cost"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Покупатели уже злые",
+          "validation": {
+            "valid": true,
+            "value": "Покупатели уже злые",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Люди режут покупки",
+          "validation": {
+            "valid": true,
+            "value": "Люди режут покупки",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Магазины не снижают цену",
+          "validation": {
+            "valid": true,
+            "value": "Магазины не снижают цену",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Покупатели недовольны ценой",
+          "validation": {
+            "valid": true,
+            "value": "Покупатели недовольны ценой",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Покупки идут вниз",
+          "validation": {
+            "valid": true,
+            "value": "Покупки идут вниз",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "cost"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Дорогие помидоры бьют по кошельку",
+          "validation": {
+            "valid": false,
+            "value": "Дорогие помидоры бьют по кошельку",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "недо поку",
+      "subheadline_candidate_count": 6,
+      "subheadline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 4,
+        "hook_score": 1,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 4,
+        "hook_score": 1,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:55:54+03:00"
+    }
+  },
+  {
+    "case": "protest",
+    "mode": "STANDARD",
+    "title": "МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ",
+    "row": {
+      "id": "protest",
+      "title": "МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ",
+      "script": "Мужчина вышел на Красную площадь с антивоенным плакатом. Его задержали. Московский суд отправил участника протеста под арест.",
+      "entities": [
+        "Красная площадь",
+        "Московский суд"
+      ],
+      "production_item_id": "synthetic:protest",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Красная площадь: арест",
+      "headline_source": "AI",
+      "headline_structure_id": "H17",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 6,
+      "headline_semantic_slots": [
+        "object",
+        "stake"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Мужчина под арестом",
+          "validation": {
+            "valid": true,
+            "value": "Мужчина под арестом",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Красная площадь: арест",
+          "validation": {
+            "valid": true,
+            "value": "Красная площадь: арест",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Антивоенный выход",
+          "validation": {
+            "valid": false,
+            "value": "Антивоенный выход",
+            "reason_code": "MISSING_NAMED_ANCHOR",
+            "reason_detail": "Headline должен назвать конкретную сущность из темы, а не только действие или абстракцию",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Суд отправил под арест",
+          "validation": {
+            "valid": true,
+            "value": "Суд отправил под арест",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Протест на Красной",
+          "validation": {
+            "valid": false,
+            "value": "Протест на Красной",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: красной",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Московский суд арестовал",
+          "validation": {
+            "valid": true,
+            "value": "Московский суд арестовал",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "арес крас",
+      "text_style": "STANDARD",
+      "headline_candidate_count": 6,
+      "headline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 1,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 1,
+        "emotion_score": 1,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:55:56+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Дело после антивоенной акции",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S07",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 6,
+      "subheadline_semantic_slots": [
+        "stake",
+        "economic"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Антивоенный плакат и задержание",
+          "validation": {
+            "valid": false,
+            "value": "Антивоенный плакат и задержание",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": false,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "list_like_nominal",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Суд отправил под арест",
+          "validation": {
+            "valid": false,
+            "value": "Суд отправил под арест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "После акции — арест",
+          "validation": {
+            "valid": false,
+            "value": "После акции — арест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Протест на площади закончился арестом",
+          "validation": {
+            "valid": false,
+            "value": "Протест на площади закончился арестом",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Дело после антивоенной акции",
+          "validation": {
+            "valid": true,
+            "value": "Дело после антивоенной акции",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "economic"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 3,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Московский суд решил быстро",
+          "validation": {
+            "valid": false,
+            "value": "Московский суд решил быстро",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "акци анти",
+      "subheadline_candidate_count": 6,
+      "subheadline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 2,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 3,
+        "literalness_score": 0,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 2,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 3,
+        "literalness_score": 0,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:55:57+03:00"
+    }
+  },
+  {
+    "case": "protest",
+    "mode": "TABLOID",
+    "title": "МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ",
+    "row": {
+      "id": "protest",
+      "title": "МУЖЧИНА ВЫШЕЛ ПРОТИВ ВОЙНЫ НА КРАСНУЮ ПЛОЩАДЬ — МОСКОВСКИЙ СУД ОТПРАВИЛ ЕГО ПОД АРЕСТ",
+      "script": "Мужчина вышел на Красную площадь с антивоенным плакатом. Его задержали. Московский суд отправил участника протеста под арест.",
+      "entities": [
+        "Красная площадь",
+        "Московский суд"
+      ],
+      "production_item_id": "synthetic:protest",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Москва: протест под арестом",
+      "headline_source": "AI",
+      "headline_structure_id": "H17",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 6,
+      "headline_semantic_slots": [
+        "object",
+        "stake"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Мужчина под арестом",
+          "validation": {
+            "valid": true,
+            "value": "Мужчина под арестом",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Красная площадь. Арест",
+          "validation": {
+            "valid": true,
+            "value": "Красная площадь. Арест",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Протест и арест",
+          "validation": {
+            "valid": true,
+            "value": "Протест и арест",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 2,
+              "emotion_score": 2,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Москва: протест под арестом",
+          "validation": {
+            "valid": true,
+            "value": "Москва: протест под арестом",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 2,
+              "emotion_score": 2,
+              "directness_score": 5,
+              "literalness_score": 25,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Суд отправил под арест",
+          "validation": {
+            "valid": true,
+            "value": "Суд отправил под арест",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 2,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Антивоенный протест сорван",
+          "validation": {
+            "valid": true,
+            "value": "Антивоенный протест сорван",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "object",
+              "stake"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 2,
+              "emotion_score": 2,
+              "directness_score": 5,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "арес моск",
+      "text_style": "TABLOID",
+      "headline_candidate_count": 6,
+      "headline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 2,
+        "emotion_score": 2,
+        "directness_score": 5,
+        "literalness_score": 25,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 2,
+        "emotion_score": 2,
+        "directness_score": 5,
+        "literalness_score": 25,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:56:00+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 2,
+      "cover_subheadline": "Мужчина вышел с плакатом",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S07",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 12,
+      "subheadline_semantic_slots": [
+        "stake",
+        "economic"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Антивоенный протест — и арест",
+          "validation": {
+            "valid": false,
+            "value": "Антивоенный протест — и арест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "За плакат сразу в арест",
+          "validation": {
+            "valid": false,
+            "value": "За плакат сразу в арест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Площадь, плакат, потом арест",
+          "validation": {
+            "valid": false,
+            "value": "Площадь, плакат, потом арест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Суд жёстко закрыл протест",
+          "validation": {
+            "valid": false,
+            "value": "Суд жёстко закрыл протест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Протест на площади задавили",
+          "validation": {
+            "valid": false,
+            "value": "Протест на площади задавили",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Цена выхода на площадь",
+          "validation": {
+            "valid": false,
+            "value": "Цена выхода на площадь",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": false,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unclear_abstract_state",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 1,
+          "value": "Красная площадь и антивоенный плакат",
+          "validation": {
+            "valid": false,
+            "value": "Красная площадь и антивоенный плакат",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": false,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 5,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "list_like_nominal",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 1,
+          "value": "Мужчина вышел с плакатом",
+          "validation": {
+            "valid": true,
+            "value": "Мужчина вышел с плакатом",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "stake",
+              "economic"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 1,
+          "value": "Антивоенный протест на Красной площади",
+          "validation": {
+            "valid": false,
+            "value": "Антивоенный протест на Красной площади",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: красной",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 1,
+          "value": "Плакат на Красной площади",
+          "validation": {
+            "valid": false,
+            "value": "Плакат на Красной площади",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: красной",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 1,
+          "value": "Против войны на Красной площади",
+          "validation": {
+            "valid": false,
+            "value": "Против войны на Красной площади",
+            "reason_code": "FOREIGN_ENTITY",
+            "reason_detail": "Чужие сущности: красной",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 1,
+          "value": "Московский суд и арест",
+          "validation": {
+            "valid": false,
+            "value": "Московский суд и арест",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "выше мужч",
+      "subheadline_candidate_count": 6,
+      "subheadline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:56:04+03:00"
+    }
+  },
+  {
+    "case": "technology",
+    "mode": "STANDARD",
+    "title": "КОМПАНИЯ АЛЬФА ОТМЕНИЛА ОБНОВЛЕНИЕ — ПОЛЬЗОВАТЕЛИ ПОТЕРЯЛИ ДОСТУП К ДОКУМЕНТАМ",
+    "row": {
+      "id": "technology",
+      "title": "КОМПАНИЯ АЛЬФА ОТМЕНИЛА ОБНОВЛЕНИЕ — ПОЛЬЗОВАТЕЛИ ПОТЕРЯЛИ ДОСТУП К ДОКУМЕНТАМ",
+      "script": "После обновления приложения пользователи потеряли доступ к документам. Компания Альфа отменила обновление и восстановила предыдущую версию. Часть документов пока недоступна, инженеры продолжают восстановление.",
+      "entities": [
+        "Альфа",
+        "пользователи",
+        "документы"
+      ],
+      "production_item_id": "synthetic:technology",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Пользователи без документов",
+      "headline_source": "AI",
+      "headline_structure_id": "H14",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 5,
+      "headline_semantic_slots": [
+        "surprise",
+        "consequence"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Альфа откатила обновление",
+          "validation": {
+            "valid": false,
+            "value": "Альфа откатила обновление",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пользователи без документов",
+          "validation": {
+            "valid": true,
+            "value": "Пользователи без документов",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Обновление отключили",
+          "validation": {
+            "valid": false,
+            "value": "Обновление отключили",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Документы снова недоступны",
+          "validation": {
+            "valid": true,
+            "value": "Документы снова недоступны",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 33,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Альфа вернула старую версию",
+          "validation": {
+            "valid": true,
+            "value": "Альфа вернула старую версию",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "доку поль",
+      "text_style": "STANDARD",
+      "headline_candidate_count": 5,
+      "headline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 3,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 3,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 66,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:56:06+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Инженеры продолжают восстановление",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S02",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 6,
+      "subheadline_semantic_slots": [
+        "consequence"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Альфа откатила обновление",
+          "validation": {
+            "valid": false,
+            "value": "Альфа откатила обновление",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Старая версия вернулась",
+          "validation": {
+            "valid": false,
+            "value": "Старая версия вернулась",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 2,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 3,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Часть документов всё ещё недоступна",
+          "validation": {
+            "valid": false,
+            "value": "Часть документов всё ещё недоступна",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Инженеры продолжают восстановление",
+          "validation": {
+            "valid": true,
+            "value": "Инженеры продолжают восстановление",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пользователи ждут доступа",
+          "validation": {
+            "valid": false,
+            "value": "Пользователи ждут доступа",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Обновление убрали после сбоя",
+          "validation": {
+            "valid": false,
+            "value": "Обновление убрали после сбоя",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "восс инже",
+      "subheadline_candidate_count": 6,
+      "subheadline_selection_reason": "best direct standard candidate after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 4,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "STANDARD",
+        "naturalness_pass": true,
+        "specificity_score": 4,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:56:08+03:00"
+    }
+  },
+  {
+    "case": "technology",
+    "mode": "TABLOID",
+    "title": "КОМПАНИЯ АЛЬФА ОТМЕНИЛА ОБНОВЛЕНИЕ — ПОЛЬЗОВАТЕЛИ ПОТЕРЯЛИ ДОСТУП К ДОКУМЕНТАМ",
+    "row": {
+      "id": "technology",
+      "title": "КОМПАНИЯ АЛЬФА ОТМЕНИЛА ОБНОВЛЕНИЕ — ПОЛЬЗОВАТЕЛИ ПОТЕРЯЛИ ДОСТУП К ДОКУМЕНТАМ",
+      "script": "После обновления приложения пользователи потеряли доступ к документам. Компания Альфа отменила обновление и восстановила предыдущую версию. Часть документов пока недоступна, инженеры продолжают восстановление.",
+      "entities": [
+        "Альфа",
+        "пользователи",
+        "документы"
+      ],
+      "production_item_id": "synthetic:technology",
+      "scenario_index": 1,
+      "status": "Ожидает",
+      "headline_status": "READY",
+      "headline_error": "",
+      "headline_provider_attempt_count": 1,
+      "cover_headline": "Часть документов недоступна",
+      "headline_source": "AI",
+      "headline_structure_id": "H14",
+      "headline_variation_index": 1,
+      "headline_attempt_count": 6,
+      "headline_semantic_slots": [
+        "surprise",
+        "consequence"
+      ],
+      "headline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Альфа откатила обновление",
+          "validation": {
+            "valid": false,
+            "value": "Альфа откатила обновление",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пользователи без документов",
+          "validation": {
+            "valid": true,
+            "value": "Пользователи без документов",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Документы пропали после апдейта",
+          "validation": {
+            "valid": false,
+            "value": "Документы пропали после апдейта",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 4,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Альфа вернула старую версию",
+          "validation": {
+            "valid": true,
+            "value": "Альфа вернула старую версию",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Обновление сломало доступ",
+          "validation": {
+            "valid": true,
+            "value": "Обновление сломало доступ",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Часть документов недоступна",
+          "validation": {
+            "valid": true,
+            "value": "Часть документов недоступна",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "surprise",
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 5,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 100,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "headline_pattern_signature": "доку недо",
+      "text_style": "TABLOID",
+      "headline_candidate_count": 6,
+      "headline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "headline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 5,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "headline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 5,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 100,
+        "factual_pass": true
+      },
+      "headline_generation_timestamp": "2026-10-02T22:56:10+03:00",
+      "subheadline_status": "READY",
+      "subheadline_error": "",
+      "subheadline_provider_attempt_count": 1,
+      "cover_subheadline": "Альфа вернула старую версию",
+      "subheadline_source": "AI",
+      "subheadline_structure_id": "S02",
+      "subheadline_variation_index": 1,
+      "subheadline_attempt_count": 5,
+      "subheadline_semantic_slots": [
+        "consequence"
+      ],
+      "subheadline_repair_history": [
+        {
+          "attempt": 0,
+          "value": "Альфа откатила обновление",
+          "validation": {
+            "valid": false,
+            "value": "Альфа откатила обновление",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 5,
+              "literalness_score": 66,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Пользователи остались без доступа",
+          "validation": {
+            "valid": false,
+            "value": "Пользователи остались без доступа",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 25,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Документы снова под ударом",
+          "validation": {
+            "valid": false,
+            "value": "Документы снова под ударом",
+            "reason_code": "DUPLICATE_WORD",
+            "reason_detail": "Повторяются содержательные слова headline",
+            "semantic_slots": []
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Сбой ударил по пользователям",
+          "validation": {
+            "valid": false,
+            "value": "Сбой ударил по пользователям",
+            "reason_code": "EDITORIAL_QUALITY_FAILED",
+            "reason_detail": "Фраза не проходит контекстную редакторскую оценку естественности, ясности или сочетаемости",
+            "semantic_slots": [],
+            "editorial_evaluation": {
+              "naturalness_pass": false,
+              "semantic_coherence_pass": false,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": false,
+              "specificity_score": 3,
+              "hook_score": 1,
+              "emotion_score": 1,
+              "directness_score": 4,
+              "literalness_score": 0,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": [
+                "unsourced_action_pairing",
+                "naturalness_or_clarity_failed"
+              ]
+            }
+          }
+        },
+        {
+          "attempt": 0,
+          "value": "Альфа вернула старую версию",
+          "validation": {
+            "valid": true,
+            "value": "Альфа вернула старую версию",
+            "reason_code": "",
+            "reason_detail": "",
+            "semantic_slots": [
+              "consequence"
+            ],
+            "editorial_evaluation": {
+              "naturalness_pass": true,
+              "semantic_coherence_pass": true,
+              "literal_clarity_pass": true,
+              "plain_language_pass": true,
+              "cliche_penalty": 0,
+              "editorial_plausibility_pass": true,
+              "specificity_score": 4,
+              "hook_score": 0,
+              "emotion_score": 0,
+              "directness_score": 5,
+              "literalness_score": 50,
+              "factual_pass": true,
+              "grounding_pass": true,
+              "duplicate_pass": true,
+              "quality_reasons": []
+            }
+          }
+        }
+      ],
+      "subheadline_pattern_signature": "альф верн",
+      "subheadline_candidate_count": 5,
+      "subheadline_selection_reason": "best supported tabloid hook after editorial quality evaluation",
+      "subheadline_editorial_evaluation": {
+        "naturalness_pass": true,
+        "semantic_coherence_pass": true,
+        "literal_clarity_pass": true,
+        "plain_language_pass": true,
+        "cliche_penalty": 0,
+        "editorial_plausibility_pass": true,
+        "specificity_score": 4,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 50,
+        "factual_pass": true,
+        "grounding_pass": true,
+        "duplicate_pass": true,
+        "quality_reasons": []
+      },
+      "subheadline_selection_evidence": {
+        "style": "TABLOID",
+        "naturalness_pass": true,
+        "specificity_score": 4,
+        "hook_score": 0,
+        "emotion_score": 0,
+        "directness_score": 5,
+        "literalness_score": 50,
+        "factual_pass": true
+      },
+      "subheadline_generation_timestamp": "2026-10-02T22:56:12+03:00"
+    }
+  }
+]
