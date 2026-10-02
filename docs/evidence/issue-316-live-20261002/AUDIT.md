@@ -126,6 +126,11 @@ not 17 additional paid calls and not a new model-quality test.
 
 Original byte hashes (SHA-256):
 
+Git treats the JSON files as text and normalizes CRLF to LF in its text view.
+The accompanying `issue-316-live-20261002-original-bytes.zip` preserves the
+original file bytes; use that archive when checking the hashes below. No
+scenario/model text was edited during this line-ending normalization.
+
 - `dataset.json`: `690bcf8480024fe1182c86a6d578b4d3c41e5f245095678f3cc8c410574ae5ba`
 - `manifest.json`: `a06dfcb49ce39539872e495f4c90b059c1b636fd8764047e32cbca7650779c5f`
 - `ledger.json`: `0df47db722c583fdbb5cec8df682e37cad2bd92615b11ec21dec8654c1ac98dc`
