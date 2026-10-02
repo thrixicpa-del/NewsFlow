@@ -360,6 +360,14 @@ handleTrusted('newsflow:choose-cover-text-triples', async () => {
   const file = result.canceled ? '' : result.filePaths[0] || '';
   return file ? readStrictUtf8CoverText(file) : '';
 });
+handleTrusted('newsflow:choose-cover-prompt-pairs', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'Промпты обложек TXT', extensions: ['txt'] }],
+  });
+  const file = result.canceled ? '' : result.filePaths[0] || '';
+  return file ? readStrictUtf8CoverText(file) : '';
+});
 handleTrusted('newsflow:choose-scenario-texts', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],

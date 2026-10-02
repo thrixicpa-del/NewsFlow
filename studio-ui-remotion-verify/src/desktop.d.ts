@@ -161,6 +161,7 @@ interface Window {
     chooseJson: () => Promise<string>;
     choosePromptText: () => Promise<string>;
     chooseCoverTextTriples: () => Promise<string>;
+    chooseCoverPromptPairs: () => Promise<string>;
     chooseScenarioTexts: () => Promise<Array<{ title: string; text: string }>>;
     chooseSavePath: (suggestedName: string) => Promise<string>;
     chooseZipSavePath: (suggestedName: string) => Promise<string>;

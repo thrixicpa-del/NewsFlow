@@ -10311,6 +10311,132 @@ def import_cover_text_triples(payload: dict) -> dict:
     }}
 
 
+def _parse_cover_prompt_pairs(value: object) -> list[tuple[str, str]]:
+    """Parse strict title/manual-prompt pairs without guessing their identity."""
+    raw = str(value or "").removeprefix("\ufeff")
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("INVALID_PAIRS: TXT не содержит непустых строк")
+    if len(lines) % 2:
+        raise ValueError("INVALID_PAIRS: после удаления пустых строк число строк должно быть кратно 2")
+    records: list[tuple[str, str]] = []
+    seen: dict[str, str] = {}
+    for offset in range(0, len(lines), 2):
+        title, prompt = lines[offset:offset + 2]
+        normalized_title = _normalise_cover_text_import_title(title)
+        if not normalized_title or not prompt.strip():
+            raise ValueError("INVALID_PAIRS: тема и ручной промпт должны быть непустыми")
+        prior = seen.get(normalized_title)
+        if prior is not None:
+            if prior != prompt:
+                raise ValueError(f"CONFLICTING_DUPLICATE: тема «{title}» встречается с разными промптами")
+            continue
+        seen[normalized_title] = prompt
+        records.append((normalized_title, prompt))
+    return records
+
+
+def _cover_rows_by_title_and_production_id(settings: Settings) -> tuple[dict[str, list[str]], dict[str, list[dict]]]:
+    """Build identity maps without retaining a queue-order contract."""
+    by_title: dict[str, list[str]] = {}
+    by_production_item_id: dict[str, list[dict]] = {}
+    for item in settings.cover_queue:
+        if not isinstance(item, dict):
+            continue
+        title = _normalise_cover_text_import_title(item.get("title"))
+        production_item_id = str(item.get("production_item_id") or item.get("productionItemId") or "").strip()
+        if title:
+            by_title.setdefault(title, []).append(production_item_id)
+        if production_item_id:
+            by_production_item_id.setdefault(production_item_id, []).append(item)
+    return by_title, by_production_item_id
+
+
+def _resolve_cover_prompt_import_ids(settings: Settings, records: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Resolve every imported title before a prompt row is allowed to mutate."""
+    by_title, by_production_item_id = _cover_rows_by_title_and_production_id(settings)
+    resolved: list[tuple[str, str]] = []
+    for normalized_title, prompt in records:
+        candidates = by_title.get(normalized_title, [])
+        if not candidates:
+            raise ValueError(f"UNKNOWN_TOPIC: тема «{normalized_title}» отсутствует в текущей очереди обложек")
+        if len(candidates) != 1:
+            raise ValueError(f"AMBIGUOUS_TOPIC: тема «{normalized_title}» соответствует нескольким строкам обложек")
+        production_item_id = candidates[0]
+        if not production_item_id:
+            raise ValueError(f"MISSING_PRODUCTION_ITEM_ID: у темы «{normalized_title}» нет durable ProductionItem ID")
+        if len(by_production_item_id.get(production_item_id, [])) != 1:
+            raise ValueError(f"AMBIGUOUS_PRODUCTION_ITEM_ID: ProductionItem ID «{production_item_id}» встречается в нескольких строках")
+        resolved.append((production_item_id, prompt))
+    return resolved
+
+
+def _replace_manual_cover_prompt(item: dict, prompt: str) -> None:
+    """Replace one visual brief without invoking a provider or changing topic-owned inputs."""
+    old_options = [
+        value for value in _cover_active_prompt_options(item)
+        if _cover_prompt_key(value) != _cover_prompt_key(prompt)
+    ]
+    item.update(
+        image_prompt=prompt,
+        image_prompt_options=[prompt],
+        selected_prompt_index=0,
+        prompt_provider="manual",
+        prompt_text_signature=_cover_text_revision(item),
+        prompt_revision_id=_cover_prompt_revision({**item, "image_prompt": prompt}),
+    )
+    _remember_cover_prompt_history(item, old_options)
+    _clear_obsolete_fresh_prompt_contract(item)
+    _clear_cover_render_state(item, status="Промпт сохранён вручную")
+    item.update(status="Промпт сохранён вручную", progress=0, error="")
+    _cover_step(item, "Промпт сохранён вручную", 0, "Ручной промпт готов к обычному запуску Covers")
+
+
+def import_cover_prompt_pairs(payload: dict) -> dict:
+    """Atomically import user-owned visual prompts by exact title then durable ID."""
+    records = _parse_cover_prompt_pairs(payload.get("text", ""))
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    resolved = _resolve_cover_prompt_import_ids(settings, records)
+    _by_title, by_production_item_id = _cover_rows_by_title_and_production_id(settings)
+
+    # All parsing, title matching and durable-ID validation happens before a
+    # single row changes, so a bad pair can never partially import the file.
+    for production_item_id, prompt in resolved:
+        _replace_manual_cover_prompt(by_production_item_id[production_item_id][0], prompt)
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-prompt-pairs-import",
+        "count": len(resolved),
+        "message": f"Ручные промпты импортированы: {len(resolved)}.",
+        "productionItemIds": [production_item_id for production_item_id, _prompt in resolved],
+    }}
+
+
+def save_cover_manual_prompt(payload: dict) -> dict:
+    """Save a typed visual prompt to exactly one durable ProductionItem."""
+    production_item_id = str(payload.get("productionItemId") or "").strip()
+    prompt = str(payload.get("prompt", ""))
+    if not production_item_id:
+        raise ValueError("MISSING_PRODUCTION_ITEM_ID: выберите тему с durable ProductionItem ID")
+    if not prompt.strip():
+        raise ValueError("MANUAL_PROMPT_EMPTY: заполните ручной промпт")
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    _by_title, by_production_item_id = _cover_rows_by_title_and_production_id(settings)
+    matches = by_production_item_id.get(production_item_id, [])
+    if len(matches) != 1:
+        raise ValueError(f"AMBIGUOUS_PRODUCTION_ITEM_ID: ProductionItem ID «{production_item_id}» не разрешён однозначно")
+    _replace_manual_cover_prompt(matches[0], prompt)
+    _save_cover_state(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "cover-manual-prompt-save",
+        "count": 1,
+        "message": "Ручной промпт сохранён.",
+        "productionItemIds": [production_item_id],
+    }}
+
+
 def remove_cover_headlines(payload: dict) -> dict:
     """Clear rendered headlines, regardless of whether AI or the user wrote them."""
     settings = load_settings()
@@ -19987,6 +20113,10 @@ def main() -> None:
             result = import_cover_headlines(payload if isinstance(payload, dict) else {})
         elif command == "import-cover-text-triples":
             result = import_cover_text_triples(payload if isinstance(payload, dict) else {})
+        elif command == "import-cover-prompt-pairs":
+            result = import_cover_prompt_pairs(payload if isinstance(payload, dict) else {})
+        elif command == "save-cover-manual-prompt":
+            result = save_cover_manual_prompt(payload if isinstance(payload, dict) else {})
         elif command == "remove-cover-headlines":
             result = remove_cover_headlines(payload if isinstance(payload, dict) else {})
         elif command == "import-cover-topics":
