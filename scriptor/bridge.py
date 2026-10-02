@@ -720,6 +720,12 @@ def _api_key_id(kind: str, index: int = 0) -> str:
 def _api_key_fingerprint(secret: str) -> str:
     """A stable identifier that cannot be used as an API credential."""
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:10] if secret else "—"
+
+
+def _api_key_revision(secret: str, label: str) -> str:
+    return hashlib.sha256(f"{secret}\0{label}".encode()).hexdigest()
+
+
 def _cover_face_folder_value(value: object) -> str:
     """Return a safe stored library path; a legacy '.' must never mean the app folder."""
     raw = str(value or "").strip().strip('"')
@@ -19537,6 +19543,55 @@ def add_api_key(payload: dict) -> dict:
     return snapshot()
 
 
+def _selected_api_key(payload: dict, *, for_update: bool = False) -> tuple[Settings, str, int, str, str]:
+    """Resolve only an explicitly selected, still-current credential."""
+    fields = {"fastgen": "cover_api_keys", "openai": "openai_api_keys",
+              "voicer": "secret_voicer_keys", "lumean": "lumean_api_keys",
+              "voicegen": "voicegen_api_keys", "wproject": "wproject_api_keys",
+              "youtube": "youtube_api_key_protected"}
+    kind = payload.get("kind")
+    index = payload.get("index")
+    if not isinstance(kind, str) or kind not in fields or type(index) is not int or index < 0:
+        raise ValueError("Ключ не найден")
+    settings = load_settings()
+    if kind == "youtube":
+        if index != 0 or not settings.youtube_api_key:
+            raise ValueError("Ключ не найден")
+        secret, label = settings.youtube_api_key, "YouTube Data API"
+    else:
+        entries = getattr(settings, fields[kind])
+        if index >= len(entries):
+            raise ValueError("Ключ не найден")
+        secret, label = entries[index].secret, entries[index].label
+    if not payload.get("fingerprint") or payload["fingerprint"] != _api_key_fingerprint(secret):
+        raise ValueError("Ключ изменён. Обновите список и откройте его заново.")
+    if for_update and payload.get("revision") != _api_key_revision(secret, label):
+        raise ValueError("Ключ изменён. Обновите список и откройте его заново.")
+    return settings, fields[kind], index, secret, label
+
+
+def reveal_api_key(payload: dict) -> dict:
+    _, _, _, secret, label = _selected_api_key(payload)
+    return {"secret": secret, "label": label, "revision": _api_key_revision(secret, label)}
+
+
+def update_api_key(payload: dict) -> dict:
+    settings, field, index, _, old_label = _selected_api_key(payload, for_update=True)
+    secret = payload.get("secret")
+    if (not isinstance(secret, str) or not secret.strip() or len(secret) > 8192
+            or any(ord(char) < 32 or ord(char) == 127 for char in secret)):
+        raise ValueError("Введите корректный API-ключ без управляющих символов")
+    label = payload.get("label", old_label)
+    if not isinstance(label, str) or len(label) > 200:
+        raise ValueError("Введите корректное название ключа")
+    settings._api_key_replacement = {
+        "field": field, "index": index, "revision": payload["revision"],
+        "secret": secret.strip(), "label": label.strip() or old_label,
+    }
+    save_settings(settings)
+    return snapshot()
+
+
 def set_key_active(payload: dict) -> dict:
     settings = load_settings()
     kind = str(payload.get("kind", ""))
@@ -20249,6 +20304,10 @@ def main() -> None:
             result = delete_range_preset(payload if isinstance(payload, dict) else {})
         elif command == "add-api-key":
             result = add_api_key(payload if isinstance(payload, dict) else {})
+        elif command == "reveal-api-key":
+            result = reveal_api_key(payload if isinstance(payload, dict) else {})
+        elif command == "update-api-key":
+            result = update_api_key(payload if isinstance(payload, dict) else {})
         elif command == "set-key-active":
             result = set_key_active(payload if isinstance(payload, dict) else {})
         elif command == "save-api-key-note":
