@@ -8180,6 +8180,17 @@ _COVER_SCENE_PRESENTATION_TOKENS = frozenset({
     "драматичный", "документальный", "редакционный", "кинематографичный", "фотореалистичный", "реалистичный",
     "освещение", "свет", "контраст", "напряжённый", "срочный", "сцена", "изображение", "кадр",
 })
+_COVER_ENHANCED_SCENE_MARKERS = (
+    "massive", "large", "dense", "packed", "surging", "towering", "collaps", "shatter", "rubble", "debris",
+    "smoke", "flame", "explosion", "armored", "military", "soldier", "missile", "weapon", "convoy", "blockade",
+    "clash", "confront", "oppos", "panic", "angry", "furious", "terrified", "emergency", "chaos", "crisis",
+    "crowd", "wave", "stampede", "evacuat", "rescu", "destroy", "damage", "pressure", "siege", "breach",
+    "массов", "огромн", "плотн", "толп", "обвал", "разруш", "дым", "огонь", "взрыв", "брон", "военн",
+    "солдат", "ракет", "оруж", "колонн", "блокад", "столкнов", "противост", "паник", "ярост", "спас",
+    "эваку", "давлен", "хаос", "кризис",
+)
+
+
 _COVER_SCENE_RISK_SUPPORT = (
     (
         "массовую толпу или протест",
@@ -8271,6 +8282,12 @@ def _cover_semantic_duplicate(candidate: object, prior: object) -> bool:
     # A high overlap after camera words are removed means the visible actors,
     # action and evidence are still the same scene, not a new strategy.
     return _cover_scene_similarity(candidate_scene, prior_scene) >= 0.72
+
+
+def _cover_scene_has_enhanced_dramaturgy(scene: object) -> bool:
+    """Require visible amplification when the operator selected enhanced mode."""
+    value = semantic_scene_brief(scene, "").casefold()
+    return bool(value and any(marker in value for marker in _COVER_ENHANCED_SCENE_MARKERS))
 
 
 def _cover_scene_is_grounded(scene: str, item: dict) -> tuple[bool, str]:
@@ -8712,7 +8729,15 @@ def generate_cover_prompts(payload: dict) -> dict:
                         "SEMANTIC_SCENE_VARIANTS_INCOMPLETE: ИИ не вернул требуемое число самостоятельных visual scenes"
                     )
                 options = options[:requested_count]
-                if not settings.cover_scene_intensity_mode:
+                if settings.cover_scene_intensity_mode:
+                    for option in options:
+                        if not _cover_scene_has_enhanced_dramaturgy(option):
+                            raise ValueError(
+                                "ENHANCED_SCENE_REQUIRED: выбран усиленный режим, но visual brief остался "
+                                "слишком нейтральным — нужен заметный масштаб, конфликт, сильная реакция, "
+                                "последствие или жёсткая визуальная метафора"
+                            )
+                else:
                     for option in options:
                         grounded, unsupported = _cover_scene_is_grounded(option, target)
                         if not grounded:
