@@ -192,7 +192,42 @@ describe("Covers Light view", () => {
     expect(
       screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
     ).toBeTruthy();
-    expect(screen.getByText(/ещё 2 документированных маршрута ожидают проверки API/i)).toBeTruthy();
+    expect(screen.getByText(/CACHED \+ CATALOG/i)).toBeTruthy();
+    expect(screen.getByText(/сохранённый FastGen-кэш \+ документированный каталог/i)).toBeTruthy();
+  });
+
+  it("drops catalog-only routes after a successful FastGen refresh makes the API authoritative", async () => {
+    const cached = {
+      ...fallback,
+      fastgenCapabilities: {
+        ...fallback.fastgenCapabilities,
+        image: [{
+          id: "flower_image_generate",
+          provider: "Flower",
+          display_name: "Flower Image",
+          health: "healthy" as const,
+          health_label: "Доступна по API",
+        }],
+      },
+    };
+    const command = vi.fn(async (name: string) =>
+      name === "refresh-fastgen" ? cached : undefined,
+    );
+
+    render(<Covers data={cached} command={command as never} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить модели" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("refresh-fastgen"));
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Nano Banana 2/i })).toBeNull(),
+    );
+    expect(screen.getByText(/LIVE/i)).toBeTruthy();
   });
 
   it("lets matching live FastGen metadata override the Nano Banana 2 catalogue fallback", () => {
