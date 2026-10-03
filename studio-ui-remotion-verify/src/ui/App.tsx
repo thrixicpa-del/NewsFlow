@@ -4204,8 +4204,7 @@ export function Covers({
   const models = fastGenCatalogVerifiedThisSession
     ? liveModels
     : [...liveModels, ...catalogOnlyModels];
-  const hasLiveFastGenModels =
-    fastGenCatalogVerifiedThisSession && liveModels.length > 0;
+  const hasLiveFastGenResponse = fastGenCatalogVerifiedThisSession;
   const hasCachedFastGenModels =
     !fastGenCatalogVerifiedThisSession && liveModels.length > 0;
   const refreshFastGenModels = async () => {
@@ -5937,7 +5936,7 @@ export function Covers({
           <div>
             <b>Модели FastGen — ответ API</b>
             <small>
-              {hasLiveFastGenModels
+              {hasLiveFastGenResponse
                 ? `${liveModels.length} моделей изображения получено из FastGen. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
                 : hasCachedFastGenModels
                   ? `Показан сохранённый FastGen-кэш + документированный каталог до новой проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
@@ -5945,7 +5944,7 @@ export function Covers({
             </small>
           </div>
           <span className="api-live-dot">
-            ● {hasLiveFastGenModels ? "LIVE" : hasCachedFastGenModels ? "CACHED + CATALOG" : "CATALOG"}
+            ● {hasLiveFastGenResponse ? "LIVE" : hasCachedFastGenModels ? "CACHED + CATALOG" : "CATALOG"}
           </span>
         </div>
         {models.length ? (
