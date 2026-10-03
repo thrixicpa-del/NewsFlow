@@ -176,17 +176,48 @@ class CoverSceneBriefTests(unittest.TestCase):
         self.assertNotEqual(row["image_prompt"], old)
         self.assertNotIn("explosion", row["image_prompt"].casefold())
 
-    def test_enhanced_generation_rejects_an_unsupported_violent_scene(self):
-        neutral = {
-            "production_item_id": "production:neutral-scene",
-            "title": "Company publishes quarterly report",
-            "script": "The chief executive presents a financial chart to investors.",
+    def test_enhanced_generation_allows_strong_symbolic_military_metaphor(self):
+        item = {
+            "production_item_id": "production:economic-blow",
+            "title": "New tariffs deal a blow to the economy",
+            "script": "Exporters report higher costs as companies revise delivery plans.",
         }
-        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True, cover_queue=[neutral])
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True, cover_queue=[item])
         sent: list[str] = []
 
         async def provider(prompt: str, **_kwargs: object) -> str:
             sent.append(prompt)
+            return json.dumps({"prompts": [
+                "Armored vehicles push through a collapsing wall of shipping containers while exporters clutch falling price charts, "
+                "using a harsh military metaphor to visualize the economic blow."
+            ], "recommended": 1})
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=provider)):
+            bridge.generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:economic-blow"],
+                "provider": "agent",
+            })
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("ОБЯЗАТЕЛЬНЫЙ РЕЖИМ", sent[0])
+        self.assertIn("символическая", sent[0])
+        self.assertIn("Armored vehicles", settings.cover_queue[0]["image_prompt"])
+        self.assertNotIn("UNSUPPORTED_SCENE_EVENT", settings.cover_queue[0].get("error", ""))
+
+    def test_standard_generation_still_rejects_unrelated_military_scene(self):
+        item = {
+            "production_item_id": "production:standard-quarterly",
+            "title": "Company publishes quarterly report",
+            "script": "The chief executive presents a financial chart to investors.",
+        }
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=False, cover_queue=[item])
+
+        async def provider(*_args: object, **_kwargs: object) -> str:
             return json.dumps({"prompts": [
                 "A massive explosion destroys city blocks as armed soldiers evacuate a terrified crowd."
             ], "recommended": 1})
@@ -198,11 +229,10 @@ class CoverSceneBriefTests(unittest.TestCase):
              patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=provider)):
             bridge.generate_cover_prompts({
                 "indices": [0],
-                "productionItemIds": ["production:neutral-scene"],
+                "productionItemIds": ["production:standard-quarterly"],
                 "provider": "agent",
             })
 
-        self.assertEqual(len(sent), 2)
         self.assertNotIn("image_prompt", settings.cover_queue[0])
         self.assertIn("UNSUPPORTED_SCENE_EVENT", settings.cover_queue[0]["error"])
 
@@ -323,9 +353,9 @@ class CoverSceneBriefTests(unittest.TestCase):
                 self.assertFalse(armed)
                 self.assertFalse(destruction)
 
-    def test_safety_block_with_default_two_variants_fails_closed_without_crashing_or_losing_old_prompt(self):
+    def test_standard_safety_block_with_default_two_variants_fails_closed_without_crashing_or_losing_old_prompt(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
-        settings = Settings(cover_prompt_variant_count=2, cover_queue=[self._item(
+        settings = Settings(cover_prompt_variant_count=2, cover_scene_intensity_mode=False, cover_queue=[self._item(
             image_prompt=old,
             image_prompt_options=[old],
         )])
@@ -349,6 +379,34 @@ class CoverSceneBriefTests(unittest.TestCase):
         self.assertEqual(row["image_prompt"], old)
         self.assertEqual(row["image_prompt_options"], [old])
         self.assertIn("SEMANTIC_SCENE_DUPLICATE", row["error"])
+
+    def test_enhanced_safety_block_never_silently_downgrades_to_neutral_fallback(self):
+        old = "Workers hold closure notices at the factory gate while management posts the signed order."
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True, cover_queue=[self._item(
+            image_prompt=old,
+            image_prompt_options=[old],
+        )])
+
+        async def blocked_provider(*_args: object, **_kwargs: object) -> str:
+            raise RuntimeError("content filter blocked by provider")
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=blocked_provider)):
+            bridge.generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:scene-brief"],
+                "provider": "agent",
+                "rewrite": True,
+            })
+
+        row = settings.cover_queue[0]
+        self.assertEqual(row["image_prompt"], old)
+        self.assertEqual(row["image_prompt_options"], [old])
+        self.assertIn("ENHANCED_SCENE_REQUIRED", row["error"])
+        self.assertNotEqual(row.get("prompt_provider"), "local-fallback")
 
 
 if __name__ == "__main__":
