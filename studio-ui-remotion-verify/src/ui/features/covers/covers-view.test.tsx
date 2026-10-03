@@ -210,11 +210,9 @@ describe("Covers Light view", () => {
         }],
       },
     };
-    const command = vi.fn(async (name: string) =>
-      name === "refresh-fastgen" ? cached : undefined,
-    );
+    const command = vi.fn(async () => cached);
 
-    render(<Covers data={cached} command={command as never} />);
+    render(<Covers data={cached} command={command} />);
     fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
 
     expect(
