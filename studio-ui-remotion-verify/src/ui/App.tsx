@@ -134,9 +134,10 @@ const defaultSeoPrompt =
 const defaultTagsPrompt =
   'Создай релевантные YouTube-теги для темы «{title}». Верни только JSON: {"tags":["..."]}.';
 
-// These documented image routes remain selectable before the first live
-// capabilities refresh.  The live FastGen catalogue replaces this list as
-// soon as it is available, including its current health and billing data.
+// These documented image routes remain selectable before this renderer has
+// completed a live capabilities refresh. Persisted API cache entries may be
+// older than the app build, so catalog-only routes supplement that cache until
+// FastGen is checked again; the successful live response is then authoritative.
 const fastGenImageFallbackModels: NewsFlowSnapshot["fastgenCapabilities"]["image"] = [
   {
     id: "flower_image_generate",
