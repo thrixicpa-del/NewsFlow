@@ -243,5 +243,63 @@ class CoverSceneBriefTests(unittest.TestCase):
         self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", build_final_provider_prompt(manual, row))
 
 
+    def test_same_scene_with_presentation_padding_is_still_a_semantic_duplicate(self):
+        old = "Workers hold closure notices at the factory gate while management posts the signed order."
+        padded = (
+            "Workers hold closure notices at the factory gate while management posts the signed order "
+            "with dramatic documentary lighting, tense editorial contrast and realistic news imagery."
+        )
+        self.assertTrue(bridge._cover_semantic_duplicate(padded, old))
+
+    def test_generic_cyberattack_or_economic_blow_does_not_authorize_military_destruction(self):
+        cyber = {
+            "title": "Company reports a cyberattack on its network",
+            "script": "Engineers isolate affected servers while the company investigates unauthorized access.",
+        }
+        economic = {
+            "title": "New tariffs deal a blow to exporters",
+            "script": "Companies calculate higher costs and revise delivery plans.",
+        }
+        for item in (cyber, economic):
+            with self.subTest(title=item["title"]):
+                armed, _reason = bridge._cover_scene_is_grounded(
+                    "Armed soldiers stand beside missile launchers while military vehicles move through the street.",
+                    item,
+                )
+                destruction, _reason = bridge._cover_scene_is_grounded(
+                    "A huge explosion sends smoke over destroyed buildings as rescuers search the rubble.",
+                    item,
+                )
+                self.assertFalse(armed)
+                self.assertFalse(destruction)
+
+    def test_safety_block_with_default_two_variants_fails_closed_without_crashing_or_losing_old_prompt(self):
+        old = "Workers hold closure notices at the factory gate while management posts the signed order."
+        settings = Settings(cover_prompt_variant_count=2, cover_queue=[self._item(
+            image_prompt=old,
+            image_prompt_options=[old],
+        )])
+
+        async def blocked_provider(*_args: object, **_kwargs: object) -> str:
+            raise RuntimeError("content filter blocked by provider")
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=blocked_provider)):
+            bridge.generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:scene-brief"],
+                "provider": "agent",
+                "rewrite": True,
+            })
+
+        row = settings.cover_queue[0]
+        self.assertEqual(row["image_prompt"], old)
+        self.assertEqual(row["image_prompt_options"], [old])
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", row["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
