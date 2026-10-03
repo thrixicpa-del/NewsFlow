@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 import threading
 import time
 import unittest
@@ -1667,7 +1666,7 @@ class CoverGalleryFileStateTests(unittest.TestCase):
         self.assertIn("конкретное действие", prompt)
         self.assertIn("визуальное доказательство", prompt)
         self.assertIn("профессиональный арт-директор YouTube-обложек", prompt)
-        self.assertIn("заметно отличаться композицией", prompt)
+        self.assertIn("ACTION, REACTION, CONSEQUENCE, CONFRONTATION, SCALE или EVIDENCE", prompt)
         self.assertIn("только когда это подтверждено темой или сценарием", prompt)
         self.assertIn("Final Prompt Builder", prompt)
         self.assertNotIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", prompt)
@@ -4202,8 +4201,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
                 save_settings(Settings(cover_scene_intensity_mode=True))
                 self.assertTrue(load_settings().cover_scene_intensity_mode)
 
-    def test_enhanced_new_prompt_replaces_an_unchanged_provider_scene_with_a_distinct_composition(self):
-        """A deliberate enhanced rewrite never silently keeps the old scene prompt."""
+    def test_enhanced_new_prompt_rejects_an_unchanged_provider_scene(self):
+        """A rewrite cannot claim freshness through a composition-only fallback."""
         settings = Settings(cover_prompt_variant_count=1)
         settings.cover_scene_intensity_mode = True
         prior_scene = "People protest in a city square with signs"
@@ -4229,11 +4228,11 @@ class CoverLocalCompositorTests(unittest.TestCase):
             generate_cover_prompts({"indices": [0], "provider": "agent", "rewrite": True})
 
         rewritten = settings.cover_queue[0]["image_prompt"]
-        self.assertNotEqual(rewritten.strip(), prior_prompt.strip())
-        self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", rewritten)
+        self.assertEqual(rewritten.strip(), prior_prompt.strip())
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
-    def test_enhanced_duplicate_rewrite_preserves_the_scene_and_changes_only_composition(self):
-        """An exact duplicate must retain its scene facts, not fall back to a new story."""
+    def test_enhanced_duplicate_rewrite_preserves_old_scene_until_provider_changes_strategy(self):
+        """An exact duplicate must not become a fake rewrite through camera notes."""
         settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True)
         provider_scene = (
             "Mayor Elena Petrova signs the River Bridge closure order beside the damaged bridge, "
@@ -4267,13 +4266,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
             })
 
         rewritten = settings.cover_queue[0]["image_prompt"]
-        self.assertNotEqual(rewritten.strip(), prior_prompt.strip())
-        for preserved in ("Mayor Elena Petrova", "River Bridge", "signs", "engineers inspect the barrier"):
-            self.assertIn(preserved, rewritten)
-        story_context = rewritten.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
-        for invented in ("crowd", "weapons", "military", "explosion", "protest", "press activity"):
-            self.assertNotIn(invented, story_context.casefold())
-        self.assertIn("Composition-only alternative", rewritten)
+        self.assertEqual(rewritten.strip(), prior_prompt.strip())
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
     def test_every_enhanced_duplicate_direction_preserves_story_with_grounded_intensity(self):
         """All local duplicate fallbacks retain their scene and amplify only its evidence."""
@@ -4316,21 +4310,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
         rewritten = settings.cover_queue[0]["image_prompt_options"]
         self.assertEqual(provider_scene_snapshot, tuple(provider_scenes))
         self.assertEqual(previous_option_snapshot, tuple(prior_options))
-        self.assertEqual(4, len(rewritten))
-        self.assertEqual(4, len(set(rewritten)))
-        forbidden = (
-            "people", "bystanders", "crowd", "reaction", "confrontation", "opposing sides",
-            "military", "weapons", "smoke", "destruction", "protest", "press", "rescuers",
-        )
-        for scene, old_prompt, new_prompt in zip(provider_scenes, prior_options, rewritten, strict=True):
-            story_context = new_prompt.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
-            composition = new_prompt.split("SELECTED COMPOSITION:\n", 1)[1].split("\n\nIDENTITY / REFERENCES:", 1)[0]
-            self.assertEqual(scene, story_context)
-            self.assertNotEqual(old_prompt, new_prompt)
-            self.assertIn("Composition-only alternative", composition)
-            self.assertIn("Context-grounded intensity", composition)
-            for forbidden_term in forbidden:
-                self.assertIsNone(re.search(rf"\b{re.escape(forbidden_term)}\b", composition.casefold()))
+        self.assertEqual(rewritten, prior_options)
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
     def test_enhanced_duplicate_intensity_keeps_each_supported_event_type_grounded(self):
         """Local duplicate rewrites may amplify source-supported material, never another event."""
@@ -4373,7 +4354,7 @@ class CoverLocalCompositorTests(unittest.TestCase):
                 ("destruction", "smoke", "explosion", "weapons", "crowd"),
             ),
         )
-        for index, (title, script, scene, required, forbidden) in enumerate(cases):
+        for index, (title, script, scene, _required, _forbidden) in enumerate(cases):
             with self.subTest(title=title):
                 item = {
                     "production_item_id": f"production:grounded-intensity-{index}",
@@ -4381,20 +4362,12 @@ class CoverLocalCompositorTests(unittest.TestCase):
                     "script": script,
                 }
                 prior_prompt = _normalize_cover_photo_prompt(scene, item)
-                rewritten = bridge._cover_distinct_enhanced_rewrite_options(
-                    [prior_prompt], item, [prior_prompt],
-                )[0]
-                story_context = rewritten.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
-                composition = rewritten.split("SELECTED COMPOSITION:\n", 1)[1].split("\n\nIDENTITY / REFERENCES:", 1)[0]
+                with self.assertRaisesRegex(ValueError, "SEMANTIC_SCENE_DUPLICATE"):
+                    bridge._cover_distinct_enhanced_rewrite_options(
+                        [prior_prompt], item, [prior_prompt],
+                    )
 
-                self.assertEqual(scene, story_context)
-                self.assertIn("Context-grounded intensity", composition)
-                for term in required:
-                    self.assertIn(term, story_context.casefold())
-                for term in forbidden:
-                    self.assertNotIn(term, story_context.casefold())
-
-    def test_standard_duplicate_rewrite_replaces_an_exact_provider_repeat_without_intensity(self):
+    def test_standard_duplicate_rewrite_rejects_an_exact_provider_repeat_without_intensity(self):
         """Freshness remains mandatory while intensity amplification stays opt-in."""
         settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=False)
         provider_scene = "Mayor Elena Petrova signs the River Bridge closure order"
@@ -4426,9 +4399,8 @@ class CoverLocalCompositorTests(unittest.TestCase):
             })
 
         rewritten = settings.cover_queue[0]["image_prompt"]
-        self.assertNotEqual(rewritten, prior_prompt)
-        self.assertIn("Composition-only alternative", rewritten)
-        self.assertNotIn("Context-grounded intensity", rewritten)
+        self.assertEqual(rewritten, prior_prompt)
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
     def test_cover_build_mode_ranges_reject_overlaps(self):
         settings = Settings()
@@ -4607,13 +4579,18 @@ class CoverLocalCompositorTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(settings.cover_queue[0]["paths"], ["cover-1.png", "cover-2.png"])
 
-    def test_prompt_writer_fills_a_missing_second_prompt_with_a_safe_topic_variant(self):
-        """The requested count is a contract even when the text model responds with a single option."""
+    def test_prompt_writer_requires_two_semantically_distinct_provider_scenes(self):
+        """Requested variants are real scene strategies, never a local camera-only fill."""
         settings = Settings(cover_prompt_variant_count=2)
         settings.cover_queue = [{"title": "Ормуз и нефтяные танкеры", "script": ""}]
 
         async def one_prompt(*_args, **_kwargs):
-            return '{"prompts":["Wide real tanker scene with reporters"],"recommended":1}'
+            return (
+                '{"prompts":['
+                '"Oil tankers queue at the strait checkpoint beside an inspection vessel",'
+                '"Shipping documents and a route map fill the control room as operators examine delayed departures"'
+                '],"recommended":1}'
+            )
 
         pool = SimpleNamespace(generate=one_prompt)
         with patch("scriptor.bridge.load_settings", return_value=settings), \
@@ -4623,8 +4600,7 @@ class CoverLocalCompositorTests(unittest.TestCase):
              patch("scriptor.bridge.HybridTextPool", return_value=pool):
             generate_cover_prompts({"indices": [0], "provider": "agent"})
         self.assertEqual(len(settings.cover_queue[0]["image_prompt_options"]), 2)
-        self.assertTrue(all(prompt.startswith("CORE STYLE:\n")
-                            and "NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2." in prompt
+        self.assertTrue(all(len(prompt) <= 800 and "CORE STYLE" not in prompt
                             for prompt in settings.cover_queue[0]["image_prompt_options"]))
 
     def test_prompt_writer_accepts_a_selected_topic_after_its_visual_prompt_was_deleted(self):
@@ -4747,7 +4723,7 @@ class CoverLocalCompositorTests(unittest.TestCase):
 
     def test_new_prompts_use_local_fallback_when_provider_safety_filter_blocks(self):
         """A blocked LLM prompt request still produces a safe, renderable new prompt."""
-        settings = Settings()
+        settings = Settings(cover_prompt_variant_count=1)
         settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
         settings.openai_api_keys = [OpenAIKey(label="test", secret="test")]
         settings.cover_queue = [{
@@ -4770,7 +4746,7 @@ class CoverLocalCompositorTests(unittest.TestCase):
         self.assertEqual(settings.cover_queue[0]["status"], "Новые промпты созданы")
         self.assertEqual(settings.cover_queue[0]["error"], "")
         self.assertTrue(settings.cover_queue[0]["image_prompt_options"])
-        self.assertIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", settings.cover_queue[0]["image_prompt"])
+        self.assertNotIn("NEWSFLOW FASTGEN UNIVERSAL THUMBNAIL CORE V2", settings.cover_queue[0]["image_prompt"])
         self.assertNotIn("breaking-news", settings.cover_queue[0]["image_prompt"].casefold())
         render.assert_not_called()
 
@@ -5179,7 +5155,12 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
             calls.append(1)
             if len(calls) == 1:
                 raise RuntimeError("429 temporary")
-            return '{"prompts":["Real press scene with documents and reporters"],"recommended":1}'
+            return (
+                '{"prompts":['
+                '"Officials present signed policy documents to reporters at a briefing table",'
+                '"Journalists examine the published document on screens as staff react in the press room"'
+                '],"recommended":1}'
+            )
 
         with patch("scriptor.bridge.load_settings", return_value=settings), \
              patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
@@ -5342,7 +5323,12 @@ class CoverBulkTextPromptReliabilityTests(unittest.TestCase):
         ) for index in range(50)]
 
         async def generate(*_args, **_kwargs):
-            return '{"prompts":["Real press scene with documents and reporters"],"recommended":1}'
+            return (
+                '{"prompts":['
+                '"Officials present signed policy documents to reporters at a briefing table",'
+                '"Journalists examine the published document on screens as staff react in the press room"'
+                '],"recommended":1}'
+            )
 
         with patch("scriptor.bridge.load_settings", return_value=settings), \
              patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
@@ -5573,8 +5559,8 @@ class CoverPromptFreshnessTests(unittest.TestCase):
             **values,
         }
 
-    def test_standard_rewrite_replaces_an_exact_previous_prompt_without_intensity(self):
-        """Freshness is required even when visual intensity is disabled."""
+    def test_standard_rewrite_rejects_an_exact_previous_prompt_without_intensity(self):
+        """Freshness requires a new semantic scene even when intensity is disabled."""
         settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=False)
         prior_scene = "Officials review a signed transport agreement at a briefing table"
         item = self._row(0)
@@ -5599,12 +5585,11 @@ class CoverPromptFreshnessTests(unittest.TestCase):
             })
 
         rewritten = settings.cover_queue[0]["image_prompt"]
-        self.assertNotEqual(rewritten, prior_prompt)
-        self.assertNotIn("Context-grounded intensity", rewritten)
-        self.assertIn("Composition-only alternative", rewritten)
+        self.assertEqual(rewritten, prior_prompt)
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
-    def test_rewrite_output_is_distinct_from_active_history_and_each_other(self):
-        """Validation happens after provider normalization and local variant fill."""
+    def test_rewrite_rejects_a_duplicate_against_active_history_and_siblings(self):
+        """Validation never fills a duplicate response with local camera variants."""
         settings = Settings(cover_prompt_variant_count=3, cover_scene_intensity_mode=False)
         old_scene = "Negotiators stand beside a trade document"
         history_scene = "Delegates examine tariff papers in a meeting room"
@@ -5619,7 +5604,11 @@ class CoverPromptFreshnessTests(unittest.TestCase):
         }]
 
         async def duplicate_short_response(*_args, **_kwargs):
-            return json.dumps({"prompts": [old_scene], "recommended": 1})
+            return json.dumps({"prompts": [
+                old_scene,
+                "Wide view of negotiators standing beside a trade document",
+                "Telephoto framing of negotiators standing beside a trade document",
+            ], "recommended": 1})
 
         with patch("scriptor.bridge.load_settings", return_value=settings), \
              patch("scriptor.bridge._hydrate_cover_library", return_value=False), \
@@ -5631,11 +5620,8 @@ class CoverPromptFreshnessTests(unittest.TestCase):
                 "provider": "agent", "rewrite": True,
             })
 
-        options = settings.cover_queue[0]["image_prompt_options"]
-        self.assertEqual(len(options), 3)
-        self.assertEqual(len(set(options)), 3)
-        self.assertNotIn(old_prompt, options)
-        self.assertNotIn(history_prompt, options)
+        self.assertEqual(settings.cover_queue[0]["image_prompt_options"], [old_prompt])
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
     def test_delete_keeps_bounded_history_without_restoring_an_active_prompt(self):
         """Deletion clears active state but retains only bounded do-not-repeat evidence."""
@@ -5712,9 +5698,10 @@ class CoverPromptFreshnessTests(unittest.TestCase):
                 "indices": [0], "productionItemIds": ["production:fresh-0"], "provider": "agent",
             })
 
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertIn("НЕ ПОВТОРЯЙ", calls[0])
-        self.assertNotEqual(settings.cover_queue[0]["image_prompt"], deleted_prompt)
+        self.assertNotIn("image_prompt", settings.cover_queue[0])
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", settings.cover_queue[0]["error"])
 
     def test_failed_rewrite_keeps_old_prompts_files_and_manual_cover_state(self):
         """Provider failure must be truthful without destructively clearing the accepted render."""
@@ -5770,7 +5757,7 @@ class CoverPromptFreshnessTests(unittest.TestCase):
             other_image = Path(directory) / "other.png"
             other_image.write_bytes(b"other")
             old_prompt = "Old accepted prompt"
-            settings = Settings(cover_output_folder=directory, cover_queue=[
+            settings = Settings(cover_output_folder=directory, cover_prompt_variant_count=1, cover_queue=[
                 self._row(0, image_prompt=old_prompt, image_prompt_options=[old_prompt],
                           paths=[str(old_image)], path=str(old_image), selected_path=str(old_image)),
                 self._row(1, image_prompt="Unselected prompt", image_prompt_options=["Unselected prompt"],
@@ -5810,7 +5797,7 @@ class CoverPromptFreshnessTests(unittest.TestCase):
             manual_face = Path(directory) / "manual-face.png"
             manual_face.write_bytes(b"face")
             old_prompt = "Old accepted visual prompt"
-            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+            settings = Settings(cover_output_folder=directory, cover_prompt_variant_count=1, cover_queue=[self._row(
                 0, image_prompt=old_prompt, image_prompt_options=[old_prompt],
                 paths=[str(old_image)], path=str(old_image), selected_path=str(old_image),
                 final_provider_prompt="OLD FINAL FASTGEN PROMPT",
@@ -5868,7 +5855,7 @@ class CoverPromptFreshnessTests(unittest.TestCase):
             old_image.write_bytes(b"old")
             old_prompt = "Old accepted visual prompt"
             old_final = "OLD FINAL FASTGEN PROMPT"
-            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+            settings = Settings(cover_output_folder=directory, cover_prompt_variant_count=1, cover_queue=[self._row(
                 0, image_prompt=old_prompt, image_prompt_options=[old_prompt],
                 paths=[str(old_image)], path=str(old_image), selected_path=str(old_image),
                 final_provider_prompt=old_final, final_provider_prompt_options=[old_final],
@@ -5904,7 +5891,7 @@ class CoverPromptFreshnessTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             old_image = Path(directory) / "old.png"
             old_image.write_bytes(b"old")
-            settings = Settings(cover_output_folder=directory, cover_queue=[self._row(
+            settings = Settings(cover_output_folder=directory, cover_prompt_variant_count=1, cover_queue=[self._row(
                 0, image_prompt="Old accepted visual prompt", image_prompt_options=["Old accepted visual prompt"],
                 paths=[str(old_image)], path=str(old_image), selected_path=str(old_image),
                 final_provider_prompt="OLD FINAL FASTGEN PROMPT",

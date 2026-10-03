@@ -120,6 +120,16 @@ def _semantic_scene(value: object, fallback: str) -> str:
     return _clean(". ".join(semantic), fallback)
 
 
+def semantic_scene_brief(value: object, fallback: str = "") -> str:
+    """Return only the human-editable scene layer of a legacy or V2 prompt.
+
+    This is deliberately separate from :func:`build_final_provider_prompt`:
+    Covers persists a scene brief, while FastGen receives the complete V2
+    treatment only at render time.
+    """
+    return _semantic_scene(value, fallback)
+
+
 _STRUCTURED_SCENE_FIELDS = (
     ("MAIN SUBJECT", "main_subject"),
     ("SELECTED PEOPLE", "selected_people"),
