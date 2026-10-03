@@ -8171,21 +8171,35 @@ _COVER_SCENE_STOP_TOKENS = frozenset({
     "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "the", "to", "while",
     "with", "это", "как", "на", "над", "от", "по", "при", "с", "со", "у", "в", "во", "и",
 })
+_COVER_SCENE_PRESENTATION_TOKENS = frozenset({
+    "dramatic", "documentary", "editorial", "cinematic", "photorealistic", "realistic", "lighting", "light",
+    "contrast", "tense", "urgent", "urgency", "impact", "thumbnail", "youtube", "news", "scene", "image", "shot",
+    "драматичный", "документальный", "редакционный", "кинематографичный", "фотореалистичный", "реалистичный",
+    "освещение", "свет", "контраст", "напряжённый", "срочный", "сцена", "изображение", "кадр",
+})
 _COVER_SCENE_RISK_SUPPORT = (
     (
         "массовую толпу или протест",
         ("crowd", "protest", "rally", "demonstrat", "march", "митинг", "толп", "протест", "демонстрант"),
-        ("crowd", "protest", "rally", "demonstrat", "march", "gather", "митинг", "толп", "протест", "демонстрант", "собрал"),
+        ("crowd", "protest", "rally", "demonstrat", "march", "митинг", "толп", "протест", "демонстрант", "акци"),
     ),
     (
         "вооружённый конфликт",
         ("weapon", "armed", "soldier", "military", "tank", "missile", "gun", "оруж", "военн", "солдат", "танк", "ракет"),
-        ("weapon", "armed", "soldier", "military", "war", "attack", "strike", "tank", "missile", "оруж", "военн", "солдат", "войн", "атак", "удар", "танк", "ракет"),
+        (
+            "weapon", "armed", "soldier", "military", "war", "combat", "frontline", "tank", "missile", "rocket",
+            "drone", "bomb", "shelling", "airstrike", "оруж", "военн", "солдат", "войн", "боев", "фронт",
+            "танк", "ракет", "дрон", "беспилот", "бомб", "обстрел", "пво",
+        ),
     ),
     (
         "разрушение, дым или спасательные действия",
         ("explosion", "blast", "smoke", "destroy", "rubble", "rescue", "firefighter", "взрыв", "дым", "разруш", "спасател", "обломк"),
-        ("explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "fire", "attack", "strike", "взрыв", "дым", "разруш", "поврежд", "спасател", "пожар", "атак", "удар", "обломк"),
+        (
+            "explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "fire", "missile", "rocket",
+            "drone", "bomb", "shelling", "airstrike", "взрыв", "дым", "разруш", "поврежд", "спасател",
+            "пожар", "ракет", "дрон", "беспилот", "бомб", "обстрел", "обломк",
+        ),
     ),
 )
 
@@ -8220,7 +8234,11 @@ def _cover_scene_tokens(value: object) -> set[str]:
     words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", scene.casefold())
     result: set[str] = set()
     for word in words:
-        if word in _COVER_SCENE_CAMERA_TOKENS or word in _COVER_SCENE_STOP_TOKENS:
+        if (
+            word in _COVER_SCENE_CAMERA_TOKENS
+            or word in _COVER_SCENE_STOP_TOKENS
+            or word in _COVER_SCENE_PRESENTATION_TOKENS
+        ):
             continue
         # English inflection and Russian case endings should not make an
         # otherwise identical action look like a distinct visual event.
@@ -8701,20 +8719,31 @@ def generate_cover_prompts(payload: dict) -> dict:
         except _BRIDGE_OPERATION_ERRORS as exc:
             if _cover_prompt_safety_blocked(exc):
                 fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
-                options = [_normalize_cover_scene_brief(_fallback_cover_prompt(target, variant), target) for variant in range(fallback_count)]
-                options = _cover_distinct_prompt_options(
-                    options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
-                )
-                _cover_step(target, "Промпты готовы", 100,
-                            "Провайдер отклонил формулировку: создан безопасный локальный вариант")
-                target.update(image_prompt_options=options, selected_prompt_index=0,
-                            image_prompt=options[0], prompt_provider="local-fallback",
-                            prompt_text_signature=_cover_text_revision(target), error="")
-                target["prompt_revision_id"] = _cover_prompt_revision(target)
-                if rewrite:
-                    _remember_cover_prompt_history(target, previous_options)
-                if stage_fresh_rewrite:
-                    staged[index] = target
+                try:
+                    options = [
+                        _normalize_cover_scene_brief(_fallback_cover_prompt(target, variant), target)
+                        for variant in range(fallback_count)
+                    ]
+                    options = _cover_distinct_prompt_options(
+                        options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
+                    )
+                except ValueError as fallback_error:
+                    reason = _cover_provider_error_message(fallback_error)
+                    _cover_step(target, "Ошибка промпта", 100, reason)
+                    target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
+                    if stage_fresh_rewrite:
+                        staging_errors[index] = reason
+                else:
+                    _cover_step(target, "Промпты готовы", 100,
+                                "Провайдер отклонил формулировку: создан безопасный локальный вариант")
+                    target.update(image_prompt_options=options, selected_prompt_index=0,
+                                image_prompt=options[0], prompt_provider="local-fallback",
+                                prompt_text_signature=_cover_text_revision(target), error="")
+                    target["prompt_revision_id"] = _cover_prompt_revision(target)
+                    if rewrite:
+                        _remember_cover_prompt_history(target, previous_options)
+                    if stage_fresh_rewrite:
+                        staged[index] = target
             else:
                 reason = _cover_provider_error_message(exc)
                 _cover_step(target, "Ошибка промпта", 100, reason)
