@@ -97,7 +97,7 @@ class CoverSceneBriefTests(unittest.TestCase):
             self.assertEqual(row["image_prompt"], old)
             self.assertEqual(row["paths"], [str(image)])
             self.assertTrue(image.is_file())
-            self.assertIn("ENHANCED_SCENE_REQUIRED", row["error"])
+            self.assertIn("SEMANTIC_SCENE_DUPLICATE", row["error"])
 
     def test_rewrite_rejects_a_semantic_paraphrase_not_just_an_exact_duplicate(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
@@ -155,7 +155,7 @@ class CoverSceneBriefTests(unittest.TestCase):
         )
 
         self.assertEqual(row["image_prompt"], old)
-        self.assertIn("semantic", row["error"].casefold())
+        self.assertIn("ENHANCED_SCENE_REQUIRED", row["error"])
 
     def test_enhanced_rewrite_keeps_supported_new_scale_and_reaction_in_the_scene_brief(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
