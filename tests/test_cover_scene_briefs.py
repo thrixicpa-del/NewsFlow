@@ -97,7 +97,7 @@ class CoverSceneBriefTests(unittest.TestCase):
             self.assertEqual(row["image_prompt"], old)
             self.assertEqual(row["paths"], [str(image)])
             self.assertTrue(image.is_file())
-            self.assertIn("semantic", row["error"].casefold())
+            self.assertIn("ENHANCED_SCENE_REQUIRED", row["error"])
 
     def test_rewrite_rejects_a_semantic_paraphrase_not_just_an_exact_duplicate(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
@@ -296,8 +296,9 @@ class CoverSceneBriefTests(unittest.TestCase):
         }
         auto_before = dict(auto)
         projected = bridge._cover_prompt_ui_projection(auto)
-        self.assertEqual(projected["image_prompt"], scene)
-        self.assertEqual(projected["image_prompt_options"], [scene])
+        expected_scene = scene.rstrip(".")
+        self.assertEqual(projected["image_prompt"], expected_scene)
+        self.assertEqual(projected["image_prompt_options"], [expected_scene])
         self.assertEqual(auto, auto_before)
 
         manual = "Photorealistic editorial scene with workers outside the factory gate."
