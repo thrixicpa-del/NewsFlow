@@ -187,10 +187,10 @@ class CoverSceneBriefTests(unittest.TestCase):
 
         async def provider(prompt: str, **_kwargs: object) -> str:
             sent.append(prompt)
-            return json.dumps({"prompts": [
+            return json.dumps({"prompts": [(
                 "Armored vehicles push through a collapsing wall of shipping containers while exporters clutch falling price charts, "
                 "using a harsh military metaphor to visualize the economic blow."
-            ], "recommended": 1})
+            )], "recommended": 1})
 
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
