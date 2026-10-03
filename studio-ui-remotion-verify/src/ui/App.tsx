@@ -4190,7 +4190,15 @@ export function Covers({
   const liveModels = (data.fastgenCapabilities.image || []).filter(
     (item) => item.id,
   );
-  const models = liveModels.length ? liveModels : fastGenImageFallbackModels;
+  const liveModelIds = new Set(liveModels.map((item) => String(item.id || "")));
+  const catalogOnlyModels = fastGenImageFallbackModels.filter(
+    (item) => !liveModelIds.has(String(item.id || "")),
+  );
+  // A persisted capabilities cache can predate a newly documented FastGen
+  // route. Keep catalog-only routes visible until that exact operation appears
+  // in the API response; matching live entries remain fully authoritative for
+  // current health/billing/provider metadata.
+  const models = [...liveModels, ...catalogOnlyModels];
   const hasLiveFastGenModels = liveModels.length > 0;
   const enabledModels = models.filter(
     (item) => item.health !== "unavailable" && !item.deprecated,
@@ -5916,7 +5924,7 @@ export function Covers({
             <b>Модели FastGen — ответ API</b>
             <small>
               {hasLiveFastGenModels
-                ? `${models.length} моделей изображения получено из FastGen. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
+                ? `${liveModels.length} моделей изображения получено из FastGen${catalogOnlyModels.length ? `; ещё ${catalogOnlyModels.length} документированных маршрута ожидают проверки API` : ""}. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
                 : `Доступен документированный каталог до проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`}
             </small>
           </div>
