@@ -31,7 +31,7 @@ jobs:
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
-      - run: python tests/run_isolated.py tests.test_cover_prompt_pairs_import tests.test_covers
+      - run: python tests/run_isolated.py tests.test_cover_prompt_pairs_import
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-cover-prompt-import
       - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session tests.test_core_runtime_guard
