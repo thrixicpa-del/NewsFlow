@@ -2587,7 +2587,7 @@ def snapshot() -> dict:
             "storyPlannerFailure": job.story_planner_failure if job else {},
         })
     cover_rows = [
-        {**item, "galleryPaths": cover_gallery_paths(item)}
+        {**_cover_prompt_ui_projection(item), "galleryPaths": cover_gallery_paths(item)}
         for item in settings.cover_queue
     ]
     cover_counts = cover_queue_counts(cover_rows)
@@ -8386,6 +8386,30 @@ def _migrate_legacy_cover_photo_prompts(settings: Settings) -> bool:
     must never rewrite a user's 84 persisted prompt choices in the background.
     """
     return False
+
+
+def _cover_prompt_ui_projection(item: dict) -> dict:
+    """Expose concise legacy auto-prompts without rewriting durable cover state.
+
+    Existing installs can contain full V2 payloads created before #321. The UI
+    should immediately show their human scene layer, but an operator-owned
+    manual prompt must remain byte-for-byte visible and editable.
+    """
+    row = dict(item)
+    if str(item.get("prompt_provider", "") or "").casefold() == "manual":
+        return row
+    if current := _cover_scene_brief_for_memory(item.get("image_prompt")):
+        row["image_prompt"] = current
+    values = item.get("image_prompt_options")
+    if isinstance(values, list):
+        projected = [
+            _cover_scene_brief_for_memory(value) or str(value)
+            for value in values
+            if str(value or "").strip()
+        ]
+        if projected:
+            row["image_prompt_options"] = projected
+    return row
 
 
 def _cover_prompt_should_generate(item: dict, *, force: bool = False) -> bool:
