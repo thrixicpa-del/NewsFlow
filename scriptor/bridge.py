@@ -8145,17 +8145,18 @@ def _cover_topic_visual_plan(item: dict) -> str:
 
 
 def _cover_scene_intensity_instruction(settings: Settings) -> str:
-    """Return the user's optional amplification for newly authored scene briefs."""
+    """Return the user's explicit enhanced-dramaturgy contract for new scene briefs."""
     if not settings.cover_scene_intensity_mode:
         return ""
     return (
-        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ: пользователь просит более масштабную и плотную визуальную подачу. "
-        "Покажи заметную коллективную реакцию и ясное противостояние, только когда это следует из темы или сценария. "
-        "Для подтверждённого протеста используй большую недовольную толпу и читаемые издалека плакаты; "
-        "для подтверждённого вооружённого конфликта — больше релевантной техники, военных и масштаба столкновения; "
-        "для подтверждённых ударов — видимые последствия, разрушения, дым или спасательные действия. "
-        "Не добавляй людей, оружие, взрывы, разрушения или митинг к теме, которая их не содержит; вместо этого усили "
-        "контекстно уместные масштаб, реакцию, контраст, действие и композиционное противостояние. "
+        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ — ОБЯЗАТЕЛЬНЫЙ РЕЖИМ: каждый новый visual brief должен быть заметно сильнее, "
+        "масштабнее, конфликтнее и эмоциональнее обычной новостной сцены. Не ослабляй этот режим до нейтральной документальной подачи. "
+        "Разрешена выразительная символическая и метафорическая визуализация, если она ясно передаёт смысл текущей темы: "
+        "например, «удар по экономике», давление, крах, блокада или противостояние могут быть показаны через военную, разрушительную "
+        "или иную жёсткую визуальную метафору, даже если речь не о буквальном боевом событии. "
+        "Сохраняй связь с текущей темой, участниками и последствиями, но выбирай максимально кликабельный масштаб, массовую реакцию, "
+        "сильный визуальный конфликт, последствия, технику, дым, разрушение или другие драматические элементы, когда они помогают "
+        "передать смысл. Усиленный режим не должен превращаться только в смену камеры, кадра или формулировки. "
     )
 
 
@@ -8709,13 +8710,14 @@ def generate_cover_prompts(payload: dict) -> dict:
                         "SEMANTIC_SCENE_VARIANTS_INCOMPLETE: ИИ не вернул требуемое число самостоятельных visual scenes"
                     )
                 options = options[:requested_count]
-                for option in options:
-                    grounded, unsupported = _cover_scene_is_grounded(option, target)
-                    if not grounded:
-                        raise ValueError(
-                            "UNSUPPORTED_SCENE_EVENT: visual brief добавил "
-                            f"{unsupported}, хотя это не подтверждено текущей темой или сценарием"
-                        )
+                if not settings.cover_scene_intensity_mode:
+                    for option in options:
+                        grounded, unsupported = _cover_scene_is_grounded(option, target)
+                        if not grounded:
+                            raise ValueError(
+                                "UNSUPPORTED_SCENE_EVENT: visual brief добавил "
+                                f"{unsupported}, хотя это не подтверждено текущей темой или сценарием"
+                            )
                 return (
                     _cover_distinct_prompt_options(
                         options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
@@ -8750,32 +8752,42 @@ def generate_cover_prompts(payload: dict) -> dict:
                 staged[index] = target
         except _BRIDGE_OPERATION_ERRORS as exc:
             if _cover_prompt_safety_blocked(exc):
-                fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
-                try:
-                    options = [
-                        _normalize_cover_scene_brief(_fallback_cover_prompt(target, variant), target)
-                        for variant in range(fallback_count)
-                    ]
-                    options = _cover_distinct_prompt_options(
-                        options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
+                if settings.cover_scene_intensity_mode:
+                    reason = (
+                        "ENHANCED_SCENE_REQUIRED: провайдер отклонил усиленную драматургию; "
+                        "нейтральный fallback не подставлен, потому что выбран усиленный режим"
                     )
-                except ValueError as fallback_error:
-                    reason = _cover_provider_error_message(fallback_error)
                     _cover_step(target, "Ошибка промпта", 100, reason)
                     target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
                     if stage_fresh_rewrite:
                         staging_errors[index] = reason
                 else:
-                    _cover_step(target, "Промпты готовы", 100,
-                                "Провайдер отклонил формулировку: создан безопасный локальный вариант")
-                    target.update(image_prompt_options=options, selected_prompt_index=0,
-                                image_prompt=options[0], prompt_provider="local-fallback",
-                                prompt_text_signature=_cover_text_revision(target), error="")
-                    target["prompt_revision_id"] = _cover_prompt_revision(target)
-                    if rewrite:
-                        _remember_cover_prompt_history(target, previous_options)
-                    if stage_fresh_rewrite:
-                        staged[index] = target
+                    fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
+                    try:
+                        options = [
+                            _normalize_cover_scene_brief(_fallback_cover_prompt(target, variant), target)
+                            for variant in range(fallback_count)
+                        ]
+                        options = _cover_distinct_prompt_options(
+                            options, target, do_not_repeat, scene_intensity=False,
+                        )
+                    except ValueError as fallback_error:
+                        reason = _cover_provider_error_message(fallback_error)
+                        _cover_step(target, "Ошибка промпта", 100, reason)
+                        target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
+                        if stage_fresh_rewrite:
+                            staging_errors[index] = reason
+                    else:
+                        _cover_step(target, "Промпты готовы", 100,
+                                    "Провайдер отклонил формулировку: создан безопасный локальный вариант")
+                        target.update(image_prompt_options=options, selected_prompt_index=0,
+                                    image_prompt=options[0], prompt_provider="local-fallback",
+                                    prompt_text_signature=_cover_text_revision(target), error="")
+                        target["prompt_revision_id"] = _cover_prompt_revision(target)
+                        if rewrite:
+                            _remember_cover_prompt_history(target, previous_options)
+                        if stage_fresh_rewrite:
+                            staged[index] = target
             else:
                 reason = _cover_provider_error_message(exc)
                 _cover_step(target, "Ошибка промпта", 100, reason)
