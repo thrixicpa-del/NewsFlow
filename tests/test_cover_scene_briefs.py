@@ -225,6 +225,32 @@ class CoverSceneBriefTests(unittest.TestCase):
             for right in row["image_prompt_options"][position + 1:]
         ))
 
+    def test_legacy_v2_is_projected_as_short_ui_scene_without_mutating_or_shortening_manual_text(self):
+        scene = "Workers hold closure notices outside the factory gate while management posts the signed order."
+        legacy = build_final_provider_prompt(scene, self._item())
+        auto = {
+            **self._item(),
+            "image_prompt": legacy,
+            "image_prompt_options": [legacy],
+            "prompt_provider": "agent",
+        }
+        auto_before = dict(auto)
+        projected = bridge._cover_prompt_ui_projection(auto)
+        self.assertEqual(projected["image_prompt"], scene)
+        self.assertEqual(projected["image_prompt_options"], [scene])
+        self.assertEqual(auto, auto_before)
+
+        manual = "Photorealistic editorial scene with workers outside the factory gate."
+        manual_row = {
+            **self._item(),
+            "image_prompt": manual,
+            "image_prompt_options": [manual],
+            "prompt_provider": "manual",
+        }
+        manual_projected = bridge._cover_prompt_ui_projection(manual_row)
+        self.assertEqual(manual_projected["image_prompt"], manual)
+        self.assertEqual(manual_projected["image_prompt_options"], [manual])
+
     def test_manual_prompt_with_style_prefix_keeps_its_scene_facts_at_render_time(self):
         manual = (
             "Photorealistic editorial scene with workers holding signed closure notices "
