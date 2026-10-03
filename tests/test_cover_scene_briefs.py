@@ -209,6 +209,36 @@ class CoverSceneBriefTests(unittest.TestCase):
         self.assertIn("Armored vehicles", settings.cover_queue[0]["image_prompt"])
         self.assertNotIn("UNSUPPORTED_SCENE_EVENT", settings.cover_queue[0].get("error", ""))
 
+    def test_enhanced_mode_rejects_a_bland_scene_even_when_it_is_semantically_new(self):
+        item = {
+            "production_item_id": "production:enhanced-required",
+            "title": "New tariffs deal a blow to the economy",
+            "script": "Exporters report higher costs as companies revise delivery plans.",
+        }
+        settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True, cover_queue=[item])
+        sent: list[str] = []
+
+        async def provider(prompt: str, **_kwargs: object) -> str:
+            sent.append(prompt)
+            return json.dumps({"prompts": [
+                "Exporters sit at a conference table reviewing new tariff documents and delivery schedules."
+            ], "recommended": 1})
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=SimpleNamespace(generate=provider)):
+            bridge.generate_cover_prompts({
+                "indices": [0],
+                "productionItemIds": ["production:enhanced-required"],
+                "provider": "agent",
+            })
+
+        self.assertEqual(len(sent), 2)
+        self.assertNotIn("image_prompt", settings.cover_queue[0])
+        self.assertIn("ENHANCED_SCENE_REQUIRED", settings.cover_queue[0]["error"])
+
     def test_standard_generation_still_rejects_unrelated_military_scene(self):
         item = {
             "production_item_id": "production:standard-quarterly",
