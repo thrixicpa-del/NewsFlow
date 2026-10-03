@@ -8278,8 +8278,9 @@ def _cover_scene_is_grounded(scene: str, item: dict) -> tuple[bool, str]:
     escalation before that scene can become durable state.
     """
     source = " ".join(str(item.get(key, "") or "") for key in (
-        "title", "script", "topic", "event_context", "supporting_context", "main_consequence",
-        "consequence", "conflict", "entities", "primary_entities",
+        "title", "script", "direction", "topic", "angle", "event_context", "supporting_context",
+        "main_consequence", "consequence", "conflict", "entities", "primary_entities", "primary_entity",
+        "geography", "framing", "framing_type",
     )).casefold()
     candidate = scene.casefold()
     for label, candidate_markers, support_markers in _COVER_SCENE_RISK_SUPPORT:
