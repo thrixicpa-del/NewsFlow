@@ -225,6 +225,30 @@ class CoverSceneBriefTests(unittest.TestCase):
             for right in row["image_prompt_options"][position + 1:]
         ))
 
+    def test_manual_prompt_with_style_prefix_keeps_its_scene_facts_at_render_time(self):
+        manual = (
+            "Photorealistic editorial scene with workers holding signed closure notices "
+            "outside the factory gate while management posts the closure order."
+        )
+        settings = Settings(cover_queue=[self._item(image_prompt="old")])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_cover_manual_prompt({
+                "productionItemId": "production:scene-brief",
+                "prompt": manual,
+            })
+
+        row = settings.cover_queue[0]
+        final = build_final_provider_prompt(row["image_prompt"], row)
+        story = final.split("\n\nMAIN SUBJECT:", 1)[0].split("STORY CONTEXT:\n", 1)[1]
+        self.assertIn("workers holding signed closure notices", story)
+        self.assertIn("management posts the closure order", story)
+        self.assertEqual(bridge._cover_recent_prompt_history({
+            "recent_visual_prompt_history": [manual],
+        }), [manual])
+
     def test_manual_prompt_stays_literal_but_render_time_builder_wraps_it_in_v2(self):
         manual = "A literal operator-written scene brief with the signed order on the desk."
         settings = Settings(cover_queue=[self._item(image_prompt="old")])
