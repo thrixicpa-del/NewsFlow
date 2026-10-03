@@ -8478,6 +8478,13 @@ def _cover_scene_brief_for_memory(value: object) -> str:
     if not raw.strip():
         return ""
     scene = semantic_scene_brief(raw, "")
+    # A short literal/manual prompt may begin with a style word that the legacy
+    # extractor treats as boilerplate. Preserve the user's concise text in
+    # history rather than losing the whole previous scene and allowing an
+    # immediate semantic repeat.
+    if not scene:
+        literal = " ".join(raw.split())
+        scene = literal if len(literal) <= _COVER_SCENE_BRIEF_MAX_CHARS else ""
     return scene if scene and len(scene) <= _COVER_SCENE_BRIEF_MAX_CHARS else ""
 
 
