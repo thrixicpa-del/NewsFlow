@@ -46,6 +46,12 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "import-cover-text-triples": CommandRegistration(
         "import_cover_text_triples", "scriptor.bridge manual cover-text import", _NO_LEGACY,
     ),
+    "import-cover-prompt-pairs": CommandRegistration(
+        "import_cover_prompt_pairs", "scriptor.bridge manual cover-prompt import", _NO_LEGACY,
+    ),
+    "save-cover-manual-prompt": CommandRegistration(
+        "save_cover_manual_prompt", "scriptor.bridge manual cover-prompt editor", _NO_LEGACY,
+    ),
     "run-montage-queue": CommandRegistration("run_montage_queue", "scriptor.timeline canonical montage path", _NO_LEGACY),
     "package-outputs": CommandRegistration("package_outputs", "scriptor.bridge output packager", _NO_LEGACY),
     "export-results-batch": CommandRegistration("export_results_batch", "scriptor.bridge batch results exporter", _NO_LEGACY),
