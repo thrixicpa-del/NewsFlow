@@ -228,6 +228,24 @@ describe("Covers Light view", () => {
     expect(screen.getByText(/LIVE/i)).toBeTruthy();
   });
 
+  it("treats an empty successful FastGen refresh as authoritative LIVE data", async () => {
+    const command = vi.fn(async () => fallback);
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить модели" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("refresh-fastgen"));
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Nano Banana 2/i })).toBeNull(),
+    );
+    expect(screen.getByText(/LIVE/i)).toBeTruthy();
+  });
+
   it("lets matching live FastGen metadata override the Nano Banana 2 catalogue fallback", () => {
     const data = {
       ...fallback,
