@@ -192,7 +192,17 @@ def build_final_provider_prompt(
         # Covers resolver is the only authority for SELECTED PEOPLE.
         prompt_values["selected_people"] = current_identity
     brief = visual_brief(prompt_values)
-    scene = _semantic_scene(scene_prompt, brief["title"])
+    # Manual scene briefs are user-owned text. A short operator prompt may
+    # legitimately start with style words such as "Photorealistic editorial
+    # scene with ..."; dropping that whole sentence would discard the actual
+    # people/action the operator wrote. Structured legacy/V2 payloads still
+    # take only their STORY CONTEXT, while literal manual briefs remain intact.
+    manual_literal = str(current_item.get("prompt_provider", "") or "").casefold() == "manual"
+    scene = (
+        _clean(scene_prompt, brief["title"])
+        if manual_literal and not scene_values
+        else _semantic_scene(scene_prompt, brief["title"])
+    )
     # ``_semantic_scene`` has already extracted only the old draft's STORY
     # CONTEXT.  Keep that concise scene narrative intact; the structured slots
     # below remain authoritative for their own labelled fields.  Rebuilding
