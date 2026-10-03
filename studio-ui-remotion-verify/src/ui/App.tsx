@@ -4050,6 +4050,8 @@ export function Covers({
   const [sceneIntensityMode, setSceneIntensityMode] = useState(
     Boolean(data.coverSettings.sceneIntensityMode),
   );
+  const [fastGenCatalogVerifiedThisSession, setFastGenCatalogVerifiedThisSession] =
+    useState(false);
   const [faceLibraryFolder, setFaceLibraryFolder] = useState(
     data.coverSettings.faceLibraryFolder || "",
   );
@@ -4195,11 +4197,22 @@ export function Covers({
     (item) => !liveModelIds.has(String(item.id || "")),
   );
   // A persisted capabilities cache can predate a newly documented FastGen
-  // route. Keep catalog-only routes visible until that exact operation appears
-  // in the API response; matching live entries remain fully authoritative for
-  // current health/billing/provider metadata.
-  const models = [...liveModels, ...catalogOnlyModels];
-  const hasLiveFastGenModels = liveModels.length > 0;
+  // route. Before this session verifies FastGen, supplement that cache with
+  // documented catalog entries. After a successful refresh the API response
+  // becomes fully authoritative, including omission/unavailability.
+  const models = fastGenCatalogVerifiedThisSession
+    ? liveModels
+    : [...liveModels, ...catalogOnlyModels];
+  const hasLiveFastGenModels =
+    fastGenCatalogVerifiedThisSession && liveModels.length > 0;
+  const hasCachedFastGenModels =
+    !fastGenCatalogVerifiedThisSession && liveModels.length > 0;
+  const refreshFastGenModels = async () => {
+    const refreshed = await command("refresh-fastgen");
+    if (refreshed) {
+      setFastGenCatalogVerifiedThisSession(true);
+    }
+  };
   const enabledModels = models.filter(
     (item) => item.health !== "unavailable" && !item.deprecated,
   );
@@ -5873,7 +5886,7 @@ export function Covers({
                 : "Нажмите «Обновить модели», чтобы запросить FastGen API."}
             </small>
           </div>
-          <Button onClick={() => void command("refresh-fastgen")}>
+          <Button onClick={() => void refreshFastGenModels()}>
             <Activity size={16} />
             Обновить FastGen
           </Button>
@@ -5924,11 +5937,15 @@ export function Covers({
             <b>Модели FastGen — ответ API</b>
             <small>
               {hasLiveFastGenModels
-                ? `${liveModels.length} моделей изображения получено из FastGen${catalogOnlyModels.length ? `; ещё ${catalogOnlyModels.length} документированных маршрута ожидают проверки API` : ""}. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
-                : `Доступен документированный каталог до проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`}
+                ? `${liveModels.length} моделей изображения получено из FastGen. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
+                : hasCachedFastGenModels
+                  ? `Показан сохранённый FastGen-кэш + документированный каталог до новой проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
+                  : `Доступен документированный каталог до проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`}
             </small>
           </div>
-          <span className="api-live-dot">● {hasLiveFastGenModels ? "LIVE" : "CATALOG"}</span>
+          <span className="api-live-dot">
+            ● {hasLiveFastGenModels ? "LIVE" : hasCachedFastGenModels ? "CACHED + CATALOG" : "CATALOG"}
+          </span>
         </div>
         {models.length ? (
           <div className="fastgen-model-grid">
@@ -5977,7 +5994,7 @@ export function Covers({
                 <code>/api/v6/models</code>. Красные модели нельзя выбрать.
               </small>
             </div>
-            <Button onClick={() => void command("refresh-fastgen")}>
+            <Button onClick={() => void refreshFastGenModels()}>
               <Activity size={16} />
               Обновить модели
             </Button>
