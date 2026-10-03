@@ -2387,6 +2387,30 @@ class FastGenClientTests(unittest.TestCase):
         self.assertFalse(supports_count)
         self.assertEqual(max_items, 1)
 
+    def test_gemini_nano_banana_2_uses_the_documented_image_operation_contract(self):
+        client = FastGenClient("test")
+        capability = {
+            "id": "gemini_nano_banana_2_image_generate",
+            "provider": "gemini",
+            "model": "gemini-nano-banana-2",
+            "inputs": {"min": 0, "max": 10},
+            "outputs": {"max_items": 1},
+            "options": {"aspect_ratio": {"enum": ["1:1", "9:16", "3:4", "4:3", "16:9"]}},
+        }
+        payload, supports_count, max_items = client._generation_payload(
+            "gemini_nano_banana_2_image_generate", "prompt", "16:9", ["reference-id"],
+            None, None, None, False, capability,
+        )
+
+        self.assertEqual(payload, {
+            "operation": "gemini_nano_banana_2_image_generate",
+            "prompt": "prompt",
+            "inputs": ["reference-id"],
+            "aspect_ratio": "16:9",
+        })
+        self.assertFalse(supports_count)
+        self.assertEqual(max_items, 1)
+
     def test_single_item_model_splits_requested_variants_into_safe_requests(self):
         client = FastGenClient("test")
         capability = {"inputs": {"min": 0, "max": 10}, "outputs": {"max_items": 1}, "options": {"aspect_ratio": {}}}

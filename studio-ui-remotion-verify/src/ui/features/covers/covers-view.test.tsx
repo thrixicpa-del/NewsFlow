@@ -151,6 +151,127 @@ describe("Covers Light view", () => {
     ));
   });
 
+  it("keeps the documented Gemini Nano Banana 2 model visible before FastGen refresh", async () => {
+    const command = vi.fn(async () => undefined);
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    const operation = screen.getByLabelText("Активная модель");
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+    fireEvent.change(operation, { target: { value: "gemini_nano_banana_2_image_generate" } });
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("save-cover-settings", {
+        operation: "gemini_nano_banana_2_image_generate",
+      }),
+    );
+  });
+
+  it("keeps Nano Banana 2 visible beside an older cached FastGen catalogue", () => {
+    const data = {
+      ...fallback,
+      fastgenCapabilities: {
+        ...fallback.fastgenCapabilities,
+        image: [{
+          id: "flower_image_generate",
+          provider: "Flower",
+          display_name: "Flower Image",
+          health: "healthy" as const,
+          health_label: "Доступна по API",
+          billing: { credits: 2, display: "2 credits" },
+        }],
+      },
+    };
+
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(screen.getByRole("option", { name: /Flower.*2 credits/i })).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/CACHED \+ CATALOG/i)).toBeTruthy();
+    expect(screen.getByText(/сохранённый FastGen-кэш \+ документированный каталог/i)).toBeTruthy();
+  });
+
+  it("drops catalog-only routes after a successful FastGen refresh makes the API authoritative", async () => {
+    const cached = {
+      ...fallback,
+      fastgenCapabilities: {
+        ...fallback.fastgenCapabilities,
+        image: [{
+          id: "flower_image_generate",
+          provider: "Flower",
+          display_name: "Flower Image",
+          health: "healthy" as const,
+          health_label: "Доступна по API",
+        }],
+      },
+    };
+    const command = vi.fn(async () => cached);
+
+    render(<Covers data={cached} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить модели" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("refresh-fastgen"));
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Nano Banana 2/i })).toBeNull(),
+    );
+    expect(screen.getByText(/LIVE/i)).toBeTruthy();
+  });
+
+  it("treats an empty successful FastGen refresh as authoritative LIVE data", async () => {
+    const command = vi.fn(async () => fallback);
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить модели" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("refresh-fastgen"));
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /Nano Banana 2/i })).toBeNull(),
+    );
+    expect(screen.getByText(/LIVE/i)).toBeTruthy();
+  });
+
+  it("lets matching live FastGen metadata override the Nano Banana 2 catalogue fallback", () => {
+    const data = {
+      ...fallback,
+      fastgenCapabilities: {
+        ...fallback.fastgenCapabilities,
+        image: [{
+          id: "gemini_nano_banana_2_image_generate",
+          provider: "Gemini Live",
+          model: "gemini-nano-banana-2",
+          display_name: "Nano Banana 2 Live",
+          health: "healthy" as const,
+          health_label: "Доступна по API",
+          billing: { credits: 3, display: "3 live credits" },
+        }],
+      },
+    };
+
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(
+      screen.getByRole("option", { name: /Gemini Live.*Nano Banana 2 Live.*3 live credits/i }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Nano Banana 2.*1 credit/i })).toBeNull();
+  });
+
   it("keeps the verified FastGen cover-start contract", async () => {
     const command = vi.fn(async () => undefined);
     const data = {

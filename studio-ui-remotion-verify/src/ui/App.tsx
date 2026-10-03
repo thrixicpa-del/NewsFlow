@@ -134,6 +134,36 @@ const defaultSeoPrompt =
 const defaultTagsPrompt =
   'Создай релевантные YouTube-теги для темы «{title}». Верни только JSON: {"tags":["..."]}.';
 
+// These documented image routes remain selectable before this renderer has
+// completed a live capabilities refresh. Persisted API cache entries may be
+// older than the app build, so catalog-only routes supplement that cache until
+// FastGen is checked again; the successful live response is then authoritative.
+const fastGenImageFallbackModels: NewsFlowSnapshot["fastgenCapabilities"]["image"] = [
+  {
+    id: "flower_image_generate",
+    provider: "Flower",
+    display_name: "Flower Image",
+    health: "degraded" as const,
+    health_label: "Требует проверки API",
+  },
+  {
+    id: "grok_image_generate",
+    provider: "Grok",
+    display_name: "Grok Image",
+    health: "degraded" as const,
+    health_label: "Требует проверки API",
+  },
+  {
+    id: "gemini_nano_banana_2_image_generate",
+    provider: "Gemini",
+    model: "gemini-nano-banana-2",
+    display_name: "Nano Banana 2",
+    health: "degraded" as const,
+    health_label: "Требует проверки API",
+    billing: { credits: 1, display: "1 credit" },
+  },
+];
+
 export const fallback: NewsFlowSnapshot = {
   pipelineTarget: 300,
   autoMontageEnabled: false,
@@ -4021,6 +4051,8 @@ export function Covers({
   const [sceneIntensityMode, setSceneIntensityMode] = useState(
     Boolean(data.coverSettings.sceneIntensityMode),
   );
+  const [fastGenCatalogVerifiedThisSession, setFastGenCatalogVerifiedThisSession] =
+    useState(false);
   const [faceLibraryFolder, setFaceLibraryFolder] = useState(
     data.coverSettings.faceLibraryFolder || "",
   );
@@ -4158,9 +4190,29 @@ export function Covers({
     );
     return () => window.clearTimeout(timer);
   }, [command, nextRateResume, rateAutoResume]);
-  const models = (data.fastgenCapabilities.image || []).filter(
+  const liveModels = (data.fastgenCapabilities.image || []).filter(
     (item) => item.id,
   );
+  const liveModelIds = new Set(liveModels.map((item) => String(item.id || "")));
+  const catalogOnlyModels = fastGenImageFallbackModels.filter(
+    (item) => !liveModelIds.has(String(item.id || "")),
+  );
+  // A persisted capabilities cache can predate a newly documented FastGen
+  // route. Before this session verifies FastGen, supplement that cache with
+  // documented catalog entries. After a successful refresh the API response
+  // becomes fully authoritative, including omission/unavailability.
+  const models = fastGenCatalogVerifiedThisSession
+    ? liveModels
+    : [...liveModels, ...catalogOnlyModels];
+  const hasLiveFastGenResponse = fastGenCatalogVerifiedThisSession;
+  const hasCachedFastGenModels =
+    !fastGenCatalogVerifiedThisSession && liveModels.length > 0;
+  const refreshFastGenModels = async () => {
+    const refreshed = await command("refresh-fastgen");
+    if (refreshed) {
+      setFastGenCatalogVerifiedThisSession(true);
+    }
+  };
   const enabledModels = models.filter(
     (item) => item.health !== "unavailable" && !item.deprecated,
   );
@@ -5834,7 +5886,7 @@ export function Covers({
                 : "Нажмите «Обновить модели», чтобы запросить FastGen API."}
             </small>
           </div>
-          <Button onClick={() => void command("refresh-fastgen")}>
+          <Button onClick={() => void refreshFastGenModels()}>
             <Activity size={16} />
             Обновить FastGen
           </Button>
@@ -5884,12 +5936,16 @@ export function Covers({
           <div>
             <b>Модели FastGen — ответ API</b>
             <small>
-              {models.length
-                ? `${models.length} моделей изображения получено из FastGen. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
-                : "Список появится после успешного обновления FastGen."}
+              {hasLiveFastGenResponse
+                ? `${liveModels.length} моделей изображения получено из FastGen. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
+                : hasCachedFastGenModels
+                  ? `Показан сохранённый FastGen-кэш + документированный каталог до новой проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`
+                  : `Доступен документированный каталог до проверки API. Выбрана сейчас: ${selectedModel?.display_name || selectedModel?.id || operation}.`}
             </small>
           </div>
-          <span className="api-live-dot">● LIVE</span>
+          <span className="api-live-dot">
+            ● {hasLiveFastGenResponse ? "LIVE" : hasCachedFastGenModels ? "CACHED + CATALOG" : "CATALOG"}
+          </span>
         </div>
         {models.length ? (
           <div className="fastgen-model-grid">
@@ -5925,10 +5981,7 @@ export function Covers({
             })}
           </div>
         ) : (
-          <div className="fastgen-empty">
-            Нет свежего ответа API. Нажмите «Обновить FastGen» и проверьте
-            сообщение об ошибке, если оно появится.
-          </div>
+          <div className="fastgen-empty">Каталог моделей пока недоступен.</div>
         )}
       </section>
       <div className="covers-workspace">
@@ -5941,7 +5994,7 @@ export function Covers({
                 <code>/api/v6/models</code>. Красные модели нельзя выбрать.
               </small>
             </div>
-            <Button onClick={() => void command("refresh-fastgen")}>
+            <Button onClick={() => void refreshFastGenModels()}>
               <Activity size={16} />
               Обновить модели
             </Button>
@@ -5975,14 +6028,7 @@ export function Covers({
                         : ""}
                     </option>
                   ))
-                ) : (
-                  <>
-                    <option value="flower_image_generate">
-                      Flower — Image
-                    </option>
-                    <option value="grok_image_generate">Grok — Image</option>
-                  </>
-                )}
+                ) : null}
               </select>
             </label>
             <div className="model-legend">
