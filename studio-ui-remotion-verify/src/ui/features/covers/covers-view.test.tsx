@@ -151,6 +151,24 @@ describe("Covers Light view", () => {
     ));
   });
 
+  it("keeps the documented Gemini Nano Banana 2 model visible before FastGen refresh", async () => {
+    const command = vi.fn(async () => undefined);
+    render(<Covers data={fallback} command={command} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+    const operation = screen.getByLabelText("Активная модель");
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+    fireEvent.change(operation, { target: { value: "gemini_nano_banana_2_image_generate" } });
+
+    await waitFor(() =>
+      expect(command).toHaveBeenCalledWith("save-cover-settings", {
+        operation: "gemini_nano_banana_2_image_generate",
+      }),
+    );
+  });
+
   it("keeps the verified FastGen cover-start contract", async () => {
     const command = vi.fn(async () => undefined);
     const data = {
