@@ -126,7 +126,7 @@ from .thumbnail_prompt_v2 import (
     append_universal_thumbnail_core_v2,
     build_final_provider_prompt,
     prompt_sources_debug,
-    strip_legacy_thumbnail_phrases,
+    semantic_scene_brief,
 )
 from .timeline import (
     GENERIC_VISUAL_QUERY,
@@ -2587,7 +2587,7 @@ def snapshot() -> dict:
             "storyPlannerFailure": job.story_planner_failure if job else {},
         })
     cover_rows = [
-        {**item, "galleryPaths": cover_gallery_paths(item)}
+        {**_cover_prompt_ui_projection(item), "galleryPaths": cover_gallery_paths(item)}
         for item in settings.cover_queue
     ]
     cover_counts = cover_queue_counts(cover_rows)
@@ -8115,8 +8115,9 @@ def _cover_structured_context(item: dict) -> str:
         )
     else:
         lines.append(
-            "НЕВОЕННОЕ ОГРАНИЧЕНИЕ: не добавляй взрывы, огонь, ракеты, дроны или военную технику, если они не "
-            "следуют из указанного контекста; для экономики, миграции и переговоров показывай только релевантную среду."
+            "СТАНДАРТНОЕ НЕВОЕННОЕ ОГРАНИЧЕНИЕ: без отдельного усиленного режима не добавляй взрывы, огонь, ракеты, "
+            "дроны или военную технику, если они не следуют из указанного контекста. Если ниже присутствует явный контракт "
+            "«УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ», он имеет приоритет и разрешает сильную символическую визуальную метафору."
         )
     return "\n".join(lines)
 
@@ -8137,74 +8138,190 @@ def _cover_topic_visual_plan(item: dict) -> str:
         "УНИВЕРСАЛЬНЫЙ ВИЗУАЛЬНЫЙ КОНТРАКТ: самостоятельно выбери самую сильную, мгновенно понятную и кликабельную "
         "реалистичную сцену строго из текущей темы, сценария и структурированного контекста. Не применяй готовый шаблон по категории "
         "новости и не подменяй тему знакомым сюжетом. Сам реши, какие люди, эмоции, объекты, фон, масштаб события и видимое действие "
-        "лучше всего передают именно эту историю. Усиливай драму, напряжение, страх, последствия, толпу, технику, разрушения или другие "
-        "сильные элементы только если они логично следуют из текущего содержания. Если таких оснований нет — добивайся кликабельности "
-        "композицией, выражением лиц, масштабом, контрастом, ракурсом и визуальным конфликтом, а не выдуманным происшествием. "
+        "лучше всего передают именно эту историю. В стандартном режиме усиливай драму, напряжение, страх, последствия, толпу, технику, "
+        "разрушения или другие сильные элементы только если они логично следуют из текущего содержания. Если ниже присутствует отдельный "
+        "контракт «УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ», он имеет приоритет: допускается более жёсткая символическая и метафорическая подача, "
+        "пока визуал ясно связан со смыслом текущей темы и не превращается в случайный посторонний сюжет. "
         f"ДОСТУПНЫЙ СТРУКТУРИРОВАННЫЙ КОНТЕКСТ: {context or 'только текущая тема и сценарий'}."
     )
 
 
 def _cover_scene_intensity_instruction(settings: Settings) -> str:
-    """Return the user's optional amplification for newly authored scene briefs."""
+    """Return the user's explicit enhanced-dramaturgy contract for new scene briefs."""
     if not settings.cover_scene_intensity_mode:
         return ""
     return (
-        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ: пользователь просит более масштабную и плотную визуальную подачу. "
-        "Покажи заметную коллективную реакцию и ясное противостояние, только когда это следует из темы или сценария. "
-        "Для подтверждённого протеста используй большую недовольную толпу и читаемые издалека плакаты; "
-        "для подтверждённого вооружённого конфликта — больше релевантной техники, военных и масштаба столкновения; "
-        "для подтверждённых ударов — видимые последствия, разрушения, дым или спасательные действия. "
-        "Не добавляй людей, оружие, взрывы, разрушения или митинг к теме, которая их не содержит; вместо этого усили "
-        "контекстно уместные масштаб, реакцию, контраст, действие и композиционное противостояние. "
+        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ — ОБЯЗАТЕЛЬНЫЙ РЕЖИМ: каждый новый visual brief должен быть заметно сильнее, "
+        "масштабнее, конфликтнее и эмоциональнее обычной новостной сцены. Не ослабляй этот режим до нейтральной документальной подачи. "
+        "Разрешена выразительная символическая и метафорическая визуализация, если она ясно передаёт смысл текущей темы: "
+        "например, «удар по экономике», давление, крах, блокада или противостояние могут быть показаны через военную, разрушительную "
+        "или иную жёсткую визуальную метафору, даже если речь не о буквальном боевом событии. "
+        "Сохраняй связь с текущей темой, участниками и последствиями, но выбирай максимально кликабельный масштаб, массовую реакцию, "
+        "сильный визуальный конфликт, последствия, технику, дым, разрушение или другие драматические элементы, когда они помогают "
+        "передать смысл. Усиленный режим не должен превращаться только в смену камеры, кадра или формулировки. "
     )
 
 
-_COVER_ENHANCED_REWRITE_COMPOSITIONS = (
-    "wide elevated camera angle; preserve every existing subject, object and action; rearrange only framing and foreground/background depth",
-    "eye-level medium-wide framing; preserve the exact existing subjects, objects and action; shift only screen position and camera distance",
-    "compressed telephoto framing of the exact same subjects and objects; change only depth, crop and relative screen placement",
-    "diagonal camera framing of the exact same existing scene; preserve entity count, identities, objects and actions; change only camera angle and layout",
+_COVER_SCENE_BRIEF_MAX_CHARS = 800
+_COVER_SCENE_CAMERA_TOKENS = frozenset({
+    "wide", "close", "closer", "medium", "telephoto", "diagonal", "elevated", "eye", "level",
+    "camera", "angle", "view", "framing", "frame", "crop", "composition", "layout", "foreground",
+    "background", "depth", "distance", "screen", "placement", "low", "high", "panoramic",
+    "широкий", "крупный", "средний", "камера", "ракурс", "кадр", "кадре", "план", "планы",
+    "композиция", "фон", "передний", "задний", "дистанция", "диагональный", "сверху", "снизу",
+})
+_COVER_SCENE_STOP_TOKENS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "the", "to", "while",
+    "with", "это", "как", "на", "над", "от", "по", "при", "с", "со", "у", "в", "во", "и",
+})
+_COVER_SCENE_PRESENTATION_TOKENS = frozenset({
+    "dramatic", "documentary", "editorial", "cinematic", "photorealistic", "realistic", "lighting", "light",
+    "contrast", "tense", "urgent", "urgency", "impact", "thumbnail", "youtube", "news", "scene", "image", "shot",
+    "драматичный", "документальный", "редакционный", "кинематографичный", "фотореалистичный", "реалистичный",
+    "освещение", "свет", "контраст", "напряжённый", "срочный", "сцена", "изображение", "кадр",
+})
+_COVER_ENHANCED_SCENE_MARKERS = (
+    "massive", "large", "dense", "packed", "surging", "towering", "collaps", "shatter", "rubble", "debris",
+    "smoke", "flame", "explosion", "armored", "military", "soldier", "missile", "weapon", "convoy", "blockade",
+    "clash", "confront", "oppos", "panic", "angry", "furious", "terrified", "emergency", "chaos", "crisis",
+    "crowd", "wave", "stampede", "evacuat", "rescu", "destroy", "damage", "pressure", "siege", "breach",
+    "массов", "огромн", "плотн", "толп", "обвал", "разруш", "дым", "огонь", "взрыв", "брон", "военн",
+    "солдат", "ракет", "оруж", "колонн", "блокад", "столкнов", "противост", "паник", "ярост", "спас",
+    "эваку", "давлен", "хаос", "кризис",
 )
 
 
-def _cover_distinct_prompt_options(
-    options: list[str], item: dict, avoided_options: list[object], *, scene_intensity: bool,
-) -> list[str]:
-    """Resolve duplicate final prompts locally after every prompt transformation.
+_COVER_SCENE_RISK_SUPPORT = (
+    (
+        "массовую толпу или протест",
+        ("crowd", "protest", "rally", "demonstrat", "march", "митинг", "толп", "протест", "демонстрант"),
+        ("crowd", "protest", "demonstrat", "митинг", "толп", "протест", "демонстрант"),
+    ),
+    (
+        "вооружённый конфликт",
+        ("weapon", "armed", "soldier", "military", "tank", "missile", "gun", "оруж", "военн", "солдат", "танк", "ракет"),
+        (
+            "weapon", "armed", "soldier", "military", "war", "combat", "frontline", "tank", "missile", "rocket",
+            "drone", "bomb", "shelling", "airstrike", "оруж", "военн", "солдат", "войн", "боев", "фронт",
+            "танк", "ракет", "дрон", "беспилот", "бомб", "обстрел", "пво",
+        ),
+    ),
+    (
+        "разрушение, дым или спасательные действия",
+        ("explosion", "blast", "smoke", "destroy", "rubble", "rescue", "firefighter", "взрыв", "дым", "разруш", "спасател", "обломк"),
+        (
+            "explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "fire", "missile", "rocket",
+            "drone", "bomb", "shelling", "airstrike", "взрыв", "дым", "разруш", "поврежд", "спасател",
+            "пожар", "ракет", "дрон", "беспилот", "бомб", "обстрел", "обломк",
+        ),
+    ),
+)
 
-    Text-provider output is only one stage: V2 normalization, optional intensity,
-    local fills and safe fallbacks may independently converge on the same final
-    payload.  This bounded pass is therefore deliberately last.  It preserves
-    the scene itself and changes only the presentation direction; enhanced mode
-    keeps its separate, topic-grounded amplification instruction.
+
+def _normalize_cover_scene_brief(value: str, item: dict | None = None) -> str:
+    """Persist a concise semantic scene, never the universal render contract."""
+    fallback = " ".join(str((item or {}).get("title", "") or "").split()) or "current news topic"
+    # Preserve V2 line structure until ``semantic_scene_brief`` has extracted
+    # STORY CONTEXT; flattening first would make a legacy render payload look
+    # like one huge, unusable scene.
+    scene = semantic_scene_brief(value, fallback)
+    if len(scene) > _COVER_SCENE_BRIEF_MAX_CHARS:
+        raise ValueError(
+            f"SCENE_BRIEF_TOO_LONG: визуальная сцена превышает {_COVER_SCENE_BRIEF_MAX_CHARS} символов; "
+            "она не была молча обрезана"
+        )
+    return scene
+
+
+def _normalize_cover_photo_prompt(value: str, item: dict | None = None) -> str:
+    """Compatibility renderer for callers that explicitly need the V2 payload.
+
+    New Cover rows must use :func:`_normalize_cover_scene_brief`; FastGen's
+    render path and legacy-focused callers can continue to request V2 here.
     """
-    used = {_cover_prompt_key(value) for value in avoided_options if _cover_prompt_key(value)}
+    return append_universal_thumbnail_core_v2(value, item)
+
+
+def _cover_scene_tokens(value: object) -> set[str]:
+    """Stable semantic evidence, intentionally blind to camera-only wording."""
+    scene = semantic_scene_brief(value, "")
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", scene.casefold())
+    result: set[str] = set()
+    for word in words:
+        if (
+            word in _COVER_SCENE_CAMERA_TOKENS
+            or word in _COVER_SCENE_STOP_TOKENS
+            or word in _COVER_SCENE_PRESENTATION_TOKENS
+        ):
+            continue
+        # English inflection and Russian case endings should not make an
+        # otherwise identical action look like a distinct visual event.
+        if len(word) > 5:
+            word = word[:5]
+        result.add(word)
+    return result
+
+
+def _cover_scene_similarity(left: object, right: object) -> float:
+    """Return deterministic lexical-semantic overlap for short scene briefs."""
+    left_tokens = _cover_scene_tokens(left)
+    right_tokens = _cover_scene_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _cover_semantic_duplicate(candidate: object, prior: object) -> bool:
+    """Reject camera-only and close paraphrase rewrites before they become active."""
+    candidate_scene = semantic_scene_brief(candidate, "")
+    prior_scene = semantic_scene_brief(prior, "")
+    if not candidate_scene or not prior_scene:
+        return False
+    if _cover_prompt_key(candidate_scene) == _cover_prompt_key(prior_scene):
+        return True
+    # A high overlap after camera words are removed means the visible actors,
+    # action and evidence are still the same scene, not a new strategy.
+    return _cover_scene_similarity(candidate_scene, prior_scene) >= 0.72
+
+
+def _cover_scene_has_enhanced_dramaturgy(scene: object) -> bool:
+    """Require visible amplification when the operator selected enhanced mode."""
+    value = semantic_scene_brief(scene, "").casefold()
+    return bool(value and any(marker in value for marker in _COVER_ENHANCED_SCENE_MARKERS))
+
+
+def _cover_scene_is_grounded(scene: str, item: dict) -> tuple[bool, str]:
+    """Keep high-risk visual event types inside the topic's supported evidence.
+
+    This is a narrow factual safety check, not a topic router: it never picks a
+    scene strategy or adds an event. It only rejects a provider's unsupported
+    escalation before that scene can become durable state.
+    """
+    source = " ".join(str(item.get(key, "") or "") for key in (
+        "title", "script", "direction", "topic", "angle", "event_context", "supporting_context",
+        "main_consequence", "consequence", "conflict", "entities", "primary_entities", "primary_entity",
+        "geography", "framing", "framing_type",
+    )).casefold()
+    candidate = scene.casefold()
+    for label, candidate_markers, support_markers in _COVER_SCENE_RISK_SUPPORT:
+        if any(marker in candidate for marker in candidate_markers) and not any(marker in source for marker in support_markers):
+            return False, label
+    return True, ""
+
+
+def _cover_distinct_prompt_options(
+    options: list[str], _item: dict, avoided_options: list[object], *, scene_intensity: bool,
+) -> list[str]:
+    """Accept only distinct semantic scenes; never fake freshness with camera notes."""
+    del scene_intensity
     result: list[str] = []
-    for index, option in enumerate(options):
-        candidate = option
-        result_keys = {_cover_prompt_key(value) for value in result}
-        if _cover_prompt_key(candidate) in used or _cover_prompt_key(candidate) in result_keys:
-            for attempt in range(1, 9):
-                direction = _COVER_ENHANCED_REWRITE_COMPOSITIONS[(index + attempt - 1) % len(_COVER_ENHANCED_REWRITE_COMPOSITIONS)]
-                intensity = (
-                    " Context-grounded intensity: only when TITLE, SCRIPT or STORY CONTEXT supports it, increase the scale, density, "
-                    "consequence and dramatic emphasis of existing topic-grounded scene material; do not introduce a new kind of event."
-                    if scene_intensity else ""
-                )
-                candidate = build_final_provider_prompt(
-                    option,
-                    item,
-                    composition_notes=(
-                        "Composition-only alternative: "
-                        f"{direction}; layout variant {attempt}. Preserve every existing subject, object and action exactly as described in STORY CONTEXT."
-                        f"{intensity} Change only camera framing, distance, layers, foreground/background arrangement and visual composition."
-                    ),
-                )
-                key = _cover_prompt_key(candidate)
-                if key not in used and key not in result_keys:
-                    break
-            else:  # pragma: no cover - layout marker guarantees a bounded unique payload.
-                raise RuntimeError("Не удалось получить уникальный визуальный промпт")
+    for candidate in options:
+        prior = [*avoided_options, *result]
+        if any(_cover_semantic_duplicate(candidate, value) for value in prior):
+            raise ValueError(
+                "SEMANTIC_SCENE_DUPLICATE: новый visual brief повторяет активную, историческую "
+                "или соседнюю сцену; камера или перефразировка не считаются новым сюжетом"
+            )
         result.append(candidate)
     return result
 
@@ -8245,8 +8362,11 @@ def _cover_instruction(item: dict, position: int, settings) -> str:
         "Верни JSON строго формата "
         '{"prompts":["..."],"recommended":1} без Markdown и пояснений. '
         f"Создай ровно {settings.cover_prompt_variant_count} разных semantic scene descriptions. "
-        "Каждый вариант обязан передавать конкретное действие, визуальное доказательство и тему, а также заметно отличаться композицией, "
-        "ракурсом, дистанцией камеры и расположением людей/объектов от остальных вариантов.\n\n"
+        "Каждый вариант — короткий самостоятельный visual brief длиной 250–600 символов, максимум 800. "
+        "Для вариантов выбирай разные ПОДТВЕРЖДЁННЫЕ темой visual strategies: ACTION, REACTION, CONSEQUENCE, CONFRONTATION, SCALE или EVIDENCE. "
+        "Стратегию не подписывай отдельным ярлыком: покажи её самой видимой сценой. Не повторяй тот же сюжет перестановкой слов, "
+        "ракурсом, дистанцией камеры, кадрированием или расположением объектов. Каждый вариант обязан передавать конкретное действие, "
+        "визуальное доказательство и тему.\n\n"
         f"ТЕМА: {title}\n{_cover_structured_context(item)}\n{_cover_topic_visual_plan(item)}"
     )
     request += _cover_scene_intensity_instruction(settings)
@@ -8280,11 +8400,6 @@ def _cover_instruction(item: dict, position: int, settings) -> str:
     return request
 
 
-def _normalize_cover_photo_prompt(value: str, item: dict | None = None) -> str:
-    """Build the immutable provider payload from a possibly legacy scene draft."""
-    return append_universal_thumbnail_core_v2(strip_legacy_thumbnail_phrases(value), item)
-
-
 def _migrate_legacy_cover_photo_prompts(settings: Settings) -> bool:
     """Keep approved legacy rows intact; V2 applies on explicit prompt generation.
 
@@ -8292,6 +8407,30 @@ def _migrate_legacy_cover_photo_prompts(settings: Settings) -> bool:
     must never rewrite a user's 84 persisted prompt choices in the background.
     """
     return False
+
+
+def _cover_prompt_ui_projection(item: dict) -> dict:
+    """Expose concise legacy auto-prompts without rewriting durable cover state.
+
+    Existing installs can contain full V2 payloads created before #321. The UI
+    should immediately show their human scene layer, but an operator-owned
+    manual prompt must remain byte-for-byte visible and editable.
+    """
+    row = dict(item)
+    if str(item.get("prompt_provider", "") or "").casefold() == "manual":
+        return row
+    if current := _cover_scene_brief_for_memory(item.get("image_prompt")):
+        row["image_prompt"] = current
+    values = item.get("image_prompt_options")
+    if isinstance(values, list):
+        projected = [
+            _cover_scene_brief_for_memory(value) or str(value)
+            for value in values
+            if str(value or "").strip()
+        ]
+        if projected:
+            row["image_prompt_options"] = projected
+    return row
 
 
 def _cover_prompt_should_generate(item: dict, *, force: bool = False) -> bool:
@@ -8340,7 +8479,7 @@ def _cover_active_prompt_options(item: dict) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for value in candidates:
-        prompt = _normalise_cover_prompt(value)
+        prompt = _cover_scene_brief_for_memory(value)
         key = _cover_prompt_key(prompt)
         if prompt and key not in seen:
             result.append(prompt)
@@ -8356,7 +8495,7 @@ def _cover_recent_prompt_history(item: dict) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for value in values:
-        prompt = _normalise_cover_prompt(value)
+        prompt = _cover_scene_brief_for_memory(value)
         key = _cover_prompt_key(prompt)
         if prompt and key not in seen:
             result.append(prompt)
@@ -8368,7 +8507,7 @@ def _remember_cover_prompt_history(item: dict, values: list[object]) -> None:
     """Append superseded active prompts to the row's small do-not-repeat window."""
     history = _cover_recent_prompt_history(item)
     for value in values:
-        prompt = _normalise_cover_prompt(value)
+        prompt = _cover_scene_brief_for_memory(value)
         key = _cover_prompt_key(prompt)
         if not prompt:
             continue
@@ -8376,6 +8515,22 @@ def _remember_cover_prompt_history(item: dict, values: list[object]) -> None:
         history.append(prompt)
     if history:
         item["recent_visual_prompt_history"] = history[-_COVER_PROMPT_HISTORY_LIMIT:]
+
+
+def _cover_scene_brief_for_memory(value: object) -> str:
+    """Keep do-not-repeat evidence small even for an accepted legacy V2 row."""
+    raw = str(value or "")
+    if not raw.strip():
+        return ""
+    scene = semantic_scene_brief(raw, "")
+    # A short literal/manual prompt may begin with a style word that the legacy
+    # extractor treats as boilerplate. Preserve the user's concise text in
+    # history rather than losing the whole previous scene and allowing an
+    # immediate semantic repeat.
+    if not scene:
+        literal = " ".join(raw.split())
+        scene = literal if len(literal) <= _COVER_SCENE_BRIEF_MAX_CHARS else ""
+    return scene if scene and len(scene) <= _COVER_SCENE_BRIEF_MAX_CHARS else ""
 
 
 def _mark_cover_prompt_stale_for_current_text(item: dict) -> None:
@@ -8403,7 +8558,7 @@ def _clean_cover_prompts(value: str, count: int) -> tuple[list[str], int]:
     cleaned = []
     for raw in prompts:
         prompt = re.sub(r"^(?:prompt|промпт)\s*[:—-]\s*", "", str(raw), flags=re.IGNORECASE).strip()
-        prompt = " ".join(prompt.split())[:6000]
+        prompt = " ".join(prompt.split())
         if len(prompt) >= 35 and prompt not in cleaned:
             cleaned.append(prompt)
     if not cleaned:
@@ -8427,17 +8582,11 @@ def _fallback_cover_prompt(item: dict, variant: int = 0) -> str:
     """
     title = " ".join(str(item.get("title", "")).split()) or "current news topic"
     context = " ".join(str(item.get("script", "")).split())[:500]
-    shot = (
-        "wide establishing television-news shot with foreground subject and visible press activity"
-        if variant % 2 == 0 else
-        "closer human-centered television-news shot with a clear object of attention and layered background"
-    )
+    del variant
     return (
-        f"Photorealistic editorial YouTube thumbnail about {title}. {shot}. "
-        "Show only people, places and objects explicitly implied by the title or script, in one coherent real-world scene. "
-        "Use natural documentary lighting, realistic scale, restrained newsroom urgency, and an uncluttered lower-left zone for later text overlay. "
-        "No invented incident, no fantasy, no surreal or cinematic poster treatment, no random flags, weapons, celebrities, damage, logos or words. "
-        + (f"Relevant context: {context}." if context else "")
+        f"The visible event directly supported by {title}: show its main participant, action and strongest concrete evidence "
+        "in the real setting stated by the current topic or script. "
+        + (f"Current context: {context}." if context else "")
     )
 
 
@@ -8568,25 +8717,55 @@ def generate_cover_prompts(payload: dict) -> dict:
             if pool_error is not None:
                 raise pool_error
             reference_paths = _cover_ai_reference_paths_for_item(target, index, settings)
-            options, chosen = _clean_cover_prompts(
-                await provider_call.generate(prompt, image_paths=reference_paths[:6]), settings.cover_prompt_variant_count,
-            )
-            options = [_normalize_cover_photo_prompt(value, target) for value in options]
-            if not options:
-                raise ValueError("ИИ вернул слишком короткий промпт обложки")
             requested_count = max(1, int(settings.cover_prompt_variant_count or 1))
-            if len(options) < requested_count:
-                # A short LLM response must not silently reduce the user's
-                # requested batch.  The local brief remains topic-specific
-                # and renderable, while the original answer stays first.
-                options.extend(
-                    _normalize_cover_photo_prompt(_fallback_cover_prompt(target, variant), target)
-                    for variant in range(len(options), requested_count)
+
+            async def request_scene_briefs(request: str) -> tuple[list[str], int]:
+                generated, recommended = _clean_cover_prompts(
+                    await provider_call.generate(request, image_paths=reference_paths[:6]), requested_count,
                 )
-            options = options[:requested_count]
-            options = _cover_distinct_prompt_options(
-                options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
-            )
+                options = [_normalize_cover_scene_brief(value, target) for value in generated]
+                if len(options) < requested_count:
+                    raise ValueError(
+                        "SEMANTIC_SCENE_VARIANTS_INCOMPLETE: ИИ не вернул требуемое число самостоятельных visual scenes"
+                    )
+                options = options[:requested_count]
+                if settings.cover_scene_intensity_mode:
+                    for option in options:
+                        if not _cover_scene_has_enhanced_dramaturgy(option):
+                            raise ValueError(
+                                "ENHANCED_SCENE_REQUIRED: выбран усиленный режим, но visual brief остался "
+                                "слишком нейтральным — нужен заметный масштаб, конфликт, сильная реакция, "
+                                "последствие или жёсткая визуальная метафора"
+                            )
+                else:
+                    for option in options:
+                        grounded, unsupported = _cover_scene_is_grounded(option, target)
+                        if not grounded:
+                            raise ValueError(
+                                "UNSUPPORTED_SCENE_EVENT: visual brief добавил "
+                                f"{unsupported}, хотя это не подтверждено текущей темой или сценарием"
+                            )
+                return (
+                    _cover_distinct_prompt_options(
+                        options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
+                    ),
+                    recommended,
+                )
+
+            try:
+                options, chosen = await request_scene_briefs(prompt)
+            except ValueError as first_error:
+                # A bounded repair asks for a genuinely different scene while
+                # preserving the factual authority and every existing prompt.
+                # It is not a camera-only local substitute and cannot mutate a
+                # staged fresh rewrite before the semantic result is accepted.
+                repair = (
+                    f"{prompt}\n\nSEMANTIC REPAIR: предыдущий ответ не дал достаточного количества новых визуальных сцен "
+                    f"({first_error}). Верни заново полный JSON. Выбери другой поддержанный темой visible strategy "
+                    "(ACTION / REACTION / CONSEQUENCE / CONFRONTATION / SCALE / EVIDENCE), а не ту же сцену с новой камерой, "
+                    "перефразировкой или перестановкой объектов."
+                )
+                options, chosen = await request_scene_briefs(repair)
             # An explicit terminal state lets the editor see that FastGen can
             # start; it is not merely an intermediate LLM progress label.
             _cover_step(target, "Промпты готовы", 100,
@@ -8600,21 +8779,42 @@ def generate_cover_prompts(payload: dict) -> dict:
                 staged[index] = target
         except _BRIDGE_OPERATION_ERRORS as exc:
             if _cover_prompt_safety_blocked(exc):
-                fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
-                options = [_normalize_cover_photo_prompt(_fallback_cover_prompt(target, variant), target) for variant in range(fallback_count)]
-                options = _cover_distinct_prompt_options(
-                    options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
-                )
-                _cover_step(target, "Промпты готовы", 100,
-                            "Провайдер отклонил формулировку: создан безопасный локальный вариант")
-                target.update(image_prompt_options=options, selected_prompt_index=0,
-                            image_prompt=options[0], prompt_provider="local-fallback",
-                            prompt_text_signature=_cover_text_revision(target), error="")
-                target["prompt_revision_id"] = _cover_prompt_revision(target)
-                if rewrite:
-                    _remember_cover_prompt_history(target, previous_options)
-                if stage_fresh_rewrite:
-                    staged[index] = target
+                if settings.cover_scene_intensity_mode:
+                    reason = (
+                        "ENHANCED_SCENE_REQUIRED: провайдер отклонил усиленную драматургию; "
+                        "нейтральный fallback не подставлен, потому что выбран усиленный режим"
+                    )
+                    _cover_step(target, "Ошибка промпта", 100, reason)
+                    target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
+                    if stage_fresh_rewrite:
+                        staging_errors[index] = reason
+                else:
+                    fallback_count = max(1, int(settings.cover_prompt_variant_count or 1))
+                    try:
+                        options = [
+                            _normalize_cover_scene_brief(_fallback_cover_prompt(target, variant), target)
+                            for variant in range(fallback_count)
+                        ]
+                        options = _cover_distinct_prompt_options(
+                            options, target, do_not_repeat, scene_intensity=False,
+                        )
+                    except ValueError as fallback_error:
+                        reason = _cover_provider_error_message(fallback_error)
+                        _cover_step(target, "Ошибка промпта", 100, reason)
+                        target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
+                        if stage_fresh_rewrite:
+                            staging_errors[index] = reason
+                    else:
+                        _cover_step(target, "Промпты готовы", 100,
+                                    "Провайдер отклонил формулировку: создан безопасный локальный вариант")
+                        target.update(image_prompt_options=options, selected_prompt_index=0,
+                                    image_prompt=options[0], prompt_provider="local-fallback",
+                                    prompt_text_signature=_cover_text_revision(target), error="")
+                        target["prompt_revision_id"] = _cover_prompt_revision(target)
+                        if rewrite:
+                            _remember_cover_prompt_history(target, previous_options)
+                        if stage_fresh_rewrite:
+                            staged[index] = target
             else:
                 reason = _cover_provider_error_message(exc)
                 _cover_step(target, "Ошибка промпта", 100, reason)
