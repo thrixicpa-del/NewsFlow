@@ -169,6 +169,58 @@ describe("Covers Light view", () => {
     );
   });
 
+  it("keeps Nano Banana 2 visible beside an older cached FastGen catalogue", () => {
+    const data = {
+      ...fallback,
+      fastgenCapabilities: {
+        ...fallback.fastgenCapabilities,
+        image: [{
+          id: "flower_image_generate",
+          provider: "Flower",
+          display_name: "Flower Image",
+          health: "healthy" as const,
+          health_label: "Доступна по API",
+          billing: { credits: 2, display: "2 credits" },
+        }],
+      },
+    };
+
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(screen.getByRole("option", { name: /Flower.*2 credits/i })).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: /Gemini.*Nano Banana 2.*1 credit/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/ещё 2 документированных маршрута ожидают проверки API/i)).toBeTruthy();
+  });
+
+  it("lets matching live FastGen metadata override the Nano Banana 2 catalogue fallback", () => {
+    const data = {
+      ...fallback,
+      fastgenCapabilities: {
+        ...fallback.fastgenCapabilities,
+        image: [{
+          id: "gemini_nano_banana_2_image_generate",
+          provider: "Gemini Live",
+          model: "gemini-nano-banana-2",
+          display_name: "Nano Banana 2 Live",
+          health: "healthy" as const,
+          health_label: "Доступна по API",
+          billing: { credits: 3, display: "3 live credits" },
+        }],
+      },
+    };
+
+    render(<Covers data={data} command={vi.fn(async () => undefined)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить студию" }));
+
+    expect(
+      screen.getByRole("option", { name: /Gemini Live.*Nano Banana 2 Live.*3 live credits/i }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Nano Banana 2.*1 credit/i })).toBeNull();
+  });
+
   it("keeps the verified FastGen cover-start contract", async () => {
     const command = vi.fn(async () => undefined);
     const data = {
