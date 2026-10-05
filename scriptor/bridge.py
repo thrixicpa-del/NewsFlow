@@ -13271,6 +13271,23 @@ def _can_failover_voice(error: Exception) -> bool:
     ))
 
 
+_WPROJECT_QUEUE_FULL_MAX_RETRIES = 18
+
+
+class _WProjectQueueFullDeferred(RuntimeError):
+    """The remote queue stayed full after bounded automatic backpressure."""
+
+
+def _wproject_queue_full(error: Exception) -> bool:
+    """Recognise WProject's explicit shared-queue backpressure response."""
+    return "queue_full" in str(error).casefold()
+
+
+def _wproject_queue_full_delay(attempt: int) -> int:
+    """Bound polite retries while a shared WProject slot is unavailable."""
+    return min(60, 5 * (2 ** max(0, int(attempt) - 1)))
+
+
 def _voice_job_resume_safe(saved: dict) -> bool:
     if not isinstance(saved, dict):
         return False
@@ -13551,37 +13568,75 @@ def generate_voice(payload: dict) -> dict:
             # The provider can accept a POST while the local process loses its
             # response. Persist the key first so every retry represents the
             # same remote request instead of a second billable task.
-            mark_provider_running(index, "wproject")
-            for attempt_key in candidates_keys:
-                try:
-                    client = WProjectClient(attempt_key.secret)
-                    task_id = client.create_task(
-                        job.result, f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
-                        threads=max(1, int(profile.task_threads)), idempotency_key=idempotency_key)
-                    # This durable remote identity is written before polling
-                    # or downloading.  A restart now resumes the accepted
-                    # WProject task rather than submitting a duplicate.
-                    job_snapshot["remote_task"] = {
-                        "provider": "wproject", "task_id": str(task_id),
-                        "key_label": attempt_key.label, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }
-                    job_snapshot["state"] = "running"
-                    persist_voice_state()
-                    content = client.wait_download(
-                        str(task_id), progress=lambda label, percent: set_task_status(index, label, percent))
-                    break
-                except _BRIDGE_OPERATION_ERRORS as exc:
-                    last_error = exc
-                    # Once WProject returned an id, it owns the task.  Do not
-                    # fail over to another key and accidentally create a
-                    # second paid request; the outer retry will resume it.
-                    if isinstance(job_snapshot.get("remote_task"), dict):
-                        raise
-                    if not settings.voice_key_failover or not _can_failover_voice(exc):
-                        raise
-                    set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
-            if content is None:
-                raise last_error or RuntimeError("WProject не принял задачу")
+            queue_full_attempt = int(job_snapshot.get("wproject_queue_full_retries", 0) or 0)
+            while content is None:
+                retry_for_capacity = False
+                mark_provider_running(index, "wproject")
+                for attempt_key in candidates_keys:
+                    try:
+                        client = WProjectClient(attempt_key.secret)
+                        task_id = client.create_task(
+                            job.result, f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
+                            threads=max(1, int(profile.task_threads)), idempotency_key=idempotency_key)
+                        # This durable remote identity is written before polling
+                        # or downloading.  A restart now resumes the accepted
+                        # WProject task rather than submitting a duplicate.
+                        job_snapshot["remote_task"] = {
+                            "provider": "wproject", "task_id": str(task_id),
+                            "key_label": attempt_key.label, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        }
+                        job_snapshot["state"] = "running"
+                        job_snapshot.pop("wproject_queue_full_next_retry_seconds", None)
+                        job_snapshot.pop("wproject_queue_full_error", None)
+                        persist_voice_state()
+                        content = client.wait_download(
+                            str(task_id), progress=lambda label, percent: set_task_status(index, label, percent))
+                        break
+                    except _BRIDGE_OPERATION_ERRORS as exc:
+                        last_error = exc
+                        # WProject's documented queue_full response means the
+                        # account's shared remote capacity (including its bot)
+                        # is occupied. It is neither an invalid script nor a
+                        # reason to try another key or provider.
+                        if _wproject_queue_full(exc):
+                            queue_full_attempt += 1
+                            delay = _wproject_queue_full_delay(queue_full_attempt)
+                            job_snapshot.update(
+                                state="queued",
+                                wproject_queue_full_retries=queue_full_attempt,
+                                wproject_queue_full_next_retry_seconds=delay,
+                                wproject_queue_full_error=_voice_error_reason(exc),
+                            )
+                            if queue_full_attempt > _WPROJECT_QUEUE_FULL_MAX_RETRIES:
+                                set_task_status(
+                                    index,
+                                    "WProject: очередь всё ещё занята — задача сохранена в очереди",
+                                    5,
+                                )
+                                raise _WProjectQueueFullDeferred(
+                                    "WProject очередь всё ещё занята; задача сохранена и ждёт безопасного продолжения"
+                                )
+                            set_task_status(
+                                index,
+                                f"WProject: очередь занята — повтор {queue_full_attempt}/{_WPROJECT_QUEUE_FULL_MAX_RETRIES} через {delay} с",
+                                5,
+                            )
+                            retry_for_capacity = True
+                            break
+                        # Once WProject returned an id, it owns the task.  Do not
+                        # fail over to another key and accidentally create a
+                        # second paid request; the outer retry will resume it.
+                        if isinstance(job_snapshot.get("remote_task"), dict):
+                            raise
+                        if not settings.voice_key_failover or not _can_failover_voice(exc):
+                            raise
+                        set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+                if retry_for_capacity:
+                    wait_until_resumed()
+                    time.sleep(delay)
+                    continue
+                if content is None:
+                    raise last_error or RuntimeError("WProject не принял задачу")
         set_task_status(index, "WProject: сохраняем MP3", 96)
         output = _save_voice_candidate(settings, index, job.request.title, content)
         return index, str(output)
@@ -13777,6 +13832,10 @@ def generate_voice(payload: dict) -> dict:
                 set_task_status(completed_index, "Готово", 100, artifact={
                     "artifactPath": output, "durationSeconds": duration,
                 })
+            except _WProjectQueueFullDeferred:
+                # The complete immutable contract stays queued. It can resume
+                # without rebuilding the script or creating a duplicate task.
+                continue
             except _BRIDGE_OPERATION_ERRORS as exc:
                 if _can_failover_voice(exc):
                     try:

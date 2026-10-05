@@ -585,6 +585,106 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
             TemporarilyUnavailableWProject.idempotency_keys[0],
         )
 
+    def test_wproject_queue_full_retries_without_discarding_the_durable_job(self):
+        """A shared remote queue-full response is backpressure, not a failed script."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class QueueFullThenAcceptedWProject:
+            idempotency_keys: ClassVar[list[str]] = []
+
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, _text, _filename, _profile, *, threads, idempotency_key):
+                type(self).idempotency_keys.append(idempotency_key)
+                if len(type(self).idempotency_keys) == 1:
+                    raise RuntimeError(
+                        "WProject: {'code': 'queue_full', 'message': 'Already 5 tasks at the limit of 5'}"
+                    )
+                return "remote-after-capacity"
+
+            def wait_download(self, task_id, progress=None):
+                self.task_id = task_id
+                return b"WPROJECT"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                voice_queue_concurrency=10,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_profiles=[{
+                    "id": "w", "name": "W", "provider": "wproject", "voice_id": "speaker",
+                }],
+                voice_default_profile_id="w",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", QueueFullThenAcceptedWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=24.0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        saved = settings.voice_tts_jobs["production-1"]
+        self.assertEqual(QueueFullThenAcceptedWProject.idempotency_keys[0], QueueFullThenAcceptedWProject.idempotency_keys[1])
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["remote_task"]["task_id"], "remote-after-capacity")
+        self.assertTrue(settings.voice_scenario_outputs["1"].endswith(".mp3"))
+
+    def test_wproject_queue_full_keeps_the_job_queued_after_bounded_wait(self):
+        """Exhausted remote capacity must not turn a durable local job into an error."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class AlwaysFullWProject:
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, *_args, **_kwargs):
+                raise RuntimeError("WProject: {'code': 'queue_full'}")
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_profiles=[{
+                    "id": "w", "name": "W", "provider": "wproject", "voice_id": "speaker",
+                }],
+                voice_default_profile_id="w",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", AlwaysFullWProject), \
+                 patch.object(bridge, "_WPROJECT_QUEUE_FULL_MAX_RETRIES", 0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        saved = settings.voice_tts_jobs["production-1"]
+        status = settings.voice_task_statuses["1"]
+        self.assertEqual(saved["state"], "queued")
+        self.assertEqual(saved["wproject_queue_full_retries"], 1)
+        self.assertEqual(settings.voice_scenario_outputs.get("1", ""), "")
+        self.assertIn("очередь", status["label"].casefold())
+        self.assertNotIn("ошибка", status["label"].casefold())
+
     def test_wproject_one_failed_task_does_not_cancel_its_neighbor(self):
         """Queue completion is isolated per ProductionItem, including WProject failures."""
         import tempfile
