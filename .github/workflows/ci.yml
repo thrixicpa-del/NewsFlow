@@ -32,6 +32,20 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+      - run: python tests/run_isolated.py tests.test_montage_index_integrity
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-proxy
+      - run: >-
+          python tests/run_isolated.py
+          scriptor.test_montage_render.MontageRenderTests.test_source_proxy_cache_reuses_an_unchanged_source_without_touching_it
+          scriptor.test_montage_render.MontageRenderTests.test_source_proxy_warmup_rebuilds_an_incomplete_cached_file
+          scriptor.test_montage_render.MontageRenderTests.test_source_proxy_warmup_writes_a_silent_1080p_30fps_video
+          scriptor.test_montage_render.MontageRenderTests.test_legacy_renderer_prefers_a_current_prepared_source_proxy
+          scriptor.test_montage_render.MontageRenderTests.test_gpu_capability_requires_a_working_nvenc_device_and_caches_the_probe
+          scriptor.test_montage_render.MontageRenderTests.test_gpu_chunk_command_preserves_order_and_source_trims
+          scriptor.test_montage_render.MontageRenderTests.test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-render
       - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice
