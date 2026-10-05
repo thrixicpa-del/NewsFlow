@@ -10621,7 +10621,6 @@ export function Editor({
   );
   const [ratio, setRatio] = useState(data.montageSettings.aspectRatio);
   const [renderer, setRenderer] = useState(data.montageSettings.renderer);
-  const [rendererDraftDirty, setRendererDraftDirty] = useState(false);
   const [remotionFrameConcurrency, setRemotionFrameConcurrency] = useState(
     String(data.montageSettings.remotionFrameConcurrency),
   );
@@ -10693,11 +10692,13 @@ export function Editor({
     (task) => task.index === inspectedMontageIndex,
   );
   useEffect(() => {
+    // A busy montage refreshes its snapshot every few moments. While the
+    // settings Sheet is open, every field below is an operator-owned draft:
+    // a background snapshot must not overwrite renderer, workers, folders,
+    // ratio or reuse controls before explicit Save.
+    if (configurationOpen) return;
     setRatio(data.montageSettings.aspectRatio);
-    // A busy montage refreshes its snapshot every few moments. Keep an
-    // operator's unsaved renderer selection intact until the persisted
-    // settings acknowledge that exact choice.
-    if (!rendererDraftDirty) setRenderer(data.montageSettings.renderer);
+    setRenderer(data.montageSettings.renderer);
     setRemotionFrameConcurrency(
       String(data.montageSettings.remotionFrameConcurrency),
     );
@@ -10719,22 +10720,12 @@ export function Editor({
       String(data.montageSettings.uniqueFootagePercent ?? 100),
     );
     setFastReuseRanges(data.montageSettings.fastReuseRanges || []);
-  }, [data.montageSettings, rendererDraftDirty]);
-  useEffect(() => {
-    if (rendererDraftDirty && data.montageSettings.renderer === renderer) {
-      setRendererDraftDirty(false);
-    }
-  }, [data.montageSettings.renderer, renderer, rendererDraftDirty]);
+  }, [data.montageSettings, configurationOpen]);
   const setRendererDraft = (value: "remotion" | "ffmpeg" | "gpu-timeline") => {
-    setRendererDraftDirty(true);
     setRenderer(value);
   };
   const handleConfigurationOpenChange = (open: boolean) => {
     setConfigurationOpen(open);
-    if (!open) {
-      setRendererDraftDirty(false);
-      setRenderer(data.montageSettings.renderer);
-    }
   };
   useEffect(() => {
     if (!pauseSaving) {
