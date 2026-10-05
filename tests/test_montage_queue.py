@@ -406,6 +406,21 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(restored.montage_renderer, "ffmpeg")
         self.assertFalse(restored.montage_renderer_explicit)
 
+    def test_persisted_montage_renderer_does_not_probe_gpu_default(self):
+        """Existing operator choices must not spawn an FFmpeg/NVENC capability probe."""
+        with tempfile.TemporaryDirectory() as folder:
+            settings_path = Path(folder) / "settings.json"
+            settings_path.write_text(
+                '{"montage_renderer":"ffmpeg","montage_renderer_explicit":true}',
+                encoding="utf-8",
+            )
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "default_montage_renderer",
+                              side_effect=AssertionError("GPU default must not be probed")):
+                restored = config.load_settings()
+        self.assertEqual(restored.montage_renderer, "ffmpeg")
+        self.assertTrue(restored.montage_renderer_explicit)
+
     def test_gpu_timeline_renderer_setting_round_trips_without_remapping(self):
         """The explicit GPU choice must survive the React/IPC/Core settings boundary."""
         settings = Settings()
