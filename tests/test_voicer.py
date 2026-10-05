@@ -243,7 +243,6 @@ class VoicerTests(unittest.TestCase):
             with patch.object(config, "config_path", return_value=settings_path):
                 config.save_settings(settings)
                 with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
-                     patch.object(bridge, "save_settings", side_effect=config.save_settings), \
                      patch.object(bridge, "load_session", return_value=(titles, [job])), \
                      patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
                      patch.object(bridge, "validate_voiceover_artifact", return_value=42.0), \
@@ -343,14 +342,14 @@ class VoicerTests(unittest.TestCase):
             with patch.object(config, "config_path", return_value=settings_path):
                 config.save_settings(initial)
 
-                def save_after_concurrent_edit(stale_settings):
+                def reconcile_after_concurrent_edit(updates):
                     concurrent = config.load_settings()
                     concurrent.template = "Параллельное изменение сохранено"
                     config.save_settings(concurrent)
-                    config.save_settings(stale_settings)
+                    return config.reconcile_voice_outputs(updates)
 
                 with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
-                     patch.object(bridge, "save_settings", side_effect=save_after_concurrent_edit), \
+                     patch.object(bridge, "reconcile_voice_outputs", side_effect=reconcile_after_concurrent_edit), \
                      patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
                      patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
                      patch.object(bridge, "validate_voiceover_artifact", return_value=17.0), \
@@ -390,14 +389,14 @@ class VoicerTests(unittest.TestCase):
             with patch.object(config, "config_path", return_value=settings_path):
                 config.save_settings(initial)
 
-                def save_after_worker_starts(stale_settings):
+                def reconcile_after_worker_starts(updates):
                     concurrent = config.load_settings()
                     concurrent.voice_tts_jobs["production-1"]["state"] = "running"
                     config.save_settings(concurrent)
-                    config.save_settings(stale_settings)
+                    return config.reconcile_voice_outputs(updates)
 
                 with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
-                     patch.object(bridge, "save_settings", side_effect=save_after_worker_starts), \
+                     patch.object(bridge, "reconcile_voice_outputs", side_effect=reconcile_after_worker_starts), \
                      patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
                      patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
                      patch.object(bridge, "validate_voiceover_artifact", return_value=17.0), \
