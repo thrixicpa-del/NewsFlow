@@ -8183,7 +8183,11 @@ _COVER_SCENE_RISK_SUPPORT = (
     ),
     (
         "вооружённый конфликт",
-        ("weapon", "armed", "soldier", "military", "tank", "missile", "gun", "оруж", "военн", "солдат", "танк", "ракет"),
+        (
+            "weapon", "armed", "soldier", "military", "war", "combat", "frontline", "tank", "missile", "rocket",
+            "drone", "bomb", "shelling", "airstrike", "gun", "оруж", "военн", "солдат", "войн", "боев", "фронт",
+            "танк", "ракет", "дрон", "беспилот", "бомб", "обстрел",
+        ),
         (
             "weapon", "armed", "soldier", "military", "war", "combat", "frontline", "tank", "missile", "rocket",
             "drone", "bomb", "shelling", "airstrike", "оруж", "военн", "солдат", "войн", "боев", "фронт",
@@ -8192,7 +8196,11 @@ _COVER_SCENE_RISK_SUPPORT = (
     ),
     (
         "разрушение, дым или спасательные действия",
-        ("explosion", "blast", "smoke", "destroy", "rubble", "rescue", "firefighter", "взрыв", "дым", "разруш", "спасател", "обломк"),
+        (
+            "explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "firefighter", "fire", "flame",
+            "burn", "blaze", "взрыв", "дым", "разруш", "поврежд", "спасател", "обломк", "пожар", "огонь", "плам",
+            "горит", "горящ",
+        ),
         (
             "explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "fire", "missile", "rocket",
             "drone", "bomb", "shelling", "airstrike", "взрыв", "дым", "разруш", "поврежд", "спасател",
@@ -8756,8 +8764,8 @@ def generate_cover_prompts(payload: dict) -> dict:
             if _cover_prompt_safety_blocked(exc):
                 if settings.cover_scene_intensity_mode:
                     reason = (
-                        "ENHANCED_SCENE_REQUIRED: провайдер отклонил усиленную драматургию; "
-                        "нейтральный fallback не подставлен, потому что выбран усиленный режим"
+                        "PROVIDER_SCENE_SAFETY_BLOCK: провайдер отклонил visual brief в усиленном режиме; "
+                        "нейтральный fallback не подставлен автоматически"
                     )
                     _cover_step(target, "Ошибка промпта", 100, reason)
                     target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
