@@ -277,7 +277,8 @@ class VoicerTests(unittest.TestCase):
                 voice_task_statuses={"25": {"label": "Ошибка озвучки", "progress": 0}},
                 idea_production_items=[{"id": "production-25", "title": "Тема 25"}],
             )
-            with patch.object(config, "config_path", return_value=settings_path):
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
                 config.save_settings(settings)
                 with patch.object(bridge, "load_settings", return_value=settings), \
                      patch.object(bridge, "load_session", return_value=(titles, [job])), \
