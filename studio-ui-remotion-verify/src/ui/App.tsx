@@ -3093,9 +3093,11 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
   }, [saved]);
 
   const topics = data.scenarios.filter((item) => item.productionItemId);
-  const selectedTopics = topics.filter((item) => selectedIds.includes(String(item.productionItemId)));
+  const selectedTopics = topics.filter((item) =>
+    selectedIds.includes(String(item.productionItemId)) && !item.result.trim()
+  );
   const selectAllNew = () => setSelectedIds(topics
-    .filter((item) => item.state !== "Готово" || !item.result.trim())
+    .filter((item) => !item.result.trim())
     .map((item) => String(item.productionItemId)));
   const toggle = (productionItemId: string) => setSelectedIds((current) =>
     current.includes(productionItemId)
