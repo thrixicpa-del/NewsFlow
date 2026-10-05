@@ -53,9 +53,11 @@ tab index.
 
 Input validation occurs before dispatch. Browser/auth/network/empty-response
 errors are persisted on the same durable task with a human-readable reason;
-the task remains recoverable and no other topic is redirected. A response
-outside the requested range is persisted without rewrite and marked
-`NEEDS_REVIEW` with actual length.
+the task remains recoverable and no other topic is redirected. The character
+range is an instruction sent to ChatGPT, not a post-generation gate: NewsFlow
+does not judge, rewrite, reject or mark the returned scenario for length or
+content. A newly returned assistant turn is stored as received (apart from
+newline normalization) and exported to TXT for the same ProductionItem.
 
 ## Verification
 
