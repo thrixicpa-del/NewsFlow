@@ -104,6 +104,28 @@ function createCorePayloadTransport(payload: unknown): CorePayloadTransport {
   };
 }
 
+function safeCoreProcessDiagnostic(stderr: string): string {
+  const detail = stderr.toLowerCase();
+  if (detail.includes('enoent') || detail.includes('not found')) {
+    return 'Ядро NewsFlow не найдено в этой сборке.';
+  }
+  if (detail.includes('eacces') || detail.includes('permission denied') || detail.includes('access is denied')) {
+    return 'NewsFlow не смог запустить ядро: нет доступа к файлу Core.';
+  }
+  return '';
+}
+
+function safeCoreLaunchError(error: unknown): Error {
+  const detail = error instanceof Error ? error.message.toLowerCase() : '';
+  if (detail.includes('enoent')) {
+    return new Error('Ядро NewsFlow не найдено в этой сборке.');
+  }
+  if (detail.includes('eacces') || detail.includes('permission denied') || detail.includes('access is denied')) {
+    return new Error('NewsFlow не смог запустить ядро: нет доступа к файлу Core.');
+  }
+  return new Error('Не удалось запустить ядро NewsFlow.');
+}
+
 function callCore(command: string, payload: unknown = {}) {
   return new Promise<unknown>((resolve, reject) => {
     const executable = pythonExecutable();
@@ -141,10 +163,8 @@ function callCore(command: string, payload: unknown = {}) {
       try {
         response = JSON.parse(readFileSync(responsePath, 'utf8'));
       } catch {
-        const diagnostic = stderr.trim().slice(0, 4096);
-        finish(new Error(diagnostic
-          ? `Ядро NewsFlow вернуло некорректный ответ: ${diagnostic}`
-          : 'Ядро NewsFlow вернуло некорректный ответ.'));
+        const diagnostic = safeCoreProcessDiagnostic(stderr);
+        finish(new Error(diagnostic || 'Ядро NewsFlow вернуло некорректный ответ.'));
         return;
       }
       if (exitCode !== 0) {
@@ -152,7 +172,8 @@ function callCore(command: string, payload: unknown = {}) {
           finish(new Error(String((response as { error?: unknown }).error || 'Ошибка ядра NewsFlow.')));
           return;
         }
-        finish(new Error(stderr.trim().slice(0, 4096) || `Ядро NewsFlow завершилось с кодом ${exitCode}.`));
+        const diagnostic = safeCoreProcessDiagnostic(stderr);
+        finish(new Error(diagnostic || `Ядро NewsFlow завершилось с кодом ${exitCode}.`));
         return;
       }
       registerApprovedOpenPaths(response);
@@ -183,9 +204,11 @@ function callCore(command: string, payload: unknown = {}) {
       });
       child.once('error', (error) => {
         responseStream.destroy();
-        finish(error);
+        finish(safeCoreLaunchError(error));
       });
-      responseStream.once('error', (error) => finish(error));
+      responseStream.once('error', () => {
+        finish(new Error('Не удалось сохранить ответ ядра NewsFlow во временный файл.'));
+      });
       responseStream.once('finish', () => {
         outputFinished = true;
         complete();
@@ -197,7 +220,7 @@ function callCore(command: string, payload: unknown = {}) {
       });
     } catch (error) {
       responseStream.destroy();
-      finish(error instanceof Error ? error : new Error(String(error)));
+      finish(safeCoreLaunchError(error));
     }
   });
 }
