@@ -361,12 +361,16 @@ def agent_plan_prompt(title: str, narration: str) -> str:
 
 
 def ffmpeg_executable() -> str:
-    roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])),
-             Path(__file__).resolve().parents[1]]
-    for root in roots:
-        candidate = root / "assets" / "ffmpeg.exe"
-        if candidate.exists():
-            return str(candidate)
+    # The packaged bundle is a Windows executable. Never select it on Linux or
+    # macOS (for example in CI), where attempting to run ffmpeg.exe masks the
+    # real validation result with PermissionError/Exec format errors.
+    if sys.platform == "win32":
+        roots = [Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])),
+                 Path(__file__).resolve().parents[1]]
+        for root in roots:
+            candidate = root / "assets" / "ffmpeg.exe"
+            if candidate.exists():
+                return str(candidate)
     system = shutil.which("ffmpeg")
     if system:
         return system
