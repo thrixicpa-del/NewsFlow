@@ -50,6 +50,66 @@ from .timeline import (
 
 
 class MontageRenderTests(unittest.TestCase):
+    @staticmethod
+    def _make_smoke_clip(root: Path, color: str) -> Path:
+        """Keep render smoke fixtures disposable instead of relying on ignored media."""
+        clip = root / f"{color}.mp4"
+        made = subprocess.run([
+            ffmpeg_executable(), "-y", "-f", "lavfi", "-i",
+            f"color=c={color}:size=640x360:rate=30:duration=2.5",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip),
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if made.returncode:
+            raise AssertionError(made.stderr[-1000:])
+        return clip
+
+    def test_gpu_timeline_rejects_missing_nvenc_without_cpu_fallback(self):
+        """The explicit GPU route must fail instead of silently using CPU FFmpeg."""
+        project = TimelineProject(
+            title="GPU contract",
+            clips=[TimelineClip("missing.mp4", "n", "q", duration=1.0)],
+        )
+        with patch.object(
+            timeline_module,
+            "gpu_timeline_capability",
+            return_value={"available": False, "reason": "NVENC недоступен"},
+        ), patch.object(
+            timeline_module,
+            "ffmpeg_executable",
+            side_effect=AssertionError("legacy CPU renderer must not start"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "NVENC недоступен"):
+                render_project(project, Path("result.mp4"), renderer="gpu-timeline")
+
+    def test_gpu_timeline_renders_disposable_clips_as_1080p_30fps(self):
+        """GPU mode renders ordered clips directly, without the proxy-cache path."""
+        if not timeline_module.gpu_timeline_capability().get("available"):
+            self.skipTest("NVENC is not available on this test machine")
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-timeline-") as temporary:
+            root = Path(temporary)
+            ffmpeg = ffmpeg_executable()
+            clips: list[TimelineClip] = []
+            for index, color in enumerate(("red", "blue"), start=1):
+                source = root / f"{color}.mp4"
+                made = subprocess.run([
+                    ffmpeg, "-y", "-f", "lavfi", "-i",
+                    f"color=c={color}:size=640x360:rate=25:duration=1.2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+                ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                self.assertEqual(made.returncode, 0, made.stderr[-1000:])
+                clips.append(TimelineClip(str(source), color, color, duration=1.0))
+            output = root / "gpu-timeline.mp4"
+            project = TimelineProject("GPU fixture", clips=clips)
+            render_project(project, output, renderer="gpu-timeline")
+            self.assertTrue(output.is_file())
+            inspected = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            self.assertIn("1920x1080", inspected.stderr)
+            self.assertIn("30 fps", inspected.stderr)
+            self.assertGreaterEqual(probe_media_duration(output), 1.9)
+
     def test_explicit_remotion_never_silently_falls_back_to_ffmpeg(self):
         """Composition mode must fail diagnostically if its canonical runner is absent."""
         project = TimelineProject(
@@ -419,11 +479,9 @@ class MontageRenderTests(unittest.TestCase):
             self.assertEqual(index.screen_text_stats(), {"blocked": 0, "safe": 0, "unchecked": 1})
 
     def test_ffmpeg_render_is_30fps_has_audio_and_does_not_crop_voice(self):
-        source_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"
-        red, blue = source_root / "red.mp4", source_root / "blue.mp4"
-        self.assertTrue(red.is_file() and blue.is_file(), "Smoke fixtures missing")
         with tempfile.TemporaryDirectory(prefix="newsflow-render-test-") as temporary:
             root = Path(temporary)
+            red, blue = self._make_smoke_clip(root, "red"), self._make_smoke_clip(root, "blue")
             voice = root / "voice.wav"
             ffmpeg = ffmpeg_executable()
             make_voice = subprocess.run([
@@ -454,11 +512,9 @@ class MontageRenderTests(unittest.TestCase):
 
     def test_ffmpeg_intro_keeps_insert_audio_and_delays_voiceover(self):
         """The first news insert is a real audible insert, not a silent cropped frame."""
-        source_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"
-        footage = source_root / "red.mp4"
-        self.assertTrue(footage.is_file(), "Smoke fixture missing")
         with tempfile.TemporaryDirectory(prefix="newsflow-intro-test-") as temporary:
             root = Path(temporary)
+            footage = self._make_smoke_clip(root, "red")
             ffmpeg = ffmpeg_executable()
             intro = root / "intro.mp4"
             voice = root / "voice.wav"

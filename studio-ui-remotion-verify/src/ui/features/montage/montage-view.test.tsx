@@ -47,6 +47,22 @@ describe("Montage Light view", () => {
     expect(screen.queryByText("Как собрать и передать монтаж")).toBeNull();
   });
 
+  it("saves the explicit GPU timeline mode with the existing render worker setting", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    render(<Editor data={fallback} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    fireEvent.click(screen.getByRole("button", { name: /Быстрый GPU-таймлайн/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-montage-settings",
+      expect.objectContaining({ renderer: "gpu-timeline", renderWorkers: 2 }),
+    ));
+    expect(screen.getByRole("button", { name: /Только FFmpeg/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Remotion — композиция/ })).toBeTruthy();
+  });
+
   it("shows the no-English-text rule as mandatory", () => {
     render(<Editor data={fallback} command={vi.fn()} refresh={async () => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
@@ -241,6 +257,27 @@ describe("Montage Light view", () => {
     render(<Editor data={paused} command={continueCommand} refresh={async () => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
     expect(continueCommand).toHaveBeenCalledWith("save-montage-settings", { queuePaused: false });
+  });
+
+  it("sends one pause request while the prior pause save is pending", async () => {
+    let release: (() => void) | undefined;
+    const data = {
+      ...fallback,
+      montageTasks: [{ index: 1, title: "Тема", status: "Рендер", outputPath: "" }],
+      montageSettings: { ...fallback.montageSettings, queuePaused: false },
+    };
+    const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {
+      release = () => resolve(data);
+    }));
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    const pause = screen.getByRole("button", { name: "Пауза" });
+    fireEvent.click(pause);
+    fireEvent.click(pause);
+
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(pause.hasAttribute("disabled")).toBe(true);
+    release?.();
   });
 
   it("distinguishes selected MP4 cleanup from explicit all cleanup", async () => {

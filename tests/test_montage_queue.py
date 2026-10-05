@@ -403,9 +403,35 @@ class MontageQueueStateTests(unittest.TestCase):
             settings_path.write_text('{"montage_renderer":"remotion"}', encoding="utf-8")
             with patch.object(config, "config_path", return_value=settings_path):
                 restored = config.load_settings()
-
         self.assertEqual(restored.montage_renderer, "ffmpeg")
         self.assertFalse(restored.montage_renderer_explicit)
+
+    def test_gpu_timeline_renderer_setting_round_trips_without_remapping(self):
+        """The explicit GPU choice must survive the React/IPC/Core settings boundary."""
+        settings = Settings()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_montage_settings({"renderer": "gpu-timeline"})
+        self.assertEqual(settings.montage_renderer, "gpu-timeline")
+
+    def test_new_montage_profile_uses_gpu_only_when_capability_is_available(self):
+        with patch.object(config, "gpu_timeline_available", return_value=True):
+            self.assertEqual(config.default_montage_renderer(), "gpu-timeline")
+        with patch.object(config, "gpu_timeline_available", return_value=False):
+            self.assertEqual(config.default_montage_renderer(), "ffmpeg")
+
+    def test_gpu_capability_probe_is_cached_for_new_profile_defaults(self):
+        """Opening Montage must not spawn a new FFmpeg probe for every settings read."""
+        original = config._GPU_TIMELINE_AVAILABLE
+        try:
+            config._GPU_TIMELINE_AVAILABLE = None
+            with patch.object(config, "_probe_gpu_timeline_available", return_value=True) as probe:
+                self.assertEqual(config.default_montage_renderer(), "gpu-timeline")
+                self.assertEqual(config.default_montage_renderer(), "gpu-timeline")
+            self.assertEqual(probe.call_count, 1)
+        finally:
+            config._GPU_TIMELINE_AVAILABLE = original
 
     def test_explicit_remotion_selection_is_preserved(self):
         with tempfile.TemporaryDirectory() as folder:

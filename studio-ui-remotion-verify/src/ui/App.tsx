@@ -10472,6 +10472,7 @@ export function Editor({
   >(null);
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [queueLaunching, setQueueLaunching] = useState(false);
+  const [pauseSaving, setPauseSaving] = useState(false);
   const [ratio, setRatio] = useState(data.montageSettings.aspectRatio);
   const [renderer, setRenderer] = useState(data.montageSettings.renderer);
   const [remotionFrameConcurrency, setRemotionFrameConcurrency] = useState(
@@ -10698,10 +10699,17 @@ export function Editor({
     );
     if (result) setSelectedProjects([]);
   };
-  const togglePause = () =>
-    void command("save-montage-settings", {
-      queuePaused: !data.montageSettings.queuePaused,
-    });
+  const togglePause = async () => {
+    if (pauseSaving) return;
+    setPauseSaving(true);
+    try {
+      await command("save-montage-settings", {
+        queuePaused: !data.montageSettings.queuePaused,
+      });
+    } finally {
+      setPauseSaving(false);
+    }
+  };
   const exportDaVinci = (all = false) =>
     void command(
       "export-davinci-xml",
@@ -10803,7 +10811,7 @@ export function Editor({
             Сохранить выбор
           </Button>
         </div>
-        <div className="renderer-choice renderer-choice-three">
+        <div className="renderer-choice renderer-choice-four">
           <button
             className={renderer === "ffmpeg" ? "selected" : ""}
             onClick={() => setRenderer("ffmpeg")}
@@ -10819,13 +10827,29 @@ export function Editor({
             <em>быстрее</em>
           </button>
           <button
-            className={renderer === "remotion" ? "selected remotion" : ""}
-            onClick={() => setRenderer("remotion")}
+            className={renderer === "gpu-timeline" ? "selected gpu" : ""}
+            onClick={() => setRenderer("gpu-timeline")}
           >
             <span>02</span>
             <div>
+              <b>Быстрый GPU-таймлайн</b>
+              <small>
+                1080p / 30 FPS без отдельных прокси на каждый футаж. Использует
+                текущее число «Видео одновременно».
+              </small>
+            </div>
+            <em>GPU</em>
+          </button>
+          <button
+            className={renderer === "remotion" ? "selected remotion" : ""}
+            onClick={() => setRenderer("remotion")}
+          >
+            <span>03</span>
+            <div>
               <b>Remotion — композиция</b>
-              <small>React-таймлайн: сцены, голос, заставка и переходы.</small>
+              <small>
+                React-таймлайн: сцены, голос, заставка и переходы.
+              </small>
             </div>
             <em>переходы</em>
           </button>
@@ -10833,13 +10857,10 @@ export function Editor({
             className={exportDaVinciXml ? "selected davinci" : ""}
             onClick={() => setExportDaVinciXml((value) => !value)}
           >
-            <span>03</span>
+            <span>04</span>
             <div>
               <b>DaVinci Resolve XML</b>
-              <small>
-                Создать FCPXML с дорожками футажей и MP3. Это не повторный
-                рендер MP4.
-              </small>
+              <small>Создать FCPXML с дорожками футажей и MP3. Это не повторный рендер MP4.</small>
             </div>
             <em>{exportDaVinciXml ? "включён" : "выключен"}</em>
           </button>
@@ -10900,6 +10921,12 @@ export function Editor({
                 Для стабильной работы начните с 2 роликов × 2 кадра.
               </small>
             </aside>
+          </div>
+        ) : renderer === "gpu-timeline" ? (
+          <div className="renderer-note">
+            <b>GPU-таймлайн выбран.</b> Он собирает тот же план в 1080p / 30 FPS
+            через NVENC и не переключается молча на CPU. Если NVENC недоступен,
+            выберите «Только FFmpeg» вручную.
           </div>
         ) : (
           <div className="renderer-note">
@@ -10985,10 +11012,11 @@ export function Editor({
             <select
               value={renderer}
               onChange={(event) =>
-                setRenderer(event.target.value as "remotion" | "ffmpeg")
+                setRenderer(event.target.value as "remotion" | "ffmpeg" | "gpu-timeline")
               }
             >
               <option value="remotion">Remotion — переходы и слои</option>
+              <option value="gpu-timeline">GPU-таймлайн — быстрый 1080p / 30 FPS</option>
               <option value="ffmpeg">FFmpeg — быстрый простой монтаж</option>
             </select>
           </label>
@@ -11367,7 +11395,7 @@ export function Editor({
             </Button>
             <Button
               kind={data.montageSettings.queuePaused ? "success" : "secondary"}
-              onClick={running ? togglePause : undefined}
+              onClick={running && !pauseSaving ? () => void togglePause() : undefined}
             >
               {data.montageSettings.queuePaused ? (
                 <Play size={16} />
