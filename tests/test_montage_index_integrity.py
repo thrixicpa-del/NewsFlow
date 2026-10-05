@@ -92,17 +92,11 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
             blocked.touch()
             cache = root / "RenderProxy" / "Sources" / "allowed.mp4"
 
-            class FakeIndex:
-                def __init__(self, _path):
-                    pass
-
-                def excluded_proxy_cache_paths(self):
-                    return {str(blocked.resolve())}
-
             settings = SimpleNamespace(footage_folders=[str(library)])
             with patch.object(bridge, "app_data_root", return_value=root), \
                  patch.object(bridge, "load_settings", return_value=settings), \
-                 patch.object(bridge, "ClipIndex", FakeIndex), \
+                 patch.object(bridge, "proxy_cache_excluded_paths",
+                              return_value={str(blocked.resolve())}), \
                  patch.object(bridge, "scan_folders", return_value=[
                      FootageItem(str(allowed), allowed.name),
                      FootageItem(str(blocked), blocked.name),
@@ -160,9 +154,12 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                     (str(manually_blocked.resolve()),),
                 )
 
-            excluded = index.excluded_proxy_cache_paths()
+            excluded = proxy_cache_excluded_paths(index.db_path)
 
-            self.assertEqual(excluded, {str(text_blocked.resolve()), str(manually_blocked.resolve())})
+            self.assertEqual(
+                excluded,
+                {str(text_blocked.resolve()), str(manually_blocked.resolve())},
+            )
 
     def test_dead_active_owner_becomes_truthful_interrupted_resume_state(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-index-status-") as temporary:
