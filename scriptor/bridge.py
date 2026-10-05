@@ -7247,7 +7247,6 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
             job.state = RunState.ERROR
             job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
     save_session(current_titles, current_jobs)
-    save_settings(settings)
     return {**snapshot(), "operationResult": {
         "kind": "browser-topic-scenarios", "count": completed,
         "message": f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз.",
