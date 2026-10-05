@@ -8175,10 +8175,20 @@ _COVER_SCENE_PRESENTATION_TOKENS = frozenset({
     "драматичный", "документальный", "редакционный", "кинематографичный", "фотореалистичный", "реалистичный",
     "освещение", "свет", "контраст", "напряжённый", "срочный", "сцена", "изображение", "кадр",
 })
+_COVER_SCENE_EXACT_RISK_MARKERS = frozenset({"war", "fire", "armed", "tank"})
+
+
+def _cover_scene_risk_marker_present(text: str, marker: str) -> bool:
+    """Match narrow high-risk terms without treating warehouse/firewall/tanker as events."""
+    if marker in _COVER_SCENE_EXACT_RISK_MARKERS:
+        return re.search(rf"(?<!\\w){re.escape(marker)}(?!\\w)", text) is not None
+    return marker in text
+
+
 _COVER_SCENE_RISK_SUPPORT = (
     (
         "массовую толпу или протест",
-        ("crowd", "protest", "rally", "demonstrat", "march", "митинг", "толп", "протест", "демонстрант"),
+        ("crowd", "protest", "demonstrat", "митинг", "толп", "протест", "демонстрант"),
         ("crowd", "protest", "demonstrat", "митинг", "толп", "протест", "демонстрант"),
     ),
     (
@@ -8290,7 +8300,10 @@ def _cover_scene_is_grounded(scene: str, item: dict) -> tuple[bool, str]:
     )).casefold()
     candidate = scene.casefold()
     for label, candidate_markers, support_markers in _COVER_SCENE_RISK_SUPPORT:
-        if any(marker in candidate for marker in candidate_markers) and not any(marker in source for marker in support_markers):
+        if (
+            any(_cover_scene_risk_marker_present(candidate, marker) for marker in candidate_markers)
+            and not any(_cover_scene_risk_marker_present(source, marker) for marker in support_markers)
+        ):
             return False, label
     return True, ""
 
