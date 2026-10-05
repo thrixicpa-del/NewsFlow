@@ -397,6 +397,18 @@ class CoverSceneBriefTests(unittest.TestCase):
                 self.assertFalse(burning)
                 self.assertFalse(drone_strike)
 
+    def test_scene_grounding_does_not_treat_warehouse_firewall_or_tanker_as_risk_events(self):
+        item = {
+            "title": "Warehouse software update improves firewall monitoring",
+            "script": "Managers review firewall logs while an oil tanker delivery schedule is updated.",
+        }
+        grounded, reason = bridge._cover_scene_is_grounded(
+            "Warehouse managers inspect firewall alerts beside a tanker delivery board.",
+            item,
+        )
+        self.assertTrue(grounded)
+        self.assertEqual(reason, "")
+
     def test_standard_safety_block_with_default_two_variants_fails_closed_without_crashing_or_losing_old_prompt(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
         settings = Settings(cover_prompt_variant_count=2, cover_scene_intensity_mode=False, cover_queue=[self._item(
