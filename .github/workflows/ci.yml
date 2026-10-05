@@ -38,6 +38,9 @@ jobs:
       - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-scenario-story-planner
+      - run: python tests/run_isolated.py tests.test_browser_topic_scenarios tests.test_chatgpt_browser scriptor.test_command_contract
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-browser-topics
       - run: pnpm typecheck
         working-directory: studio-ui-remotion-verify
       - run: pnpm test:ui
