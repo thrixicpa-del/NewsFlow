@@ -190,6 +190,41 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(settings.tag_char_limit, 500)
         self.assertLessEqual(len(", ".join(bridge._limit_tags(["a" * 500, "b"], 5000))), 500)
 
+    def test_manual_seo_and_tags_save_by_production_item_id_after_queue_reorder(self):
+        settings = Settings(seo_queue=[
+            {
+                "production_item_id": "production:other", "source_title": "Other",
+                "description": "Other description", "hashtags": ["#other"], "tags": ["other"],
+            },
+            {
+                "production_item_id": "production:chosen", "source_title": "Chosen",
+                "description": "Chosen description", "hashtags": ["#chosen"], "tags": ["chosen"],
+            },
+        ])
+        # The queue may be refreshed/reordered between opening the editor and
+        # pressing Save; selection must remain attached to the durable item.
+        settings.seo_queue.reverse()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            bridge.save_seo_text({
+                "productionItemId": "production:chosen",
+                "description": "Edited SEO description",
+                "hashtags": "#edited",
+            })
+            bridge.save_tags_text({
+                "productionItemId": "production:chosen",
+                "tags": "edited tag, another tag",
+            })
+
+        chosen = next(item for item in settings.seo_queue if item["production_item_id"] == "production:chosen")
+        other = next(item for item in settings.seo_queue if item["production_item_id"] == "production:other")
+        self.assertEqual(chosen["description"], "Edited SEO description")
+        self.assertEqual(chosen["hashtags"], ["#edited"])
+        self.assertEqual(chosen["tags"], ["edited tag", "another tag"])
+        self.assertEqual(other["description"], "Other description")
+        self.assertEqual(other["tags"], ["other"])
+
     def test_montage_handoff_persists_production_identity_for_package_linkage(self):
         settings = Settings()
 

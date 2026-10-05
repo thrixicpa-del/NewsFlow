@@ -12927,18 +12927,42 @@ def clear_tags(payload: dict) -> dict:
     return snapshot()
 
 
+def _seo_queue_item_for_edit(settings: Settings, payload: dict, *, missing_message: str) -> dict:
+    """Resolve an editor save against a durable ProductionItem when available.
+
+    Older saved rows predate ProductionItem IDs, so their index remains a
+    deliberately narrow compatibility fallback. A current UI selection must
+    never silently move to a neighbour after a queue refresh or reorder.
+    """
+    production_item_id = str(
+        payload.get("productionItemId", payload.get("production_item_id", "")) or ""
+    ).strip()
+    if production_item_id:
+        matches = [
+            item for item in settings.seo_queue
+            if str(item.get("production_item_id", "") or "").strip() == production_item_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError("Найдены несколько SEO-пакетов с одним ProductionItem ID")
+        raise ValueError(missing_message)
+    index = int(payload.get("index", -1))
+    if 0 <= index < len(settings.seo_queue):
+        return settings.seo_queue[index]
+    raise ValueError(missing_message)
+
+
 def save_tags_text(payload: dict) -> dict:
     """Save manually reviewed tags and enforce the same character budget as generation."""
     settings = load_settings()
-    index = int(payload.get("index", -1))
-    if not 0 <= index < len(settings.seo_queue):
-        raise ValueError("Пакет тегов не найден")
+    item = _seo_queue_item_for_edit(settings, payload, missing_message="Пакет тегов не найден")
     raw = str(payload.get("tags", ""))
     values = [part.strip() for part in re.split(r"[,\n]", raw) if part.strip()]
     tags = _limit_tags(values, settings.tag_char_limit)
     if not tags:
         raise ValueError("Добавьте хотя бы один тег, который помещается в лимит")
-    settings.seo_queue[index].update(tags=tags, tags_status="Готово", tags_error="")
+    item.update(tags=tags, tags_status="Готово", tags_error="")
     save_settings(settings)
     return snapshot()
 
@@ -12946,9 +12970,7 @@ def save_tags_text(payload: dict) -> dict:
 def save_seo_text(payload: dict) -> dict:
     """Save a manually reviewed SEO description without touching its tags."""
     settings = load_settings()
-    index = int(payload.get("index", -1))
-    if not 0 <= index < len(settings.seo_queue):
-        raise ValueError("SEO-пакет не найден")
+    item = _seo_queue_item_for_edit(settings, payload, missing_message="SEO-пакет не найден")
     description = str(payload.get("description", "")).strip()
     if not description:
         raise ValueError("SEO-описание не может быть пустым")
@@ -12960,7 +12982,6 @@ def save_seo_text(payload: dict) -> dict:
         word = re.sub(r"[^\w-]", "", str(entry).strip().lstrip("#"))
         if word and f"#{word}" not in hashtags:
             hashtags.append(f"#{word}")
-    item = settings.seo_queue[index]
     item.update(description=description, hashtags=hashtags or _seo_hashtags(item), status="Готово", error="")
     save_settings(settings)
     return snapshot()

@@ -128,6 +128,7 @@ type Command = <K extends NewsFlowCommand>(
 ) => Promise<NewsFlowSnapshot | undefined>;
 type DirtyWorkspace = "templates" | "knowledge" | "keys";
 type PendingNavigation = { nextPage: Page; source: DirtyWorkspace } | null;
+type SeoEditorTarget = { productionItemId: string; legacyIndex: number };
 
 const defaultSeoPrompt =
   "Создай точное SEO-описание по теме «{title}», естественные хештеги и призыв посмотреть ролик. Верни только JSON.";
@@ -8769,10 +8770,15 @@ export function Seo({ data, command }: { data: NewsFlowSnapshot; command: Comman
   const [useScriptContext, setUseScriptContext] = useState(
     data.seoSettings.useScriptContext,
   );
-  const [opened, setOpened] = useState<number | null>(null);
+  const [opened, setOpened] = useState<SeoEditorTarget | null>(null);
   const [description, setDescription] = useState("");
   const [hashtags, setHashtags] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const openedItem = opened
+    ? opened.productionItemId
+      ? data.seo.find((item) => item.production_item_id === opened.productionItemId)
+      : data.seo[opened.legacyIndex]
+    : undefined;
   useEffect(() => {
     setTemplate(data.seoSettings.promptTemplate || defaultSeoPrompt);
     setProvider(data.seoSettings.provider);
@@ -8834,14 +8840,19 @@ export function Seo({ data, command }: { data: NewsFlowSnapshot; command: Comman
     if (selected.length !== 1) return;
     const item = data.seo[selected[0]];
     if (!item) return;
-    setOpened(selected[0]);
+    setOpened({
+      productionItemId: String(item.production_item_id || ""),
+      legacyIndex: selected[0],
+    });
     setDescription(item.description || "");
     setHashtags((item.hashtags || []).join(" "));
   };
   const saveEditor = async () => {
-    if (opened === null) return;
+    if (!opened || !openedItem) return;
     const result = await command("save-seo-text", {
-      index: opened,
+      ...(opened.productionItemId
+        ? { productionItemId: opened.productionItemId }
+        : { index: opened.legacyIndex }),
       description,
       hashtags,
     });
@@ -9059,7 +9070,7 @@ export function Seo({ data, command }: { data: NewsFlowSnapshot; command: Comman
             <div>
               <b>Просмотр и редактирование SEO</b>
               <small>
-                {data.seo[opened]?.source_title || "Тема"}. Призыв — последнее
+                {openedItem?.source_title || "Тема"}. Призыв — последнее
                 предложение SEO-текста.
               </small>
             </div>
@@ -9092,7 +9103,7 @@ export function Seo({ data, command }: { data: NewsFlowSnapshot; command: Comman
               <textarea
                 readOnly
                 value={
-                  (data.seo[opened]?.tags || []).join(", ") ||
+                  (openedItem?.tags || []).join(", ") ||
                   "Теги ещё не созданы — откройте раздел «Теги»."
                 }
               />
@@ -9121,9 +9132,14 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
   const [tagCharLimit, setTagCharLimit] = useState(
     String(data.seoSettings.tagCharLimit),
   );
-  const [opened, setOpened] = useState<number | null>(null);
+  const [opened, setOpened] = useState<SeoEditorTarget | null>(null);
   const [tagText, setTagText] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const openedItem = opened
+    ? opened.productionItemId
+      ? data.seo.find((item) => item.production_item_id === opened.productionItemId)
+      : data.seo[opened.legacyIndex]
+    : undefined;
   useEffect(() => {
     setTemplate(data.seoSettings.tagsPromptTemplate || defaultTagsPrompt);
     setProvider(data.seoSettings.tagsProvider);
@@ -9176,13 +9192,18 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
     if (selected.length !== 1) return;
     const item = data.seo[selected[0]];
     if (!item) return;
-    setOpened(selected[0]);
+    setOpened({
+      productionItemId: String(item.production_item_id || ""),
+      legacyIndex: selected[0],
+    });
     setTagText((item.tags || []).join(", "));
   };
   const saveTags = async () => {
-    if (opened === null) return;
+    if (!opened || !openedItem) return;
     const result = await command("save-tags-text", {
-      index: opened,
+      ...(opened.productionItemId
+        ? { productionItemId: opened.productionItemId }
+        : { index: opened.legacyIndex }),
       tags: tagText,
     });
     if (result) setOpened(null);
@@ -9372,7 +9393,7 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
             <div>
               <b>Просмотр и редактирование тегов</b>
               <small>
-                {data.seo[opened]?.source_title || "Тема"}. Лимит:{" "}
+                {openedItem?.source_title || "Тема"}. Лимит:{" "}
                 {tagCharLimit} символов с запятыми.
               </small>
             </div>

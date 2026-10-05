@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { fallback, Seo, Tags } from "../../App";
 
@@ -45,5 +45,56 @@ describe("SEO and Tags Light views", () => {
     render(<Tags data={fallback} command={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Настроить теги" }));
     expect(screen.getByLabelText(/Лимит тегов, символов/i).getAttribute("max")).toBe("500");
+  });
+
+  it("opens and saves the selected SEO package by ProductionItem ID", async () => {
+    const data = {
+      ...fallback,
+      seo: [{
+        production_item_id: "production:seo-open-edit",
+        source_title: "SEO topic",
+        description: "Saved SEO description",
+        hashtags: ["#seo"],
+        tags: ["seo tag"],
+        status: "Готово",
+      }],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Seo data={data} command={command} />);
+
+    fireEvent.click(screen.getByText("SEO topic").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Открыть / редактировать" }));
+    expect(screen.getByText("Просмотр и редактирование SEO")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить SEO" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-seo-text", {
+      productionItemId: "production:seo-open-edit",
+      description: "Saved SEO description",
+      hashtags: "#seo",
+    }));
+  });
+
+  it("opens and saves the selected tag set by ProductionItem ID", async () => {
+    const data = {
+      ...fallback,
+      seo: [{
+        production_item_id: "production:tags-open-edit",
+        source_title: "Tags topic",
+        tags: ["first tag", "second tag"],
+        tags_status: "Готово",
+      }],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Tags data={data} command={command} />);
+
+    fireEvent.click(screen.getByText("Tags topic").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Открыть / редактировать" }));
+    expect(screen.getByText("Просмотр и редактирование тегов")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить теги" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-tags-text", {
+      productionItemId: "production:tags-open-edit",
+      tags: "first tag, second tag",
+    }));
   });
 });
