@@ -14848,7 +14848,26 @@ def warm_proxy_cache(payload: dict) -> dict:
     settings = load_settings()
     roots = [folder for folder in settings.footage_folders if Path(folder).is_dir()]
     if not roots:
-        raise ValueError("Добавьте хотя бы одну папку с футажами перед подготовкой proxy-кэша")
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        _write_proxy_cache_pause_requested(False)
+        _write_proxy_cache_status({
+            "stage": "error",
+            "active": False,
+            "pauseRequested": False,
+            "total": 0,
+            "processed": 0,
+            "ready": 0,
+            "skipped": 0,
+            "excluded": 0,
+            "failed": 0,
+            "current": "",
+            "ownerPid": os.getpid(),
+            "startedAt": now,
+            "updatedAt": now,
+            "error": "Добавьте хотя бы одну доступную папку с футажами перед подготовкой proxy-кэша",
+            "message": "",
+        })
+        raise ValueError("Добавьте хотя бы одну доступную папку с футажами перед подготовкой proxy-кэша")
     lease = _claim_proxy_cache_lock()
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
     _write_proxy_cache_pause_requested(False)
