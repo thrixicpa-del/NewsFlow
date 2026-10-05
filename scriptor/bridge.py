@@ -2953,7 +2953,8 @@ def snapshot() -> dict:
                             "planningWorkers": settings.montage_planning_workers,
                             "downloadWorkers": settings.montage_download_workers,
                             "renderWorkers": settings.montage_render_workers,
-                            "queuePaused": settings.montage_queue_paused},
+                            "queuePaused": settings.montage_queue_paused,
+                            "queueRunning": _montage_queue_owner_running()},
         "montageTasks": [dict(value, index=int(key)) for key, value in sorted(
             settings.montage_task_statuses.items(), key=lambda pair: int(pair[0]) if str(pair[0]).isdigit() else 10 ** 9
         )],
@@ -17783,6 +17784,16 @@ def _montage_queue_lock_path() -> Path:
     return app_data_root() / "montage-queue.lock"
 
 
+def _montage_queue_owner_running() -> bool:
+    """Read the process-owned queue lock without mutating persisted task state."""
+    lock_path = _montage_queue_lock_path()
+    try:
+        owner = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return _montage_process_is_running(owner.get("pid"))
+
+
 def _claim_montage_queue_lock() -> Path | None:
     """Claim the one cross-process Montage owner, reclaiming a dead owner."""
     lock_path = _montage_queue_lock_path()
@@ -17849,6 +17860,12 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     jobs when the desktop app is updated.
     """
     settings = load_settings()
+    # A newly acquired owner proves any persisted pause belongs to a dead
+    # previous worker. Never let a stale pause from an old session freeze a
+    # fresh queue before it can report progress.
+    if settings.montage_queue_paused:
+        settings.montage_queue_paused = False
+        save_settings(settings)
     _reconcile_montage_outputs(settings)
     if _recover_interrupted_montage_tasks(settings):
         save_settings(settings)
@@ -18017,10 +18034,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         )
         staged_output = output_staging / output.name
         def heartbeat(pid: int | None):
-            _montage_task_update(
-                settings, index, status="Рендер", phase="Рендер футажей", progress=None,
-                detail=("FFmpeg работает" if pid else "FFmpeg завершил этап"), ffmpegPid=int(pid or 0),
-            )
+            _montage_render_process_heartbeat(settings, index, pid)
         def progress(done: int, total: int, label: str):
             if "Remotion" in label or "Композици" in label or "Кадр" in label:
                 value = max(60, min(99, 60 + int(38 * done / max(1, total))))
