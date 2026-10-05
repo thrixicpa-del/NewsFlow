@@ -106,7 +106,7 @@ function createCorePayloadTransport(payload: unknown): CorePayloadTransport {
 
 function safeCoreProcessDiagnostic(stderr: string): string {
   const detail = stderr.toLowerCase();
-  if (detail.includes('enoent') || detail.includes('not found')) {
+  if (detail.includes('enoent')) {
     return 'Ядро NewsFlow не найдено в этой сборке.';
   }
   if (detail.includes('eacces') || detail.includes('permission denied') || detail.includes('access is denied')) {
@@ -147,7 +147,7 @@ function callCore(command: string, payload: unknown = {}) {
     const responseStream = createWriteStream(responsePath, { flags: 'w', mode: 0o600 });
     let stderr = '';
     let exited = false;
-    let outputFinished = false;
+    let outputClosed = false;
     let exitCode: number | null = null;
     let settled = false;
     const finish = (error?: Error, response?: unknown) => {
@@ -158,7 +158,7 @@ function callCore(command: string, payload: unknown = {}) {
       else resolve(response);
     };
     const complete = () => {
-      if (!exited || !outputFinished || settled) return;
+      if (!exited || !outputClosed || settled) return;
       let response: unknown;
       try {
         response = JSON.parse(readFileSync(responsePath, 'utf8'));
@@ -207,10 +207,13 @@ function callCore(command: string, payload: unknown = {}) {
         finish(safeCoreLaunchError(error));
       });
       responseStream.once('error', () => {
+        child.kill();
         finish(new Error('Не удалось сохранить ответ ядра NewsFlow во временный файл.'));
       });
-      responseStream.once('finish', () => {
-        outputFinished = true;
+      // Wait for the file descriptor to close, not merely for writable
+      // "finish". Windows can refuse rmSync while response.json is still open.
+      responseStream.once('close', () => {
+        outputClosed = true;
         complete();
       });
       child.once('close', (code) => {
