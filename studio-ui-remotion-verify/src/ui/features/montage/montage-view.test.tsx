@@ -121,7 +121,12 @@ describe("Montage Light view", () => {
 
   it("keeps montage settings inside the fixed-width Sheet rather than widening the document", () => {
     const styles = readFileSync(resolve(process.cwd(), "src/ui/editor.css"), "utf8");
+    const shellStyles = readFileSync(
+      resolve(process.cwd(), "src/ui/layout/app-shell-responsive.css"),
+      "utf8",
+    );
 
+    expect(shellStyles).toContain("html{overflow-x:hidden}");
     expect(styles).toContain(".nf-sheet-body .nf-montage-configuration{min-width:0;width:100%}");
     expect(styles).toContain(".nf-sheet-body .asset-grid{grid-template-columns:minmax(0,1fr)");
     expect(styles).toContain(".nf-sheet-body .renderer-choice-four{grid-template-columns:minmax(0,1fr)}");

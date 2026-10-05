@@ -1,4 +1,9 @@
 /* Current workstation shell overrides the legacy desktop canvas only while it is active. */
+/* Radix Sheets live in a portal and Chromium may otherwise make their fixed
+   right edge part of the document's horizontal scroll range during autofocus.
+   Keep horizontal scrolling inside explicit local scrollers (tables, logs),
+   never on the whole desktop canvas. */
+html{overflow-x:hidden}
 body{min-width:0}
 main.nf-main{grid-column:auto;padding:0}
 .nf-editorial-workspace>.publication-target-widget{grid-template-columns:minmax(0,1fr)}
