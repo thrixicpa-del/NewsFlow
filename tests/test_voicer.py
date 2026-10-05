@@ -212,6 +212,345 @@ class VoicerTests(unittest.TestCase):
             self.assertEqual(settings.voice_scenario_outputs, {})
             self.assertEqual(settings.voice_task_statuses, {})
 
+    def test_voice_queue_atomic_writer_applies_exact_contract(self):
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            candidate = Path(output) / "001 — Тема 1.mp3"
+            candidate.write_bytes(b"audio")
+            script_hash = hashlib.sha256("Текст".encode("utf-8")).hexdigest()
+            settings = Settings(
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+            )
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
+                config.save_settings(settings)
+                stat = candidate.stat()
+                result = config.reconcile_voice_outputs([{
+                    "production_item_id": "production-1",
+                    "expected_job_id": "job-1",
+                    "scenario_index": 0,
+                    "script_hash": script_hash,
+                    "output_key": "1",
+                    "output_path": str(candidate),
+                    "duration_seconds": 10.0,
+                    "validated_at": "test",
+                    "file_size": stat.st_size,
+                    "file_mtime_ns": stat.st_mtime_ns,
+                }])
+                persisted = config.load_settings()
+
+        self.assertEqual(result["applied_indices"], [0], result)
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "ready")
+
+    def test_voice_queue_atomic_writer_rejects_fresh_tombstone(self):
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            candidate = Path(output) / "001 — Тема 1.mp3"
+            candidate.write_bytes(b"audio")
+            script_hash = hashlib.sha256("Текст".encode("utf-8")).hexdigest()
+            settings = Settings(
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+                deleted_scenario_production_ids=["production-1"],
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(settings)
+                stat = candidate.stat()
+                result = config.reconcile_voice_outputs([{
+                    "production_item_id": "production-1",
+                    "expected_job_id": "job-1",
+                    "scenario_index": 0,
+                    "script_hash": script_hash,
+                    "output_key": "1",
+                    "output_path": str(candidate),
+                    "duration_seconds": 10.0,
+                    "validated_at": "test",
+                    "file_size": stat.st_size,
+                    "file_mtime_ns": stat.st_mtime_ns,
+                }])
+                persisted = config.load_settings()
+
+        self.assertEqual(result["applied_indices"], [])
+        self.assertEqual(result["skip_reasons"], {"PRODUCTION_ITEM_DELETED": 1})
+        self.assertEqual(persisted.voice_scenario_outputs, {})
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "error")
+
+    def test_voice_queue_atomic_writer_rejects_changed_tombstone_set(self):
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            candidate = Path(output) / "002 — Тема 2.mp3"
+            candidate.write_bytes(b"audio")
+            script_hash = hashlib.sha256("Текст 2".encode("utf-8")).hexdigest()
+            initial_deleted_ids_hash = hashlib.sha256(b"").hexdigest()
+            settings = Settings(
+                voice_tts_jobs={"production-2": {
+                    "id": "job-2", "production_item_id": "production-2",
+                    "scenario_index": 1, "state": "error", "script_hash": script_hash,
+                }},
+                # Simulate another scenario being deleted after the recovery scan.
+                deleted_scenario_production_ids=["production-1"],
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(settings)
+                stat = candidate.stat()
+                result = config.reconcile_voice_outputs([{
+                    "production_item_id": "production-2",
+                    "expected_job_id": "job-2",
+                    "scenario_index": 1,
+                    "script_hash": script_hash,
+                    "deleted_ids_hash": initial_deleted_ids_hash,
+                    "output_key": "2",
+                    "output_path": str(candidate),
+                    "duration_seconds": 10.0,
+                    "validated_at": "test",
+                    "file_size": stat.st_size,
+                    "file_mtime_ns": stat.st_mtime_ns,
+                }])
+                persisted = config.load_settings()
+
+        self.assertEqual(result["applied_indices"], [])
+        self.assertEqual(result["skip_reasons"], {"TOMBSTONES_CHANGED": 1})
+        self.assertEqual(persisted.voice_scenario_outputs, {})
+        self.assertEqual(persisted.voice_tts_jobs["production-2"]["state"], "error")
+
+    def test_voice_queue_reconciliation_restores_a_valid_orphaned_mp3_by_production_item(self):
+        """A stale provider error may recover only the exact immutable script contract."""
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            titles = [f"Тема {index}" for index in range(1, 25)] + ["Тема 25"]
+            orphan = Path(output) / "025 — Тема 25.mp3"
+            orphan.write_bytes(b"recovered-audio")
+            script = "Текст сценария"
+            script_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+            job = Job(
+                ScenarioRequest(24, "Тема 25", "", "production-25"),
+                RunState.DONE,
+                script,
+            )
+            settings = Settings(
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-25": {
+                    "id": "job-25", "production_item_id": "production-25",
+                    "scenario_index": 24, "state": "error", "error": "WProject: queue_full",
+                    "script_hash": script_hash, "script_revision": script_hash,
+                }},
+                voice_task_statuses={"25": {"label": "Ошибка озвучки", "progress": 0}},
+                idea_production_items=[{"id": "production-25", "title": "Тема 25"}],
+            )
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
+                config.save_settings(settings)
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=(titles, [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=42.0), \
+                     patch.object(bridge, "_ensure_ready_voice_maps") as ensure_maps:
+                    result = bridge.reconcile_voice_queue({})
+                persisted = config.load_settings()
+
+        self.assertEqual(result["operationResult"]["recovered"], 1, result["operationResult"])
+        self.assertEqual(persisted.voice_scenario_outputs["25"], str(orphan))
+        self.assertEqual(persisted.voice_task_statuses["25"]["label"], "Готово: восстановлено")
+        saved = persisted.voice_tts_jobs["production-25"]
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["output_path"], str(orphan))
+        self.assertEqual(saved["artifact"]["path"], str(orphan))
+        self.assertEqual(saved["artifact"]["duration_seconds"], 42.0)
+        ensure_maps.assert_called_once_with({24})
+
+    def test_voice_queue_reconciliation_matches_newsflow_canonical_long_title_filename(self):
+        with tempfile.TemporaryDirectory() as output:
+            title = "Очень длинная новостная тема " * 8
+            candidate = Path(output) / f"001 — {bridge.safe_filename(title)}.mp3"
+            candidate.write_bytes(b"audio")
+
+            self.assertEqual(
+                bridge._reconcilable_voice_candidates(Path(output), 0, title),
+                [candidate],
+            )
+
+    def test_voice_queue_reconciliation_rejects_stale_script_wrong_index_and_non_mp3(self):
+        """Number/title alone must never bind old or non-MP3 audio to a current scenario."""
+        import hashlib
+
+        script = "Текущий текст"
+        correct_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+        cases = [
+            ("stale-script", 0, hashlib.sha256(b"old text").hexdigest(), ".mp3"),
+            ("wrong-index", 9, correct_hash, ".mp3"),
+            ("wrong-format", 0, correct_hash, ".wav"),
+        ]
+        for label, saved_index, saved_hash, suffix in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as output:
+                candidate = Path(output) / f"001 — Тема 1{suffix}"
+                candidate.write_bytes(b"audio")
+                job = Job(
+                    ScenarioRequest(0, "Тема 1", "", "production-1"),
+                    RunState.DONE,
+                    script,
+                )
+                settings = Settings(
+                    voicer_output_folder=output,
+                    voice_tts_jobs={"production-1": {
+                        "id": "job-1", "production_item_id": "production-1",
+                        "scenario_index": saved_index, "state": "error",
+                        "script_hash": saved_hash,
+                    }},
+                    idea_production_items=[{"id": "production-1", "title": "Тема 1"}],
+                )
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=15.0) as validate, \
+                     patch.object(bridge, "save_settings") as save:
+                    result = bridge.reconcile_voice_queue({})
+
+                self.assertEqual(result["operationResult"]["recovered"], 0)
+                self.assertEqual(settings.voice_scenario_outputs, {})
+                save.assert_not_called()
+                if label == "wrong-format":
+                    validate.assert_not_called()
+
+    def test_voice_queue_reconciliation_preserves_concurrent_settings_changes(self):
+        """The narrow commit must not rewrite unrelated fields from its stale Settings snapshot."""
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            orphan = Path(output) / "001 — Тема 1.mp3"
+            orphan.write_bytes(b"recovered")
+            script = "Текущий сценарий"
+            script_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+            initial = Settings(
+                template="До параллельного изменения",
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+                idea_production_items=[{"id": "production-1", "title": "Тема 1"}],
+            )
+            job = Job(
+                ScenarioRequest(0, "Тема 1", "", "production-1"),
+                RunState.DONE,
+                script,
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(initial)
+
+                def reconcile_after_concurrent_edit(updates):
+                    concurrent = config.load_settings()
+                    concurrent.template = "Параллельное изменение сохранено"
+                    config.save_settings(concurrent)
+                    return config.reconcile_voice_outputs(updates)
+
+                with patch.object(bridge, "load_settings", return_value=initial), \
+                     patch.object(bridge, "reconcile_voice_outputs", side_effect=reconcile_after_concurrent_edit), \
+                     patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=17.0), \
+                     patch.object(bridge, "_ensure_ready_voice_maps"):
+                    result = bridge.reconcile_voice_queue({})
+                persisted = config.load_settings()
+
+        self.assertEqual(result["operationResult"]["recovered"], 1)
+        self.assertEqual(persisted.template, "Параллельное изменение сохранено")
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "ready")
+
+    def test_voice_queue_reconciliation_blocks_if_worker_becomes_active_before_commit(self):
+        """A worker that starts after scanning still wins the compare-and-swap."""
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            orphan = Path(output) / "001 — Тема 1.mp3"
+            orphan.write_bytes(b"recovered")
+            script = "Текущий сценарий"
+            script_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+            initial = Settings(
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+                idea_production_items=[{"id": "production-1", "title": "Тема 1"}],
+            )
+            job = Job(
+                ScenarioRequest(0, "Тема 1", "", "production-1"),
+                RunState.DONE,
+                script,
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(initial)
+
+                def reconcile_after_worker_starts(updates):
+                    concurrent = config.load_settings()
+                    concurrent.voice_tts_jobs["production-1"]["state"] = "running"
+                    config.save_settings(concurrent)
+                    return config.reconcile_voice_outputs(updates)
+
+                with patch.object(bridge, "load_settings", return_value=initial), \
+                     patch.object(bridge, "reconcile_voice_outputs", side_effect=reconcile_after_worker_starts), \
+                     patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=17.0), \
+                     patch.object(bridge, "_ensure_ready_voice_maps") as ensure_maps:
+                    result = bridge.reconcile_voice_queue({})
+                persisted = config.load_settings()
+
+        self.assertEqual(result["operationResult"]["recovered"], 0)
+        self.assertEqual(result["operationResult"]["blocked"], 1, result["operationResult"])
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "running")
+        self.assertEqual(persisted.voice_scenario_outputs, {})
+        ensure_maps.assert_not_called()
+
+    def test_voice_queue_reconciliation_does_not_touch_files_while_a_worker_is_active(self):
+        with tempfile.TemporaryDirectory() as output:
+            orphan = Path(output) / "001 — Тема 1.mp3"
+            orphan.write_bytes(b"must-not-be-probed")
+            settings = Settings(
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1", "scenario_index": 0,
+                    "state": "running",
+                }},
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                 patch.object(bridge, "validate_voiceover_artifact") as validate, \
+                 patch.object(bridge, "save_settings") as save:
+                result = bridge.reconcile_voice_queue({})
+
+        self.assertEqual(result["operationResult"]["blocked"], 1)
+        self.assertEqual(result["operationResult"]["recovered"], 0)
+        validate.assert_not_called()
+        save.assert_not_called()
+
     def test_generated_voice_marks_invalid_audio_as_error_not_ready(self):
         """A provider response is not READY until the saved audio is decodable."""
         class FakeClient:

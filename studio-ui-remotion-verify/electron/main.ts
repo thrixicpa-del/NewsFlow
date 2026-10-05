@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron';
-import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { createWriteStream, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -104,6 +104,28 @@ function createCorePayloadTransport(payload: unknown): CorePayloadTransport {
   };
 }
 
+function safeCoreProcessDiagnostic(stderr: string): string {
+  const detail = stderr.toLowerCase();
+  if (detail.includes('enoent')) {
+    return 'Ядро NewsFlow не найдено в этой сборке.';
+  }
+  if (detail.includes('eacces') || detail.includes('permission denied') || detail.includes('access is denied')) {
+    return 'NewsFlow не смог запустить ядро: нет доступа к файлу Core.';
+  }
+  return '';
+}
+
+function safeCoreLaunchError(error: unknown): Error {
+  const detail = error instanceof Error ? error.message.toLowerCase() : '';
+  if (detail.includes('enoent')) {
+    return new Error('Ядро NewsFlow не найдено в этой сборке.');
+  }
+  if (detail.includes('eacces') || detail.includes('permission denied') || detail.includes('access is denied')) {
+    return new Error('NewsFlow не смог запустить ядро: нет доступа к файлу Core.');
+  }
+  return new Error('Не удалось запустить ядро NewsFlow.');
+}
+
 function callCore(command: string, payload: unknown = {}) {
   return new Promise<unknown>((resolve, reject) => {
     const executable = pythonExecutable();
@@ -121,12 +143,51 @@ function callCore(command: string, payload: unknown = {}) {
     // Windows. Do not hide the short-lived core process that starts OAuth, or
     // Chrome can exit without creating its visible authorization window.
     const windowsHide = command !== 'start-youtube-channel-handoff';
+    const responsePath = path.join(path.dirname(transport.path), 'response.json');
+    const responseStream = createWriteStream(responsePath, { flags: 'w', mode: 0o600 });
+    let stderr = '';
+    let exited = false;
+    let outputClosed = false;
+    let exitCode: number | null = null;
+    let settled = false;
+    let pendingError: Error | null = null;
+    const finish = (error?: Error, response?: unknown) => {
+      if (settled) return;
+      settled = true;
+      transport.dispose();
+      if (error) reject(error);
+      else resolve(response);
+    };
+    const complete = () => {
+      if (!exited || !outputClosed || settled) return;
+      if (pendingError) {
+        finish(pendingError);
+        return;
+      }
+      let response: unknown;
+      try {
+        response = JSON.parse(readFileSync(responsePath, 'utf8'));
+      } catch {
+        const diagnostic = safeCoreProcessDiagnostic(stderr);
+        finish(new Error(diagnostic || 'Ядро NewsFlow вернуло некорректный ответ.'));
+        return;
+      }
+      if (exitCode !== 0) {
+        if (response && typeof response === 'object' && 'error' in response) {
+          finish(new Error(String((response as { error?: unknown }).error || 'Ошибка ядра NewsFlow.')));
+          return;
+        }
+        const diagnostic = safeCoreProcessDiagnostic(stderr);
+        finish(new Error(diagnostic || `Ядро NewsFlow завершилось с кодом ${exitCode}.`));
+        return;
+      }
+      registerApprovedOpenPaths(response);
+      finish(undefined, response);
+    };
     try {
-      execFile(executable, args,
-      {
+      const child = spawn(executable, args, {
         windowsHide,
         cwd: coreRoot,
-        maxBuffer: 1024 * 1024 * 8,
         env: {
           ...process.env,
           PYTHONPATH: coreRoot,
@@ -138,24 +199,41 @@ function callCore(command: string, payload: unknown = {}) {
           NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2',
           NEWSFLOW_BRIDGE_PAYLOAD_FILE: transport.path,
         },
-      }, (error, stdout, stderr) => {
-        transport.dispose();
-        if (error) {
-          try {
-            const response = JSON.parse(stdout);
-            if (response?.error) return reject(new Error(String(response.error)));
-          } catch { /* process error below is the useful fallback */ }
-          return reject(new Error(stderr || error.message));
-        }
-        try {
-          const response = JSON.parse(stdout);
-          registerApprovedOpenPaths(response);
-          resolve(response);
-        } catch { reject(new Error(`Некорректный ответ ядра: ${stdout || stderr}`)); }
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.pipe(responseStream);
+      child.stderr.on('data', (chunk: Buffer) => {
+        // stderr is diagnostics only. Keep it bounded; the JSON response is
+        // streamed to disk and no longer has a stdout maxBuffer limit.
+        if (stderr.length < 4096) stderr += chunk.toString('utf8').slice(0, 4096 - stderr.length);
+      });
+      child.once('error', (error) => {
+        pendingError = safeCoreLaunchError(error);
+        responseStream.destroy();
+      });
+      responseStream.once('error', () => {
+        pendingError = new Error('Не удалось сохранить ответ ядра NewsFlow во временный файл.');
+        responseStream.destroy();
+        child.kill();
+      });
+      // Wait for the file descriptor to close, not merely for writable
+      // "finish". Windows can refuse rmSync while response.json is still open.
+      responseStream.once('close', () => {
+        outputClosed = true;
+        complete();
+      });
+      child.once('close', (code) => {
+        exited = true;
+        exitCode = code;
+        complete();
       });
     } catch (error) {
-      transport.dispose();
-      reject(error instanceof Error ? error : new Error(String(error)));
+      // A synchronous spawn/setup failure has no child close event to wait for,
+      // but the response file still must close before the temp directory can
+      // be removed safely on Windows.
+      exited = true;
+      pendingError = safeCoreLaunchError(error);
+      responseStream.destroy();
     }
   });
 }

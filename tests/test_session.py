@@ -171,6 +171,38 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(failures, [])
             self.assertTrue(set(observed).issubset({"old", "new-0", "new-1", "new-2", "new-3", "new-4"}))
 
+    def test_reader_thread_cannot_downgrade_revision_used_by_writer(self):
+        """A stale reader thread must not poison another thread's current CAS baseline."""
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
+            save_session(["old"], [])
+            loaded = threading.Event()
+            publish_done = threading.Event()
+            failures: list[BaseException] = []
+
+            def stale_reader_writer() -> None:
+                titles, jobs = load_session()
+                loaded.set()
+                publish_done.wait(timeout=5)
+                try:
+                    save_session(titles, jobs)
+                except SessionWriteConflictError:
+                    return
+                except BaseException as error:
+                    failures.append(error)
+                    return
+                failures.append(AssertionError("stale reader thread unexpectedly overwrote the newer session"))
+
+            worker = threading.Thread(target=stale_reader_writer)
+            worker.start()
+            self.assertTrue(loaded.wait(timeout=5))
+            save_session(["new"], [])
+            publish_done.set()
+            worker.join(timeout=5)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(load_session()[0], ["new"])
+
     def test_stale_writer_is_rejected_instead_of_overwriting_newer_session(self):
         """A bridge process that loaded an old session must not silently clobber a newer save."""
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
@@ -197,7 +229,9 @@ class SessionTests(unittest.TestCase):
             stale_jobs = [Job(ScenarioRequest(0, "R1", "P"), RunState.WAITING)]
             newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
             save_session(["R1"], stale_jobs)
-            original_remember = __import__("scriptor.session", fromlist=["_remember_session_revision"])._remember_session_revision
+            original_remember = __import__(
+                "scriptor.session", fromlist=["_remember_loaded_session_revision"]
+            )._remember_loaded_session_revision
             committed_newer = False
 
             def commit_r2_before_remember(path, *revision):
@@ -207,7 +241,7 @@ class SessionTests(unittest.TestCase):
                     _write_session_file(path, _session_data(["R2"], newer_jobs))
                 return original_remember(path, *revision)
 
-            with patch("scriptor.session._remember_session_revision", side_effect=commit_r2_before_remember):
+            with patch("scriptor.session._remember_loaded_session_revision", side_effect=commit_r2_before_remember):
                 loaded_titles, _loaded_jobs = load_session()
 
             self.assertEqual(loaded_titles, ["R1"])

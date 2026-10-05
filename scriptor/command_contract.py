@@ -42,6 +42,9 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "generate-voice-queue": CommandRegistration("generate_voice_queue", "scriptor.bridge current voice worker", _NO_LEGACY),
     "generate-voice-range": CommandRegistration("generate_voice_range", "scriptor.tts_ranges", _NO_LEGACY),
     "rebuild-voice-map": CommandRegistration("rebuild_voice_map", "scriptor.voice_map", _NO_LEGACY),
+    "reconcile-voice-queue": CommandRegistration(
+        "reconcile_voice_queue", "scriptor.bridge completed-MP3 recovery", _NO_LEGACY,
+    ),
     "generate-covers": CommandRegistration("generate_covers", "scriptor.thumbnail_prompt_v2", _NO_LEGACY),
     "import-cover-text-triples": CommandRegistration(
         "import_cover_text_triples", "scriptor.bridge manual cover-text import", _NO_LEGACY,

@@ -34,6 +34,7 @@ import { useUiPreferences } from "./layout/ui-preferences";
 import { CommandPalette } from "./layout/CommandPalette";
 import { buildWorkspaceSearchItems } from "./layout/workspace-search";
 import { buildVisualFixture } from "./visual-regression/visual-fixtures";
+import { coreAvailabilityNotice } from "./core-availability";
 import { PageHeader } from "./components/page-header";
 import { StatCard } from "./components/stat-card";
 import { Toast } from "./components/toast";
@@ -794,10 +795,8 @@ export function App() {
         setData(state);
         setTarget(String(state.pipelineTarget));
       }
-    } catch {
-      setNotice(
-        "Ядро NewsFlow временно недоступно — интерфейс открыт в безопасном режиме.",
-      );
+    } catch (error) {
+      setNotice(coreAvailabilityNotice(error));
     }
   }, [visualFixture]);
   useEffect(() => {
@@ -12772,7 +12771,9 @@ export function VoiceQueue({
   const [outputFolder, setOutputFolder] = useState(data.voiceOutputFolder);
   const [generating, setGenerating] = useState(false);
   const [rebuildingTiming, setRebuildingTiming] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   const voiceGenerationLock = useRef(false);
+  const voiceReconcileLock = useRef(false);
   type VoiceQueueItem = (typeof data.voiceItems)[number] & {
     jobProvider?: string;
     resumeSafe?: boolean;
@@ -12904,6 +12905,18 @@ export function VoiceQueue({
   const importAudioFolder = async () => {
     const root = await window.newsflowDesktop?.chooseFolder();
     if (root) void command("import-voiceover-folder", { root });
+  };
+  const reconcileVoiceQueue = async () => {
+    if (generating || reconciling || voiceReconcileLock.current) return;
+    voiceReconcileLock.current = true;
+    setReconciling(true);
+    try {
+      await command("reconcile-voice-queue", {});
+      await refresh();
+    } finally {
+      voiceReconcileLock.current = false;
+      setReconciling(false);
+    }
   };
   const exportOwnAudio = async () => {
     if (selected.length !== 1) return;
@@ -13108,6 +13121,14 @@ export function VoiceQueue({
         <Button kind="primary" onClick={() => void importAudioFolder()}>
           <FolderOpen size={17} />
           Импортировать папку озвучек
+        </Button>
+        <Button
+          kind="primary"
+          disabled={generating || reconciling}
+          onClick={() => void reconcileVoiceQueue()}
+        >
+          <RefreshCw size={17} />
+          {reconciling ? "Сверяем MP3…" : "Обновить очередь"}
         </Button>
         <Button onClick={() => void window.newsflowDesktop?.openPath(outputFolder)}>
           <FolderOpen size={17} />

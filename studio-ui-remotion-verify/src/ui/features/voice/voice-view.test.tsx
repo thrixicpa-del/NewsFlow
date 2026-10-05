@@ -25,6 +25,19 @@ describe("Voice Light views", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("generate-voice", { indices: [2] }));
   });
 
+  it("reconciles completed audio without starting another voice task", async () => {
+    const command = vi.fn(async () => undefined);
+    const refresh = vi.fn(async () => undefined);
+    render(<VoiceQueue data={fallback} go={vi.fn()} command={command} refresh={refresh} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить очередь" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("reconcile-voice-queue", {}));
+    expect(command).not.toHaveBeenCalledWith("generate-voice", expect.anything());
+    expect(command).not.toHaveBeenCalledWith("generate-voice-queue", expect.anything());
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("does not submit selected voice generation twice while the current command is pending", async () => {
     let releaseCurrentCommand: (() => void) | undefined;
     const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {
