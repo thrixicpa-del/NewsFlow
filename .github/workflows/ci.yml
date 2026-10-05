@@ -31,6 +31,7 @@ jobs:
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+      - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
       - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice
