@@ -62,6 +62,12 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
         "save_cover_manual_prompt", "scriptor.bridge manual cover-prompt editor", _NO_LEGACY,
     ),
     "run-montage-queue": CommandRegistration("run_montage_queue", "scriptor.timeline canonical montage path", _NO_LEGACY),
+    "run-proxy-cache-warmup": CommandRegistration(
+        "warm_proxy_cache", "scriptor.timeline source-proxy warm-up", _NO_LEGACY,
+    ),
+    "set-proxy-cache-paused": CommandRegistration(
+        "set_proxy_cache_paused", "scriptor.bridge proxy-cache control", _NO_LEGACY,
+    ),
     "package-outputs": CommandRegistration("package_outputs", "scriptor.bridge output packager", _NO_LEGACY),
     "export-results-batch": CommandRegistration("export_results_batch", "scriptor.bridge batch results exporter", _NO_LEGACY),
     "generate-seo": CommandRegistration("generate_seo", "scriptor.bridge SEO service", _NO_LEGACY),
