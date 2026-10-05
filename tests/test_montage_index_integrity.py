@@ -262,6 +262,29 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                 "removed": 1,
             })
 
+    def test_screen_text_maintenance_reprocesses_previous_classifier_version(self):
+        """A changed classifier must not trust verdicts produced by the old algorithm."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-text-version-") as temporary:
+            root = Path(temporary)
+            clip = root / "clip.mp4"
+            clip.write_bytes(b"fixture")
+            index = ClipIndex(root / "footage-index.sqlite3", embedder_factory=lambda: (object(), object()))
+            previous_version = SCREEN_TEXT_CLASSIFIER_VERSION - 1
+            with index._connect() as connection:
+                stat = clip.stat()
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns, -1, previous_version),
+                )
+
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "screen_text_eligibility", return_value="SAFE") as classify:
+                result = index.classify_english_screen_text()
+
+            classify.assert_called_once_with(str(clip.resolve()), deep=True)
+            self.assertEqual(result["checked"], 1)
+
     def test_screen_text_maintenance_reuses_existing_index_without_media_roots(self):
         """The desktop command must classify stored vectors, not rescan footage."""
         states = []
