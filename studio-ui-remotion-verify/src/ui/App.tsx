@@ -10451,7 +10451,15 @@ function MontageAssets({
   );
 }
 
-export function MontageLiveStatus({ data }: { data: NewsFlowSnapshot }) {
+export function MontageLiveStatus({
+  data,
+  queuePaused = data.montageSettings.queuePaused,
+  queueRunning = data.montageSettings.queueRunning,
+}: {
+  data: NewsFlowSnapshot;
+  queuePaused?: boolean;
+  queueRunning?: boolean;
+}) {
   const stages = [
     {
       label: "В очереди",
@@ -10476,9 +10484,12 @@ export function MontageLiveStatus({ data }: { data: NewsFlowSnapshot }) {
     { label: "Готово", statuses: ["Готово"], hint: "MP4 сохранён" },
     { label: "Ошибка", statuses: ["Ошибка"], hint: "можно повторить задачу" },
   ];
-  const active = data.montageTasks.filter(
+  const persistedActive = data.montageTasks.filter(
     (task) => !["Готово", "Ошибка"].includes(task.status || ""),
   );
+  const workerRunning = queueRunning ?? persistedActive.length > 0;
+  const active = workerRunning ? persistedActive : [];
+  const staleActive = workerRunning ? [] : persistedActive;
   const lead = active[0];
   return (
     <section className="panel montage-live-status">
@@ -10486,24 +10497,35 @@ export function MontageLiveStatus({ data }: { data: NewsFlowSnapshot }) {
         <div>
           <b>Монтаж сейчас</b>
           <small>
-            {data.montageSettings.queuePaused
-              ? "Очередь на паузе: текущая операция остановится на безопасном этапе."
+            {queuePaused
+              ? lead?.status === "Пауза"
+                ? "Очередь на паузе. Нажмите «Продолжить», чтобы worker начал следующий безопасный этап."
+                : "Пауза запрошена: уже запущенный FFmpeg завершит текущий subprocess, новый этап не начнётся."
               : lead
                 ? `Сейчас: «${lead.title}» — ${lead.phase || lead.status}`
-                : data.montageTasks.length
-                  ? "Очередь завершена. Откройте MP4 или повторите задачи с ошибкой."
-                  : "Очередь ещё не запускалась."}
+                : staleActive.length
+                  ? "Активный worker не найден. Предыдущие строки можно безопасно запустить повторно."
+                  : data.montageTasks.length
+                    ? "Очередь завершена. Откройте MP4 или повторите задачи с ошибкой."
+                    : "Очередь ещё не запускалась."}
           </small>
         </div>
         <span className={active.length ? "status montage-active" : "status"}>
-          {active.length ? `${active.length} в работе` : "Нет активных задач"}
+          {active.length
+            ? `${active.length} в работе`
+            : staleActive.length
+              ? `${staleActive.length} требуют продолжения`
+              : "Нет активных задач"}
         </span>
       </div>
       <div className="montage-stage-flow">
         {stages.map((stage) => {
-          const count = data.montageTasks.filter((task) =>
-            stage.statuses.includes(task.status || ""),
-          ).length;
+          const activeStage = !["Готово", "Ошибка"].includes(stage.label);
+          const count = !workerRunning && activeStage
+            ? 0
+            : data.montageTasks.filter((task) =>
+                stage.statuses.includes(task.status || ""),
+              ).length;
           return (
             <div
               key={stage.label}
@@ -10594,6 +10616,11 @@ export function Editor({
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [queueLaunching, setQueueLaunching] = useState(false);
   const [pauseSaving, setPauseSaving] = useState(false);
+  const [queuePausedDraft, setQueuePausedDraft] = useState(
+    data.montageSettings.queueRunning === false
+      ? false
+      : data.montageSettings.queuePaused,
+  );
   const [ratio, setRatio] = useState(data.montageSettings.aspectRatio);
   const [renderer, setRenderer] = useState(data.montageSettings.renderer);
   const [remotionFrameConcurrency, setRemotionFrameConcurrency] = useState(
@@ -10646,12 +10673,13 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
-  const running = data.montageTasks.some((item) =>
+  const statusSuggestsRunning = data.montageTasks.some((item) =>
     [
       "В очереди",
       "Планирование",
       "Планирование сцен",
       "Подбор футажей",
+      "Проверка текста",
       "Внешний поиск",
       "Нарезка внешнего футажа",
       "Ожидает рендер",
@@ -10660,11 +10688,17 @@ export function Editor({
       "Пауза",
     ].includes(item.status || ""),
   );
+  const running = data.montageSettings.queueRunning ?? statusSuggestsRunning;
   const queueActive = running || queueLaunching;
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,
   );
   useEffect(() => {
+    // A busy montage refreshes its snapshot every few moments. While the
+    // settings Sheet is open, every field below is an operator-owned draft:
+    // a background snapshot must not overwrite renderer, workers, folders,
+    // ratio or reuse controls before explicit Save.
+    if (configurationOpen) return;
     setRatio(data.montageSettings.aspectRatio);
     setRenderer(data.montageSettings.renderer);
     setRemotionFrameConcurrency(
@@ -10688,7 +10722,18 @@ export function Editor({
       String(data.montageSettings.uniqueFootagePercent ?? 100),
     );
     setFastReuseRanges(data.montageSettings.fastReuseRanges || []);
-  }, [data.montageSettings]);
+  }, [data.montageSettings, configurationOpen]);
+  const setRendererDraft = (value: "remotion" | "ffmpeg" | "gpu-timeline") => {
+    setRenderer(value);
+  };
+  const handleConfigurationOpenChange = (open: boolean) => {
+    setConfigurationOpen(open);
+  };
+  useEffect(() => {
+    if (!pauseSaving) {
+      setQueuePausedDraft(running ? data.montageSettings.queuePaused : false);
+    }
+  }, [data.montageSettings.queuePaused, pauseSaving, running]);
   useEffect(() => {
     setSelected((current) =>
       current.filter((index) => ready.some((item) => item.index === index)),
@@ -10821,14 +10866,18 @@ export function Editor({
     if (result) setSelectedProjects([]);
   };
   const togglePause = async () => {
-    if (pauseSaving) return;
+    if (pauseSaving || !running) return;
+    const paused = !queuePausedDraft;
     setPauseSaving(true);
+    setQueuePausedDraft(paused);
     try {
-      await command("save-montage-settings", {
-        queuePaused: !data.montageSettings.queuePaused,
+      const saved = await command("save-montage-settings", {
+        queuePaused: paused,
       });
+      if (!saved) setQueuePausedDraft(data.montageSettings.queuePaused);
     } finally {
       setPauseSaving(false);
+      void refresh();
     }
   };
   const exportDaVinci = (all = false) =>
@@ -10889,10 +10938,14 @@ export function Editor({
           </Button>
         </div>
       </section>
-      <MontageLiveStatus data={data} />
+      <MontageLiveStatus
+        data={data}
+        queuePaused={queuePausedDraft}
+        queueRunning={running}
+      />
       <Sheet
         open={configurationOpen}
-        onOpenChange={setConfigurationOpen}
+        onOpenChange={handleConfigurationOpenChange}
         title="Настройки Fast News монтажа"
         description="Движок, подготовка футажей, DaVinci, ресурсы и параметры рендера."
       >
@@ -10935,7 +10988,7 @@ export function Editor({
         <div className="renderer-choice renderer-choice-four">
           <button
             className={renderer === "ffmpeg" ? "selected" : ""}
-            onClick={() => setRenderer("ffmpeg")}
+            onClick={() => setRendererDraft("ffmpeg")}
           >
             <span>01</span>
             <div>
@@ -10949,7 +11002,7 @@ export function Editor({
           </button>
           <button
             className={renderer === "gpu-timeline" ? "selected gpu" : ""}
-            onClick={() => setRenderer("gpu-timeline")}
+            onClick={() => setRendererDraft("gpu-timeline")}
           >
             <span>02</span>
             <div>
@@ -10963,7 +11016,7 @@ export function Editor({
           </button>
           <button
             className={renderer === "remotion" ? "selected remotion" : ""}
-            onClick={() => setRenderer("remotion")}
+            onClick={() => setRendererDraft("remotion")}
           >
             <span>03</span>
             <div>
@@ -11133,7 +11186,7 @@ export function Editor({
             <select
               value={renderer}
               onChange={(event) =>
-                setRenderer(event.target.value as "remotion" | "ffmpeg" | "gpu-timeline")
+                setRendererDraft(event.target.value as "remotion" | "ffmpeg" | "gpu-timeline")
               }
             >
               <option value="remotion">Remotion — переходы и слои</option>
@@ -11515,15 +11568,21 @@ export function Editor({
               Повторить монтаж всех: {ready.length}
             </Button>
             <Button
-              kind={data.montageSettings.queuePaused ? "success" : "secondary"}
+              kind={queuePausedDraft ? "success" : "secondary"}
               onClick={running && !pauseSaving ? () => void togglePause() : undefined}
             >
-              {data.montageSettings.queuePaused ? (
+              {queuePausedDraft ? (
                 <Play size={16} />
               ) : (
                 <Pause size={16} />
               )}
-              {data.montageSettings.queuePaused ? "Продолжить" : "Пауза"}
+              {pauseSaving
+                ? queuePausedDraft
+                  ? "Запрашиваем паузу…"
+                  : "Продолжаем…"
+                : queuePausedDraft
+                  ? "Продолжить"
+                  : "Пауза"}
             </Button>
           </div>
         </div>
