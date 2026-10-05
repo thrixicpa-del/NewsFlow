@@ -384,8 +384,18 @@ class CoverSceneBriefTests(unittest.TestCase):
                     "A huge explosion sends smoke over destroyed buildings as rescuers search the rubble.",
                     item,
                 )
+                burning, _reason = bridge._cover_scene_is_grounded(
+                    "A burning warehouse is engulfed in flames while firefighters arrive.",
+                    item,
+                )
+                drone_strike, _reason = bridge._cover_scene_is_grounded(
+                    "Combat drones cross the skyline during an airstrike.",
+                    item,
+                )
                 self.assertFalse(armed)
                 self.assertFalse(destruction)
+                self.assertFalse(burning)
+                self.assertFalse(drone_strike)
 
     def test_standard_safety_block_with_default_two_variants_fails_closed_without_crashing_or_losing_old_prompt(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
@@ -439,7 +449,8 @@ class CoverSceneBriefTests(unittest.TestCase):
         row = settings.cover_queue[0]
         self.assertEqual(row["image_prompt"], old)
         self.assertEqual(row["image_prompt_options"], [old])
-        self.assertIn("ENHANCED_SCENE_REQUIRED", row["error"])
+        self.assertIn("PROVIDER_SCENE_SAFETY_BLOCK", row["error"])
+        self.assertNotIn("ENHANCED_SCENE_REQUIRED", row["error"])
         self.assertNotEqual(row.get("prompt_provider"), "local-fallback")
 
 
