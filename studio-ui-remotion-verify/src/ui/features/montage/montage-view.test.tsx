@@ -89,6 +89,36 @@ describe("Montage Light view", () => {
     ));
   });
 
+  it("protects every unsaved montage setting from background refresh and discards it on close", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const { rerender } = render(
+      <Editor data={fallback} command={command} refresh={async () => undefined} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    const workers = screen.getByLabelText(/Видео одновременно/) as HTMLInputElement;
+    fireEvent.change(workers, { target: { value: "5" } });
+    expect(workers.value).toBe("5");
+
+    rerender(
+      <Editor
+        data={{
+          ...fallback,
+          montageSettings: { ...fallback.montageSettings, renderWorkers: 2 },
+        }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+    expect((screen.getByLabelText(/Видео одновременно/) as HTMLInputElement).value).toBe("5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    await waitFor(() =>
+      expect((screen.getByLabelText(/Видео одновременно/) as HTMLInputElement).value).toBe("2"),
+    );
+  });
+
   it("keeps montage settings inside the fixed-width Sheet rather than widening the document", () => {
     const styles = readFileSync(resolve(process.cwd(), "src/ui/editor.css"), "utf8");
 
