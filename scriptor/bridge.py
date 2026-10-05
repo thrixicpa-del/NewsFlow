@@ -63,6 +63,7 @@ from .config import (
     allow_empty_release_state,
     app_data_root,
     load_settings,
+    reconcile_voice_outputs,
     save_settings,
 )
 from .core import (
@@ -5967,12 +5968,7 @@ def reconcile_voice_queue(payload: dict) -> dict:
     blocked = 0
     skip_reasons: dict[str, int] = {}
     if updates:
-        # save_settings recognises this private narrow-mutation contract:
-        # it reloads the latest JSON under the existing cross-process lock and
-        # applies only voice reconciliation fields after comparing identities.
-        settings._voice_reconcile_updates = updates
-        save_settings(settings)
-        reconcile_result = getattr(settings, "_voice_reconcile_result", {})
+        reconcile_result = reconcile_voice_outputs(updates)
         recovered = {
             int(value) for value in reconcile_result.get("applied_indices", [])
             if isinstance(value, int) or str(value).isdigit()
