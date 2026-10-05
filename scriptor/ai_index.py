@@ -77,7 +77,7 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
 SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 6
+SCREEN_TEXT_CLASSIFIER_VERSION = 7
 # Restore the NewsFlow 2.1.136 contract: ordinary Cyrillic/Russian lettering is
 # allowed. Montage blocks prominent English/Latin lettering and, separately,
 # full-screen title/interstitial slates in any language.
@@ -234,7 +234,8 @@ def proxy_cache_excluded_paths(db_path: str | Path) -> set[str]:
     if not path.is_file():
         return set()
     uri = f"{path.resolve().as_uri()}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=30) as connection:
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
         connection.row_factory = sqlite3.Row
         columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(clips)")}
         required = {"path", "disabled", "english_text", "english_text_version"}
@@ -246,6 +247,11 @@ def proxy_cache_excluded_paths(db_path: str | Path) -> set[str]:
                   OR (english_text=1 AND english_text_version>=?)""",
             (SCREEN_TEXT_CLASSIFIER_VERSION,),
         ).fetchall()
+    finally:
+        # sqlite's connection context manager commits/rolls back but does not
+        # close.  This is a read-only probe and must release the database on
+        # Windows before the caller can remove or replace an indexed folder.
+        connection.close()
     return {os.path.normcase(str(Path(row["path"]).resolve())) for row in rows}
 
 
@@ -1109,20 +1115,18 @@ class ClipIndex:
     def classify_english_screen_text(self, progress: Callable[[IndexProgress], None] | None = None,
                                      cancel: threading.Event | None = None,
                                      batch_clips: int = 384) -> dict[str, int]:
-        """Persist the conservative 2.1.136-style clip-level text verdict.
+        """Persist conservative full-frame English/interstitial verdicts.
 
-        The stored clip embedding already averages the 15% / 50% / 85%
-        indexing frames, so the maintenance pass does not reopen media. Only
-        a clear English/Latin-text signal is blocked; every other current row
-        remains usable instead of being removed from normal Montage selection
-        merely because CLIP is uncertain.
+        A three-frame index embedding can miss a sparse caption or end card.
+        This explicit maintenance action therefore uses the existing cached
+        local model to inspect the current clips deeply, preserving UNCERTAIN
+        rather than turning it into a false all-clear.
         """
-        import numpy as np
 
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT path,embedding FROM clips
-                   WHERE embedding IS NOT NULL AND english_text_version < ?
+                """SELECT path FROM clips
+                   WHERE english_text_version < ?
                    ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
@@ -1145,42 +1149,19 @@ class ClipIndex:
             return {"checked": 0, "blocked": stats["blocked"], "safe": stats["safe"],
                     "uncertain": stats["unchecked"]}
 
-        positive, negative = self._query_vectors([
-            _SCREEN_TEXT_COARSE_POSITIVE_QUERY,
-            _SCREEN_TEXT_COARSE_NEGATIVE_QUERY,
-        ])
-        blocked = safe = 0
         for offset in range(0, len(rows), max(1, int(batch_clips))):
             if cancel and cancel.is_set():
                 state.stage = "cancelled"
                 break
-            updates: list[tuple[int, int, str]] = []
             for row in rows[offset:offset + max(1, int(batch_clips))]:
-                vector = np.frombuffer(row["embedding"], dtype=np.float32)
                 state.processed += 1
                 state.current = Path(row["path"]).name
-                if vector.size != positive.size:
+                try:
+                    self.screen_text_eligibility(row["path"], deep=True)
+                except (OSError, ValueError):
                     state.failed += 1
                     continue
-                is_blocked = (
-                    float(np.dot(vector, positive))
-                    >= float(np.dot(vector, negative)) + _SCREEN_TEXT_COARSE_MARGIN
-                )
-                updates.append((
-                    1 if is_blocked else -1,
-                    SCREEN_TEXT_CLASSIFIER_VERSION,
-                    row["path"],
-                ))
-                blocked += int(is_blocked)
-                safe += int(not is_blocked)
-            if updates:
-                with self._lock, self._connect() as connection:
-                    connection.executemany(
-                        "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?",
-                        updates,
-                    )
-                self._invalidate_search_cache()
-                state.indexed += len(updates)
+                state.indexed += 1
             if progress:
                 progress(state)
         if state.stage != "cancelled":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
@@ -71,7 +72,8 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                  patch.object(bridge, "load_settings", return_value=settings), \
                  self.assertRaisesRegex(ValueError, "доступную папку"):
                 bridge.warm_proxy_cache({})
-            status = bridge._read_proxy_cache_status(check_owner=False)
+            with patch.object(bridge, "app_data_root", return_value=root):
+                status = bridge._read_proxy_cache_status(check_owner=False)
 
             self.assertEqual(status["stage"], "error")
             self.assertFalse(status["active"])
@@ -96,7 +98,7 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
             with patch.object(bridge, "app_data_root", return_value=root), \
                  patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "proxy_cache_excluded_paths",
-                              return_value={str(blocked.resolve())}), \
+                              return_value={os.path.normcase(str(blocked.resolve()))}), \
                  patch.object(bridge, "scan_folders", return_value=[
                      FootageItem(str(allowed), allowed.name),
                      FootageItem(str(blocked), blocked.name),
@@ -158,7 +160,8 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
 
             self.assertEqual(
                 excluded,
-                {str(text_blocked.resolve()), str(manually_blocked.resolve())},
+                {os.path.normcase(str(text_blocked.resolve())),
+                 os.path.normcase(str(manually_blocked.resolve()))},
             )
 
     def test_dead_active_owner_becomes_truthful_interrupted_resume_state(self):
@@ -258,6 +261,29 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                 "failed": 1,
                 "removed": 1,
             })
+
+    def test_screen_text_maintenance_reprocesses_previous_classifier_version(self):
+        """A changed classifier must not trust verdicts produced by the old algorithm."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-text-version-") as temporary:
+            root = Path(temporary)
+            clip = root / "clip.mp4"
+            clip.write_bytes(b"fixture")
+            index = ClipIndex(root / "footage-index.sqlite3", embedder_factory=lambda: (object(), object()))
+            previous_version = SCREEN_TEXT_CLASSIFIER_VERSION - 1
+            with index._connect() as connection:
+                stat = clip.stat()
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns, -1, previous_version),
+                )
+
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "screen_text_eligibility", return_value="SAFE") as classify:
+                result = index.classify_english_screen_text()
+
+            classify.assert_called_once_with(str(clip.resolve()), deep=True)
+            self.assertEqual(result["checked"], 1)
 
     def test_screen_text_maintenance_reuses_existing_index_without_media_roots(self):
         """The desktop command must classify stored vectors, not rescan footage."""

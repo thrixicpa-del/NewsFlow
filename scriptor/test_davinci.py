@@ -161,7 +161,12 @@ class DaVinciHandoffTests(unittest.TestCase):
             bridge.load_settings = lambda: settings
             bridge.save_settings = lambda _: None
             bridge.snapshot = lambda: {"snapshot": True}
-            bridge.render_project = lambda *_args, **_kwargs: rendered
+            def render_to_staging(_project, target, **_kwargs):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"rendered")
+                return target
+
+            bridge.render_project = render_to_staging
             bridge.import_fcpxml = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Resolve закрыт"))
             # This hand-off test deliberately uses a tiny non-media fixture;
             # source-duration decoding is covered by the real render tests.
