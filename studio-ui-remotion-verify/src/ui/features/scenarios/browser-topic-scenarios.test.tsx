@@ -35,8 +35,13 @@ describe("browser topic scenarios", () => {
     expect(screen.getByText("Тема из очереди")).toBeTruthy();
     expect(screen.getByText("Тема с готовым текстом")).toBeTruthy();
     expect(screen.queryByText("Старый сценарий не должен оказаться в browser prompt.")).toBeNull();
+    const existingCheckbox = screen.getByLabelText("Выбрать: Тема с готовым текстом") as HTMLInputElement;
+    expect(existingCheckbox.disabled).toBe(true);
+
     fireEvent.click(screen.getByLabelText("Выбрать: Тема из очереди"));
-    fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }));
+    const runButton = screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }) as HTMLButtonElement;
+    await waitFor(() => expect(runButton.disabled).toBe(false));
+    fireEvent.click(runButton);
 
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "generate-browser-topic-scenarios",
