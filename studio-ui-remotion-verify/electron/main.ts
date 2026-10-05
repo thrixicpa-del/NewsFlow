@@ -440,6 +440,13 @@ handleTrusted('newsflow:choose-prompt-text', async () => {
   if (text.length > 1_000_000) throw new Error('Файл промпта больше 1 МБ. Разделите его на несколько TXT-файлов.');
   return text;
 });
+handleTrusted('newsflow:choose-browser-scenario-requirements', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'Требования TXT / Markdown', extensions: ['txt', 'md', 'markdown'] }],
+  });
+  return result.canceled ? '' : result.filePaths[0] || '';
+});
 handleTrusted('newsflow:choose-cover-text-triples', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],

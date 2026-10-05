@@ -31,6 +31,12 @@ _NO_LEGACY = ("scriptor.app", "scriptor.legacy_bridge")
 # not a side effect of adding another string to the generic IPC channel.
 COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "save-settings": CommandRegistration("save_settings_patch", "scriptor.config.Settings", _NO_LEGACY),
+    "save-browser-topic-scenario-settings": CommandRegistration(
+        "save_browser_topic_scenario_settings", "scriptor.browser_topic_scenarios", _NO_LEGACY,
+    ),
+    "generate-browser-topic-scenarios": CommandRegistration(
+        "generate_browser_topic_scenarios", "scriptor.browser_topic_scenarios", _NO_LEGACY,
+    ),
     "add-topic": CommandRegistration("add_topic", "scriptor.bridge topic service", _NO_LEGACY),
     "reject-suggested-topics": CommandRegistration(
         "reject_suggested_topics", "scriptor.bridge idea proposal service", _NO_LEGACY,

@@ -8,6 +8,8 @@
  */
 export const ALLOWED_CORE_COMMANDS = new Set<string>([
   "snapshot", "reconcile-runtime-state", "save-settings", "save-obsidian-settings", "test-obsidian-mcp", "export-obsidian-notes",
+  "save-browser-topic-scenario-settings",
+  "generate-browser-topic-scenarios",
   "add-topic", "delete-topics", "suggest-topics", "add-suggested-topics-to-favorites", "clear-suggested-topics", "reject-suggested-topics", "add-idea-reference-channel", "remove-idea-reference-channel", "save-idea-reference-rules", "analyze-idea-reference-channels", "research-youtube-topics", "clear-youtube-suggested-topics", "add-session", "add-topics-to-plan", "set-idea-route", "save-idea-route-preset", "update-idea-plan", "generate-ideas", "delete-idea-results", "regenerate-idea-results", "add-ideas-to-scenarios", "transfer-ideas", "export-ideas",
   "import-manual-scenario", "import-manual-scenarios", "import-voiceover", "import-voiceover-files", "import-voiceover-folder", "reconcile-voice-queue", "remove-voiceovers", "export-stage", "export-scenario-titles", "export-scenarios", "export-scenarios-separate-txt", "set-session-active", "set-session-usage",
   "add-channel", "import-channel-research-txt", "update-analytics-channel-metadata", "open-analytics-channel", "remove-analytics-channel", "save-google-oauth", "save-youtube-oauth-service", "start-youtube-channel-handoff", "finish-youtube-channel-handoff", "cancel-youtube-channel-handoff", "connect-youtube-channel", "reset-youtube-channel-account", "refresh-analytics",

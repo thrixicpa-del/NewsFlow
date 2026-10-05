@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('newsflowDesktop', {
   chooseAudioFiles: () => ipcRenderer.invoke('newsflow:choose-audio-files'),
   chooseJson: () => ipcRenderer.invoke('newsflow:choose-json'),
   choosePromptText: () => ipcRenderer.invoke('newsflow:choose-prompt-text'),
+  chooseBrowserScenarioRequirements: () => ipcRenderer.invoke('newsflow:choose-browser-scenario-requirements'),
   chooseCoverTextTriples: () => ipcRenderer.invoke('newsflow:choose-cover-text-triples'),
   chooseCoverPromptPairs: () => ipcRenderer.invoke('newsflow:choose-cover-prompt-pairs'),
   chooseScenarioTexts: () => ipcRenderer.invoke('newsflow:choose-scenario-texts'),
