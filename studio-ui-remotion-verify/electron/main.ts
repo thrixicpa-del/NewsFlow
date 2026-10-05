@@ -150,6 +150,7 @@ function callCore(command: string, payload: unknown = {}) {
     let outputClosed = false;
     let exitCode: number | null = null;
     let settled = false;
+    let pendingError: Error | null = null;
     const finish = (error?: Error, response?: unknown) => {
       if (settled) return;
       settled = true;
@@ -159,6 +160,10 @@ function callCore(command: string, payload: unknown = {}) {
     };
     const complete = () => {
       if (!exited || !outputClosed || settled) return;
+      if (pendingError) {
+        finish(pendingError);
+        return;
+      }
       let response: unknown;
       try {
         response = JSON.parse(readFileSync(responsePath, 'utf8'));
@@ -203,12 +208,13 @@ function callCore(command: string, payload: unknown = {}) {
         if (stderr.length < 4096) stderr += chunk.toString('utf8').slice(0, 4096 - stderr.length);
       });
       child.once('error', (error) => {
+        pendingError = safeCoreLaunchError(error);
         responseStream.destroy();
-        finish(safeCoreLaunchError(error));
       });
       responseStream.once('error', () => {
+        pendingError = new Error('Не удалось сохранить ответ ядра NewsFlow во временный файл.');
+        responseStream.destroy();
         child.kill();
-        finish(new Error('Не удалось сохранить ответ ядра NewsFlow во временный файл.'));
       });
       // Wait for the file descriptor to close, not merely for writable
       // "finish". Windows can refuse rmSync while response.json is still open.
@@ -222,8 +228,12 @@ function callCore(command: string, payload: unknown = {}) {
         complete();
       });
     } catch (error) {
+      // A synchronous spawn/setup failure has no child close event to wait for,
+      // but the response file still must close before the temp directory can
+      // be removed safely on Windows.
+      exited = true;
+      pendingError = safeCoreLaunchError(error);
       responseStream.destroy();
-      finish(safeCoreLaunchError(error));
     }
   });
 }
