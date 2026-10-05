@@ -213,37 +213,192 @@ class VoicerTests(unittest.TestCase):
             self.assertEqual(settings.voice_task_statuses, {})
 
     def test_voice_queue_reconciliation_restores_a_valid_orphaned_mp3_by_production_item(self):
-        """A stale provider error must not hide a completed, exact numbered MP3."""
-        with tempfile.TemporaryDirectory() as output:
+        """A stale provider error may recover only the exact immutable script contract."""
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
             titles = [f"Тема {index}" for index in range(1, 25)] + ["Тема 25"]
             orphan = Path(output) / "025 — Тема 25.mp3"
             orphan.write_bytes(b"recovered-audio")
+            script = "Текст сценария"
+            script_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
             job = Job(
                 ScenarioRequest(24, "Тема 25", "", "production-25"),
                 RunState.DONE,
-                "Текст сценария",
+                script,
             )
             settings = Settings(
                 voicer_output_folder=output,
                 voice_tts_jobs={"production-25": {
                     "id": "job-25", "production_item_id": "production-25",
                     "scenario_index": 24, "state": "error", "error": "WProject: queue_full",
+                    "script_hash": script_hash, "script_revision": script_hash,
                 }},
                 voice_task_statuses={"25": {"label": "Ошибка озвучки", "progress": 0}},
                 idea_production_items=[{"id": "production-25", "title": "Тема 25"}],
             )
-            with patch.object(bridge, "load_settings", return_value=settings), \
-                 patch.object(bridge, "save_settings"), \
-                 patch.object(bridge, "load_session", return_value=(titles, [job])), \
-                 patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
-                 patch.object(bridge, "validate_voiceover_artifact", return_value=42.0):
-                result = bridge.reconcile_voice_queue({})
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(settings)
+                with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
+                     patch.object(bridge, "save_settings", side_effect=config.save_settings), \
+                     patch.object(bridge, "load_session", return_value=(titles, [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=42.0), \
+                     patch.object(bridge, "_ensure_ready_voice_maps") as ensure_maps:
+                    result = bridge.reconcile_voice_queue({})
+                persisted = config.load_settings()
 
         self.assertEqual(result["operationResult"]["recovered"], 1)
-        self.assertEqual(settings.voice_scenario_outputs["25"], str(orphan))
-        self.assertEqual(settings.voice_task_statuses["25"]["label"], "Готово: восстановлено")
-        self.assertEqual(settings.voice_tts_jobs["production-25"]["state"], "ready")
-        self.assertEqual(settings.voice_tts_jobs["production-25"]["output_path"], str(orphan))
+        self.assertEqual(persisted.voice_scenario_outputs["25"], str(orphan))
+        self.assertEqual(persisted.voice_task_statuses["25"]["label"], "Готово: восстановлено")
+        saved = persisted.voice_tts_jobs["production-25"]
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["output_path"], str(orphan))
+        self.assertEqual(saved["artifact"]["path"], str(orphan))
+        self.assertEqual(saved["artifact"]["duration_seconds"], 42.0)
+        ensure_maps.assert_called_once_with({24})
+
+    def test_voice_queue_reconciliation_rejects_stale_script_wrong_index_and_non_mp3(self):
+        """Number/title alone must never bind old or non-MP3 audio to a current scenario."""
+        import hashlib
+
+        script = "Текущий текст"
+        correct_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+        cases = [
+            ("stale-script", 0, hashlib.sha256(b"old text").hexdigest(), ".mp3"),
+            ("wrong-index", 9, correct_hash, ".mp3"),
+            ("wrong-format", 0, correct_hash, ".wav"),
+        ]
+        for label, saved_index, saved_hash, suffix in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as output:
+                candidate = Path(output) / f"001 — Тема 1{suffix}"
+                candidate.write_bytes(b"audio")
+                job = Job(
+                    ScenarioRequest(0, "Тема 1", "", "production-1"),
+                    RunState.DONE,
+                    script,
+                )
+                settings = Settings(
+                    voicer_output_folder=output,
+                    voice_tts_jobs={"production-1": {
+                        "id": "job-1", "production_item_id": "production-1",
+                        "scenario_index": saved_index, "state": "error",
+                        "script_hash": saved_hash,
+                    }},
+                    idea_production_items=[{"id": "production-1", "title": "Тема 1"}],
+                )
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=15.0) as validate, \
+                     patch.object(bridge, "save_settings") as save:
+                    result = bridge.reconcile_voice_queue({})
+
+                self.assertEqual(result["operationResult"]["recovered"], 0)
+                self.assertEqual(settings.voice_scenario_outputs, {})
+                save.assert_not_called()
+                if label == "wrong-format":
+                    validate.assert_not_called()
+
+    def test_voice_queue_reconciliation_preserves_concurrent_settings_changes(self):
+        """The narrow commit must not rewrite unrelated fields from its stale Settings snapshot."""
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            orphan = Path(output) / "001 — Тема 1.mp3"
+            orphan.write_bytes(b"recovered")
+            script = "Текущий сценарий"
+            script_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+            initial = Settings(
+                template="До параллельного изменения",
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+                idea_production_items=[{"id": "production-1", "title": "Тема 1"}],
+            )
+            job = Job(
+                ScenarioRequest(0, "Тема 1", "", "production-1"),
+                RunState.DONE,
+                script,
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(initial)
+
+                def save_after_concurrent_edit(stale_settings):
+                    concurrent = config.load_settings()
+                    concurrent.template = "Параллельное изменение сохранено"
+                    config.save_settings(concurrent)
+                    config.save_settings(stale_settings)
+
+                with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
+                     patch.object(bridge, "save_settings", side_effect=save_after_concurrent_edit), \
+                     patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=17.0), \
+                     patch.object(bridge, "_ensure_ready_voice_maps"):
+                    result = bridge.reconcile_voice_queue({})
+                persisted = config.load_settings()
+
+        self.assertEqual(result["operationResult"]["recovered"], 1)
+        self.assertEqual(persisted.template, "Параллельное изменение сохранено")
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "ready")
+
+    def test_voice_queue_reconciliation_blocks_if_worker_becomes_active_before_commit(self):
+        """A worker that starts after scanning still wins the compare-and-swap."""
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            orphan = Path(output) / "001 — Тема 1.mp3"
+            orphan.write_bytes(b"recovered")
+            script = "Текущий сценарий"
+            script_hash = hashlib.sha256(script.encode("utf-8")).hexdigest()
+            initial = Settings(
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+                idea_production_items=[{"id": "production-1", "title": "Тема 1"}],
+            )
+            job = Job(
+                ScenarioRequest(0, "Тема 1", "", "production-1"),
+                RunState.DONE,
+                script,
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(initial)
+
+                def save_after_worker_starts(stale_settings):
+                    concurrent = config.load_settings()
+                    concurrent.voice_tts_jobs["production-1"]["state"] = "running"
+                    config.save_settings(concurrent)
+                    config.save_settings(stale_settings)
+
+                with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
+                     patch.object(bridge, "save_settings", side_effect=save_after_worker_starts), \
+                     patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
+                     patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                     patch.object(bridge, "validate_voiceover_artifact", return_value=17.0), \
+                     patch.object(bridge, "_ensure_ready_voice_maps") as ensure_maps:
+                    result = bridge.reconcile_voice_queue({})
+                persisted = config.load_settings()
+
+        self.assertEqual(result["operationResult"]["recovered"], 0)
+        self.assertEqual(result["operationResult"]["blocked"], 1)
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "running")
+        self.assertEqual(persisted.voice_scenario_outputs, {})
+        ensure_maps.assert_not_called()
 
     def test_voice_queue_reconciliation_does_not_touch_files_while_a_worker_is_active(self):
         with tempfile.TemporaryDirectory() as output:
