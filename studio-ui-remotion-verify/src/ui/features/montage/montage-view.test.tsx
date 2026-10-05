@@ -1,4 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { App, Editor, fallback, Outputs } from "../../App";
 
@@ -61,6 +63,38 @@ describe("Montage Light view", () => {
     ));
     expect(screen.getByRole("button", { name: /Только FFmpeg/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Remotion — композиция/ })).toBeTruthy();
+  });
+
+  it("keeps an unsaved renderer choice while a background montage snapshot arrives", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const { rerender } = render(<Editor data={fallback} command={command} refresh={async () => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    const gpu = screen.getByRole("button", { name: /Быстрый GPU-таймлайн/ });
+    fireEvent.click(gpu);
+    expect(gpu.className).toContain("selected");
+
+    // A queue refresh returns the persisted FFmpeg preference. It must not
+    // erase an operator's draft before the explicit Save action.
+    rerender(<Editor data={{
+      ...fallback,
+      montageSettings: { ...fallback.montageSettings, renderer: "ffmpeg" },
+    }} command={command} refresh={async () => undefined} />);
+
+    await waitFor(() => expect(gpu.className).toContain("selected"));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-montage-settings",
+      expect.objectContaining({ renderer: "gpu-timeline" }),
+    ));
+  });
+
+  it("keeps montage settings inside the fixed-width Sheet rather than widening the document", () => {
+    const styles = readFileSync(resolve(process.cwd(), "src/ui/editor.css"), "utf8");
+
+    expect(styles).toContain(".nf-sheet-body .asset-grid{grid-template-columns:minmax(0,1fr)");
+    expect(styles).toContain(".nf-sheet-body .renderer-choice-four{grid-template-columns:minmax(0,1fr)}");
+    expect(styles).toContain(".nf-sheet-body .montage-grid{grid-template-columns:minmax(0,1fr)}");
   });
 
   it("shows the no-English-text rule as mandatory", () => {

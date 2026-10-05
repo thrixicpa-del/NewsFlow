@@ -10596,6 +10596,7 @@ export function Editor({
   const [pauseSaving, setPauseSaving] = useState(false);
   const [ratio, setRatio] = useState(data.montageSettings.aspectRatio);
   const [renderer, setRenderer] = useState(data.montageSettings.renderer);
+  const [rendererDraftDirty, setRendererDraftDirty] = useState(false);
   const [remotionFrameConcurrency, setRemotionFrameConcurrency] = useState(
     String(data.montageSettings.remotionFrameConcurrency),
   );
@@ -10666,7 +10667,10 @@ export function Editor({
   );
   useEffect(() => {
     setRatio(data.montageSettings.aspectRatio);
-    setRenderer(data.montageSettings.renderer);
+    // A busy montage refreshes its snapshot every few moments. Keep an
+    // operator's unsaved renderer selection intact until the persisted
+    // settings acknowledge that exact choice.
+    if (!rendererDraftDirty) setRenderer(data.montageSettings.renderer);
     setRemotionFrameConcurrency(
       String(data.montageSettings.remotionFrameConcurrency),
     );
@@ -10688,7 +10692,23 @@ export function Editor({
       String(data.montageSettings.uniqueFootagePercent ?? 100),
     );
     setFastReuseRanges(data.montageSettings.fastReuseRanges || []);
-  }, [data.montageSettings]);
+  }, [data.montageSettings, rendererDraftDirty]);
+  useEffect(() => {
+    if (rendererDraftDirty && data.montageSettings.renderer === renderer) {
+      setRendererDraftDirty(false);
+    }
+  }, [data.montageSettings.renderer, renderer, rendererDraftDirty]);
+  const setRendererDraft = (value: "remotion" | "ffmpeg" | "gpu-timeline") => {
+    setRendererDraftDirty(true);
+    setRenderer(value);
+  };
+  const handleConfigurationOpenChange = (open: boolean) => {
+    setConfigurationOpen(open);
+    if (!open) {
+      setRendererDraftDirty(false);
+      setRenderer(data.montageSettings.renderer);
+    }
+  };
   useEffect(() => {
     setSelected((current) =>
       current.filter((index) => ready.some((item) => item.index === index)),
@@ -10892,7 +10912,7 @@ export function Editor({
       <MontageLiveStatus data={data} />
       <Sheet
         open={configurationOpen}
-        onOpenChange={setConfigurationOpen}
+        onOpenChange={handleConfigurationOpenChange}
         title="Настройки Fast News монтажа"
         description="Движок, подготовка футажей, DaVinci, ресурсы и параметры рендера."
       >
@@ -10935,7 +10955,7 @@ export function Editor({
         <div className="renderer-choice renderer-choice-four">
           <button
             className={renderer === "ffmpeg" ? "selected" : ""}
-            onClick={() => setRenderer("ffmpeg")}
+            onClick={() => setRendererDraft("ffmpeg")}
           >
             <span>01</span>
             <div>
@@ -10949,7 +10969,7 @@ export function Editor({
           </button>
           <button
             className={renderer === "gpu-timeline" ? "selected gpu" : ""}
-            onClick={() => setRenderer("gpu-timeline")}
+            onClick={() => setRendererDraft("gpu-timeline")}
           >
             <span>02</span>
             <div>
@@ -10963,7 +10983,7 @@ export function Editor({
           </button>
           <button
             className={renderer === "remotion" ? "selected remotion" : ""}
-            onClick={() => setRenderer("remotion")}
+            onClick={() => setRendererDraft("remotion")}
           >
             <span>03</span>
             <div>
@@ -11133,7 +11153,7 @@ export function Editor({
             <select
               value={renderer}
               onChange={(event) =>
-                setRenderer(event.target.value as "remotion" | "ffmpeg" | "gpu-timeline")
+                setRendererDraft(event.target.value as "remotion" | "ffmpeg" | "gpu-timeline")
               }
             >
               <option value="remotion">Remotion — переходы и слои</option>
