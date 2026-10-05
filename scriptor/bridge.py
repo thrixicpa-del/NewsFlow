@@ -13570,8 +13570,13 @@ def generate_voice(payload: dict) -> dict:
         # The provider can accept a POST while the local process loses its
         # response. Persist the key first so every retry represents the same
         # remote request instead of a second billable task.
-        queue_full_attempt = int(job_snapshot.get("wproject_queue_full_retries", 0) or 0)
-        rate_limit_attempt = int(job_snapshot.get("wproject_rate_limit_retries", 0) or 0)
+        # Retry limits are per active queue command. Persisted counters are
+        # cumulative diagnostics only; a later safe Resume gets a fresh bounded
+        # backoff window instead of being exhausted by an earlier process.
+        queue_full_attempt = 0
+        rate_limit_attempt = 0
+        queue_full_total = int(job_snapshot.get("wproject_queue_full_retries", 0) or 0)
+        rate_limit_total = int(job_snapshot.get("wproject_rate_limit_retries", 0) or 0)
 
         def wproject_client(api_key: str):
             client = WProjectClient(api_key)
@@ -13582,23 +13587,29 @@ def generate_voice(payload: dict) -> dict:
             return client
 
         def defer_backpressure(kind: str, error: Exception) -> int:
-            nonlocal queue_full_attempt, rate_limit_attempt
+            nonlocal queue_full_attempt, rate_limit_attempt, queue_full_total, rate_limit_total
             if kind == "queue_full":
                 queue_full_attempt += 1
-                attempt, maximum = queue_full_attempt, _WPROJECT_QUEUE_FULL_MAX_RETRIES
+                queue_full_total += 1
+                attempt, total, maximum = (
+                    queue_full_attempt, queue_full_total, _WPROJECT_QUEUE_FULL_MAX_RETRIES,
+                )
                 delay = _wproject_queue_full_delay(attempt)
                 label = "очередь занята"
                 exhausted = "очередь всё ещё занята"
             else:
                 rate_limit_attempt += 1
-                attempt, maximum = rate_limit_attempt, _WPROJECT_RATE_LIMIT_MAX_RETRIES
+                rate_limit_total += 1
+                attempt, total, maximum = (
+                    rate_limit_attempt, rate_limit_total, _WPROJECT_RATE_LIMIT_MAX_RETRIES,
+                )
                 delay = _wproject_rate_limit_delay(attempt)
                 label = "лимит запросов"
                 exhausted = "лимит запросов всё ещё действует"
             job_snapshot.update(
                 state="queued",
                 **{
-                    f"wproject_{kind}_retries": attempt,
+                    f"wproject_{kind}_retries": total,
                     f"wproject_{kind}_next_retry_seconds": delay,
                     f"wproject_{kind}_error": _voice_error_reason(error),
                 },
