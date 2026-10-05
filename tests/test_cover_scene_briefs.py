@@ -140,7 +140,7 @@ class CoverSceneBriefTests(unittest.TestCase):
         self.assertNotIn("TYPOGRAPHY", history)
         self.assertLessEqual(max(len(line[2:]) for line in history.splitlines() if line.startswith("- ")), 800)
 
-    def test_enhanced_rewrite_requires_a_supported_semantic_scene_change(self):
+    def test_enhanced_rewrite_rejects_camera_only_duplicate_without_intensity_veto(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
         settings = Settings(cover_prompt_variant_count=1, cover_scene_intensity_mode=True, cover_queue=[self._item(
             image_prompt=old,
@@ -155,7 +155,8 @@ class CoverSceneBriefTests(unittest.TestCase):
         )
 
         self.assertEqual(row["image_prompt"], old)
-        self.assertIn("ENHANCED_SCENE_REQUIRED", row["error"])
+        self.assertIn("SEMANTIC_SCENE_DUPLICATE", row["error"])
+        self.assertNotIn("ENHANCED_SCENE_REQUIRED", row["error"])
 
     def test_enhanced_rewrite_keeps_supported_new_scale_and_reaction_in_the_scene_brief(self):
         old = "Workers hold closure notices at the factory gate while management posts the signed order."
@@ -176,7 +177,7 @@ class CoverSceneBriefTests(unittest.TestCase):
         self.assertNotEqual(row["image_prompt"], old)
         self.assertNotIn("explosion", row["image_prompt"].casefold())
 
-    def test_enhanced_generation_allows_strong_symbolic_military_metaphor(self):
+    def test_enhanced_generation_rejects_unsupported_military_metaphor(self):
         item = {
             "production_item_id": "production:economic-blow",
             "title": "New tariffs deal a blow to the economy",
@@ -203,13 +204,11 @@ class CoverSceneBriefTests(unittest.TestCase):
                 "provider": "agent",
             })
 
-        self.assertEqual(len(sent), 1)
-        self.assertIn("ОБЯЗАТЕЛЬНЫЙ РЕЖИМ", sent[0])
-        self.assertIn("символическая", sent[0])
-        self.assertIn("Armored vehicles", settings.cover_queue[0]["image_prompt"])
-        self.assertNotIn("UNSUPPORTED_SCENE_EVENT", settings.cover_queue[0].get("error", ""))
+        self.assertEqual(len(sent), 2)
+        self.assertNotIn("image_prompt", settings.cover_queue[0])
+        self.assertIn("UNSUPPORTED_SCENE_EVENT", settings.cover_queue[0]["error"])
 
-    def test_enhanced_mode_rejects_a_bland_scene_even_when_it_is_semantically_new(self):
+    def test_enhanced_mode_accepts_grounded_restrained_scene_without_subjective_veto(self):
         item = {
             "production_item_id": "production:enhanced-required",
             "title": "New tariffs deal a blow to the economy",
@@ -235,9 +234,13 @@ class CoverSceneBriefTests(unittest.TestCase):
                 "provider": "agent",
             })
 
-        self.assertEqual(len(sent), 2)
-        self.assertNotIn("image_prompt", settings.cover_queue[0])
-        self.assertIn("ENHANCED_SCENE_REQUIRED", settings.cover_queue[0]["error"])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(
+            settings.cover_queue[0]["image_prompt"],
+            "Exporters sit at a conference table reviewing new tariff documents and delivery schedules",
+        )
+        self.assertEqual(settings.cover_queue[0].get("error"), "")
+        self.assertNotIn("ENHANCED_SCENE_REQUIRED", settings.cover_queue[0].get("error", ""))
 
     def test_standard_generation_still_rejects_unrelated_military_scene(self):
         item = {
