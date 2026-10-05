@@ -1117,7 +1117,12 @@ def load_settings() -> Settings:
         follows_pipeline = bool(data.get("idea_target_follows_pipeline", True))
         idea_target = (pipeline_target if follows_pipeline
                        else max(1, int(data.get("idea_target_count", 100))))
-        saved_montage_renderer = str(data.get("montage_renderer", default_montage_renderer())).casefold()
+        saved_renderer_value = data.get("montage_renderer")
+        saved_montage_renderer = (
+            default_montage_renderer()
+            if saved_renderer_value is None
+            else str(saved_renderer_value).casefold()
+        )
         montage_renderer_explicit = bool(data.get("montage_renderer_explicit", False))
         # Earlier builds wrote ``remotion`` merely because it was the default.
         # The absence of the explicit marker means this was never an operator
