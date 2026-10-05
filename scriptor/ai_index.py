@@ -227,6 +227,28 @@ def source_family_identity(path: str | Path, source_url: str = "") -> str:
     return source_family_identity_text(str(path), source_url)
 
 
+
+def proxy_cache_excluded_paths(db_path: str | Path) -> set[str]:
+    """Read persisted proxy exclusions without creating or migrating the index."""
+    path = Path(db_path)
+    if not path.is_file():
+        return set()
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=30) as connection:
+        connection.row_factory = sqlite3.Row
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(clips)")}
+        required = {"path", "disabled", "english_text", "english_text_version"}
+        if not required.issubset(columns):
+            return set()
+        rows = connection.execute(
+            """SELECT path FROM clips
+               WHERE disabled=1
+                  OR (english_text=1 AND english_text_version>=?)""",
+            (SCREEN_TEXT_CLASSIFIER_VERSION,),
+        ).fetchall()
+    return {os.path.normcase(str(Path(row["path"]).resolve())) for row in rows}
+
+
 class ClipIndex:
     """SQLite-backed multimodal index designed for tens of thousands of short clips."""
 
