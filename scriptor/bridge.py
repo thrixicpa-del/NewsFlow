@@ -7107,8 +7107,9 @@ def _select_browser_topic_tasks(settings: Settings, titles: list[str], jobs: lis
         if job is None:
             job = Job(ScenarioRequest(index, titles[index], "", identity))
             jobs_by_index[index] = job
-        # Existing completed prose is never silently replaced by a browser run.
-        if job.state is RunState.DONE and str(job.result or "").strip():
+        # Browser mode only creates a missing scenario. Any existing prose,
+        # regardless of status, is operator-owned and is never overwritten.
+        if str(job.result or "").strip():
             continue
         if not str(job.request.production_item_id).strip():
             job.request = ScenarioRequest(
@@ -7183,30 +7184,70 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
         async with transport_factory(session) as transport:
             return await run_browser_topic_tasks(browser_settings, tasks, transport)
 
-    outcomes = asyncio.run(run())
+    try:
+        outcomes = asyncio.run(run())
+    except _BRIDGE_OPERATION_ERRORS as exc:
+        # A browser/context launch failure happens before per-topic outcomes
+        # exist. Re-read the current session and clear only this batch's still-
+        # empty RUNNING jobs by durable ProductionItem ID.
+        current_titles, current_jobs = load_session()
+        current_by_id = {
+            str(job.request.production_item_id or "").strip(): job
+            for job in current_jobs
+            if str(job.request.production_item_id or "").strip()
+        }
+        for task in tasks:
+            job = current_by_id.get(task.production_item_id)
+            if job is None or str(job.result or "").strip():
+                continue
+            if job.state is RunState.RUNNING:
+                job.state = RunState.ERROR
+                job.error = str(exc)
+        save_session(current_titles, current_jobs)
+        raise
+
+    # Browser tabs may run for minutes. Re-read the authoritative session and
+    # commit every outcome by ProductionItem ID, never by stale queue index.
+    current_titles, current_jobs = load_session()
+    current_by_id = {
+        str(job.request.production_item_id or "").strip(): job
+        for job in current_jobs
+        if str(job.request.production_item_id or "").strip()
+    }
+    completed = 0
     for task, outcome in zip(tasks, outcomes):
-        job = jobs_by_index[task.queue_index]
+        job = current_by_id.get(task.production_item_id)
+        if job is None:
+            continue
+        # A manual edit/import that appeared while ChatGPT was open wins.
+        if str(job.result or "").strip():
+            continue
         if isinstance(outcome, BrowserTopicCompletion) and outcome.text:
+            # No content/fact/length gate: ChatGPT's returned prose is saved as
+            # received, with only newline normalization done in the adapter.
             job.result = outcome.text
-            job.length_status, job.actual_chars = scenario_length_status(job.request, outcome.text)
+            job.actual_chars = len(outcome.text)
+            job.length_status = ""
+            export_title = str(job.request.title or task.title)
             try:
-                _browser_topic_export_path(settings, task.title, task.production_item_id).write_text(
-                    outcome.text.strip() + "\n", encoding="utf-8",
+                target = _browser_topic_export_path(
+                    settings, export_title, task.production_item_id,
                 )
+                target.write_text(outcome.text, encoding="utf-8")
             except OSError as exc:
-                # Keep the returned prose recoverable in the selected item,
-                # but do not falsely report a completed TXT export.
+                # The text remains recoverable in the same ProductionItem even
+                # when its separate TXT export cannot be published.
                 job.state = RunState.ERROR
                 job.error = f"ChatGPT вернул сценарий, но TXT не удалось сохранить: {exc}"
             else:
                 job.state = RunState.DONE
                 job.error = ""
+                completed += 1
         else:
             job.state = RunState.ERROR
             job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
-    save_session(titles, list(jobs_by_index.values()))
+    save_session(current_titles, current_jobs)
     save_settings(settings)
-    completed = sum(isinstance(item, BrowserTopicCompletion) and bool(item.text) for item in outcomes)
     return {**snapshot(), "operationResult": {
         "kind": "browser-topic-scenarios", "count": completed,
         "message": f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз.",
