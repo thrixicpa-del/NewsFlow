@@ -134,6 +134,73 @@ class MontageRenderTests(unittest.TestCase):
             self.assertIn("30 fps", inspected.stderr)
             self.assertGreaterEqual(probe_media_duration(output), 1.9)
 
+    def test_gpu_chunk_command_preserves_order_and_source_trims(self):
+        """Direct-source GPU chunks must use the saved timeline order and trims."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-command-") as temporary:
+            root = Path(temporary)
+            first = root / "first.mp4"
+            second = root / "second.mp4"
+            first.write_bytes(b"x")
+            second.write_bytes(b"x")
+            script = root / "chunk.ffscript"
+            clips = [
+                TimelineClip(str(first), "a", "a", duration=2.0, source_start=1.25),
+                TimelineClip(str(second), "b", "b", duration=3.0, source_start=4.5),
+            ]
+            with patch.object(timeline_module, "probe_video_duration", return_value=30.0), \
+                 patch.object(timeline_module, "gpu_timeline_encoder_args",
+                              return_value=["-c:v", "h264_nvenc"]):
+                command = timeline_module._gpu_timeline_chunk_command(
+                    "ffmpeg", clips, root / "chunk.mp4", script, 1920, 1080,
+                )
+
+            inputs = [command[index + 1] for index, value in enumerate(command) if value == "-i"]
+            starts = [command[index + 1] for index, value in enumerate(command) if value == "-ss"]
+            self.assertEqual(inputs, [str(first), str(second)])
+            self.assertEqual(starts, ["1.250", "4.500"])
+            filter_script = script.read_text(encoding="utf-8")
+            self.assertLess(filter_script.index("[0:v]"), filter_script.index("[1:v]"))
+            self.assertIn("concat=n=2:v=1:a=0[outv]", filter_script)
+
+    def test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache(self):
+        """Long GPU timelines stay bounded and do not materialise legacy proxies."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-bounded-") as temporary:
+            root = Path(temporary)
+            project = TimelineProject(
+                "GPU bounded",
+                clips=[
+                    TimelineClip(str(root / f"clip-{index}.mp4"), str(index), str(index), duration=1.0)
+                    for index in range(25)
+                ],
+            )
+            output = root / "result.mp4"
+            chunk_sizes: list[int] = []
+
+            def fake_chunk_command(_ffmpeg, clips, chunk_output, _script, _width, _height):
+                chunk_sizes.append(len(clips))
+                return ["ffmpeg", "-y", str(chunk_output)]
+
+            def fake_run(command, process_observer=None):
+                if process_observer:
+                    process_observer(123)
+                    process_observer(None)
+                Path(command[-1]).write_bytes(b"x" * 2048)
+
+            with patch.object(timeline_module, "ffmpeg_executable", return_value="ffmpeg"), \
+                 patch.object(timeline_module, "gpu_timeline_encoder_args",
+                              return_value=["-c:v", "h264_nvenc"]), \
+                 patch.object(timeline_module, "_gpu_timeline_chunk_command",
+                              side_effect=fake_chunk_command), \
+                 patch.object(timeline_module, "_run", side_effect=fake_run), \
+                 patch.object(timeline_module, "render_workspace_root", return_value=root), \
+                 patch.object(timeline_module, "proxy_cache_root",
+                              side_effect=AssertionError("GPU timeline must not use proxy cache")):
+                rendered = timeline_module._render_project_gpu_timeline(project, output)
+
+            self.assertEqual(chunk_sizes, [12, 12, 1])
+            self.assertTrue(rendered.is_file())
+            self.assertEqual(rendered, output)
+
     def test_explicit_remotion_never_silently_falls_back_to_ffmpeg(self):
         """Composition mode must fail diagnostically if its canonical runner is absent."""
         project = TimelineProject(
