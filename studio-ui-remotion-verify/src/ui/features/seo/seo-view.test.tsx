@@ -97,4 +97,118 @@ describe("SEO and Tags Light views", () => {
       tags: "first tag, second tag",
     }));
   });
+
+  it("keeps the opened SEO item bound to its ProductionItem ID after queue reorder", async () => {
+    const chosen = {
+      production_item_id: "production:seo-chosen",
+      source_title: "Chosen SEO",
+      description: "Chosen description",
+      hashtags: ["#chosen"],
+      tags: ["chosen tag"],
+      status: "Готово",
+    };
+    const other = {
+      production_item_id: "production:seo-other",
+      source_title: "Other SEO",
+      description: "Other description",
+      hashtags: ["#other"],
+      tags: ["other tag"],
+      status: "Готово",
+    };
+    const command = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <Seo data={{ ...fallback, seo: [chosen, other] }} command={command} />,
+    );
+
+    fireEvent.click(screen.getByText("Chosen SEO").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Открыть / редактировать" }));
+    rerender(<Seo data={{ ...fallback, seo: [other, chosen] }} command={command} />);
+
+    expect(screen.getByDisplayValue("Chosen description")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить SEO" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-seo-text", {
+      productionItemId: "production:seo-chosen",
+      description: "Chosen description",
+      hashtags: "#chosen",
+    }));
+  });
+
+  it("still sends the durable SEO identity when the opened row disappeared", async () => {
+    const chosen = {
+      production_item_id: "production:seo-missing",
+      source_title: "Missing SEO",
+      description: "Draft description",
+      hashtags: ["#draft"],
+      status: "Готово",
+    };
+    const command = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <Seo data={{ ...fallback, seo: [chosen] }} command={command} />,
+    );
+
+    fireEvent.click(screen.getByText("Missing SEO").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Открыть / редактировать" }));
+    rerender(<Seo data={{ ...fallback, seo: [] }} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить SEO" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-seo-text", {
+      productionItemId: "production:seo-missing",
+      description: "Draft description",
+      hashtags: "#draft",
+    }));
+  });
+
+  it("keeps the opened tag set bound to its ProductionItem ID after queue reorder", async () => {
+    const chosen = {
+      production_item_id: "production:tags-chosen",
+      source_title: "Chosen Tags",
+      tags: ["chosen one", "chosen two"],
+      tags_status: "Готово",
+    };
+    const other = {
+      production_item_id: "production:tags-other",
+      source_title: "Other Tags",
+      tags: ["other"],
+      tags_status: "Готово",
+    };
+    const command = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <Tags data={{ ...fallback, seo: [chosen, other] }} command={command} />,
+    );
+
+    fireEvent.click(screen.getByText("Chosen Tags").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Открыть / редактировать" }));
+    rerender(<Tags data={{ ...fallback, seo: [other, chosen] }} command={command} />);
+
+    expect(screen.getByDisplayValue("chosen one, chosen two")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить теги" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-tags-text", {
+      productionItemId: "production:tags-chosen",
+      tags: "chosen one, chosen two",
+    }));
+  });
+
+  it("still sends the durable tag identity when the opened row disappeared", async () => {
+    const chosen = {
+      production_item_id: "production:tags-missing",
+      source_title: "Missing Tags",
+      tags: ["draft tag"],
+      tags_status: "Готово",
+    };
+    const command = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <Tags data={{ ...fallback, seo: [chosen] }} command={command} />,
+    );
+
+    fireEvent.click(screen.getByText("Missing Tags").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "Открыть / редактировать" }));
+    rerender(<Tags data={{ ...fallback, seo: [] }} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить теги" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-tags-text", {
+      productionItemId: "production:tags-missing",
+      tags: "draft tag",
+    }));
+  });
+
 });
