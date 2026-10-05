@@ -27,6 +27,7 @@ REQUIRED_SOURCES = (
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
     "bridge_main.py",
+    "Scriptor.spec",
 )
 
 
@@ -121,15 +122,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r34")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r36")
         self.assertEqual(
             lock["coreExeSha256"],
-            "7f467da94da23914cd15c682f5a3741d9475255fa4822b34260621fa7cf5ff4d",
+            "22b3ffa5222a06ebd5235c12ac832e70474fa18690a78bf45138d4753e3c2f71",
         )
-        self.assertEqual(lock["coreExeSize"], 34389243)
+        self.assertEqual(lock["coreExeSize"], 34389270)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "f960512c33f951dcf1fd12adcb5b2cc7d28798e6",
+            "81a7ecf9f714a2aa1b1249ce3da0f4b9870b537b",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),
@@ -179,6 +180,18 @@ class CoreRuntimeGuardTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(relative, result.stderr)
                 self.assertIn("Пересоберите core-bin", result.stderr)
+
+    def test_guard_rejects_changed_frozen_core_build_spec(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            (fixture_root / "Scriptor.spec").write_text(
+                "# changed frozen core build specification\n", encoding="utf-8"
+            )
+
+            result = self._run(fixture_app)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Scriptor.spec", result.stderr)
 
     def test_guard_rejects_changed_openai_client_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:

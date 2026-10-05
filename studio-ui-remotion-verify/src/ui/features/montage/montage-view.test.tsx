@@ -180,6 +180,30 @@ describe("Montage Light view", () => {
     ));
   });
 
+  it("keeps an interrupted text-check row visible and resumable in the montage queue", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 83, title: "Последняя ручная тема", state: "Готово", result: "Мой текст", error: "" }],
+      voiceItems: [{ index: 83, title: "Последняя ручная тема", state: "Готово", path: "D:/084.mp3" }],
+      montageTasks: [{
+        index: 83,
+        title: "Последняя ручная тема",
+        status: "Проверка текста",
+        phase: "Проверка текста",
+        outputPath: "",
+      }],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    expect(screen.getByRole("button", { name: /Последняя ручная тема/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "run-montage-queue", { indices: [83], replaceOutput: false },
+    ));
+  });
+
   it("offers explicit selected retry for an error row", async () => {
     const data = {
       ...fallback,

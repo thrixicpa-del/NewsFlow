@@ -115,7 +115,7 @@ class MontageQueueStateTests(unittest.TestCase):
             def launch():
                 try:
                     results.append(bridge.run_montage_queue({"indices": [0]}))
-                except Exception as exc:
+                except ValueError as exc:
                     errors.append(str(exc))
 
             threads = [threading.Thread(target=launch) for _ in range(2)]
@@ -1214,6 +1214,25 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(task["phase"], "Предыдущий запуск остановлен")
         self.assertIn("остановлена", task["error"])
         self.assertEqual(task["title"], "Тест")
+
+    def test_interrupted_text_check_stage_is_recovered_as_an_active_queue_task(self):
+        settings = Settings()
+        settings.montage_task_statuses = {
+            "84": {
+                "title": "Ручной сценарий",
+                "status": "Проверка текста",
+                "phase": "Проверка текста",
+                "progress": 42,
+                "queuePid": 999999,
+            }
+        }
+
+        with patch.object(bridge, "_montage_process_is_running", return_value=False):
+            self.assertTrue(bridge._recover_interrupted_montage_tasks(settings))
+
+        task = settings.montage_task_statuses["84"]
+        self.assertEqual(task["status"], "Ошибка")
+        self.assertEqual(task["phase"], "Предыдущий запуск остановлен")
 
     def test_default_queue_skips_a_valid_ready_video(self):
         """Ordinary resume must never rebuild a completed, valid MP4."""
