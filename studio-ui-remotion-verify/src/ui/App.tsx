@@ -8848,7 +8848,7 @@ export function Seo({ data, command }: { data: NewsFlowSnapshot; command: Comman
     setHashtags((item.hashtags || []).join(" "));
   };
   const saveEditor = async () => {
-    if (!opened || !openedItem) return;
+    if (!opened) return;
     const result = await command("save-seo-text", {
       ...(opened.productionItemId
         ? { productionItemId: opened.productionItemId }
@@ -9199,7 +9199,7 @@ export function Tags({ data, command }: { data: NewsFlowSnapshot; command: Comma
     setTagText((item.tags || []).join(", "));
   };
   const saveTags = async () => {
-    if (!opened || !openedItem) return;
+    if (!opened) return;
     const result = await command("save-tags-text", {
       ...(opened.productionItemId
         ? { productionItemId: opened.productionItemId }
