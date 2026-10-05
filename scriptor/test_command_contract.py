@@ -10,6 +10,8 @@ class CommandContractTests(unittest.TestCase):
 
         expected = {
             "save-settings", "add-topic", "generate-ideas", "generate-scenarios",
+            "save-browser-topic-scenario-settings",
+            "generate-browser-topic-scenarios",
             "import-manual-scenario", "remove-scenarios",
             "generate-voice-queue",
             "generate-voice-range", "generate-covers", "run-montage-queue",

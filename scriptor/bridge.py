@@ -43,7 +43,18 @@ from .ai_index import (
     SearchHit,
     source_family_identity_text,
 )
+from .browser_topic_scenarios import (
+    BrowserScenarioSettings,
+    BrowserTopicCompletion,
+    BrowserTopicFailure,
+    BrowserTopicTask,
+    run_browser_topic_tasks,
+)
 from .channel_research import channel_research_state, new_task, parse_txt_sources
+from .chatgpt_browser import (
+    ChatGPTBrowserClient,
+    validate_chatgpt_project_url,
+)
 from .claude import chrome_path, open_login_window
 from .command_contract import (
     COMMAND_CONTRACT,
@@ -2563,6 +2574,11 @@ def snapshot() -> dict:
     voice_count = sum(Path(path).is_file() for path in settings.voice_scenario_outputs.values())
     montage_count = montage_ready_count(settings)
     job_by_index = {job.request.index: job for job in jobs}
+    current_production_id_by_title = {
+        str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
+        for item in [*settings.idea_production_items, *settings.idea_scenario_context.values()]
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
     scenarios = []
     for index, title in enumerate(titles):
         job = job_by_index.get(index)
@@ -2572,6 +2588,11 @@ def snapshot() -> dict:
         )
         scenarios.append({
             "index": index,
+            # The browser-driven route must bind an operator's topic to the
+            # durable ProductionItem, never to a sortable renderer position.
+            "productionItemId": str(
+                request.production_item_id if request else current_production_id_by_title.get(str(title).casefold(), "")
+            ).strip(),
             "title": title,
             "state": job.state.value if job else RunState.WAITING.value,
             "result": job.result if job else "",
@@ -2876,6 +2897,19 @@ def snapshot() -> dict:
                 if item.get("topic") == "__newsflow_desktop__"
             ],
         },
+        "browserTopicScenarios": {
+            "projectUrl": str(settings.browser_topic_scenarios.get("project_url", "") or ""),
+            "sessionId": str(settings.browser_topic_scenarios.get("session_id", "") or ""),
+            "requirementsMode": str(settings.browser_topic_scenarios.get("requirements_mode", "text") or "text"),
+            "requirementsText": str(settings.browser_topic_scenarios.get("requirements_text", "") or ""),
+            "requirementsFile": str(settings.browser_topic_scenarios.get("requirements_file", "") or ""),
+            "companionPrompt": str(settings.browser_topic_scenarios.get("companion_prompt", "") or ""),
+            "minimumChars": max(0, int(settings.browser_topic_scenarios.get("minimum_chars", 0) or 0)),
+            "maximumChars": max(0, int(settings.browser_topic_scenarios.get("maximum_chars", 0) or 0)),
+            "concurrency": max(1, int(settings.browser_topic_scenarios.get("concurrency", 1) or 1)),
+            "promptOverrides": dict(settings.browser_topic_scenarios.get("prompt_overrides", {}) or {}),
+            "urlOverrides": dict(settings.browser_topic_scenarios.get("url_overrides", {}) or {}),
+        },
         "coverSettings": {
             "outputFolder": settings.cover_output_folder,
             "operation": settings.cover_operation,
@@ -3052,6 +3086,53 @@ def save_settings_patch(patch: dict) -> dict:
             # must point at the newly selected root rather than a stale folder.
             settings.results_last_export_folder = ""
         settings.results_output_folder = destination
+    save_settings(settings)
+    return snapshot()
+
+
+def _browser_topic_override_map(value: object, *, url_values: bool = False) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise TypeError("Индивидуальные настройки тем должны быть объектом")
+    result: dict[str, str] = {}
+    for raw_id, raw_text in value.items():
+        production_item_id = str(raw_id or "").strip()
+        text = str(raw_text or "").strip()
+        if not production_item_id or not text:
+            continue
+        if len(production_item_id) > 256 or len(text) > 100_000:
+            raise ValueError("Настройка темы слишком длинная")
+        if url_values:
+            text = validate_chatgpt_project_url(text)
+        result[production_item_id] = text
+    return result
+
+
+def save_browser_topic_scenario_settings(payload: dict) -> dict:
+    """Persist direct browser-topic settings without API/provider side effects."""
+    settings = load_settings()
+    project_url = str(payload.get("projectUrl", "")).strip()
+    if project_url:
+        project_url = validate_chatgpt_project_url(project_url)
+    requirements_mode = str(payload.get("requirementsMode", "text")).strip().lower()
+    if requirements_mode not in {"text", "file"}:
+        raise ValueError("Выберите источник требований: текст или файл")
+    minimum = max(0, int(payload.get("minimumChars", 0) or 0))
+    maximum = max(0, int(payload.get("maximumChars", 0) or 0))
+    if (minimum or maximum) and (not minimum or not maximum or minimum > maximum):
+        raise ValueError("Укажите корректный диапазон символов")
+    settings.browser_topic_scenarios = {
+        "project_url": project_url,
+        "session_id": str(payload.get("sessionId", "")).strip(),
+        "requirements_mode": requirements_mode,
+        "requirements_text": str(payload.get("requirementsText", "")),
+        "requirements_file": str(payload.get("requirementsFile", "")).strip(),
+        "companion_prompt": str(payload.get("companionPrompt", "")),
+        "minimum_chars": minimum,
+        "maximum_chars": maximum,
+        "concurrency": max(1, min(10, int(payload.get("concurrency", 1) or 1))),
+        "prompt_overrides": _browser_topic_override_map(payload.get("promptOverrides", {})),
+        "url_overrides": _browser_topic_override_map(payload.get("urlOverrides", {}), url_values=True),
+    }
     save_settings(settings)
     return snapshot()
 
@@ -6945,6 +7026,191 @@ def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job
             context.update(record)
             changed = True
     return changed
+
+
+def _browser_topic_settings(settings: Settings) -> BrowserScenarioSettings:
+    raw = dict(getattr(settings, "browser_topic_scenarios", {}) or {})
+    return BrowserScenarioSettings(
+        project_url=str(raw.get("project_url", "") or "").strip(),
+        requirements_mode=str(raw.get("requirements_mode", "text") or "text").strip(),
+        requirements_text=str(raw.get("requirements_text", "") or ""),
+        requirements_file=str(raw.get("requirements_file", "") or "").strip(),
+        companion_prompt=str(raw.get("companion_prompt", "") or ""),
+        minimum_chars=max(0, int(raw.get("minimum_chars", 0) or 0)),
+        maximum_chars=max(0, int(raw.get("maximum_chars", 0) or 0)),
+        concurrency=max(1, min(10, int(raw.get("concurrency", 1) or 1))),
+        prompt_overrides={str(key): str(value) for key, value in dict(raw.get("prompt_overrides", {}) or {}).items()},
+        url_overrides={str(key): str(value) for key, value in dict(raw.get("url_overrides", {}) or {}).items()},
+    )
+
+
+def _browser_topic_session(settings: Settings, session_id: str) -> ChromeSession:
+    identity = str(session_id or "").strip()
+    session = next((item for item in settings.chrome_sessions if item.profile_id == identity), None)
+    if session is None:
+        raise ValueError("Выберите изолированную сессию Chrome для ChatGPT")
+    if not session.active:
+        raise ValueError("Выбранная сессия Chrome отключена")
+    return session
+
+
+def _browser_topic_identity_map(settings: Settings, titles: list[str], jobs: list[Job]) -> dict[int, str]:
+    """Return the current durable IDs; titles only migrate legacy blank jobs.
+
+    The renderer action is never resolved by this map alone: it must present
+    the exact ID back in ``productionItemIds``.  The title projection merely
+    supplies an ID to legacy jobs before the first browser route is used.
+    """
+    by_title = {
+        str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
+        for item in settings.idea_production_items
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    jobs_by_index = {job.request.index: job for job in jobs}
+    identities: dict[int, str] = {}
+    for index, title in enumerate(titles):
+        job = jobs_by_index.get(index)
+        identity = str(job.request.production_item_id if job else "").strip()
+        identities[index] = identity or by_title.get(str(title).casefold(), "")
+    return identities
+
+
+def _select_browser_topic_tasks(settings: Settings, titles: list[str], jobs: list[Job], payload: dict) -> tuple[list[BrowserTopicTask], dict[int, Job]]:
+    identities = _browser_topic_identity_map(settings, titles, jobs)
+    jobs_by_index = {job.request.index: job for job in jobs}
+    raw_indices = payload.get("indices", [])
+    if not isinstance(raw_indices, list):
+        raise TypeError("indices должен быть списком")
+    requested_indices = [int(index) for index in raw_indices]
+    raw_ids = payload.get("productionItemIds", payload.get("production_item_ids", []))
+    if raw_ids is None:
+        raw_ids = []
+    if not isinstance(raw_ids, list):
+        raise TypeError("productionItemIds должен быть списком durable ProductionItem ID")
+    requested_ids = [str(value).strip() for value in raw_ids if str(value).strip()]
+    if requested_indices:
+        if len(set(requested_indices)) != len(requested_indices) or len(requested_ids) != len(requested_indices):
+            raise ValueError("Выбранные темы устарели или не содержат ProductionItem ID")
+        expected_by_index = dict(zip(requested_indices, requested_ids))
+        for index, expected_id in expected_by_index.items():
+            if not 0 <= index < len(titles) or identities.get(index) != expected_id:
+                raise ValueError("Выбранная тема устарела или не соответствует ProductionItem ID")
+        selected_indices = requested_indices
+    else:
+        selected_indices = list(range(len(titles)))
+    tasks: list[BrowserTopicTask] = []
+    for index in selected_indices:
+        job = jobs_by_index.get(index)
+        identity = identities.get(index, "")
+        if not identity:
+            continue
+        if job is None:
+            job = Job(ScenarioRequest(index, titles[index], "", identity))
+            jobs_by_index[index] = job
+        # Existing completed prose is never silently replaced by a browser run.
+        if job.state is RunState.DONE and str(job.result or "").strip():
+            continue
+        if not str(job.request.production_item_id).strip():
+            job.request = ScenarioRequest(
+                job.request.index, job.request.title, job.request.prompt, identity,
+                job.request.target_chars, job.request.allowed_min, job.request.allowed_max,
+            )
+        tasks.append(BrowserTopicTask(
+            production_item_id=identity,
+            title=titles[index],
+            queue_index=index,
+            existing_scenario=job.result,
+        ))
+    return tasks, jobs_by_index
+
+
+def _browser_topic_export_path(settings: Settings, title: str, production_item_id: str) -> Path:
+    folder = Path(settings.output_folder) / "ChatGPT браузер"
+    folder.mkdir(parents=True, exist_ok=True)
+    # The visible name is the topic.  The durable ID suffix prevents two
+    # different current topics that normalize to the same Windows filename
+    # from overwriting one another.
+    suffix = re.sub(r"[^A-Za-z0-9]", "", production_item_id)[-8:] or "topic"
+    return folder / f"{safe_filename(title)} — {suffix}.txt"
+
+
+def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPTBrowserClient) -> dict:
+    """Generate new prose via the operator's logged-in ChatGPT browser session.
+
+    This is a sibling route to Planner/Writer, not a fallback for them.  A
+    browser task starts from the current ProductionItem topic only and writes
+    its returned plain text back to that same durable session job.
+    """
+    settings = load_settings()
+    titles, jobs = load_session()
+    if ensure_idea_production_items(settings, active_titles=titles):
+        save_settings(settings)
+    browser_settings = _browser_topic_settings(settings)
+    # Validate all global technical prerequisites before changing any job.
+    validate_chatgpt_project_url(browser_settings.project_url)
+    if browser_settings.requirements_mode not in {"text", "file"}:
+        raise ValueError("Выберите источник требований: текст или файл")
+    if browser_settings.requirements_mode == "file" and not Path(browser_settings.requirements_file).is_file():
+        raise ValueError("Файл требований не найден. Выберите его заново.")
+    if not browser_settings.companion_prompt.strip():
+        raise ValueError("Заполните сопроводительное письмо")
+    if not browser_settings.minimum_chars or browser_settings.minimum_chars > browser_settings.maximum_chars:
+        raise ValueError("Укажите корректный диапазон символов")
+    session = _browser_topic_session(settings, str(settings.browser_topic_scenarios.get("session_id", "")))
+    tasks, jobs_by_index = _select_browser_topic_tasks(settings, titles, jobs, payload)
+    if not tasks:
+        return {**snapshot(), "operationResult": {
+            "kind": "browser-topic-scenarios-skip-ready", "count": 0,
+            "message": "Нет новых выбранных тем для ChatGPT. Готовые сценарии не перезаписываются.",
+        }}
+    # Validate all per-item routes before the first visible browser action.
+    for task in tasks:
+        route_url = browser_settings.url_overrides.get(task.production_item_id, browser_settings.project_url)
+        validate_chatgpt_project_url(route_url)
+
+    for task in tasks:
+        job = jobs_by_index[task.queue_index]
+        job.state = RunState.RUNNING
+        job.error = ""
+        job.request = ScenarioRequest(
+            job.request.index, job.request.title, job.request.prompt, task.production_item_id,
+            (browser_settings.minimum_chars + browser_settings.maximum_chars) // 2,
+            browser_settings.minimum_chars, browser_settings.maximum_chars,
+        )
+    save_session(titles, list(jobs_by_index.values()))
+
+    async def run() -> list[BrowserTopicCompletion | BrowserTopicFailure]:
+        async with transport_factory(session) as transport:
+            return await run_browser_topic_tasks(browser_settings, tasks, transport)
+
+    outcomes = asyncio.run(run())
+    for task, outcome in zip(tasks, outcomes):
+        job = jobs_by_index[task.queue_index]
+        if isinstance(outcome, BrowserTopicCompletion) and outcome.text:
+            job.result = outcome.text
+            job.length_status, job.actual_chars = scenario_length_status(job.request, outcome.text)
+            try:
+                _browser_topic_export_path(settings, task.title, task.production_item_id).write_text(
+                    outcome.text.strip() + "\n", encoding="utf-8",
+                )
+            except OSError as exc:
+                # Keep the returned prose recoverable in the selected item,
+                # but do not falsely report a completed TXT export.
+                job.state = RunState.ERROR
+                job.error = f"ChatGPT вернул сценарий, но TXT не удалось сохранить: {exc}"
+            else:
+                job.state = RunState.DONE
+                job.error = ""
+        else:
+            job.state = RunState.ERROR
+            job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
+    save_session(titles, list(jobs_by_index.values()))
+    save_settings(settings)
+    completed = sum(isinstance(item, BrowserTopicCompletion) and bool(item.text) for item in outcomes)
+    return {**snapshot(), "operationResult": {
+        "kind": "browser-topic-scenarios", "count": completed,
+        "message": f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз.",
+    }}
 
 
 def generate_scenarios(payload: dict) -> dict:
@@ -20530,6 +20796,10 @@ def main() -> None:
             result = reconcile_runtime_state(payload if isinstance(payload, dict) else {})
         elif command == "save-settings":
             result = save_settings_patch(payload if isinstance(payload, dict) else {})
+        elif command == "save-browser-topic-scenario-settings":
+            result = save_browser_topic_scenario_settings(payload if isinstance(payload, dict) else {})
+        elif command == "generate-browser-topic-scenarios":
+            result = generate_browser_topic_scenarios(payload if isinstance(payload, dict) else {})
         elif command == "save-obsidian-settings":
             result = save_obsidian_settings(payload if isinstance(payload, dict) else {})
         elif command == "test-obsidian-mcp":

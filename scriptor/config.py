@@ -576,6 +576,10 @@ class Settings:
     scenario_target_chars: int = 0
     scenario_allowed_min: int = 0
     scenario_allowed_max: int = 0
+    # Direct browser-authenticated ChatGPT topic scenario route.  This is
+    # intentionally separate from the current Planner/Writer template and
+    # carries no provider credentials.
+    browser_topic_scenarios: dict = field(default_factory=dict)
     idea_topics: list[str] = field(default_factory=lambda: list(NEWS_TOPICS))
     # Agent proposals are deliberately separate from the user's permanent
     # direction library. They become favourites only after explicit approval.
@@ -1234,6 +1238,8 @@ def load_settings() -> Settings:
             scenario_target_chars=max(0, int(data.get("scenario_target_chars", 0) or 0)),
             scenario_allowed_min=max(0, int(data.get("scenario_allowed_min", 0) or 0)),
             scenario_allowed_max=max(0, int(data.get("scenario_allowed_max", 0) or 0)),
+            browser_topic_scenarios=(dict(data.get("browser_topic_scenarios", {}))
+                                     if isinstance(data.get("browser_topic_scenarios", {}), dict) else {}),
             idea_topics=data.get("idea_topics", Settings().idea_topics),
             idea_suggested_topics=data.get("idea_suggested_topics", []),
             idea_reference_channels=[item for item in data.get("idea_reference_channels", []) if isinstance(item, dict)],
@@ -1735,8 +1741,7 @@ def reconcile_voice_outputs(updates: list[dict]) -> dict:
             restored.pop("next_retry_after_seconds", None)
             for field_name in list(restored):
                 if (field_name.startswith("wproject_")
-                        and (field_name.endswith("_error")
-                             or field_name.endswith("_next_retry_seconds"))):
+                        and field_name.endswith(("_error", "_next_retry_seconds"))):
                     restored.pop(field_name, None)
             voice_jobs[production_item_id] = restored
             voice_outputs[output_key] = str(candidate)
@@ -1906,6 +1911,7 @@ def save_settings(settings: Settings):
         "scenario_target_chars": settings.scenario_target_chars,
         "scenario_allowed_min": settings.scenario_allowed_min,
         "scenario_allowed_max": settings.scenario_allowed_max,
+        "browser_topic_scenarios": settings.browser_topic_scenarios,
         "idea_topics": settings.idea_topics,
         "idea_suggested_topics": settings.idea_suggested_topics,
         "idea_reference_channels": settings.idea_reference_channels,

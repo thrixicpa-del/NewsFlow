@@ -101,6 +101,7 @@ type Page =
   | "dashboard"
   | "ideas"
   | "scenarios"
+  | "browserTopics"
   | "scripts"
   | "templates"
   | "agents"
@@ -198,6 +199,19 @@ export const fallback: NewsFlowSnapshot = {
   ideaRejectedItems: [],
   ideaRoutePresets: [],
   scenarios: [],
+  browserTopicScenarios: {
+    projectUrl: "",
+    sessionId: "",
+    requirementsMode: "text",
+    requirementsText: "",
+    requirementsFile: "",
+    companionPrompt: "",
+    minimumChars: 12000,
+    maximumChars: 18000,
+    concurrency: 1,
+    promptOverrides: {},
+    urlOverrides: {},
+  },
   covers: [],
   coverCounts: { total: 0, ready: 0, missing: 0, failed: 0, generating: 0, queued: 0 },
   seo: [],
@@ -423,6 +437,11 @@ const pageMeta: Record<
     subtitle: "Очередь сценариев, статусы и ручная передача дальше",
     icon: Newspaper,
   },
+  browserTopics: {
+    title: "Сценарии через ChatGPT",
+    subtitle: "Темы из очереди → отдельные вкладки ChatGPT → готовые TXT",
+    icon: MonitorPlay,
+  },
   scripts: {
     title: "Готовые сценарии",
     subtitle: "Просмотр, редактирование и передача готовых текстов дальше",
@@ -545,6 +564,7 @@ const navigation: Array<{
     entries: [
       ["ideas", "Генерация идей", Sparkles],
       ["scenarios", "Новости", Newspaper],
+      ["browserTopics", "ChatGPT — темы", MonitorPlay],
       ["scripts", "Готовые сценарии", FileText],
       ["templates", "Шаблоны", Library],
       ["agents", "Агенты NewsFlow", Bot],
@@ -945,6 +965,9 @@ export function App() {
             refresh={refresh}
           />
         ) : null}
+        {page === "browserTopics" ? (
+          <BrowserTopicScenarios data={data} command={command} />
+        ) : null}
         {page === "scripts" ? (
           <FinishedScripts data={data} go={navigate} command={command} />
         ) : null}
@@ -996,6 +1019,7 @@ export function App() {
           "dashboard",
           "ideas",
           "scenarios",
+          "browserTopics",
           "scripts",
           "templates",
           "agents",
@@ -3028,6 +3052,138 @@ export function Scenarios({
             text="Очередь сохраняется в проекте NewsFlow и не пропадёт после перезапуска."
           />
         )}
+      </section>
+    </div>
+  );
+}
+
+/**
+ * Separate direct-browser route.  It intentionally lists queue *topics* and
+ * does not expose any existing scenario text as an input to ChatGPT.
+ */
+export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapshot; command: Command }) {
+  const saved = data.browserTopicScenarios;
+  const [projectUrl, setProjectUrl] = useState(saved.projectUrl);
+  const [sessionId, setSessionId] = useState(saved.sessionId);
+  const [requirementsMode, setRequirementsMode] = useState<'text' | 'file'>(saved.requirementsMode);
+  const [requirementsText, setRequirementsText] = useState(saved.requirementsText);
+  const [requirementsFile, setRequirementsFile] = useState(saved.requirementsFile);
+  const [companionPrompt, setCompanionPrompt] = useState(saved.companionPrompt);
+  const [minimumChars, setMinimumChars] = useState(String(saved.minimumChars || 12000));
+  const [maximumChars, setMaximumChars] = useState(String(saved.maximumChars || 18000));
+  const [concurrency, setConcurrency] = useState(String(saved.concurrency || 1));
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [overridePrompt, setOverridePrompt] = useState("");
+  const [overrideUrl, setOverrideUrl] = useState("");
+  const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>(saved.promptOverrides);
+  const [urlOverrides, setUrlOverrides] = useState<Record<string, string>>(saved.urlOverrides);
+
+  useEffect(() => {
+    setProjectUrl(saved.projectUrl);
+    setSessionId(saved.sessionId);
+    setRequirementsMode(saved.requirementsMode);
+    setRequirementsText(saved.requirementsText);
+    setRequirementsFile(saved.requirementsFile);
+    setCompanionPrompt(saved.companionPrompt);
+    setMinimumChars(String(saved.minimumChars || 12000));
+    setMaximumChars(String(saved.maximumChars || 18000));
+    setConcurrency(String(saved.concurrency || 1));
+    setPromptOverrides(saved.promptOverrides);
+    setUrlOverrides(saved.urlOverrides);
+  }, [saved]);
+
+  const topics = data.scenarios.filter((item) => item.productionItemId);
+  const selectedTopics = topics.filter((item) => selectedIds.includes(String(item.productionItemId)));
+  const selectAllNew = () => setSelectedIds(topics
+    .filter((item) => item.state !== "Готово" || !item.result.trim())
+    .map((item) => String(item.productionItemId)));
+  const toggle = (productionItemId: string) => setSelectedIds((current) =>
+    current.includes(productionItemId)
+      ? current.filter((value) => value !== productionItemId)
+      : [...current, productionItemId],
+  );
+  const chooseRequirementsFile = async () => {
+    const selected = await window.newsflowDesktop?.chooseBrowserScenarioRequirements();
+    if (selected) setRequirementsFile(selected);
+  };
+  const applyOverrides = () => {
+    if (!selectedIds.length) return;
+    setPromptOverrides((current) => {
+      const next = { ...current };
+      for (const id of selectedIds) {
+        if (overridePrompt.trim()) next[id] = overridePrompt;
+        else delete next[id];
+      }
+      return next;
+    });
+    setUrlOverrides((current) => {
+      const next = { ...current };
+      for (const id of selectedIds) {
+        if (overrideUrl.trim()) next[id] = overrideUrl;
+        else delete next[id];
+      }
+      return next;
+    });
+  };
+  const settingsPayload = () => ({
+      projectUrl,
+      sessionId,
+      requirementsMode,
+      requirementsText,
+      requirementsFile,
+      companionPrompt,
+      minimumChars: Number(minimumChars),
+      maximumChars: Number(maximumChars),
+      concurrency: Number(concurrency),
+      promptOverrides,
+      urlOverrides,
+    });
+  const save = async () => {
+    await command("save-browser-topic-scenario-settings", settingsPayload());
+  };
+  const runSelected = async () => {
+    const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
+    if (!savedState || !selectedTopics.length) return;
+    await command("generate-browser-topic-scenarios", {
+      indices: selectedTopics.map((topic) => topic.index),
+      productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
+    });
+  };
+  const sessionIndex = data.chromeSessions.findIndex((session) => session.id === sessionId);
+  return (
+    <div className="nf-scenarios">
+      <section className="panel scenario-add">
+        <div className="panel-title"><div><b>ChatGPT через браузер — темы очереди</b><small>В ChatGPT уходит только точное название темы. Старый текст сценария не используется как вход.</small></div></div>
+        <div className="form-row">
+          <Input label="URL проекта ChatGPT" value={projectUrl} onChange={(event) => setProjectUrl(event.target.value)} placeholder="https://chatgpt.com/g/.../project" />
+          <Select label="Изолированная сессия Chrome" value={sessionId} onChange={(event) => setSessionId(event.target.value)} options={[
+            { value: "", label: "Выберите сессию" },
+            ...data.chromeSessions.map((session) => ({ value: session.id, label: session.label })),
+          ]} />
+          <Button disabled={sessionIndex < 0} onClick={() => void command("open-chrome-session", { index: sessionIndex, url: projectUrl })}><MonitorPlay size={16} />Войти в ChatGPT</Button>
+        </div>
+        <div className="form-row">
+          <Input label="Минимум символов" type="number" min="1" value={minimumChars} onChange={(event) => setMinimumChars(event.target.value)} />
+          <Input label="Максимум символов" type="number" min="1" value={maximumChars} onChange={(event) => setMaximumChars(event.target.value)} />
+          <Input label="Одновременно вкладок" type="number" min="1" max="10" value={concurrency} onChange={(event) => setConcurrency(event.target.value)} description="Один отдельный чат в каждой вкладке." />
+        </div>
+      </section>
+      <section className="panel scenario-add">
+        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённый файл или текст. Тема и диапазон символов добавляются NewsFlow автоматически.</small></div></div>
+        <Select label="Источник требований" value={requirementsMode} onChange={(event) => setRequirementsMode(event.target.value as 'text' | 'file')} options={[{ value: "text", label: "Вставить текст в сообщение" }, { value: "file", label: "Прикрепить файл к ChatGPT" }]} />
+        {requirementsMode === "text" ? <Textarea label="Требования к стилю и структуре" value={requirementsText} onChange={(event) => setRequirementsText(event.target.value)} placeholder="Вставьте требования…" /> : <div className="form-row"><Input label="Файл требований" value={requirementsFile} readOnly placeholder="Выберите TXT или Markdown" /><Button onClick={() => void chooseRequirementsFile()}><FolderOpen size={16} />Выбрать файл</Button></div>}
+        <Textarea label="Сопроводительное письмо" value={companionPrompt} onChange={(event) => setCompanionPrompt(event.target.value)} placeholder="Укажите требования, общие для каждого сценария. Тему и объём сюда писать не нужно." />
+      </section>
+      <section className="panel scenario-add">
+        <div className="panel-title"><div><b>Темы для запуска</b><small>Привязка выполняется только по ProductionItem ID. Фильтрация, сортировка и положение строки не меняют назначение.</small></div><span className="status">Выбрано: {selectedTopics.length}</span></div>
+        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <div className="form-row">
+          <Textarea label="Prompt для выбранных тем (необязательно)" value={overridePrompt} onChange={(event) => setOverridePrompt(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий prompt" />
+          <Input label="URL для выбранных тем (необязательно)" value={overrideUrl} onChange={(event) => setOverrideUrl(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий URL" />
+          <Button disabled={!selectedIds.length} onClick={applyOverrides}>Применить к выбранным</Button>
+        </div>
+        <div className="table-wrap scenario-table"><table><thead><tr><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Источник prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); return <tr key={id}><td><Checkbox checked={selectedIds.includes(id)} onCheckedChange={() => toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"} · {urlOverrides[id] ? "Отдельный URL" : "Общий URL"}</td></tr>; })}</tbody></table></div>
+        {!topics.length ? <EmptyState title="Нет тем с ProductionItem ID" description="Добавьте темы в очередь сценариев или выполните восстановление состояния проекта." /> : null}
       </section>
     </div>
   );
