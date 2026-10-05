@@ -212,6 +212,61 @@ class VoicerTests(unittest.TestCase):
             self.assertEqual(settings.voice_scenario_outputs, {})
             self.assertEqual(settings.voice_task_statuses, {})
 
+    def test_voice_queue_reconciliation_restores_a_valid_orphaned_mp3_by_production_item(self):
+        """A stale provider error must not hide a completed, exact numbered MP3."""
+        with tempfile.TemporaryDirectory() as output:
+            titles = [f"Тема {index}" for index in range(1, 25)] + ["Тема 25"]
+            orphan = Path(output) / "025 — Тема 25.mp3"
+            orphan.write_bytes(b"recovered-audio")
+            job = Job(
+                ScenarioRequest(24, "Тема 25", "", "production-25"),
+                RunState.DONE,
+                "Текст сценария",
+            )
+            settings = Settings(
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-25": {
+                    "id": "job-25", "production_item_id": "production-25",
+                    "scenario_index": 24, "state": "error", "error": "WProject: queue_full",
+                }},
+                voice_task_statuses={"25": {"label": "Ошибка озвучки", "progress": 0}},
+                idea_production_items=[{"id": "production-25", "title": "Тема 25"}],
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(titles, [job])), \
+                 patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=42.0):
+                result = bridge.reconcile_voice_queue({})
+
+        self.assertEqual(result["operationResult"]["recovered"], 1)
+        self.assertEqual(settings.voice_scenario_outputs["25"], str(orphan))
+        self.assertEqual(settings.voice_task_statuses["25"]["label"], "Готово: восстановлено")
+        self.assertEqual(settings.voice_tts_jobs["production-25"]["state"], "ready")
+        self.assertEqual(settings.voice_tts_jobs["production-25"]["output_path"], str(orphan))
+
+    def test_voice_queue_reconciliation_does_not_touch_files_while_a_worker_is_active(self):
+        with tempfile.TemporaryDirectory() as output:
+            orphan = Path(output) / "001 — Тема 1.mp3"
+            orphan.write_bytes(b"must-not-be-probed")
+            settings = Settings(
+                voicer_output_folder=output,
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1", "scenario_index": 0,
+                    "state": "running",
+                }},
+            )
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
+                 patch.object(bridge, "validate_voiceover_artifact") as validate, \
+                 patch.object(bridge, "save_settings") as save:
+                result = bridge.reconcile_voice_queue({})
+
+        self.assertEqual(result["operationResult"]["blocked"], 1)
+        self.assertEqual(result["operationResult"]["recovered"], 0)
+        validate.assert_not_called()
+        save.assert_not_called()
+
     def test_generated_voice_marks_invalid_audio_as_error_not_ready(self):
         """A provider response is not READY until the saved audio is decodable."""
         class FakeClient:
