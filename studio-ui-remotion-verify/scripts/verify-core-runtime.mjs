@@ -25,6 +25,9 @@ const requiredSources = [
   'scriptor/thumbnail_prompt_v2.py',
   'scriptor/observability.py',
   'bridge_main.py',
+  // PyInstaller collects dynamic montage imports from this build recipe; it is
+  // therefore part of the immutable Frozen Core identity as well.
+  'Scriptor.spec',
 ];
 
 if (lock.format !== 1
