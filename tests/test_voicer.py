@@ -542,6 +542,15 @@ class VoicerTests(unittest.TestCase):
         self.assertAlmostEqual(sleep.call_args.args[0], 40.0)
         self.assertEqual(list(requests), [20.0, 70.1])
 
+    def test_non_windows_ffmpeg_resolution_ignores_bundled_exe(self):
+        from scriptor import timeline
+
+        with patch.object(timeline.sys, "platform", "linux"), \
+             patch.object(timeline.shutil, "which", return_value="/usr/bin/ffmpeg") as which:
+            self.assertEqual(timeline.ffmpeg_executable(), "/usr/bin/ffmpeg")
+
+        which.assert_called_once_with("ffmpeg")
+
     def test_safe_audio_name(self):
         self.assertEqual(safe_audio_name("  <news>?  "), "news.mp3")
 
