@@ -20,6 +20,11 @@ def _format_characters(value: int) -> str:
     return f"{int(value):,}".replace(",", " ")
 
 
+def normalize_browser_response(value: object) -> str:
+    """Preserve returned prose verbatim except for newline normalization."""
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 @dataclass(frozen=True)
 class BrowserScenarioSettings:
     project_url: str = ""
@@ -135,7 +140,7 @@ async def run_browser_topic_tasks(
     scheduling seam pure makes the identity and concurrency contract testable
     without an authenticated browser or a provider call.
     """
-    concurrency = max(1, int(settings.concurrency or 1))
+    concurrency = max(1, min(10, int(settings.concurrency or 1)))
     slots = asyncio.Semaphore(concurrency)
 
     async def run_one(task: BrowserTopicTask) -> BrowserTopicCompletion:
@@ -153,7 +158,7 @@ async def run_browser_topic_tasks(
         return BrowserTopicCompletion(
             production_item_id=_clean_text(task.production_item_id),
             title=task.browser_input_title,
-            text=_clean_text(text),
+            text=normalize_browser_response(text),
         )
 
     outcomes = await asyncio.gather(*(run_one(task) for task in tasks), return_exceptions=True)
