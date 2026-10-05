@@ -228,7 +228,8 @@ class VoicerTests(unittest.TestCase):
                     "scenario_index": 0, "state": "error", "script_hash": script_hash,
                 }},
             )
-            with patch.object(config, "config_path", return_value=settings_path):
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
                 config.save_settings(settings)
                 stat = candidate.stat()
                 result = config.reconcile_voice_outputs([{
@@ -375,7 +376,8 @@ class VoicerTests(unittest.TestCase):
                 RunState.DONE,
                 script,
             )
-            with patch.object(config, "config_path", return_value=settings_path):
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
                 config.save_settings(initial)
 
                 def reconcile_after_concurrent_edit(updates):
@@ -422,7 +424,8 @@ class VoicerTests(unittest.TestCase):
                 RunState.DONE,
                 script,
             )
-            with patch.object(config, "config_path", return_value=settings_path):
+            with patch.object(config, "config_path", return_value=settings_path), \
+                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
                 config.save_settings(initial)
 
                 def reconcile_after_worker_starts(updates):
