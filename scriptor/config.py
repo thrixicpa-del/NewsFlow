@@ -1991,7 +1991,15 @@ def save_settings(settings: Settings):
         }
         data["deleted_scenario_production_ids"] = sorted(deleted_scenario_production_ids)[-10000:]
         if voice_reconcile_updates:
-            reconcile_result = {"applied_indices": [], "blocked": 0, "skipped": 0}
+            reconcile_result = {
+                "applied_indices": [], "blocked": 0, "skipped": 0, "skip_reasons": {},
+            }
+
+            def skip_voice_reconcile(reason: str) -> None:
+                reconcile_result["skipped"] += 1
+                reasons = reconcile_result["skip_reasons"]
+                reasons[reason] = int(reasons.get(reason, 0) or 0) + 1
+
             voice_jobs = dict(data.get("voice_tts_jobs") or {})
             voice_outputs = dict(data.get("voice_scenario_outputs") or {})
             voice_statuses = dict(data.get("voice_task_statuses") or {})
@@ -2008,17 +2016,17 @@ def save_settings(settings: Settings):
                 production_item_id = str(update.get("production_item_id", "")).strip()
                 current = voice_jobs.get(production_item_id)
                 if not production_item_id or not isinstance(current, dict):
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("JOB_MISSING")
                     continue
                 expected_job_id = str(update.get("expected_job_id", "")).strip()
                 if not expected_job_id or str(current.get("id", "")).strip() != expected_job_id:
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("JOB_CHANGED")
                     continue
                 try:
                     scenario_index = int(update.get("scenario_index"))
                     current_index = int(current.get("scenario_index"))
                 except (TypeError, ValueError):
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("INDEX_INVALID")
                     continue
                 output_key = str(update.get("output_key", "")).strip()
                 expected_key = str(scenario_index + 1)
@@ -2031,15 +2039,15 @@ def save_settings(settings: Settings):
                         or str(current.get("production_item_id", "")).strip() != production_item_id
                         or not expected_script_hash
                         or current_script_hash != expected_script_hash):
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("IDENTITY_CHANGED")
                     continue
                 existing_output = Path(str(voice_outputs.get(output_key, "")))
                 if existing_output.is_file():
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("OUTPUT_ALREADY_READY")
                     continue
                 candidate = Path(str(update.get("output_path", "")))
                 if not candidate.is_file() or candidate.suffix.casefold() != ".mp3":
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("CANDIDATE_MISSING")
                     continue
                 try:
                     candidate_stat = candidate.stat()
@@ -2047,12 +2055,12 @@ def save_settings(settings: Settings):
                     expected_mtime_ns = int(update.get("file_mtime_ns"))
                     duration = float(update.get("duration_seconds"))
                 except (OSError, TypeError, ValueError):
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("CANDIDATE_METADATA_INVALID")
                     continue
                 if (candidate_stat.st_size != expected_size
                         or candidate_stat.st_mtime_ns != expected_mtime_ns
                         or duration <= 0.05):
-                    reconcile_result["skipped"] += 1
+                    skip_voice_reconcile("FILE_CHANGED")
                     continue
                 validated_at = str(update.get("validated_at", "")).strip()
                 restored = dict(current)
