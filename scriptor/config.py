@@ -1665,6 +1665,14 @@ def reconcile_voice_outputs(updates: list[dict]) -> dict:
             if production_item_id in deleted_ids:
                 skip("PRODUCTION_ITEM_DELETED")
                 continue
+            expected_deleted_ids_hash = str(update.get("deleted_ids_hash", "")).strip()
+            if expected_deleted_ids_hash:
+                current_deleted_ids_hash = hashlib.sha256(
+                    "\0".join(sorted(deleted_ids)).encode("utf-8")
+                ).hexdigest()
+                if current_deleted_ids_hash != expected_deleted_ids_hash:
+                    skip("TOMBSTONES_CHANGED")
+                    continue
             expected_job_id = str(update.get("expected_job_id", "")).strip()
             if not expected_job_id or str(current.get("id", "")).strip() != expected_job_id:
                 skip("JOB_CHANGED")
