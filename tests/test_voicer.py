@@ -279,7 +279,7 @@ class VoicerTests(unittest.TestCase):
             )
             with patch.object(config, "config_path", return_value=settings_path):
                 config.save_settings(settings)
-                with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
+                with patch.object(bridge, "load_settings", return_value=settings), \
                      patch.object(bridge, "load_session", return_value=(titles, [job])), \
                      patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
                      patch.object(bridge, "validate_voiceover_artifact", return_value=42.0), \
@@ -376,8 +376,7 @@ class VoicerTests(unittest.TestCase):
                 RunState.DONE,
                 script,
             )
-            with patch.object(config, "config_path", return_value=settings_path), \
-                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
+            with patch.object(config, "config_path", return_value=settings_path):
                 config.save_settings(initial)
 
                 def reconcile_after_concurrent_edit(updates):
@@ -386,7 +385,7 @@ class VoicerTests(unittest.TestCase):
                     config.save_settings(concurrent)
                     return config.reconcile_voice_outputs(updates)
 
-                with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
+                with patch.object(bridge, "load_settings", return_value=initial), \
                      patch.object(bridge, "reconcile_voice_outputs", side_effect=reconcile_after_concurrent_edit), \
                      patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
                      patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
@@ -424,8 +423,7 @@ class VoicerTests(unittest.TestCase):
                 RunState.DONE,
                 script,
             )
-            with patch.object(config, "config_path", return_value=settings_path), \
-                 patch.object(config, "migrate_newsflow_storage", side_effect=lambda value, _leaf: str(value or output)):
+            with patch.object(config, "config_path", return_value=settings_path):
                 config.save_settings(initial)
 
                 def reconcile_after_worker_starts(updates):
@@ -434,7 +432,7 @@ class VoicerTests(unittest.TestCase):
                     config.save_settings(concurrent)
                     return config.reconcile_voice_outputs(updates)
 
-                with patch.object(bridge, "load_settings", side_effect=config.load_settings), \
+                with patch.object(bridge, "load_settings", return_value=initial), \
                      patch.object(bridge, "reconcile_voice_outputs", side_effect=reconcile_after_worker_starts), \
                      patch.object(bridge, "load_session", return_value=(["Тема 1"], [job])), \
                      patch.object(bridge, "snapshot", return_value={"refreshed": True}), \
