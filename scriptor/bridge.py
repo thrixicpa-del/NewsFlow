@@ -5845,7 +5845,7 @@ def _numbered_voice_output_index(path: Path) -> int | None:
 
 
 def _reconcilable_voice_candidates(output_folder: Path, index: int, title: str) -> list[Path]:
-    """Find exact numbered/title matches without searching unrelated folders."""
+    """Find exact managed MP3 matches without searching unrelated folders."""
     folders = (output_folder, output_folder / "Импортированные")
     candidates: list[Path] = []
     expected_key = audio_title_key(title)
@@ -5857,7 +5857,10 @@ def _reconcilable_voice_candidates(output_folder: Path, index: int, title: str) 
         except OSError:
             continue
         for path in files:
-            if (not path.is_file() or path.suffix.casefold() not in SUPPORTED_AUDIO_SUFFIXES
+            # Reconciliation is deliberately narrower than manual import:
+            # issue #329 is recovery of a completed managed MP3, never an
+            # opportunistic attachment of another audio format.
+            if (not path.is_file() or path.suffix.casefold() != ".mp3"
                     or _numbered_voice_output_index(path) != index
                     or audio_title_key(path.name) != expected_key):
                 continue
@@ -5866,11 +5869,12 @@ def _reconcilable_voice_candidates(output_folder: Path, index: int, title: str) 
 
 
 def reconcile_voice_queue(payload: dict) -> dict:
-    """Attach exact, validated completed MP3s to their existing voice jobs.
+    """Attach exact, validated completed MP3s to their immutable voice jobs.
 
-    This is an explicit recovery operation, never a TTS launch.  It is held
-    while a durable worker is active so a stale process cannot overwrite a
-    newly recovered READY record.
+    Candidate discovery/validation happens without mutating settings. The
+    final commit is a narrow compare-and-swap performed by save_settings
+    under the cross-process settings lock, so a concurrent worker or settings
+    command cannot be overwritten by this recovery action.
     """
     del payload
     settings = load_settings()
@@ -5885,69 +5889,106 @@ def reconcile_voice_queue(payload: dict) -> dict:
         }}
 
     titles, jobs = load_session()
-    production_ids = {
-        str(item.get("id", "")).strip()
-        for item in settings.idea_production_items
-        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    deleted_ids = {
+        str(value).strip()
+        for value in [
+            *settings.idea_deleted_production_ids,
+            *settings.deleted_scenario_production_ids,
+        ]
+        if str(value).strip()
     }
-    recovered: set[int] = set()
+    updates: list[dict] = []
     ambiguous = 0
     skipped = 0
     output_root = Path(settings.voicer_output_folder)
     for job in jobs:
         index = int(job.request.index)
-        if not 0 <= index < len(titles):
+        if (job.state != RunState.DONE or not job.result.strip()
+                or not 0 <= index < len(titles)):
+            skipped += 1
             continue
         key = str(index + 1)
         current = Path(str(settings.voice_scenario_outputs.get(key, "")))
         if current.is_file():
             continue
+
         production_item_id = str(job.request.production_item_id or "").strip()
         saved = settings.voice_tts_jobs.get(production_item_id)
-        if (not production_item_id or production_item_id not in production_ids
+        actual_script_hash = hashlib.sha256(job.result.encode("utf-8")).hexdigest()
+        saved_script_hash = str(
+            (saved or {}).get("script_hash") or (saved or {}).get("script_revision") or ""
+        ).strip() if isinstance(saved, dict) else ""
+        try:
+            saved_index = int(saved.get("scenario_index")) if isinstance(saved, dict) else -1
+        except (TypeError, ValueError):
+            saved_index = -1
+        if (not production_item_id or production_item_id in deleted_ids
                 or not isinstance(saved, dict)
-                or str(saved.get("production_item_id", "")).strip() != production_item_id):
+                or str(saved.get("production_item_id", "")).strip() != production_item_id
+                or saved_index != index
+                or not saved_script_hash
+                or saved_script_hash != actual_script_hash):
             skipped += 1
             continue
+
         candidates = _reconcilable_voice_candidates(output_root, index, titles[index])
         if len(candidates) > 1:
             first = candidates[0]
             if not all(_same_audio_file(first, candidate) for candidate in candidates[1:]):
                 ambiguous += 1
                 continue
-            # Prefer the managed import copy when the same completed bytes are
-            # present both at the output root and in the import folder.
             candidates.sort(key=lambda path: (path.parent.name != "Импортированные", str(path)))
         if not candidates:
             continue
+
         candidate = candidates[0]
         try:
             duration = validate_voiceover_artifact(candidate)
-        except (OSError, ValueError):
+            stat = candidate.stat()
+        except (OSError, RuntimeError, ValueError):
             skipped += 1
             continue
-        restored = dict(saved)
-        restored.update({"state": "ready", "output_path": str(candidate)})
-        restored.pop("error", None)
-        settings.voice_tts_jobs[production_item_id] = restored
-        settings.voice_scenario_outputs[key] = str(candidate)
-        settings.voice_task_statuses[key] = {
-            "label": "Готово: восстановлено", "progress": 100,
-            "updatedAt": time.strftime("%H:%M:%S"), "durationSeconds": duration,
-            "artifactPath": str(candidate), "jobSnapshotId": str(restored.get("id", "")),
-        }
-        recovered.add(index)
-    if recovered:
+        updates.append({
+            "production_item_id": production_item_id,
+            "expected_job_id": str(saved.get("id", "")),
+            "scenario_index": index,
+            "script_hash": actual_script_hash,
+            "output_key": key,
+            "output_path": str(candidate),
+            "duration_seconds": duration,
+            "validated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "file_size": int(stat.st_size),
+            "file_mtime_ns": int(stat.st_mtime_ns),
+        })
+
+    recovered: set[int] = set()
+    blocked = 0
+    if updates:
+        # save_settings recognises this private narrow-mutation contract:
+        # it reloads the latest JSON under the existing cross-process lock and
+        # applies only voice reconciliation fields after comparing identities.
+        settings._voice_reconcile_updates = updates
         save_settings(settings)
-        _ensure_ready_voice_maps(recovered)
+        reconcile_result = getattr(settings, "_voice_reconcile_result", {})
+        recovered = {
+            int(value) for value in reconcile_result.get("applied_indices", [])
+            if isinstance(value, int) or str(value).isdigit()
+        }
+        blocked = int(reconcile_result.get("blocked", 0) or 0)
+        skipped += int(reconcile_result.get("skipped", 0) or 0)
+        if recovered:
+            _ensure_ready_voice_maps(recovered)
+
     message = f"Восстановлено готовых MP3: {len(recovered)}."
+    if blocked:
+        message += f" Не изменено из-за активной очереди: {blocked}."
     if ambiguous:
         message += f" Не изменено неоднозначных совпадений: {ambiguous}."
     if skipped:
         message += f" Пропущено: {skipped}."
     return {**snapshot(), "operationResult": {
-        "kind": "voice-queue-reconcile", "recovered": len(recovered), "ambiguous": ambiguous,
-        "skipped": skipped, "message": message,
+        "kind": "voice-queue-reconcile", "recovered": len(recovered), "blocked": blocked,
+        "ambiguous": ambiguous, "skipped": skipped, "message": message,
     }}
 
 
