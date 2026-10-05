@@ -8181,7 +8181,7 @@ _COVER_SCENE_EXACT_RISK_MARKERS = frozenset({"war", "fire", "armed", "tank"})
 def _cover_scene_risk_marker_present(text: str, marker: str) -> bool:
     """Match narrow high-risk terms without treating warehouse/firewall/tanker as events."""
     if marker in _COVER_SCENE_EXACT_RISK_MARKERS:
-        return re.search(rf"(?<!\\w){re.escape(marker)}(?!\\w)", text) is not None
+        return re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text) is not None
     return marker in text
 
 
