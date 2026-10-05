@@ -261,6 +261,17 @@ class VoicerTests(unittest.TestCase):
         self.assertEqual(saved["artifact"]["duration_seconds"], 42.0)
         ensure_maps.assert_called_once_with({24})
 
+    def test_voice_queue_reconciliation_matches_newsflow_canonical_long_title_filename(self):
+        with tempfile.TemporaryDirectory() as output:
+            title = "Очень длинная новостная тема " * 8
+            candidate = Path(output) / f"001 — {bridge.safe_filename(title)}.mp3"
+            candidate.write_bytes(b"audio")
+
+            self.assertEqual(
+                bridge._reconcilable_voice_candidates(Path(output), 0, title),
+                [candidate],
+            )
+
     def test_voice_queue_reconciliation_rejects_stale_script_wrong_index_and_non_mp3(self):
         """Number/title alone must never bind old or non-MP3 audio to a current scenario."""
         import hashlib
