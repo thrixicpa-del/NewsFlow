@@ -85,6 +85,9 @@ class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
                 return 1
 
         class Button:
+            @property
+            def first(self):
+                return self
             async def is_visible(self, timeout=0):
                 return False
 
