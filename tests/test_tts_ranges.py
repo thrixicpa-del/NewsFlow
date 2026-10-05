@@ -681,6 +681,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         status = settings.voice_task_statuses["1"]
         self.assertEqual(saved["state"], "queued")
         self.assertEqual(saved["wproject_queue_full_retries"], 1)
+        self.assertNotIn("wproject_queue_full_next_retry_seconds", saved)
         self.assertEqual(settings.voice_scenario_outputs.get("1", ""), "")
         self.assertIn("очередь", status["label"].casefold())
         self.assertNotIn("ошибка", status["label"].casefold())
@@ -729,6 +730,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         status = settings.voice_task_statuses["1"]
         self.assertEqual(saved["state"], "queued")
         self.assertEqual(saved["wproject_rate_limit_retries"], 1)
+        self.assertNotIn("wproject_rate_limit_next_retry_seconds", saved)
         self.assertEqual(settings.voice_scenario_outputs.get("1", ""), "")
         self.assertIn("лимит", status["label"].casefold())
         self.assertNotIn("ошибка", status["label"].casefold())
@@ -786,6 +788,88 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         self.assertEqual(PollingRateLimitedWProject.waited, 2)
         self.assertEqual(PollingRateLimitedWProject.observed_poll_seconds, [3.0, 3.0])
         self.assertEqual(settings.voice_tts_jobs["production-1"]["state"], "ready")
+
+    def test_wproject_rate_limited_fallback_stays_queued_and_resumes_saved_contract(self):
+        """A backpressured WProject reserve stays queued and Resume keeps that reserve."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, VoiceGenKey, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class FailingVoiceGen:
+            calls: ClassVar[int] = 0
+
+            def __init__(self, _key):
+                pass
+
+            def synthesize(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise RuntimeError("503 VoiceGen temporarily unavailable")
+
+        class RateLimitedThenAcceptedWProject:
+            created_with: ClassVar[list[tuple[str, str]]] = []
+            waited: ClassVar[list[str]] = []
+
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, _text, _filename, profile, *, threads, idempotency_key):
+                type(self).created_with.append((profile.voice_id, idempotency_key))
+                if len(type(self).created_with) == 1:
+                    raise RuntimeError("WProject: 429 лимит WProject: {'code': 'rate_limited'}")
+                return "fallback-after-rate-limit"
+
+            def wait_download(self, task_id, progress=None):
+                type(self).waited.append(task_id)
+                return b"WPROJECT-FALLBACK"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                voice_queue_concurrency=1,
+                voice_key_failover=True,
+                voicegen_api_keys=[VoiceGenKey("VG", "voicegen-key")],
+                wproject_api_keys=[WProjectKey("W", "wproject-key")],
+                voice_profiles=[
+                    {"id": "primary", "name": "Primary", "provider": "voicegen",
+                     "voice_id": "primary-voice"},
+                    {"id": "fallback-w", "name": "Fallback W", "provider": "wproject",
+                     "voice_id": "fallback-speaker", "fallback": True},
+                ],
+                voice_default_profile_id="primary",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", FailingVoiceGen), \
+                 patch.object(bridge, "WProjectClient", RateLimitedThenAcceptedWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0), \
+                 patch.object(bridge, "_WPROJECT_RATE_LIMIT_MAX_RETRIES", 0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+                saved = settings.voice_tts_jobs["production-1"]
+                self.assertEqual(saved["state"], "queued")
+                self.assertEqual(saved["active_provider"], "wproject")
+                self.assertEqual(saved["active_settings"]["voice_id"], "fallback-speaker")
+                stable_key = saved["provider_idempotency_key"]
+
+                bridge.generate_voice({"indices": [0], "resume": True})
+
+        self.assertEqual(FailingVoiceGen.calls, 3)
+        self.assertEqual(
+            RateLimitedThenAcceptedWProject.created_with,
+            [("fallback-speaker", stable_key), ("fallback-speaker", stable_key)],
+        )
+        self.assertEqual(RateLimitedThenAcceptedWProject.waited, ["fallback-after-rate-limit"])
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["remote_task"]["task_id"], "fallback-after-rate-limit")
 
     def test_wproject_one_failed_task_does_not_cancel_its_neighbor(self):
         """Queue completion is isolated per ProductionItem, including WProject failures."""
