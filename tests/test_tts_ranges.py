@@ -585,6 +585,355 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
             TemporarilyUnavailableWProject.idempotency_keys[0],
         )
 
+    def test_wproject_queue_full_retries_without_discarding_the_durable_job(self):
+        """A shared remote queue-full response is backpressure, not a failed script."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class QueueFullThenAcceptedWProject:
+            idempotency_keys: ClassVar[list[str]] = []
+
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, _text, _filename, _profile, *, threads, idempotency_key):
+                type(self).idempotency_keys.append(idempotency_key)
+                if len(type(self).idempotency_keys) == 1:
+                    raise RuntimeError(
+                        "WProject: {'code': 'queue_full', 'message': 'Already 5 tasks at the limit of 5'}"
+                    )
+                return "remote-after-capacity"
+
+            def wait_download(self, task_id, progress=None):
+                self.task_id = task_id
+                return b"WPROJECT"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                voice_queue_concurrency=10,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_profiles=[{
+                    "id": "w", "name": "W", "provider": "wproject", "voice_id": "speaker",
+                }],
+                voice_default_profile_id="w",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", QueueFullThenAcceptedWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=24.0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        saved = settings.voice_tts_jobs["production-1"]
+        self.assertEqual(QueueFullThenAcceptedWProject.idempotency_keys[0], QueueFullThenAcceptedWProject.idempotency_keys[1])
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["remote_task"]["task_id"], "remote-after-capacity")
+        self.assertTrue(settings.voice_scenario_outputs["1"].endswith(".mp3"))
+
+    def test_wproject_queue_full_keeps_the_job_queued_after_bounded_wait(self):
+        """Exhausted remote capacity must not turn a durable local job into an error."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class AlwaysFullWProject:
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, *_args, **_kwargs):
+                raise RuntimeError("WProject: {'code': 'queue_full'}")
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_profiles=[{
+                    "id": "w", "name": "W", "provider": "wproject", "voice_id": "speaker",
+                }],
+                voice_default_profile_id="w",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", AlwaysFullWProject), \
+                 patch.object(bridge, "_WPROJECT_QUEUE_FULL_MAX_RETRIES", 0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        saved = settings.voice_tts_jobs["production-1"]
+        status = settings.voice_task_statuses["1"]
+        self.assertEqual(saved["state"], "queued")
+        self.assertEqual(saved["wproject_queue_full_retries"], 1)
+        self.assertNotIn("wproject_queue_full_next_retry_seconds", saved)
+        self.assertEqual(settings.voice_scenario_outputs.get("1", ""), "")
+        self.assertIn("очередь", status["label"].casefold())
+        self.assertNotIn("ошибка", status["label"].casefold())
+
+    def test_wproject_rate_limit_keeps_the_job_queued_after_bounded_wait(self):
+        """HTTP 429 is provider backpressure, never a terminal voice failure."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class AlwaysRateLimitedWProject:
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, *_args, **_kwargs):
+                raise RuntimeError(
+                    "WProject: 429 лимит WProject: {'code': 'rate_limited', "
+                    "'message': 'Не более 300 запросов в минуту.'}"
+                )
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_profiles=[{
+                    "id": "w", "name": "W", "provider": "wproject", "voice_id": "speaker",
+                }],
+                voice_default_profile_id="w",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", AlwaysRateLimitedWProject), \
+                 patch.object(bridge, "_WPROJECT_RATE_LIMIT_MAX_RETRIES", 0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        saved = settings.voice_tts_jobs["production-1"]
+        status = settings.voice_task_statuses["1"]
+        self.assertEqual(saved["state"], "queued")
+        self.assertEqual(saved["wproject_rate_limit_retries"], 1)
+        self.assertNotIn("wproject_rate_limit_next_retry_seconds", saved)
+        self.assertEqual(settings.voice_scenario_outputs.get("1", ""), "")
+        self.assertIn("лимит", status["label"].casefold())
+        self.assertNotIn("ошибка", status["label"].casefold())
+
+    def test_wproject_rate_limit_while_polling_resumes_the_accepted_task_only(self):
+        """A 429 during polling must not resubmit an already accepted script."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class PollingRateLimitedWProject:
+            created = 0
+            waited = 0
+            observed_poll_seconds: ClassVar[list[float]] = []
+
+            def __init__(self, _key):
+                self.poll_seconds = 2.0
+
+            def create_task(self, *_args, **_kwargs):
+                type(self).created += 1
+                return "accepted-task-1"
+
+            def wait_download(self, _task_id, progress=None):
+                type(self).waited += 1
+                type(self).observed_poll_seconds.append(self.poll_seconds)
+                if type(self).waited == 1:
+                    raise RuntimeError("WProject: 429 лимит WProject: {'code': 'rate_limited'}")
+                return b"WPROJECT"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_profiles=[{
+                    "id": "w", "name": "W", "provider": "wproject", "voice_id": "speaker",
+                }],
+                voice_default_profile_id="w",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", PollingRateLimitedWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=24.0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+        self.assertEqual(PollingRateLimitedWProject.created, 1)
+        self.assertEqual(PollingRateLimitedWProject.waited, 2)
+        self.assertEqual(PollingRateLimitedWProject.observed_poll_seconds, [3.0, 3.0])
+        self.assertEqual(settings.voice_tts_jobs["production-1"]["state"], "ready")
+
+    def test_wproject_resume_gets_fresh_bounded_backoff_after_previous_exhaustion(self):
+        """Persisted diagnostics must not consume the retry budget of a later Resume."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class QueueFullThenAcceptedWProject:
+            calls: ClassVar[int] = 0
+            idempotency_keys: ClassVar[list[str]] = []
+
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, _text, _filename, _profile, *, threads, idempotency_key):
+                type(self).calls += 1
+                type(self).idempotency_keys.append(idempotency_key)
+                if type(self).calls == 1:
+                    raise RuntimeError("WProject: {'code': 'queue_full'}")
+                return "accepted-after-resume"
+
+            def wait_download(self, task_id, progress=None):
+                self.task_id = task_id
+                return b"WPROJECT"
+
+        with tempfile.TemporaryDirectory() as folder:
+            saved = {
+                "id": "job-1",
+                "production_item_id": "production-1",
+                "scenario_index": 0,
+                "state": "queued",
+                "provider": "wproject",
+                "script_hash": "",
+                "settings": {"provider": "wproject", "voice_id": "speaker", "task_threads": 10},
+                "provider_idempotency_key": "stable-key",
+                "wproject_queue_full_retries": 19,
+            }
+            settings = Settings(
+                voicer_output_folder=folder,
+                wproject_api_keys=[WProjectKey("W", "test", streams=10)],
+                voice_tts_jobs={"production-1": saved},
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "WProjectClient", QueueFullThenAcceptedWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0), \
+                 patch.object(bridge, "_WPROJECT_QUEUE_FULL_MAX_RETRIES", 1), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0], "resume": True})
+
+        self.assertEqual(QueueFullThenAcceptedWProject.calls, 2)
+        self.assertEqual(QueueFullThenAcceptedWProject.idempotency_keys, ["stable-key", "stable-key"])
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["wproject_queue_full_retries"], 20)
+        self.assertEqual(saved["remote_task"]["task_id"], "accepted-after-resume")
+
+    def test_wproject_rate_limited_fallback_stays_queued_and_resumes_saved_contract(self):
+        """A backpressured WProject reserve stays queued and Resume keeps that reserve."""
+        import tempfile
+        from unittest.mock import patch
+
+        from scriptor import bridge
+        from scriptor.config import Settings, VoiceGenKey, WProjectKey
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        class FailingVoiceGen:
+            calls: ClassVar[int] = 0
+
+            def __init__(self, _key):
+                pass
+
+            def synthesize(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise RuntimeError("503 VoiceGen temporarily unavailable")
+
+        class RateLimitedThenAcceptedWProject:
+            created_with: ClassVar[list[tuple[str, str]]] = []
+            waited: ClassVar[list[str]] = []
+
+            def __init__(self, _key):
+                pass
+
+            def create_task(self, _text, _filename, profile, *, threads, idempotency_key):
+                type(self).created_with.append((profile.voice_id, idempotency_key))
+                if len(type(self).created_with) == 1:
+                    raise RuntimeError("WProject: 429 лимит WProject: {'code': 'rate_limited'}")
+                return "fallback-after-rate-limit"
+
+            def wait_download(self, task_id, progress=None):
+                type(self).waited.append(task_id)
+                return b"WPROJECT-FALLBACK"
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                voicer_output_folder=folder,
+                voice_queue_concurrency=1,
+                voice_key_failover=True,
+                voicegen_api_keys=[VoiceGenKey("VG", "voicegen-key")],
+                wproject_api_keys=[WProjectKey("W", "wproject-key")],
+                voice_profiles=[
+                    {"id": "primary", "name": "Primary", "provider": "voicegen",
+                     "voice_id": "primary-voice"},
+                    {"id": "fallback-w", "name": "Fallback W", "provider": "wproject",
+                     "voice_id": "fallback-speaker", "fallback": True},
+                ],
+                voice_default_profile_id="primary",
+                idea_production_items=[{"id": "production-1", "title": "Тема"}],
+            )
+            job = Job(ScenarioRequest(0, "Тема", ""), RunState.DONE, "Текст сценария", "")
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "save_settings"), \
+                 patch.object(bridge, "load_session", return_value=(["Тема"], [job])), \
+                 patch.object(bridge, "snapshot", return_value={"ok": True}), \
+                 patch.object(bridge, "VoiceGenClient", FailingVoiceGen), \
+                 patch.object(bridge, "WProjectClient", RateLimitedThenAcceptedWProject), \
+                 patch.object(bridge, "validate_voiceover_artifact", return_value=1.0), \
+                 patch.object(bridge, "_WPROJECT_RATE_LIMIT_MAX_RETRIES", 0), \
+                 patch.object(bridge.time, "sleep"):
+                bridge.generate_voice({"indices": [0]})
+
+                saved = settings.voice_tts_jobs["production-1"]
+                self.assertEqual(saved["state"], "queued")
+                self.assertEqual(saved["active_provider"], "wproject")
+                self.assertEqual(saved["active_settings"]["voice_id"], "fallback-speaker")
+                stable_key = saved["provider_idempotency_key"]
+
+                bridge.generate_voice({"indices": [0], "resume": True})
+
+        self.assertEqual(FailingVoiceGen.calls, 3)
+        self.assertEqual(
+            RateLimitedThenAcceptedWProject.created_with,
+            [("fallback-speaker", stable_key), ("fallback-speaker", stable_key)],
+        )
+        self.assertEqual(RateLimitedThenAcceptedWProject.waited, ["fallback-after-rate-limit"])
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["remote_task"]["task_id"], "fallback-after-rate-limit")
+
     def test_wproject_one_failed_task_does_not_cancel_its_neighbor(self):
         """Queue completion is isolated per ProductionItem, including WProject failures."""
         import tempfile

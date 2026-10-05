@@ -13271,6 +13271,39 @@ def _can_failover_voice(error: Exception) -> bool:
     ))
 
 
+_WPROJECT_QUEUE_FULL_MAX_RETRIES = 18
+_WPROJECT_RATE_LIMIT_MAX_RETRIES = 18
+# At ten local workers the client's historic 2s status polling reaches the
+# provider's 300 RPM account ceiling before POST/download requests are counted.
+# Three seconds leaves headroom while retaining ten concurrent durable jobs.
+_WPROJECT_SAFE_POLL_SECONDS = 3.0
+
+
+class _WProjectBackpressureDeferred(RuntimeError):
+    """WProject remained temporarily unavailable after bounded backpressure."""
+
+
+def _wproject_queue_full(error: Exception) -> bool:
+    """Recognise WProject's explicit shared-queue backpressure response."""
+    return "queue_full" in str(error).casefold()
+
+
+def _wproject_rate_limited(error: Exception) -> bool:
+    """Recognise WProject's documented per-minute request backpressure."""
+    message = str(error).casefold()
+    return "rate_limited" in message or ("wproject" in message and "429" in message)
+
+
+def _wproject_queue_full_delay(attempt: int) -> int:
+    """Bound polite retries while a shared WProject slot is unavailable."""
+    return min(60, 5 * (2 ** max(0, int(attempt) - 1)))
+
+
+def _wproject_rate_limit_delay(attempt: int) -> int:
+    """Give the provider's rolling per-minute window time to recover."""
+    return min(60, 5 * (2 ** max(0, int(attempt) - 1)))
+
+
 def _voice_job_resume_safe(saved: dict) -> bool:
     if not isinstance(saved, dict):
         return False
@@ -13526,60 +13559,144 @@ def generate_voice(payload: dict) -> dict:
         wait_until_resumed()
         job = jobs_by_index[index]
         job_snapshot = snapshots_by_index[index]
-        remote_task = job_snapshot.get("remote_task")
-        if (isinstance(remote_task, dict)
-                and str(remote_task.get("provider", "")).casefold() == "wproject"
-                and str(remote_task.get("task_id", "")).strip()):
-            # The remote task has already been accepted by WProject.  Never
-            # submit the same script again just because NewsFlow restarted or
-            # the polling connection was interrupted: resume that exact task.
-            persisted_label = str(remote_task.get("key_label", "")).strip()
-            resumed_key = next((item for item in wproject_keys if item.label == persisted_label), key)
-            task_id = str(remote_task["task_id"])
-            set_task_status(index, "WProject: продолжаем созданную задачу", 10)
-            content = WProjectClient(resumed_key.secret).wait_download(
-                task_id, progress=lambda label, percent: set_task_status(index, label, percent))
-        else:
-            set_task_status(index, "WProject: готовим задачу", 5)
-            candidates_keys = [key] + [item for item in wproject_keys if item is not key]
-            last_error: Exception | None = None
-            content: bytes | None = None
-            idempotency_key = str(job_snapshot.get("provider_idempotency_key") or "").strip()
-            if not idempotency_key:
-                idempotency_key = f"newsflow:voice:{job_snapshot.get('id') or uuid.uuid4().hex!s}"[:128]
-                job_snapshot["provider_idempotency_key"] = idempotency_key
-            # The provider can accept a POST while the local process loses its
-            # response. Persist the key first so every retry represents the
-            # same remote request instead of a second billable task.
+        set_task_status(index, "WProject: готовим задачу", 5)
+        candidates_keys = [key] + [item for item in wproject_keys if item is not key]
+        last_error: Exception | None = None
+        content: bytes | None = None
+        idempotency_key = str(job_snapshot.get("provider_idempotency_key") or "").strip()
+        if not idempotency_key:
+            idempotency_key = f"newsflow:voice:{job_snapshot.get('id') or uuid.uuid4().hex!s}"[:128]
+            job_snapshot["provider_idempotency_key"] = idempotency_key
+        # The provider can accept a POST while the local process loses its
+        # response. Persist the key first so every retry represents the same
+        # remote request instead of a second billable task.
+        # Retry limits are per active queue command. Persisted counters are
+        # cumulative diagnostics only; a later safe Resume gets a fresh bounded
+        # backoff window instead of being exhausted by an earlier process.
+        queue_full_attempt = 0
+        rate_limit_attempt = 0
+        queue_full_total = int(job_snapshot.get("wproject_queue_full_retries", 0) or 0)
+        rate_limit_total = int(job_snapshot.get("wproject_rate_limit_retries", 0) or 0)
+
+        def wproject_client(api_key: str):
+            client = WProjectClient(api_key)
+            # Keep the account-wide HTTP rate below WProject's 300 RPM limit
+            # even when all ten configured local queue workers are polling.
+            if hasattr(client, "poll_seconds"):
+                client.poll_seconds = max(_WPROJECT_SAFE_POLL_SECONDS, float(client.poll_seconds))
+            return client
+
+        def defer_backpressure(kind: str, error: Exception) -> int:
+            nonlocal queue_full_attempt, rate_limit_attempt, queue_full_total, rate_limit_total
+            if kind == "queue_full":
+                queue_full_attempt += 1
+                queue_full_total += 1
+                attempt, total, maximum = (
+                    queue_full_attempt, queue_full_total, _WPROJECT_QUEUE_FULL_MAX_RETRIES,
+                )
+                delay = _wproject_queue_full_delay(attempt)
+                label = "очередь занята"
+                exhausted = "очередь всё ещё занята"
+            else:
+                rate_limit_attempt += 1
+                rate_limit_total += 1
+                attempt, total, maximum = (
+                    rate_limit_attempt, rate_limit_total, _WPROJECT_RATE_LIMIT_MAX_RETRIES,
+                )
+                delay = _wproject_rate_limit_delay(attempt)
+                label = "лимит запросов"
+                exhausted = "лимит запросов всё ещё действует"
+            job_snapshot.update(
+                state="queued",
+                **{
+                    f"wproject_{kind}_retries": total,
+                    f"wproject_{kind}_next_retry_seconds": delay,
+                    f"wproject_{kind}_error": _voice_error_reason(error),
+                },
+            )
+            if attempt > maximum:
+                # The command is about to return, so there is no scheduled
+                # retry anymore. Do not persist a misleading future delay.
+                job_snapshot.pop(f"wproject_{kind}_next_retry_seconds", None)
+                set_task_status(index, f"WProject: {exhausted} — задача сохранена в очереди", 5)
+                raise _WProjectBackpressureDeferred(
+                    f"WProject {exhausted}; задача сохранена и ждёт безопасного продолжения"
+                )
+            set_task_status(index, f"WProject: {label} — повтор {attempt}/{maximum} через {delay} с", 5)
+            return delay
+
+        while content is None:
+            # A pause can arrive during a backoff sleep. Re-check it before
+            # every remote create/poll attempt, not only when this job starts.
+            wait_until_resumed()
+            retry_for_backpressure = False
+            delay = 0
             mark_provider_running(index, "wproject")
-            for attempt_key in candidates_keys:
+            remote_task = job_snapshot.get("remote_task")
+            if (isinstance(remote_task, dict)
+                    and str(remote_task.get("provider", "")).casefold() == "wproject"
+                    and str(remote_task.get("task_id", "")).strip()):
+                # Once WProject accepted a task, resume only that exact task;
+                # neither a 429 nor a restart may submit the script again.
+                persisted_label = str(remote_task.get("key_label", "")).strip()
+                resumed_key = next((item for item in wproject_keys if item.label == persisted_label), key)
                 try:
-                    client = WProjectClient(attempt_key.secret)
-                    task_id = client.create_task(
-                        job.result, f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
-                        threads=max(1, int(profile.task_threads)), idempotency_key=idempotency_key)
-                    # This durable remote identity is written before polling
-                    # or downloading.  A restart now resumes the accepted
-                    # WProject task rather than submitting a duplicate.
-                    job_snapshot["remote_task"] = {
-                        "provider": "wproject", "task_id": str(task_id),
-                        "key_label": attempt_key.label, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    }
-                    job_snapshot["state"] = "running"
-                    persist_voice_state()
-                    content = client.wait_download(
-                        str(task_id), progress=lambda label, percent: set_task_status(index, label, percent))
-                    break
+                    set_task_status(index, "WProject: продолжаем созданную задачу", 10)
+                    content = wproject_client(resumed_key.secret).wait_download(
+                        str(remote_task["task_id"]),
+                        progress=lambda label, percent: set_task_status(index, label, percent),
+                    )
                 except _BRIDGE_OPERATION_ERRORS as exc:
                     last_error = exc
-                    # Once WProject returned an id, it owns the task.  Do not
-                    # fail over to another key and accidentally create a
-                    # second paid request; the outer retry will resume it.
-                    if isinstance(job_snapshot.get("remote_task"), dict):
+                    if _wproject_rate_limited(exc):
+                        delay = defer_backpressure("rate_limit", exc)
+                        retry_for_backpressure = True
+                    else:
                         raise
-                    if not settings.voice_key_failover or not _can_failover_voice(exc):
-                        raise
-                    set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+            else:
+                for attempt_key in candidates_keys:
+                    try:
+                        client = wproject_client(attempt_key.secret)
+                        task_id = client.create_task(
+                            job.result, f"{index + 1:03d} — {safe_filename(job.request.title)}", profile,
+                            threads=max(1, int(profile.task_threads)), idempotency_key=idempotency_key)
+                        # This durable remote identity is written before polling
+                        # or downloading. A restart now resumes the accepted
+                        # WProject task rather than submitting a duplicate.
+                        job_snapshot["remote_task"] = {
+                            "provider": "wproject", "task_id": str(task_id),
+                            "key_label": attempt_key.label, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        }
+                        job_snapshot["state"] = "running"
+                        for kind in ("queue_full", "rate_limit"):
+                            job_snapshot.pop(f"wproject_{kind}_next_retry_seconds", None)
+                            job_snapshot.pop(f"wproject_{kind}_error", None)
+                        persist_voice_state()
+                        content = client.wait_download(
+                            str(task_id), progress=lambda label, percent: set_task_status(index, label, percent))
+                        break
+                    except _BRIDGE_OPERATION_ERRORS as exc:
+                        last_error = exc
+                        if _wproject_queue_full(exc):
+                            delay = defer_backpressure("queue_full", exc)
+                            retry_for_backpressure = True
+                            break
+                        if _wproject_rate_limited(exc):
+                            delay = defer_backpressure("rate_limit", exc)
+                            retry_for_backpressure = True
+                            break
+                        # Once WProject returned an id, it owns the task. Do not
+                        # fail over to another key and accidentally create a
+                        # second paid request; the next loop resumes that task.
+                        if isinstance(job_snapshot.get("remote_task"), dict):
+                            raise
+                        if not settings.voice_key_failover or not _can_failover_voice(exc):
+                            raise
+                        set_task_status(index, f"Лимит/ключ {attempt_key.label} — пробуем следующий", 12)
+            if retry_for_backpressure:
+                wait_until_resumed()
+                time.sleep(delay)
+                continue
             if content is None:
                 raise last_error or RuntimeError("WProject не принял задачу")
         set_task_status(index, "WProject: сохраняем MP3", 96)
@@ -13641,6 +13758,10 @@ def generate_voice(payload: dict) -> dict:
                     continue
                 output = _save_voice_candidate(settings, index, job.request.title, content)
                 return index, str(output)
+            except _WProjectBackpressureDeferred:
+                # Provider capacity/rate backpressure on a WProject reserve is
+                # still a durable queued job, not a failed fallback.
+                raise
             except _BRIDGE_OPERATION_ERRORS:
                 continue
         raise RuntimeError("Резервные активные голоса не смогли принять задачу")
@@ -13690,7 +13811,7 @@ def generate_voice(payload: dict) -> dict:
         state = str(snapshot.get("state", "")).casefold()
         resume_active_provider = (
             resume_requested
-            and state in {"running", "interrupted", "retrying"}
+            and state in {"queued", "running", "interrupted", "retrying"}
             and _voice_job_resume_safe(snapshot)
             and str(snapshot.get("active_provider") or "").strip()
         )
@@ -13719,6 +13840,11 @@ def generate_voice(payload: dict) -> dict:
                         if provider == "voicegen":
                             return voicegen_task(index, key, profile)
                         return wproject_task(index, key, profile)
+                    except _WProjectBackpressureDeferred:
+                        # WProject already persisted the immutable job as queued.
+                        # Do not consume the generic three-attempt loop or route
+                        # a provider capacity/rate condition to another service.
+                        raise
                     except _BRIDGE_OPERATION_ERRORS as error:
                         # 429/network/service overload is a queue condition,
                         # not a reason to discard the immutable job or its
@@ -13777,6 +13903,10 @@ def generate_voice(payload: dict) -> dict:
                 set_task_status(completed_index, "Готово", 100, artifact={
                     "artifactPath": output, "durationSeconds": duration,
                 })
+            except _WProjectBackpressureDeferred:
+                # The complete immutable contract stays queued. It can resume
+                # without rebuilding the script or creating a duplicate task.
+                continue
             except _BRIDGE_OPERATION_ERRORS as exc:
                 if _can_failover_voice(exc):
                     try:
@@ -13791,6 +13921,11 @@ def generate_voice(payload: dict) -> dict:
                         set_task_status(completed_index, "Готово через резервный сервис", 100, artifact={
                             "artifactPath": output, "durationSeconds": duration,
                         })
+                        continue
+                    except _WProjectBackpressureDeferred:
+                        # The reserve WProject contract is already persisted as
+                        # queued. Keep it resumable instead of converting the
+                        # capacity/rate condition into a terminal voice error.
                         continue
                     except _BRIDGE_OPERATION_ERRORS:
                         pass
