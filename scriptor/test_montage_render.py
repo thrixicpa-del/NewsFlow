@@ -63,6 +63,30 @@ class MontageRenderTests(unittest.TestCase):
             raise AssertionError(made.stderr[-1000:])
         return clip
 
+    def test_gpu_capability_requires_a_working_nvenc_device_and_caches_the_probe(self):
+        """An advertised encoder is not enough when CUDA/GPU initialisation fails."""
+        ffmpeg = "C:/NewsFlow/fake-ffmpeg.exe"
+        timeline_module._GPU_TIMELINE_CAPABILITY_CACHE.pop(ffmpeg, None)
+        failed_probe = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=" V..... h264_nvenc NVIDIA NVENC H.264 encoder",
+            stderr="Cannot load nvcuda.dll",
+        )
+        try:
+            with patch.object(timeline_module.subprocess, "run", return_value=failed_probe) as run:
+                first = timeline_module.gpu_timeline_capability(ffmpeg)
+                second = timeline_module.gpu_timeline_capability(ffmpeg)
+            self.assertFalse(first["available"])
+            self.assertFalse(second["available"])
+            self.assertIn("nvcuda", str(first["reason"]).casefold())
+            self.assertEqual(run.call_count, 1)
+            command = run.call_args.args[0]
+            self.assertIn("lavfi", command)
+            self.assertIn("h264_nvenc", command)
+        finally:
+            timeline_module._GPU_TIMELINE_CAPABILITY_CACHE.pop(ffmpeg, None)
+
     def test_gpu_timeline_rejects_missing_nvenc_without_cpu_fallback(self):
         """The explicit GPU route must fail instead of silently using CPU FFmpeg."""
         project = TimelineProject(
