@@ -446,6 +446,7 @@ def gpu_timeline_capability(ffmpeg: str | None = None) -> dict[str, object]:
             binary, "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1:d=1",
             "-frames:v", "1", "-an", "-c:v", "h264_nvenc",
+            "-preset", "p4", "-cq", "20", "-b:v", "0",
             "-f", "null", "-",
         ],
         capture_output=True,
