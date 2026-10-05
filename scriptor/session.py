@@ -115,6 +115,7 @@ _SESSION_REPLACE_RETRY_SECONDS = 0.05
 _SESSION_WRITE_LOCK_GUARD = threading.Lock()
 _SESSION_WRITE_LOCKS: dict[str, threading.Lock] = {}
 _SESSION_OBSERVED_REVISIONS: dict[str, str | None] = {}
+_SESSION_THREAD_STATE = threading.local()
 _TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32})
 
 
@@ -137,9 +138,28 @@ def _session_revision(path: Path) -> str | None:
     return sha256(path.read_bytes()).hexdigest()
 
 
+def _thread_observed_revisions() -> dict[str, str | None]:
+    revisions = getattr(_SESSION_THREAD_STATE, "observed_revisions", None)
+    if revisions is None:
+        revisions = {}
+        _SESSION_THREAD_STATE.observed_revisions = revisions
+    return revisions
+
+
 def _remember_session_revision(path: Path, revision: str | None) -> None:
-    """Remember the revision of the exact snapshot or publication already locked."""
-    _SESSION_OBSERVED_REVISIONS[str(path.resolve()).casefold()] = revision
+    """Remember a revision already known to be authoritative under the session lock."""
+    key = str(path.resolve()).casefold()
+    _SESSION_OBSERVED_REVISIONS[key] = revision
+    _thread_observed_revisions()[key] = revision
+
+
+def _remember_loaded_session_revision(path: Path, revision: str | None) -> None:
+    """Bind this thread to its snapshot without downgrading another thread's publication."""
+    key = str(path.resolve()).casefold()
+    _thread_observed_revisions()[key] = revision
+    with _exclusive_session_write(path):
+        if _session_revision(path) == revision:
+            _SESSION_OBSERVED_REVISIONS[key] = revision
 
 
 @contextmanager
@@ -235,7 +255,12 @@ def save_session(titles: list[str], jobs: list[Job]):
     key = str(path.resolve()).casefold()
     with _exclusive_session_write(path):
         current_revision = _session_revision(path)
-        observed_revision = _SESSION_OBSERVED_REVISIONS.get(key)
+        thread_revisions = _thread_observed_revisions()
+        observed_revision = (
+            thread_revisions[key]
+            if key in thread_revisions
+            else _SESSION_OBSERVED_REVISIONS.get(key)
+        )
         if observed_revision is not None and observed_revision != current_revision:
             raise SessionWriteConflictError(
                 "Сессия NewsFlow была обновлена другим процессом; устаревшая запись не опубликована."
@@ -545,10 +570,10 @@ def load_session() -> tuple[list[str], list[Job]]:
                 recovered_empty = _recover_empty_primary_from_backup(revision)
                 if recovered_empty:
                     recovered_titles, recovered_jobs, authoritative_revision = recovered_empty
-                    _remember_session_revision(path, authoritative_revision)
+                    _remember_loaded_session_revision(path, authoritative_revision)
                     return _apply_scenario_tombstones(recovered_titles, recovered_jobs)
             if candidate == path:
-                _remember_session_revision(path, revision)
+                _remember_loaded_session_revision(path, revision)
             elif invalid_primary_revision is not None:
                 # The backup is authoritative only when it can conditionally
                 # self-heal the exact malformed primary snapshot. If another
@@ -557,7 +582,7 @@ def load_session() -> tuple[list[str], list[Job]]:
                 authoritative_revision = _conditionally_restore_primary_from_backup(
                     invalid_primary_revision, titles, jobs,
                 )
-                _remember_session_revision(path, authoritative_revision)
+                _remember_loaded_session_revision(path, authoritative_revision)
             return titles, jobs
         except _SessionSnapshotReadError as error:
             if candidate == path:
