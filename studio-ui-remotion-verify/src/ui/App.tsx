@@ -10425,6 +10425,7 @@ export function Editor({
       data.scenarios.some((scenario) => scenario.index === item.index) &&
       [
         "Готов к монтажу",
+        "Проверка текста",
         "В очереди",
         "Планирование",
         "Планирование сцен",

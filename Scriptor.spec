@@ -24,7 +24,7 @@ if len(_payload) != _expected["size"] or hashlib.sha256(_payload).hexdigest() !=
     raise RuntimeError("CORE_ASSET_INVALID: assets/ffmpeg.exe size/SHA-256 differs from the asset lock")
 del _payload
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 datas = [("assets", "assets")]
 binaries = []
@@ -46,6 +46,12 @@ for package in (
     datas += collected[0]
     binaries += collected[1]
     hiddenimports += collected[2]
+
+# ``ai_index`` imports FastEmbed only when footage semantic search is used.
+# PyInstaller cannot discover that deferred import from static analysis; data
+# collection alone leaves ``fastembed`` files on disk but no importable module
+# in PYZ, which makes Montage fail at runtime.
+hiddenimports += collect_submodules("fastembed")
 
 a = Analysis(
     ["bridge_main.py"],

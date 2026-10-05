@@ -79,6 +79,7 @@ class CoreAssetGuardTests(unittest.TestCase):
             raise AnalysisReached("dependency collection reached")
 
         modules["PyInstaller.utils.hooks"].collect_all = stop_before_analysis
+        modules["PyInstaller.utils.hooks"].collect_submodules = lambda _package: []
         with patch.dict(sys.modules, modules):
             try:
                 runpy.run_path(str(ROOT / "Scriptor.spec"), init_globals={
@@ -127,6 +128,30 @@ class CoreAssetGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root, app, _, _ = self._fixture(temporary)
             self.assertIsInstance(self._spec_result(root, app, pe_fixture()), AnalysisReached)
+
+    def test_spec_collects_fastembed_modules_for_dynamic_montage_import(self):
+        """The frozen Core must include code, not only FastEmbed data files."""
+        collected_submodules = []
+        modules = {name: types.ModuleType(name) for name in (
+            "PyInstaller", "PyInstaller.utils", "PyInstaller.utils.hooks",
+        )}
+        modules["PyInstaller.utils.hooks"].collect_all = lambda _package: ([], [], [])
+        modules["PyInstaller.utils.hooks"].collect_submodules = (
+            lambda package: collected_submodules.append(package) or [f"{package}.embedding"]
+        )
+        with patch.dict(sys.modules, modules):
+            runpy.run_path(str(ROOT / "Scriptor.spec"), init_globals={
+                "SPEC": str(ROOT / "Scriptor.spec"),
+                "SPECPATH": str(ROOT),
+                "Analysis": lambda *_args, **_kwargs: types.SimpleNamespace(
+                    pure=[], scripts=[], binaries=[], zipfiles=[], datas=[],
+                ),
+                "PYZ": lambda *_args, **_kwargs: object(),
+                "EXE": lambda *_args, **_kwargs: object(),
+                "COLLECT": lambda *_args, **_kwargs: object(),
+            })
+
+        self.assertIn("fastembed", collected_submodules)
 
     def test_core_rejects_pointer_despite_matching_main_exe_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
