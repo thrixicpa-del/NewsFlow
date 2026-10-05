@@ -13,8 +13,11 @@ describe("Core response transport", () => {
     expect(mainSource).not.toContain("execFile(");
   });
 
-  it("keeps only bounded stderr diagnostics while parsing the complete response file", () => {
+  it("keeps stderr bounded and never returns raw stderr text to the renderer", () => {
     expect(mainSource).toContain("stderr.length < 4096");
     expect(mainSource).toContain("JSON.parse(readFileSync(responsePath, 'utf8'))");
+    expect(mainSource).toContain("safeCoreProcessDiagnostic(stderr)");
+    expect(mainSource).not.toContain("stderr.trim().slice(0, 4096)");
+    expect(mainSource).not.toContain("некорректный ответ: ${diagnostic}");
   });
 });
