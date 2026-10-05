@@ -1642,6 +1642,12 @@ def reconcile_voice_outputs(updates: list[dict]) -> dict:
         }
         voice_outputs = dict(data.get("voice_scenario_outputs") or {})
         voice_statuses = dict(data.get("voice_task_statuses") or {})
+        deleted_ids = {
+            str(value).strip()
+            for field_name in ("idea_deleted_production_ids", "deleted_scenario_production_ids")
+            for value in (data.get(field_name) if isinstance(data.get(field_name), list) else [])
+            if str(value).strip()
+        }
         active_count = sum(
             1 for item in voice_jobs.values()
             if str(item.get("state", "")).casefold() in {"running", "retrying"}
@@ -1655,6 +1661,9 @@ def reconcile_voice_outputs(updates: list[dict]) -> dict:
             current = voice_jobs.get(production_item_id)
             if not production_item_id or not isinstance(current, dict):
                 skip("JOB_MISSING")
+                continue
+            if production_item_id in deleted_ids:
+                skip("PRODUCTION_ITEM_DELETED")
                 continue
             expected_job_id = str(update.get("expected_job_id", "")).strip()
             if not expected_job_id or str(current.get("id", "")).strip() != expected_job_id:
