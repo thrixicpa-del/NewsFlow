@@ -34,6 +34,7 @@ import { useUiPreferences } from "./layout/ui-preferences";
 import { CommandPalette } from "./layout/CommandPalette";
 import { buildWorkspaceSearchItems } from "./layout/workspace-search";
 import { buildVisualFixture } from "./visual-regression/visual-fixtures";
+import { coreAvailabilityNotice } from "./core-availability";
 import { PageHeader } from "./components/page-header";
 import { StatCard } from "./components/stat-card";
 import { Toast } from "./components/toast";
@@ -794,10 +795,8 @@ export function App() {
         setData(state);
         setTarget(String(state.pipelineTarget));
       }
-    } catch {
-      setNotice(
-        "Ядро NewsFlow временно недоступно — интерфейс открыт в безопасном режиме.",
-      );
+    } catch (error) {
+      setNotice(coreAvailabilityNotice(error));
     }
   }, [visualFixture]);
   useEffect(() => {
