@@ -41,6 +41,7 @@ from .ai_index import (
     ClipIndex,
     IndexProgress,
     SearchHit,
+    proxy_cache_excluded_paths,
     source_family_identity_text,
 )
 from .browser_topic_scenarios import (
@@ -156,8 +157,10 @@ from .timeline import (
     remotion_payload,
     render_project,
     required_video_duration,
+    source_proxy_cache_root,
     title_only_scene_plan,
     validate_rendered_montage,
+    warm_source_proxy,
 )
 from .tts_ranges import (
     RangeValidationError,
@@ -2303,6 +2306,115 @@ def _claim_footage_index_lock() -> _FootageIndexLease:
         raise
 
 
+def _proxy_cache_status_path() -> Path:
+    return app_data_root() / "proxy-cache-status.json"
+
+
+def _proxy_cache_control_path() -> Path:
+    return app_data_root() / "proxy-cache-control.json"
+
+
+def _read_proxy_cache_pause_requested() -> bool:
+    try:
+        payload = json.loads(_proxy_cache_control_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(payload.get("pauseRequested")) if isinstance(payload, dict) else False
+
+
+def _write_proxy_cache_pause_requested(paused: bool) -> None:
+    path = _proxy_cache_control_path()
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"pauseRequested": bool(paused)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _read_proxy_cache_status(*, check_owner: bool = True) -> dict:
+    path = _proxy_cache_status_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        status = raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+    if check_owner and status.get("active") and status.get("ownerPid") and not _index_process_is_running(status["ownerPid"]):
+        _write_proxy_cache_pause_requested(False)
+        status.update({
+            "stage": "interrupted",
+            "active": False,
+            "pauseRequested": False,
+            "message": "Подготовка proxy прервана. Запустите её снова: готовые неизменённые файлы будут пропущены.",
+            "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        _write_proxy_cache_status(status)
+    return status
+
+
+def _write_proxy_cache_status(payload: dict) -> None:
+    """Atomically persist proxy preparation progress outside user settings."""
+    path = _proxy_cache_status_path()
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _proxy_cache_lock_path() -> Path:
+    return app_data_root() / "proxy-cache-run.lock"
+
+
+_PROXY_CACHE_THREAD_LOCK = threading.Lock()
+
+
+class _ProxyCacheLease:
+    def __init__(self, path: Path):
+        self.path = path
+        self.released = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        try:
+            self.path.unlink(missing_ok=True)
+        finally:
+            self.released = True
+            _PROXY_CACHE_THREAD_LOCK.release()
+
+
+def _claim_proxy_cache_lock() -> _ProxyCacheLease:
+    if not _PROXY_CACHE_THREAD_LOCK.acquire(blocking=False):
+        raise RuntimeError("Подготовка proxy-кэша уже выполняется. Дождитесь её завершения.")
+    lock_path = _proxy_cache_lock_path()
+    try:
+        if lock_path.exists():
+            try:
+                current = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                current = {}
+            if _index_process_is_running(current.get("pid")):
+                raise RuntimeError("Подготовка proxy-кэша уже выполняется. Дождитесь её завершения.")
+            lock_path.unlink()
+        with lock_path.open("x", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
+        return _ProxyCacheLease(lock_path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _PROXY_CACHE_THREAD_LOCK.release()
+        raise
+
+
 def _publication_allocation_profiles(settings: Settings) -> list[dict]:
     """Merge saved per-channel allocation choices with actual channel state."""
 
@@ -2679,6 +2791,7 @@ def snapshot() -> dict:
     except (OSError, sqlite3.Error) as error:
         footage_index_error = f"База ИИ-индекса временно недоступна: {error}"
     footage_status = _read_footage_index_status()
+    proxy_cache_status = _read_proxy_cache_status()
     # A portable NewsFlow window may be closed while its worker is indexing.
     # Do not leave the next launch stuck forever on a stale "active" flag.
     if footage_status.get("active"):
@@ -2813,6 +2926,7 @@ def snapshot() -> dict:
             "error": footage_index_error,
             "status": footage_status,
         },
+        "proxyCache": {"status": proxy_cache_status},
         "cutterSources": settings.cutter_sources,
         "cutterSettings": {"outputFolder": settings.cutter_output_folder, "downloadFolder": settings.footage_download_folder,
                            "mixerOutputFolder": settings.mixer_output_folder},
@@ -14713,6 +14827,139 @@ def index_footage(payload: dict) -> dict:
             pass
 
 
+def _proxy_cache_wait_if_paused(status: dict) -> None:
+    """Pause only between complete source files; FFmpeg is never interrupted."""
+    while _read_proxy_cache_pause_requested():
+        status.update({
+            "stage": "paused",
+            "active": True,
+            "pauseRequested": True,
+            "message": "Подготовка proxy-кэша на паузе после текущего файла.",
+            "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        _write_proxy_cache_status(status)
+        time.sleep(0.25)
+    status["pauseRequested"] = False
+
+
+def warm_proxy_cache(payload: dict) -> dict:
+    """Prepare one reusable 1080p/30fps proxy per configured source video."""
+    del payload
+    settings = load_settings()
+    roots = [folder for folder in settings.footage_folders if Path(folder).is_dir()]
+    if not roots:
+        raise ValueError("Добавьте хотя бы одну папку с футажами перед подготовкой proxy-кэша")
+    lease = _claim_proxy_cache_lock()
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_proxy_cache_pause_requested(False)
+    try:
+        items = scan_folders(roots)
+        blocked = proxy_cache_excluded_paths(app_data_root() / "footage-index.sqlite3")
+        source_bytes = 0
+        for item in items:
+            try:
+                source_bytes += Path(item.path).stat().st_size
+            except OSError:
+                pass
+        status: dict[str, object] = {
+            "stage": "warming",
+            "active": True,
+            "pauseRequested": False,
+            "total": len(items),
+            "processed": 0,
+            "ready": 0,
+            "skipped": 0,
+            "excluded": 0,
+            "failed": 0,
+            "current": "",
+            "sourceBytes": source_bytes,
+            "cacheFolder": str(source_proxy_cache_root()),
+            "ownerPid": os.getpid(),
+            "startedAt": started_at,
+            "updatedAt": started_at,
+            "message": "",
+        }
+
+        def report() -> None:
+            status["pauseRequested"] = _read_proxy_cache_pause_requested()
+            status["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            _write_proxy_cache_status(status)
+
+        report()
+        for item in items:
+            _proxy_cache_wait_if_paused(status)
+            source = Path(item.path).resolve()
+            status["stage"] = "warming"
+            status["active"] = True
+            status["current"] = source.name
+            report()
+            source_identity = os.path.normcase(str(source))
+            if source_identity in blocked:
+                status["excluded"] = int(status["excluded"]) + 1
+            else:
+                try:
+                    _target, reused = warm_source_proxy(source, 1920, 1080, heartbeat=None)
+                    if reused:
+                        status["skipped"] = int(status["skipped"]) + 1
+                    else:
+                        status["ready"] = int(status["ready"]) + 1
+                except (OSError, RuntimeError, ValueError) as exc:
+                    status["failed"] = int(status["failed"]) + 1
+                    status["message"] = f"Последняя ошибка: {source.name}: {exc}"
+            status["processed"] = int(status["processed"]) + 1
+            report()
+        _write_proxy_cache_pause_requested(False)
+        status.update({
+            "stage": "complete",
+            "active": False,
+            "pauseRequested": False,
+            "current": "",
+            "message": (
+                f"Готово: {status['ready']}; уже были готовы: {status['skipped']}; "
+                f"исключено: {status['excluded']}; ошибок: {status['failed']}."
+            ),
+        })
+        report()
+        return {**snapshot(), "operationResult": {
+            "kind": "proxy-cache-warmup", "count": int(status["ready"]),
+            "folder": str(source_proxy_cache_root()), "message": str(status["message"]),
+        }, "proxyCacheResult": {
+            key: int(status[key]) for key in ("total", "processed", "ready", "skipped", "excluded", "failed")
+        }}
+    except _BRIDGE_OPERATION_ERRORS as exc:
+        _write_proxy_cache_pause_requested(False)
+        status = _read_proxy_cache_status(check_owner=False)
+        status.update({
+            "stage": "error", "active": False, "error": str(exc),
+            "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        _write_proxy_cache_status(status)
+        raise
+    finally:
+        lease.release()
+
+
+def set_proxy_cache_paused(payload: dict) -> dict:
+    """Request a safe pause/resume for the independent proxy warm-up worker."""
+    status = _read_proxy_cache_status(check_owner=False)
+    if not status:
+        raise ValueError("Подготовка proxy-кэша ещё не запускалась")
+    if not status.get("active"):
+        raise ValueError("Подготовка proxy-кэша сейчас не выполняется")
+    paused = bool(payload.get("paused", True))
+    _write_proxy_cache_pause_requested(paused)
+    status["pauseRequested"] = paused
+    if not paused and status.get("stage") == "paused":
+        status["stage"] = "warming"
+        status["message"] = "Подготовка proxy-кэша продолжается."
+    status["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    _write_proxy_cache_status(status)
+    return {**snapshot(), "operationResult": {
+        "kind": "proxy-cache-pause", "count": 0,
+        "message": "Подготовка proxy-кэша на паузе." if paused else "Подготовка proxy-кэша продолжена.",
+    }}
+
+
 def save_montage_settings(payload: dict) -> dict:
     settings = load_settings()
     ratio = str(payload.get("aspectRatio", settings.montage_aspect_ratio)).strip()
@@ -21167,6 +21414,10 @@ def main() -> None:
             result = download_web_footage(payload if isinstance(payload, dict) else {})
         elif command == "index-footage":
             result = index_footage(payload if isinstance(payload, dict) else {})
+        elif command == "run-proxy-cache-warmup":
+            result = warm_proxy_cache(payload if isinstance(payload, dict) else {})
+        elif command == "set-proxy-cache-paused":
+            result = set_proxy_cache_paused(payload if isinstance(payload, dict) else {})
         elif command == "save-montage-settings":
             result = save_montage_settings(payload if isinstance(payload, dict) else {})
         elif command == "prepare-montage":
