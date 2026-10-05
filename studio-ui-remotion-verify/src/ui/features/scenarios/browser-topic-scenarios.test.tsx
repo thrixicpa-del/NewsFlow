@@ -18,14 +18,22 @@ describe("browser topic scenarios", () => {
         productionItemId: "production-immutable-4",
         title: "Тема из очереди",
         state: "Ожидает",
-        result: "Старый сценарий не должен оказаться в browser prompt.",
+        result: "",
         error: "",
+      }, {
+        index: 5,
+        productionItemId: "production-existing-5",
+        title: "Тема с готовым текстом",
+        state: "Ошибка",
+        result: "Старый сценарий не должен оказаться в browser prompt.",
+        error: "Старый технический статус",
       }],
     };
     const command = vi.fn(async () => data);
     render(<BrowserTopicScenarios data={data} command={command} />);
 
     expect(screen.getByText("Тема из очереди")).toBeTruthy();
+    expect(screen.getByText("Тема с готовым текстом")).toBeTruthy();
     expect(screen.queryByText("Старый сценарий не должен оказаться в browser prompt.")).toBeNull();
     fireEvent.click(screen.getByLabelText("Выбрать: Тема из очереди"));
     fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }));
