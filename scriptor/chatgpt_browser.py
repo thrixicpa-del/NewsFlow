@@ -140,7 +140,7 @@ class ChatGPTBrowserClient:
         try:
             if await messages.count() == 0:
                 return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ChatGPTBrowserError("Не удалось проверить чистый контекст ChatGPT.") from exc
 
         selectors = (
@@ -159,7 +159,7 @@ class ChatGPTBrowserClient:
                     if await messages.count() == 0:
                         return
                     await page.wait_for_timeout(200)
-            except Exception:  # noqa: BLE001,S110 - compatibility fall-through only.
+            except Exception:  # noqa: BLE001,S112 - compatibility fall-through only.
                 continue
         raise ChatGPTBrowserError(
             "Не удалось открыть отдельный новый чат. NewsFlow не будет использовать существующий диалог."
