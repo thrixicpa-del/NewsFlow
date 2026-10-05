@@ -10,9 +10,12 @@ describe("Core availability notice", () => {
     expect(message).not.toContain("api-key");
   });
 
-  it("distinguishes a missing bundled Core from a generic unavailable snapshot", () => {
-    expect(coreAvailabilityNotice(new Error("В сборке не найдено актуальное ядро NewsFlow")))
+  it("distinguishes missing and failed-to-launch Core from a generic snapshot failure", () => {
+    expect(coreAvailabilityNotice(new Error("Ядро NewsFlow не найдено в этой сборке.")))
       .toContain("не найдено");
+    const launch = coreAvailabilityNotice(new Error("NewsFlow не смог запустить ядро: нет доступа к файлу Core."));
+    expect(launch).toContain("не удалось запустить");
+    expect(launch).toContain("Данные проекта не удалены");
     expect(coreAvailabilityNotice(new Error("unexpected low-level diagnostic")))
       .toContain("не удалось получить снимок");
   });
