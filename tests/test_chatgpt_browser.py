@@ -26,9 +26,10 @@ class ChatGPTBrowserUrlTests(unittest.TestCase):
 
 class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_wait_for_answer_requires_a_new_assistant_turn(self):
+        from unittest.mock import patch
+
         from scriptor.chatgpt_browser import ChatGPTBrowserClient
         from scriptor.config import ChromeSession
-        from unittest.mock import patch
 
         class FakeLoop:
             now = 0.0
