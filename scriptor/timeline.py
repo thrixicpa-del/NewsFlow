@@ -18,6 +18,7 @@ from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
+_GPU_TIMELINE_CAPABILITY_CACHE: dict[str, dict[str, object]] = {}
 _PROXY_LOCK_GUARD = threading.RLock()
 _PROXY_LOCKS: dict[str, threading.Lock] = {}
 
@@ -427,16 +428,26 @@ def video_encoder_args(ffmpeg: str) -> list[str]:
 
 
 def gpu_timeline_capability(ffmpeg: str | None = None) -> dict[str, object]:
-    """Describe whether the explicit GPU timeline route can use NVENC.
+    """Prove that the explicit GPU route can actually initialise NVENC.
 
-    This deliberately does not reuse ``video_encoder_args``: that helper has a
-    safe CPU fallback for the legacy renderer, while a selected GPU route must
-    fail honestly instead of changing the operator's chosen mode.
+    Seeing h264_nvenc in the FFmpeg encoder list is not sufficient: FFmpeg
+    can advertise it on a machine with no usable NVIDIA driver or GPU. Probe
+    one disposable frame once per FFmpeg binary and cache the result so long
+    montage renders never repeat the hardware check per chunk.
     """
     binary = ffmpeg or ffmpeg_executable()
+    cached = _GPU_TIMELINE_CAPABILITY_CACHE.get(binary)
+    if cached is not None:
+        return dict(cached)
+
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run(
-        [binary, "-hide_banner", "-encoders"],
+        [
+            binary, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1:d=1",
+            "-frames:v", "1", "-an", "-c:v", "h264_nvenc",
+            "-f", "null", "-",
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -444,12 +455,21 @@ def gpu_timeline_capability(ffmpeg: str | None = None) -> dict[str, object]:
         creationflags=flags,
         check=False,
     )
-    available = "h264_nvenc" in (result.stdout or "")
-    return {
+    available = result.returncode == 0
+    diagnostic = (result.stderr or result.stdout or "").strip()
+    if available:
+        reason = ""
+    elif diagnostic:
+        reason = f"NVENC недоступен: {diagnostic.splitlines()[-1][-500:]}"
+    else:
+        reason = "NVENC недоступен в этой системе"
+    capability: dict[str, object] = {
         "available": available,
         "encoder": "h264_nvenc",
-        "reason": "" if available else "NVENC недоступен в FFmpeg этой сборки NewsFlow",
+        "reason": reason,
     }
+    _GPU_TIMELINE_CAPABILITY_CACHE[binary] = capability
+    return dict(capability)
 
 
 def gpu_timeline_encoder_args(ffmpeg: str) -> list[str]:
@@ -458,7 +478,6 @@ def gpu_timeline_encoder_args(ffmpeg: str) -> list[str]:
     if not capability["available"]:
         raise RuntimeError(str(capability["reason"]))
     return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", "-b:v", "0"]
-
 
 def probe_media_duration(path: Path) -> float:
     ffmpeg = ffmpeg_executable()
