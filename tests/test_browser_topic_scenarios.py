@@ -327,6 +327,198 @@ class BrowserTopicBridgeTests(unittest.TestCase):
             self.assertEqual(final[1].result, "Старый сценарий нельзя передавать в браузер.")
             self.assertTrue(list((Path(directory) / "ChatGPT браузер").glob("*.txt")))
 
+    def test_browser_route_never_overwrites_existing_prose_even_when_job_is_error(self):
+        from scriptor import bridge
+        from scriptor.config import Settings
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        job = Job(
+            ScenarioRequest(0, "Тема", "", "prod-1"),
+            RunState.ERROR,
+            "Уже сохранённый оператором текст",
+            "старый технический статус",
+        )
+        tasks, _jobs = bridge._select_browser_topic_tasks(
+            Settings(), ["Тема"], [job],
+            {"indices": [0], "productionItemIds": ["prod-1"]},
+        )
+
+        self.assertEqual(tasks, [])
+        self.assertEqual(job.result, "Уже сохранённый оператором текст")
+
+    def test_browser_completion_commits_by_production_item_after_queue_reorder(self):
+        from scriptor import bridge
+        from scriptor.config import ChromeSession, Settings
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = ChromeSession(label="ChatGPT test", profile_id="chatgpt-test")
+            settings = Settings(
+                output_folder=directory,
+                chrome_sessions=[session],
+                browser_topic_scenarios={
+                    "project_url": "https://chatgpt.com/g/project",
+                    "session_id": "chatgpt-test",
+                    "requirements_mode": "text",
+                    "requirements_text": "Стиль.",
+                    "companion_prompt": "Только текст.",
+                    "minimum_chars": 10,
+                    "maximum_chars": 20,
+                    "concurrency": 1,
+                },
+            )
+            initial_titles = ["Тема A", "Тема B"]
+            initial_a = Job(ScenarioRequest(0, "Тема A", "", "prod-a"))
+            initial_b = Job(ScenarioRequest(1, "Тема B", "", "prod-b"))
+            current_titles = ["Тема B", "Тема A"]
+            current_b = Job(ScenarioRequest(0, "Тема B", "", "prod-b"))
+            current_a = Job(ScenarioRequest(1, "Тема A", "", "prod-a"))
+            saved = []
+
+            class Transport:
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def generate(self, **_kwargs):
+                    return "Ответ для A"
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(
+                     bridge, "load_session",
+                     side_effect=[
+                         (initial_titles, [initial_a, initial_b]),
+                         (current_titles, [current_b, current_a]),
+                     ],
+                 ), \
+                 patch.object(bridge, "save_session", side_effect=lambda titles, jobs: saved.append((list(titles), list(jobs)))), \
+                 patch.object(bridge, "ensure_idea_production_items", return_value=False), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "save_settings"):
+                result = bridge.generate_browser_topic_scenarios(
+                    {"indices": [0], "productionItemIds": ["prod-a"]},
+                    transport_factory=lambda _session: Transport(),
+                )
+
+        self.assertEqual(result["operationResult"]["count"], 1)
+        final_titles, final_jobs = saved[-1]
+        self.assertEqual(final_titles, current_titles)
+        by_id = {job.request.production_item_id: job for job in final_jobs}
+        self.assertEqual(by_id["prod-a"].result, "Ответ для A")
+        self.assertEqual(by_id["prod-a"].state, RunState.DONE)
+        self.assertEqual(by_id["prod-b"].result, "")
+
+    def test_browser_launch_failure_clears_this_batch_running_state(self):
+        from scriptor import bridge
+        from scriptor.config import ChromeSession, Settings
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        session = ChromeSession(label="ChatGPT test", profile_id="chatgpt-test")
+        settings = Settings(
+            chrome_sessions=[session],
+            browser_topic_scenarios={
+                "project_url": "https://chatgpt.com/g/project",
+                "session_id": "chatgpt-test",
+                "requirements_mode": "text",
+                "requirements_text": "Стиль.",
+                "companion_prompt": "Только текст.",
+                "minimum_chars": 10,
+                "maximum_chars": 20,
+                "concurrency": 1,
+            },
+        )
+        titles = ["Тема"]
+        job = Job(ScenarioRequest(0, "Тема", "", "prod-1"))
+        saved = []
+
+        class BrokenTransport:
+            async def __aenter__(self):
+                raise RuntimeError("browser unavailable")
+            async def __aexit__(self, *_args):
+                return None
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", side_effect=[(titles, [job]), (titles, [job])]), \
+             patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved.append(list(jobs))), \
+             patch.object(bridge, "ensure_idea_production_items", return_value=False), \
+             self.assertRaisesRegex(RuntimeError, "browser unavailable"):
+            bridge.generate_browser_topic_scenarios(
+                {"indices": [0], "productionItemIds": ["prod-1"]},
+                transport_factory=lambda _session: BrokenTransport(),
+            )
+
+        self.assertEqual(saved[-1][0].state, RunState.ERROR)
+        self.assertIn("browser unavailable", saved[-1][0].error)
+
+    def test_browser_result_is_saved_without_length_gate(self):
+        from scriptor import bridge
+        from scriptor.config import ChromeSession, Settings
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = ChromeSession(label="ChatGPT test", profile_id="chatgpt-test")
+            settings = Settings(
+                output_folder=directory,
+                chrome_sessions=[session],
+                browser_topic_scenarios={
+                    "project_url": "https://chatgpt.com/g/project",
+                    "session_id": "chatgpt-test",
+                    "requirements_mode": "text",
+                    "requirements_text": "Стиль.",
+                    "companion_prompt": "Только текст.",
+                    "minimum_chars": 12000,
+                    "maximum_chars": 18000,
+                    "concurrency": 1,
+                },
+            )
+            titles = ["Тема"]
+            job = Job(ScenarioRequest(0, "Тема", "", "prod-1"))
+            saved = []
+
+            class Transport:
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def generate(self, **_kwargs):
+                    return "коротко"
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(titles, [job])), \
+                 patch.object(bridge, "save_session", side_effect=lambda _titles, jobs: saved.append(list(jobs))), \
+                 patch.object(bridge, "ensure_idea_production_items", return_value=False), \
+                 patch.object(bridge, "snapshot", return_value={}), \
+                 patch.object(bridge, "save_settings"):
+                result = bridge.generate_browser_topic_scenarios(
+                    {"indices": [0], "productionItemIds": ["prod-1"]},
+                    transport_factory=lambda _session: Transport(),
+                )
+
+        self.assertEqual(result["operationResult"]["count"], 1)
+        final = saved[-1][0]
+        self.assertEqual(final.result, "коротко")
+        self.assertEqual(final.state, RunState.DONE)
+        self.assertEqual(final.length_status, "")
+        self.assertEqual(final.actual_chars, len("коротко"))
+
+    def test_browser_identity_does_not_guess_between_duplicate_historical_titles(self):
+        from scriptor import bridge
+        from scriptor.config import Settings
+
+        settings = Settings(idea_production_items=[
+            {"id": "old-a", "title": "Одинаковая тема"},
+            {"id": "old-b", "title": "Одинаковая тема"},
+        ])
+        with self.assertRaisesRegex(ValueError, "ProductionItem ID"):
+            bridge._select_browser_topic_tasks(
+                settings, ["Одинаковая тема"], [],
+                {"indices": [0], "productionItemIds": ["old-a"]},
+            )
+
     def test_browser_route_rejects_a_stale_index_to_production_item_mapping_before_browser(self):
         from scriptor import bridge
         from scriptor.config import ChromeSession, Settings
