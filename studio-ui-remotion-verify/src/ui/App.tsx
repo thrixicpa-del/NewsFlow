@@ -11622,12 +11622,15 @@ export function Editor({
                   <p className="task-error">Причина: {task.error}</p>
                 ) : null}
                 <div className="task-timeline">
-                  {(task.timeline || []).slice(-6).map((event, index) => (
-                    <small key={`${event.at}-${index}`}>
-                      <b>{event.at}</b> {event.label}
-                      {event.detail ? ` — ${event.detail}` : ""}
-                    </small>
-                  ))}
+                  {(task.timeline || []).slice(-6).map((event, index) => {
+                    const diagnostic = `${event.at} ${event.label}${event.detail ? ` — ${event.detail}` : ""}`;
+                    return (
+                      <small className="task-timeline-entry" key={`${event.at}-${index}`} title={diagnostic}>
+                        <b>{event.at}</b> {event.label}
+                        {event.detail ? ` — ${event.detail}` : ""}
+                      </small>
+                    );
+                  })}
                 </div>
                 <div className="toolbar compact">
                   <Button onClick={() => setInspectedMontageIndex(task.index)}>

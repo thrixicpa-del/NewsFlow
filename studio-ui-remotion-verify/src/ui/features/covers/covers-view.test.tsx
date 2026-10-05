@@ -7,8 +7,14 @@ import { coverWordPairGenerationPayload } from "../../thumbnail-word-actions";
 
 const coverStyles = readFileSync(resolve(process.cwd(), "src/ui/covers.css"), "utf8");
 const responsiveStyles = readFileSync(resolve(process.cwd(), "src/ui/layout/app-shell-responsive.css"), "utf8");
+const componentStyles = readFileSync(resolve(process.cwd(), "src/ui/components/components.css"), "utf8");
 
 describe("Covers Light view", () => {
+  it("keeps the Visual Production Studio sheet bounded when a setting has a long value", () => {
+    expect(componentStyles).toMatch(/\.nf-sheet-content\{[^}]*min-width:0[^}]*overflow:hidden/);
+    expect(componentStyles).toMatch(/\.nf-sheet-body\{[^}]*min-width:0[^}]*overflow:auto/);
+  });
+
   it("imports manual prompt pairs through one chooser and one durable command", async () => {
     let finishChoose: (value: string) => void = () => undefined;
     const chooseCoverPromptPairs = vi.fn(() => new Promise<string>((resolve) => {

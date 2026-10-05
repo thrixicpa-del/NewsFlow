@@ -220,6 +220,24 @@ describe("Montage Light view", () => {
     ));
   });
 
+  it("bounds a long montage event inside its task card without discarding the diagnostic", () => {
+    const detail = `scene diagnostics ${"very-long-source-name_".repeat(80)}`;
+    const data = {
+      ...fallback,
+      montageTasks: [{
+        index: 1,
+        title: "Длинный лог",
+        status: "Подбор футажей",
+        timeline: [{ at: "20:14:00", label: "Подбор футажей", progress: 53, detail }],
+      }],
+    };
+
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+
+    const event = screen.getByTitle(`20:14:00 Подбор футажей — ${detail}`);
+    expect(event.className).toContain("task-timeline-entry");
+  });
+
   it("offers explicit selected retry for an error row", async () => {
     const data = {
       ...fallback,
