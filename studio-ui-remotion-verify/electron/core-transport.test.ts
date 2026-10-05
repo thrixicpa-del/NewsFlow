@@ -17,6 +17,8 @@ describe("Core response transport", () => {
     expect(mainSource).toContain("stderr.length < 4096");
     expect(mainSource).toContain("JSON.parse(readFileSync(responsePath, 'utf8'))");
     expect(mainSource).toContain("safeCoreProcessDiagnostic(stderr)");
+    expect(mainSource).toContain("responseStream.once('close'");
+    expect(mainSource).not.toContain("responseStream.once('finish'");
     expect(mainSource).not.toContain("stderr.trim().slice(0, 4096)");
     expect(mainSource).not.toContain("некорректный ответ: ${diagnostic}");
   });
