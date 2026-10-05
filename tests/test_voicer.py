@@ -249,6 +249,45 @@ class VoicerTests(unittest.TestCase):
         self.assertEqual(result["applied_indices"], [0], result)
         self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "ready")
 
+    def test_voice_queue_atomic_writer_rejects_fresh_tombstone(self):
+        import hashlib
+
+        from scriptor import config
+
+        with tempfile.TemporaryDirectory() as state_dir, tempfile.TemporaryDirectory() as output:
+            settings_path = Path(state_dir) / "settings.json"
+            candidate = Path(output) / "001 — Тема 1.mp3"
+            candidate.write_bytes(b"audio")
+            script_hash = hashlib.sha256("Текст".encode("utf-8")).hexdigest()
+            settings = Settings(
+                voice_tts_jobs={"production-1": {
+                    "id": "job-1", "production_item_id": "production-1",
+                    "scenario_index": 0, "state": "error", "script_hash": script_hash,
+                }},
+                deleted_scenario_production_ids=["production-1"],
+            )
+            with patch.object(config, "config_path", return_value=settings_path):
+                config.save_settings(settings)
+                stat = candidate.stat()
+                result = config.reconcile_voice_outputs([{
+                    "production_item_id": "production-1",
+                    "expected_job_id": "job-1",
+                    "scenario_index": 0,
+                    "script_hash": script_hash,
+                    "output_key": "1",
+                    "output_path": str(candidate),
+                    "duration_seconds": 10.0,
+                    "validated_at": "test",
+                    "file_size": stat.st_size,
+                    "file_mtime_ns": stat.st_mtime_ns,
+                }])
+                persisted = config.load_settings()
+
+        self.assertEqual(result["applied_indices"], [])
+        self.assertEqual(result["skip_reasons"], {"PRODUCTION_ITEM_DELETED": 1})
+        self.assertEqual(persisted.voice_scenario_outputs, {})
+        self.assertEqual(persisted.voice_tts_jobs["production-1"]["state"], "error")
+
     def test_voice_queue_reconciliation_restores_a_valid_orphaned_mp3_by_production_item(self):
         """A stale provider error may recover only the exact immutable script contract."""
         import hashlib
