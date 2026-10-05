@@ -10487,7 +10487,10 @@ export function MontageLiveStatus({
   const persistedActive = data.montageTasks.filter(
     (task) => !["Готово", "Ошибка"].includes(task.status || ""),
   );
-  const workerRunning = queueRunning ?? persistedActive.length > 0;
+  // A persisted task phase is historical state, not proof that a worker is
+  // still alive.  Only the Core's owner-PID/lock projection may block a new
+  // launch; older snapshots that do not expose it stay recoverable.
+  const workerRunning = queueRunning === true;
   const active = workerRunning ? persistedActive : [];
   const staleActive = workerRunning ? [] : persistedActive;
   const lead = active[0];
@@ -10673,22 +10676,10 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
-  const statusSuggestsRunning = data.montageTasks.some((item) =>
-    [
-      "В очереди",
-      "Планирование",
-      "Планирование сцен",
-      "Подбор футажей",
-      "Проверка текста",
-      "Внешний поиск",
-      "Нарезка внешнего футажа",
-      "Ожидает рендер",
-      "Рендер",
-      "Склейка",
-      "Пауза",
-    ].includes(item.status || ""),
-  );
-  const running = data.montageSettings.queueRunning ?? statusSuggestsRunning;
+  // Do not infer a live queue from a persisted phase.  A Core snapshot sets
+  // queueRunning from the real owner PID/lock; absent/false means that the
+  // stale row is resumable instead of disabling every launch button.
+  const running = data.montageSettings.queueRunning === true;
   const queueActive = running || queueLaunching;
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,

@@ -121,7 +121,12 @@ describe("Montage Light view", () => {
 
   it("keeps montage settings inside the fixed-width Sheet rather than widening the document", () => {
     const styles = readFileSync(resolve(process.cwd(), "src/ui/editor.css"), "utf8");
+    const shellStyles = readFileSync(
+      resolve(process.cwd(), "src/ui/layout/app-shell-responsive.css"),
+      "utf8",
+    );
 
+    expect(shellStyles).toContain("html{overflow-x:hidden}");
     expect(styles).toContain(".nf-sheet-body .nf-montage-configuration{min-width:0;width:100%}");
     expect(styles).toContain(".nf-sheet-body .asset-grid{grid-template-columns:minmax(0,1fr)");
     expect(styles).toContain(".nf-sheet-body .renderer-choice-four{grid-template-columns:minmax(0,1fr)}");
@@ -282,7 +287,7 @@ describe("Montage Light view", () => {
     ));
   });
 
-  it("keeps an interrupted text-check row visible and resumable in the montage queue", async () => {
+  it("treats an old snapshot without a live-owner flag as resumable, not active", async () => {
     const data = {
       ...fallback,
       scenarios: [{ index: 83, title: "Последняя ручная тема", state: "Готово", result: "Мой текст", error: "" }],
@@ -299,6 +304,8 @@ describe("Montage Light view", () => {
     render(<Editor data={data} command={command} refresh={async () => undefined} />);
 
     expect(screen.getByRole("button", { name: /Последняя ручная тема/ })).toBeTruthy();
+    expect(screen.getByText(/Активный worker не найден/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Собрать незавершённые" }).hasAttribute("disabled")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
 
     await waitFor(() => expect(command).toHaveBeenCalledWith(
