@@ -77,7 +77,7 @@ SEMANTIC_TAG_QUERIES: tuple[tuple[str, str], ...] = (
 SEMANTIC_TAG_LABELS = frozenset(label for label, _query in SEMANTIC_TAG_QUERIES)
 SEMANTIC_INDEX_VERSION = 7
 
-SCREEN_TEXT_CLASSIFIER_VERSION = 6
+SCREEN_TEXT_CLASSIFIER_VERSION = 7
 # Restore the NewsFlow 2.1.136 contract: ordinary Cyrillic/Russian lettering is
 # allowed. Montage blocks prominent English/Latin lettering and, separately,
 # full-screen title/interstitial slates in any language.
