@@ -1602,6 +1602,165 @@ def _archive_pre_write_settings(path: Path, raw_on_disk: str) -> None:
             pass
 
 
+
+def reconcile_voice_outputs(updates: list[dict]) -> dict:
+    """Atomically attach validated MP3s without serializing unrelated settings.
+
+    Each update is a compare-and-swap against the latest settings.json under
+    the same cross-process lock used by normal saves. Only voice_tts_jobs,
+    voice_scenario_outputs and voice_task_statuses may change.
+    """
+    clean_updates = [dict(item) for item in updates if isinstance(item, dict)]
+    result = {"applied_indices": [], "blocked": 0, "skipped": 0, "skip_reasons": {}}
+    if not clean_updates:
+        return result
+
+    def skip(reason: str) -> None:
+        result["skipped"] += 1
+        reasons = result["skip_reasons"]
+        reasons[reason] = int(reasons.get(reason, 0) or 0) + 1
+
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _exclusive_settings_write(path):
+        if not path.is_file():
+            result["skipped"] = len(clean_updates)
+            result["skip_reasons"] = {"SETTINGS_MISSING": len(clean_updates)}
+            return result
+        try:
+            raw_on_disk = path.read_text(encoding="utf-8")
+            data = json.loads(raw_on_disk)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise SettingsFileCorruptError(path) from error
+        if not isinstance(data, dict):
+            raise SettingsFileCorruptError(path)
+
+        voice_jobs = {
+            str(key): dict(value)
+            for key, value in dict(data.get("voice_tts_jobs") or {}).items()
+            if isinstance(value, dict)
+        }
+        voice_outputs = dict(data.get("voice_scenario_outputs") or {})
+        voice_statuses = dict(data.get("voice_task_statuses") or {})
+        active_count = sum(
+            1 for item in voice_jobs.values()
+            if str(item.get("state", "")).casefold() in {"running", "retrying"}
+        )
+        if active_count:
+            result["blocked"] = active_count
+            return result
+
+        for update in clean_updates:
+            production_item_id = str(update.get("production_item_id", "")).strip()
+            current = voice_jobs.get(production_item_id)
+            if not production_item_id or not isinstance(current, dict):
+                skip("JOB_MISSING")
+                continue
+            expected_job_id = str(update.get("expected_job_id", "")).strip()
+            if not expected_job_id or str(current.get("id", "")).strip() != expected_job_id:
+                skip("JOB_CHANGED")
+                continue
+            try:
+                scenario_index = int(update.get("scenario_index"))
+                current_index = int(current.get("scenario_index"))
+            except (TypeError, ValueError):
+                skip("INDEX_INVALID")
+                continue
+            output_key = str(update.get("output_key", "")).strip()
+            expected_key = str(scenario_index + 1)
+            current_script_hash = str(
+                current.get("script_hash") or current.get("script_revision") or ""
+            ).strip()
+            expected_script_hash = str(update.get("script_hash", "")).strip()
+            if (scenario_index < 0 or current_index != scenario_index
+                    or output_key != expected_key
+                    or str(current.get("production_item_id", "")).strip() != production_item_id
+                    or not expected_script_hash
+                    or current_script_hash != expected_script_hash):
+                skip("IDENTITY_CHANGED")
+                continue
+            existing_output = Path(str(voice_outputs.get(output_key, "")))
+            if existing_output.is_file():
+                skip("OUTPUT_ALREADY_READY")
+                continue
+
+            candidate = Path(str(update.get("output_path", "")))
+            if not candidate.is_file() or candidate.suffix.casefold() != ".mp3":
+                skip("CANDIDATE_MISSING")
+                continue
+            try:
+                candidate_stat = candidate.stat()
+                expected_size = int(update.get("file_size"))
+                expected_mtime_ns = int(update.get("file_mtime_ns"))
+                duration = float(update.get("duration_seconds"))
+            except (OSError, TypeError, ValueError):
+                skip("CANDIDATE_METADATA_INVALID")
+                continue
+            if (candidate_stat.st_size != expected_size
+                    or candidate_stat.st_mtime_ns != expected_mtime_ns
+                    or duration <= 0.05):
+                skip("FILE_CHANGED")
+                continue
+
+            validated_at = str(update.get("validated_at", "")).strip()
+            restored = dict(current)
+            restored.update({
+                "state": "ready",
+                "output_path": str(candidate),
+                "artifact": {
+                    "path": str(candidate),
+                    "duration_seconds": duration,
+                    "validated_at": validated_at,
+                },
+            })
+            restored.pop("error", None)
+            restored.pop("retry_count", None)
+            restored.pop("next_retry_after_seconds", None)
+            for field_name in list(restored):
+                if (field_name.startswith("wproject_")
+                        and (field_name.endswith("_error")
+                             or field_name.endswith("_next_retry_seconds"))):
+                    restored.pop(field_name, None)
+            voice_jobs[production_item_id] = restored
+            voice_outputs[output_key] = str(candidate)
+            voice_statuses[output_key] = {
+                "label": "Готово: восстановлено",
+                "progress": 100,
+                "updatedAt": time.strftime("%H:%M:%S"),
+                "durationSeconds": duration,
+                "artifactPath": str(candidate),
+                "jobSnapshotId": str(restored.get("id", "")),
+            }
+            result["applied_indices"].append(scenario_index)
+
+        if not result["applied_indices"]:
+            return result
+
+        data["voice_tts_jobs"] = voice_jobs
+        data["voice_scenario_outputs"] = voice_outputs
+        data["voice_task_statuses"] = voice_statuses
+        _archive_pre_write_settings(path, raw_on_disk)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            deadline = time.monotonic() + 8.0
+            while True:
+                try:
+                    os.replace(temporary, path)
+                    break
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.10)
+        finally:
+            try:
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
+    return result
+
+
 def save_settings(settings: Settings):
     data = {
         "schema_version": SETTINGS_SCHEMA_VERSION,
@@ -1870,16 +2029,10 @@ def save_settings(settings: Settings):
             raw_on_disk = ""
             on_disk = {}
         replacement = getattr(settings, "_api_key_replacement", None)
-        voice_reconcile_updates = [
-            dict(item) for item in getattr(settings, "_voice_reconcile_updates", [])
-            if isinstance(item, dict)
-        ]
-        if replacement and voice_reconcile_updates:
-            raise ValueError("Нельзя одновременно изменять API-ключ и восстанавливать очередь озвучки")
-        if replacement or voice_reconcile_updates:
-            # Credential edits and voice reconciliation are narrow mutations,
-            # not stale whole-profile saves. Start from the current locked disk
-            # snapshot so concurrent settings/queue changes survive.
+        if replacement:
+            # A credential edit is a narrow mutation, not a stale whole-profile
+            # save. Start from the current locked disk snapshot so concurrent
+            # settings changes and other credential selections survive.
             data = dict(on_disk)
         disk_generation = max(0, int(on_disk.get("production_reset_generation", 0) or 0))
         incoming_generation = max(0, int(data.get("production_reset_generation", 0) or 0))
@@ -1990,114 +2143,6 @@ def save_settings(settings: Settings):
             ] if str(value).strip()
         }
         data["deleted_scenario_production_ids"] = sorted(deleted_scenario_production_ids)[-10000:]
-        if voice_reconcile_updates:
-            reconcile_result = {
-                "applied_indices": [], "blocked": 0, "skipped": 0, "skip_reasons": {},
-            }
-
-            def skip_voice_reconcile(reason: str) -> None:
-                reconcile_result["skipped"] += 1
-                reasons = reconcile_result["skip_reasons"]
-                reasons[reason] = int(reasons.get(reason, 0) or 0) + 1
-
-            voice_jobs = dict(data.get("voice_tts_jobs") or {})
-            voice_outputs = dict(data.get("voice_scenario_outputs") or {})
-            voice_statuses = dict(data.get("voice_task_statuses") or {})
-            active_count = sum(
-                1 for item in voice_jobs.values()
-                if isinstance(item, dict)
-                and str(item.get("state", "")).casefold() in {"running", "retrying"}
-            )
-            if active_count:
-                reconcile_result["blocked"] = active_count
-                settings._voice_reconcile_result = reconcile_result
-                return
-            for update in voice_reconcile_updates:
-                production_item_id = str(update.get("production_item_id", "")).strip()
-                current = voice_jobs.get(production_item_id)
-                if not production_item_id or not isinstance(current, dict):
-                    skip_voice_reconcile("JOB_MISSING")
-                    continue
-                expected_job_id = str(update.get("expected_job_id", "")).strip()
-                if not expected_job_id or str(current.get("id", "")).strip() != expected_job_id:
-                    skip_voice_reconcile("JOB_CHANGED")
-                    continue
-                try:
-                    scenario_index = int(update.get("scenario_index"))
-                    current_index = int(current.get("scenario_index"))
-                except (TypeError, ValueError):
-                    skip_voice_reconcile("INDEX_INVALID")
-                    continue
-                output_key = str(update.get("output_key", "")).strip()
-                expected_key = str(scenario_index + 1)
-                current_script_hash = str(
-                    current.get("script_hash") or current.get("script_revision") or ""
-                ).strip()
-                expected_script_hash = str(update.get("script_hash", "")).strip()
-                if (scenario_index < 0 or current_index != scenario_index
-                        or output_key != expected_key
-                        or str(current.get("production_item_id", "")).strip() != production_item_id
-                        or not expected_script_hash
-                        or current_script_hash != expected_script_hash):
-                    skip_voice_reconcile("IDENTITY_CHANGED")
-                    continue
-                existing_output = Path(str(voice_outputs.get(output_key, "")))
-                if existing_output.is_file():
-                    skip_voice_reconcile("OUTPUT_ALREADY_READY")
-                    continue
-                candidate = Path(str(update.get("output_path", "")))
-                if not candidate.is_file() or candidate.suffix.casefold() != ".mp3":
-                    skip_voice_reconcile("CANDIDATE_MISSING")
-                    continue
-                try:
-                    candidate_stat = candidate.stat()
-                    expected_size = int(update.get("file_size"))
-                    expected_mtime_ns = int(update.get("file_mtime_ns"))
-                    duration = float(update.get("duration_seconds"))
-                except (OSError, TypeError, ValueError):
-                    skip_voice_reconcile("CANDIDATE_METADATA_INVALID")
-                    continue
-                if (candidate_stat.st_size != expected_size
-                        or candidate_stat.st_mtime_ns != expected_mtime_ns
-                        or duration <= 0.05):
-                    skip_voice_reconcile("FILE_CHANGED")
-                    continue
-                validated_at = str(update.get("validated_at", "")).strip()
-                restored = dict(current)
-                restored.update({
-                    "state": "ready",
-                    "output_path": str(candidate),
-                    "artifact": {
-                        "path": str(candidate),
-                        "duration_seconds": duration,
-                        "validated_at": validated_at,
-                    },
-                })
-                restored.pop("error", None)
-                restored.pop("retry_count", None)
-                restored.pop("next_retry_after_seconds", None)
-                for field_name in list(restored):
-                    if (field_name.startswith("wproject_")
-                            and (field_name.endswith("_error")
-                                 or field_name.endswith("_next_retry_seconds"))):
-                        restored.pop(field_name, None)
-                voice_jobs[production_item_id] = restored
-                voice_outputs[output_key] = str(candidate)
-                voice_statuses[output_key] = {
-                    "label": "Готово: восстановлено",
-                    "progress": 100,
-                    "updatedAt": time.strftime("%H:%M:%S"),
-                    "durationSeconds": duration,
-                    "artifactPath": str(candidate),
-                    "jobSnapshotId": str(restored.get("id", "")),
-                }
-                reconcile_result["applied_indices"].append(scenario_index)
-            settings._voice_reconcile_result = reconcile_result
-            if not reconcile_result["applied_indices"]:
-                return
-            data["voice_tts_jobs"] = voice_jobs
-            data["voice_scenario_outputs"] = voice_outputs
-            data["voice_task_statuses"] = voice_statuses
         _archive_pre_write_settings(path, raw_on_disk)
         # A unique temporary name prevents a status-poll bridge call from
         # colliding with the long montage worker's old ``settings.tmp`` file.
