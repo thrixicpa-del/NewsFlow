@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from 'electron';
-import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { createWriteStream, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -121,12 +121,47 @@ function callCore(command: string, payload: unknown = {}) {
     // Windows. Do not hide the short-lived core process that starts OAuth, or
     // Chrome can exit without creating its visible authorization window.
     const windowsHide = command !== 'start-youtube-channel-handoff';
+    const responsePath = path.join(path.dirname(transport.path), 'response.json');
+    const responseStream = createWriteStream(responsePath, { flags: 'w', mode: 0o600 });
+    let stderr = '';
+    let exited = false;
+    let outputFinished = false;
+    let exitCode: number | null = null;
+    let settled = false;
+    const finish = (error?: Error, response?: unknown) => {
+      if (settled) return;
+      settled = true;
+      transport.dispose();
+      if (error) reject(error);
+      else resolve(response);
+    };
+    const complete = () => {
+      if (!exited || !outputFinished || settled) return;
+      let response: unknown;
+      try {
+        response = JSON.parse(readFileSync(responsePath, 'utf8'));
+      } catch {
+        const diagnostic = stderr.trim().slice(0, 4096);
+        finish(new Error(diagnostic
+          ? `Ядро NewsFlow вернуло некорректный ответ: ${diagnostic}`
+          : 'Ядро NewsFlow вернуло некорректный ответ.'));
+        return;
+      }
+      if (exitCode !== 0) {
+        if (response && typeof response === 'object' && 'error' in response) {
+          finish(new Error(String((response as { error?: unknown }).error || 'Ошибка ядра NewsFlow.')));
+          return;
+        }
+        finish(new Error(stderr.trim().slice(0, 4096) || `Ядро NewsFlow завершилось с кодом ${exitCode}.`));
+        return;
+      }
+      registerApprovedOpenPaths(response);
+      finish(undefined, response);
+    };
     try {
-      execFile(executable, args,
-      {
+      const child = spawn(executable, args, {
         windowsHide,
         cwd: coreRoot,
-        maxBuffer: 1024 * 1024 * 8,
         env: {
           ...process.env,
           PYTHONPATH: coreRoot,
@@ -138,24 +173,31 @@ function callCore(command: string, payload: unknown = {}) {
           NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2',
           NEWSFLOW_BRIDGE_PAYLOAD_FILE: transport.path,
         },
-      }, (error, stdout, stderr) => {
-        transport.dispose();
-        if (error) {
-          try {
-            const response = JSON.parse(stdout);
-            if (response?.error) return reject(new Error(String(response.error)));
-          } catch { /* process error below is the useful fallback */ }
-          return reject(new Error(stderr || error.message));
-        }
-        try {
-          const response = JSON.parse(stdout);
-          registerApprovedOpenPaths(response);
-          resolve(response);
-        } catch { reject(new Error(`Некорректный ответ ядра: ${stdout || stderr}`)); }
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.pipe(responseStream);
+      child.stderr.on('data', (chunk: Buffer) => {
+        // stderr is diagnostics only. Keep it bounded; the JSON response is
+        // streamed to disk and no longer has a stdout maxBuffer limit.
+        if (stderr.length < 4096) stderr += chunk.toString('utf8').slice(0, 4096 - stderr.length);
+      });
+      child.once('error', (error) => {
+        responseStream.destroy();
+        finish(error);
+      });
+      responseStream.once('error', (error) => finish(error));
+      responseStream.once('finish', () => {
+        outputFinished = true;
+        complete();
+      });
+      child.once('close', (code) => {
+        exited = true;
+        exitCode = code;
+        complete();
       });
     } catch (error) {
-      transport.dispose();
-      reject(error instanceof Error ? error : new Error(String(error)));
+      responseStream.destroy();
+      finish(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }
