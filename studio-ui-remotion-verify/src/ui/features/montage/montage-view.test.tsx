@@ -92,6 +92,7 @@ describe("Montage Light view", () => {
   it("keeps montage settings inside the fixed-width Sheet rather than widening the document", () => {
     const styles = readFileSync(resolve(process.cwd(), "src/ui/editor.css"), "utf8");
 
+    expect(styles).toContain(".nf-sheet-body .nf-montage-configuration{min-width:0;width:100%}");
     expect(styles).toContain(".nf-sheet-body .asset-grid{grid-template-columns:minmax(0,1fr)");
     expect(styles).toContain(".nf-sheet-body .renderer-choice-four{grid-template-columns:minmax(0,1fr)}");
     expect(styles).toContain(".nf-sheet-body .montage-grid{grid-template-columns:minmax(0,1fr)}");
@@ -230,6 +231,27 @@ describe("Montage Light view", () => {
     ));
   });
 
+  it("does not let a stale persisted render status disable launch when no queue owner is alive", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Старый рендер", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Старый рендер", state: "Готово", path: "D:/voice.mp3" }],
+      montageTasks: [{ index: 1, title: "Старый рендер", status: "Рендер", outputPath: "" }],
+      montageSettings: { ...fallback.montageSettings, queueRunning: false },
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+
+    const launch = screen.getByRole("button", { name: "Собрать незавершённые" });
+    expect(launch.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/Активный worker не найден/)).toBeTruthy();
+
+    fireEvent.click(launch);
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "run-montage-queue", { indices: [1], replaceOutput: false },
+    ));
+  });
+
   it("keeps an interrupted text-check row visible and resumable in the montage queue", async () => {
     const data = {
       ...fallback,
@@ -293,19 +315,37 @@ describe("Montage Light view", () => {
   });
 
   it("keeps pause and continue controls truthful", async () => {
+    let releasePause: ((value: NewsFlowSnapshot | undefined) => void) | undefined;
     const running = {
       ...fallback,
       montageTasks: [{ index: 1, title: "Тема", status: "Рендер", outputPath: "" }],
-      montageSettings: { ...fallback.montageSettings, queuePaused: false },
+      montageSettings: { ...fallback.montageSettings, queuePaused: false, queueRunning: true },
     };
-    const pauseCommand = vi.fn().mockResolvedValue(running);
+    const pauseCommand = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {
+      releasePause = resolve;
+    }));
     const first = render(<Editor data={running} command={pauseCommand} refresh={async () => undefined} />);
+
     fireEvent.click(screen.getByRole("button", { name: "Пауза" }));
     expect(pauseCommand).toHaveBeenCalledWith("save-montage-settings", { queuePaused: true });
+    expect(screen.getByRole("button", { name: "Запрашиваем паузу…" })).toBeTruthy();
+    expect(screen.getByText(/Пауза запрошена: уже запущенный FFmpeg завершит текущий subprocess/)).toBeTruthy();
+
+    releasePause?.({
+      ...running,
+      montageSettings: { ...running.montageSettings, queuePaused: true, queueRunning: true },
+    });
     first.unmount();
 
-    const paused = { ...running, montageSettings: { ...running.montageSettings, queuePaused: true } };
-    const continueCommand = vi.fn().mockResolvedValue(paused);
+    const paused = {
+      ...running,
+      montageTasks: [{ index: 1, title: "Тема", status: "Пауза", outputPath: "" }],
+      montageSettings: { ...running.montageSettings, queuePaused: true, queueRunning: true },
+    };
+    const continueCommand = vi.fn().mockResolvedValue({
+      ...paused,
+      montageSettings: { ...paused.montageSettings, queuePaused: false },
+    });
     render(<Editor data={paused} command={continueCommand} refresh={async () => undefined} />);
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
     expect(continueCommand).toHaveBeenCalledWith("save-montage-settings", { queuePaused: false });
@@ -316,7 +356,7 @@ describe("Montage Light view", () => {
     const data = {
       ...fallback,
       montageTasks: [{ index: 1, title: "Тема", status: "Рендер", outputPath: "" }],
-      montageSettings: { ...fallback.montageSettings, queuePaused: false },
+      montageSettings: { ...fallback.montageSettings, queuePaused: false, queueRunning: true },
     };
     const command = vi.fn(() => new Promise<NewsFlowSnapshot | undefined>((resolve) => {
       release = () => resolve(data);
