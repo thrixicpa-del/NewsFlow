@@ -494,7 +494,9 @@ def _production_artifact_fence():
 
 def _production_staging_folder(root: Path, generation: int, kind: str) -> Path:
     """Return a reset-generation-owned staging root, never a canonical output root."""
-    return root / ".newsflow-staging" / str(max(0, generation)) / kind
+    staging = root / ".newsflow-staging" / str(max(0, generation)) / kind
+    staging.mkdir(parents=True, exist_ok=True)
+    return staging
 
 
 def _remove_staged_artifact(path: Path, root: Path) -> None:

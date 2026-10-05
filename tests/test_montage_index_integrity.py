@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
@@ -71,7 +72,8 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                  patch.object(bridge, "load_settings", return_value=settings), \
                  self.assertRaisesRegex(ValueError, "доступную папку"):
                 bridge.warm_proxy_cache({})
-            status = bridge._read_proxy_cache_status(check_owner=False)
+            with patch.object(bridge, "app_data_root", return_value=root):
+                status = bridge._read_proxy_cache_status(check_owner=False)
 
             self.assertEqual(status["stage"], "error")
             self.assertFalse(status["active"])
@@ -96,7 +98,7 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
             with patch.object(bridge, "app_data_root", return_value=root), \
                  patch.object(bridge, "load_settings", return_value=settings), \
                  patch.object(bridge, "proxy_cache_excluded_paths",
-                              return_value={str(blocked.resolve())}), \
+                              return_value={os.path.normcase(str(blocked.resolve()))}), \
                  patch.object(bridge, "scan_folders", return_value=[
                      FootageItem(str(allowed), allowed.name),
                      FootageItem(str(blocked), blocked.name),
@@ -158,7 +160,8 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
 
             self.assertEqual(
                 excluded,
-                {str(text_blocked.resolve()), str(manually_blocked.resolve())},
+                {os.path.normcase(str(text_blocked.resolve())),
+                 os.path.normcase(str(manually_blocked.resolve()))},
             )
 
     def test_dead_active_owner_becomes_truthful_interrupted_resume_state(self):
