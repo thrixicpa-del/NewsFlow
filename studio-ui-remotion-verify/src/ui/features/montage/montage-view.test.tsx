@@ -282,7 +282,7 @@ describe("Montage Light view", () => {
     ));
   });
 
-  it("keeps an interrupted text-check row visible and resumable in the montage queue", async () => {
+  it("treats an old snapshot without a live-owner flag as resumable, not active", async () => {
     const data = {
       ...fallback,
       scenarios: [{ index: 83, title: "Последняя ручная тема", state: "Готово", result: "Мой текст", error: "" }],
@@ -299,6 +299,8 @@ describe("Montage Light view", () => {
     render(<Editor data={data} command={command} refresh={async () => undefined} />);
 
     expect(screen.getByRole("button", { name: /Последняя ручная тема/ })).toBeTruthy();
+    expect(screen.getByText(/Активный worker не найден/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Собрать незавершённые" }).hasAttribute("disabled")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
 
     await waitFor(() => expect(command).toHaveBeenCalledWith(
