@@ -8282,8 +8282,7 @@ def _cover_structured_context(item: dict) -> str:
     else:
         lines.append(
             "СТАНДАРТНОЕ НЕВОЕННОЕ ОГРАНИЧЕНИЕ: без отдельного усиленного режима не добавляй взрывы, огонь, ракеты, "
-            "дроны или военную технику, если они не следуют из указанного контекста. Если ниже присутствует явный контракт "
-            "«УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ», он имеет приоритет и разрешает сильную символическую визуальную метафору."
+            "дроны или военную технику, если они не следуют из указанного контекста."
         )
     return "\n".join(lines)
 
@@ -8305,9 +8304,8 @@ def _cover_topic_visual_plan(item: dict) -> str:
         "реалистичную сцену строго из текущей темы, сценария и структурированного контекста. Не применяй готовый шаблон по категории "
         "новости и не подменяй тему знакомым сюжетом. Сам реши, какие люди, эмоции, объекты, фон, масштаб события и видимое действие "
         "лучше всего передают именно эту историю. В стандартном режиме усиливай драму, напряжение, страх, последствия, толпу, технику, "
-        "разрушения или другие сильные элементы только если они логично следуют из текущего содержания. Если ниже присутствует отдельный "
-        "контракт «УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ», он имеет приоритет: допускается более жёсткая символическая и метафорическая подача, "
-        "пока визуал ясно связан со смыслом текущей темы и не превращается в случайный посторонний сюжет. "
+        "разрушения или другие сильные элементы только если они логично следуют из текущего содержания. Не подменяй тему "
+        "знакомым сюжетом и не заменяй её выдуманным происшествием. "
         f"ДОСТУПНЫЙ СТРУКТУРИРОВАННЫЙ КОНТЕКСТ: {context or 'только текущая тема и сценарий'}."
     )
 
@@ -8317,14 +8315,11 @@ def _cover_scene_intensity_instruction(settings: Settings) -> str:
     if not settings.cover_scene_intensity_mode:
         return ""
     return (
-        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ — ОБЯЗАТЕЛЬНЫЙ РЕЖИМ: каждый новый visual brief должен быть заметно сильнее, "
-        "масштабнее, конфликтнее и эмоциональнее обычной новостной сцены. Не ослабляй этот режим до нейтральной документальной подачи. "
-        "Разрешена выразительная символическая и метафорическая визуализация, если она ясно передаёт смысл текущей темы: "
-        "например, «удар по экономике», давление, крах, блокада или противостояние могут быть показаны через военную, разрушительную "
-        "или иную жёсткую визуальную метафору, даже если речь не о буквальном боевом событии. "
-        "Сохраняй связь с текущей темой, участниками и последствиями, но выбирай максимально кликабельный масштаб, массовую реакцию, "
-        "сильный визуальный конфликт, последствия, технику, дым, разрушение или другие драматические элементы, когда они помогают "
-        "передать смысл. Усиленный режим не должен превращаться только в смену камеры, кадра или формулировки. "
+        "УСИЛЕННАЯ ДРАМАТУРГИЯ СЦЕНЫ: усиливай только когда это следует из темы или сценария: сделай видимее уже существующие "
+        "масштаб, реакцию, конфликт, последствия или доказательство события. Не добавляй людей, толпу, вооружённый конфликт, "
+        "разрушение, дым или новое событие только ради драматичности. Если материал не поддерживает такое усиление, сохрани "
+        "конкретную, естественную и фактически привязанную сцену без выдуманной эскалации. Усиленный режим не должен "
+        "превращаться только в смену камеры, кадра или формулировки. "
     )
 
 
@@ -8346,26 +8341,29 @@ _COVER_SCENE_PRESENTATION_TOKENS = frozenset({
     "драматичный", "документальный", "редакционный", "кинематографичный", "фотореалистичный", "реалистичный",
     "освещение", "свет", "контраст", "напряжённый", "срочный", "сцена", "изображение", "кадр",
 })
-_COVER_ENHANCED_SCENE_MARKERS = (
-    "massive", "large", "dense", "packed", "surging", "towering", "collaps", "shatter", "rubble", "debris",
-    "smoke", "flame", "explosion", "armored", "military", "soldier", "missile", "weapon", "convoy", "blockade",
-    "clash", "confront", "oppos", "panic", "angry", "furious", "terrified", "emergency", "chaos", "crisis",
-    "crowd", "wave", "stampede", "evacuat", "rescu", "destroy", "damage", "pressure", "siege", "breach",
-    "массов", "огромн", "плотн", "толп", "обвал", "разруш", "дым", "огонь", "взрыв", "брон", "военн",
-    "солдат", "ракет", "оруж", "колонн", "блокад", "столкнов", "противост", "паник", "ярост", "спас",
-    "эваку", "давлен", "хаос", "кризис",
-)
+_COVER_SCENE_EXACT_RISK_MARKERS = frozenset({"war", "fire", "armed", "tank"})
+
+
+def _cover_scene_risk_marker_present(text: str, marker: str) -> bool:
+    """Match narrow high-risk terms without treating warehouse/firewall/tanker as events."""
+    if marker in _COVER_SCENE_EXACT_RISK_MARKERS:
+        return re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", text) is not None
+    return marker in text
 
 
 _COVER_SCENE_RISK_SUPPORT = (
     (
         "массовую толпу или протест",
-        ("crowd", "protest", "rally", "demonstrat", "march", "митинг", "толп", "протест", "демонстрант"),
+        ("crowd", "protest", "demonstrat", "митинг", "толп", "протест", "демонстрант"),
         ("crowd", "protest", "demonstrat", "митинг", "толп", "протест", "демонстрант"),
     ),
     (
         "вооружённый конфликт",
-        ("weapon", "armed", "soldier", "military", "tank", "missile", "gun", "оруж", "военн", "солдат", "танк", "ракет"),
+        (
+            "weapon", "armed", "soldier", "military", "war", "combat", "frontline", "tank", "missile", "rocket",
+            "drone", "bomb", "shelling", "airstrike", "gun", "оруж", "военн", "солдат", "войн", "боев", "фронт",
+            "танк", "ракет", "дрон", "беспилот", "бомб", "обстрел",
+        ),
         (
             "weapon", "armed", "soldier", "military", "war", "combat", "frontline", "tank", "missile", "rocket",
             "drone", "bomb", "shelling", "airstrike", "оруж", "военн", "солдат", "войн", "боев", "фронт",
@@ -8374,7 +8372,11 @@ _COVER_SCENE_RISK_SUPPORT = (
     ),
     (
         "разрушение, дым или спасательные действия",
-        ("explosion", "blast", "smoke", "destroy", "rubble", "rescue", "firefighter", "взрыв", "дым", "разруш", "спасател", "обломк"),
+        (
+            "explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "firefighter", "fire", "flame",
+            "burn", "blaze", "взрыв", "дым", "разруш", "поврежд", "спасател", "обломк", "пожар", "огонь", "плам",
+            "горит", "горящ",
+        ),
         (
             "explosion", "blast", "smoke", "destroy", "damage", "rubble", "rescue", "fire", "missile", "rocket",
             "drone", "bomb", "shelling", "airstrike", "взрыв", "дым", "разруш", "поврежд", "спасател",
@@ -8450,12 +8452,6 @@ def _cover_semantic_duplicate(candidate: object, prior: object) -> bool:
     return _cover_scene_similarity(candidate_scene, prior_scene) >= 0.72
 
 
-def _cover_scene_has_enhanced_dramaturgy(scene: object) -> bool:
-    """Require visible amplification when the operator selected enhanced mode."""
-    value = semantic_scene_brief(scene, "").casefold()
-    return bool(value and any(marker in value for marker in _COVER_ENHANCED_SCENE_MARKERS))
-
-
 def _cover_scene_is_grounded(scene: str, item: dict) -> tuple[bool, str]:
     """Keep high-risk visual event types inside the topic's supported evidence.
 
@@ -8470,7 +8466,10 @@ def _cover_scene_is_grounded(scene: str, item: dict) -> tuple[bool, str]:
     )).casefold()
     candidate = scene.casefold()
     for label, candidate_markers, support_markers in _COVER_SCENE_RISK_SUPPORT:
-        if any(marker in candidate for marker in candidate_markers) and not any(marker in source for marker in support_markers):
+        if (
+            any(_cover_scene_risk_marker_present(candidate, marker) for marker in candidate_markers)
+            and not any(_cover_scene_risk_marker_present(source, marker) for marker in support_markers)
+        ):
             return False, label
     return True, ""
 
@@ -8895,22 +8894,19 @@ def generate_cover_prompts(payload: dict) -> dict:
                         "SEMANTIC_SCENE_VARIANTS_INCOMPLETE: ИИ не вернул требуемое число самостоятельных visual scenes"
                     )
                 options = options[:requested_count]
-                if settings.cover_scene_intensity_mode:
-                    for option in options:
-                        if not _cover_scene_has_enhanced_dramaturgy(option):
-                            raise ValueError(
-                                "ENHANCED_SCENE_REQUIRED: выбран усиленный режим, но visual brief остался "
-                                "слишком нейтральным — нужен заметный масштаб, конфликт, сильная реакция, "
-                                "последствие или жёсткая визуальная метафора"
-                            )
-                else:
-                    for option in options:
-                        grounded, unsupported = _cover_scene_is_grounded(option, target)
-                        if not grounded:
-                            raise ValueError(
-                                "UNSUPPORTED_SCENE_EVENT: visual brief добавил "
-                                f"{unsupported}, хотя это не подтверждено текущей темой или сценарием"
-                            )
+                # Intensity is an operator preference for supported visual
+                # material, not a lexical admission test.  A provider must
+                # never get a licence to invent a military conflict or an
+                # explosion for an economic/diplomatic item; conversely, a
+                # restrained but grounded scene remains usable when the
+                # source contains no supported escalation to amplify.
+                for option in options:
+                    grounded, unsupported = _cover_scene_is_grounded(option, target)
+                    if not grounded:
+                        raise ValueError(
+                            "UNSUPPORTED_SCENE_EVENT: visual brief добавил "
+                            f"{unsupported}, хотя это не подтверждено текущей темой или сценарием"
+                        )
                 return (
                     _cover_distinct_prompt_options(
                         options, target, do_not_repeat, scene_intensity=settings.cover_scene_intensity_mode,
@@ -8947,8 +8943,8 @@ def generate_cover_prompts(payload: dict) -> dict:
             if _cover_prompt_safety_blocked(exc):
                 if settings.cover_scene_intensity_mode:
                     reason = (
-                        "ENHANCED_SCENE_REQUIRED: провайдер отклонил усиленную драматургию; "
-                        "нейтральный fallback не подставлен, потому что выбран усиленный режим"
+                        "PROVIDER_SCENE_SAFETY_BLOCK: провайдер отклонил visual brief в усиленном режиме; "
+                        "нейтральный fallback не подставлен автоматически"
                     )
                     _cover_step(target, "Ошибка промпта", 100, reason)
                     target.update(error=reason, prompt_provider_attempt_count=provider_call.attempts)
