@@ -88,17 +88,27 @@ class ChatGPTBrowserClient:
             raise ChatGPTBrowserError(
                 f"Закройте окно Chrome сессии «{self.session.label}» перед запуском."
             ) from error
-        raise ChatGPTBrowserError(f"Сессия «{self.session.label}»: {message}") from error
+        if "timeout" in lower:
+            raise ChatGPTBrowserError(
+                f"Сессия «{self.session.label}»: ChatGPT не ответил за отведённое время."
+            ) from error
+        raise ChatGPTBrowserError(
+            f"Сессия «{self.session.label}»: не удалось выполнить действие в ChatGPT."
+        ) from error
 
     async def generate(self, *, project_url: str, message: str,
                        requirements_file: str, task) -> str:
-        """Send one task in its own fresh chat tab and return visible prose only."""
+        """Send one task in its own confirmed fresh chat and return only its new turn."""
         del task  # identity is used by the queue, never inserted as hidden prose.
         if self._context is None:
             raise ChatGPTBrowserError("Сессия ChatGPT не запущена")
         page = await self._context.new_page()
         try:
-            await page.goto(validate_chatgpt_project_url(project_url), wait_until="domcontentloaded", timeout=120_000)
+            await page.goto(
+                validate_chatgpt_project_url(project_url),
+                wait_until="domcontentloaded",
+                timeout=120_000,
+            )
             await self._start_new_chat(page)
             editor = await self._find_editor(page)
             if editor is None:
@@ -106,12 +116,13 @@ class ChatGPTBrowserClient:
                     f"Сессия «{self.session.label}» не вошла в ChatGPT. Откройте её в «Сессиях Chrome», "
                     "войдите вручную и закройте окно Chrome."
                 )
+            assistant_count = await page.locator("[data-message-author-role='assistant']").count()
             if requirements_file:
                 await self._attach_requirements_file(page, requirements_file)
             await editor.click()
             await editor.fill(message)
             await editor.press("Enter")
-            return await self._wait_for_answer(page)
+            return await self._wait_for_answer(page, baseline_count=assistant_count)
         except ChatGPTBrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize Playwright transport failures for the UI.
@@ -124,12 +135,14 @@ class ChatGPTBrowserClient:
 
     @staticmethod
     async def _start_new_chat(page) -> None:
-        """Use a visible New Chat control when the selected project exposes it.
+        """Fail closed unless the tab is demonstrably a fresh conversation."""
+        messages = page.locator("[data-message-author-role]")
+        try:
+            if await messages.count() == 0:
+                return
+        except Exception as exc:  # noqa: BLE001
+            raise ChatGPTBrowserError("Не удалось проверить чистый контекст ChatGPT.") from exc
 
-        A project URL may already open an empty composer, in which case the
-        control is absent and that fresh tab is the new context.  We never
-        reuse or scrape an earlier conversation just to make this succeed.
-        """
         selectors = (
             "[data-testid='create-new-chat-button']",
             "button:has-text('New chat')",
@@ -138,12 +151,19 @@ class ChatGPTBrowserClient:
         for selector in selectors:
             button = page.locator(selector).first
             try:
-                if await button.is_visible(timeout=500):
-                    await button.click()
-                    await page.wait_for_timeout(300)
-                    return
-            except Exception:  # noqa: BLE001,S110 - different ChatGPT shells expose different controls.
-                pass
+                if not await button.is_visible(timeout=500):
+                    continue
+                await button.click()
+                deadline = asyncio.get_running_loop().time() + 8.0
+                while asyncio.get_running_loop().time() < deadline:
+                    if await messages.count() == 0:
+                        return
+                    await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001,S110 - compatibility fall-through only.
+                continue
+        raise ChatGPTBrowserError(
+            "Не удалось открыть отдельный новый чат. NewsFlow не будет использовать существующий диалог."
+        )
 
     @staticmethod
     async def _find_editor(page):
@@ -177,14 +197,18 @@ class ChatGPTBrowserClient:
                 "ChatGPT не показал поле прикрепления файла. Откройте новый чат и повторите запуск."
             ) from exc
 
-    async def _wait_for_answer(self, page) -> str:
+    async def _wait_for_answer(self, page, *, baseline_count: int) -> str:
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         previous = ""
         stable_since = 0.0
-        answer = page.locator("[data-message-author-role='assistant']").last
+        answers = page.locator("[data-message-author-role='assistant']")
         while asyncio.get_running_loop().time() < deadline:
+            current = ""
             try:
-                current = (await answer.inner_text(timeout=2_000)).strip()
+                count = await answers.count()
+                if count > baseline_count:
+                    # Only a newly-created assistant turn can satisfy this task.
+                    current = await answers.nth(count - 1).inner_text(timeout=2_000)
             except Exception:  # noqa: BLE001 - no answer is normal while the turn is pending.
                 current = ""
             now = asyncio.get_running_loop().time()
@@ -194,12 +218,16 @@ class ChatGPTBrowserClient:
                 stable_since = 0.0
             previous = current
             stop_visible = False
-            for selector in ("button[aria-label*='Stop']", "button[aria-label*='Останов']"):
+            for selector in (
+                "button[data-testid='stop-button']",
+                "button[aria-label*='Stop']",
+                "button[aria-label*='Останов']",
+            ):
                 try:
                     stop_visible = stop_visible or await page.locator(selector).is_visible(timeout=250)
                 except Exception:  # noqa: BLE001,S110 - selector is optional across ChatGPT UI versions.
                     pass
-            if current and not stop_visible and stable_since and now - stable_since >= 2.0:
-                return current
+            if current.strip() and not stop_visible and stable_since and now - stable_since >= 4.0:
+                return current.replace("\r\n", "\n").replace("\r", "\n")
             await page.wait_for_timeout(500)
-        raise ChatGPTBrowserError("ChatGPT не вернул готовый текст за отведённое время")
+        raise ChatGPTBrowserError("ChatGPT не вернул новый готовый ответ за отведённое время")
