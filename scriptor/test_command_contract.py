@@ -15,6 +15,7 @@ class CommandContractTests(unittest.TestCase):
             "import-manual-scenario", "remove-scenarios",
             "generate-voice-queue",
             "generate-voice-range", "generate-covers", "run-montage-queue",
+            "run-proxy-cache-warmup", "set-proxy-cache-paused",
             "package-outputs", "export-results-batch", "generate-seo", "generate-tags",
             "upload-publication-jobs", "confirm-publication-v2-distribution",
             "migrate-publication-v2",
