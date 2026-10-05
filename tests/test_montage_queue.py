@@ -216,6 +216,58 @@ class MontageQueueStateTests(unittest.TestCase):
                 bridge.run_montage_queue({"indices": [0]})
             self.assertFalse(lock_path.exists())
 
+    def test_queue_owner_running_uses_the_live_pid_lock_without_mutating_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with patch.object(bridge, "app_data_root", return_value=root):
+                lock_path = bridge._montage_queue_lock_path()
+                lock_path.write_text(
+                    '{"pid": %d, "startedAt": "now"}' % os.getpid(),
+                    encoding="utf-8",
+                )
+                before = lock_path.read_text(encoding="utf-8")
+                self.assertTrue(bridge._montage_queue_owner_running())
+                self.assertEqual(lock_path.read_text(encoding="utf-8"), before)
+
+                lock_path.write_text('{"pid": 999999, "startedAt": "old"}', encoding="utf-8")
+                with patch.object(bridge, "_montage_process_is_running", return_value=False):
+                    self.assertFalse(bridge._montage_queue_owner_running())
+
+    def test_new_queue_owner_clears_an_orphaned_pause_before_work(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Only row"])
+            settings.montage_queue_paused = True
+            patches, plan_calls, render_calls = self._queue_runtime_patches(
+                root, settings, ["Only row"], jobs,
+            )
+            for context in patches:
+                context.start()
+            try:
+                result = bridge.run_montage_queue({"indices": [0]})
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+
+        self.assertFalse(settings.montage_queue_paused)
+        self.assertEqual(result["operationResult"]["count"], 1)
+        self.assertEqual(plan_calls, [0])
+        self.assertEqual(render_calls, ["Only row"])
+
+    def test_render_heartbeat_waits_for_pause_only_after_ffmpeg_subprocess_finishes(self):
+        settings = Settings()
+        with patch.object(bridge, "_montage_task_update") as update, \
+             patch.object(bridge, "_montage_wait_if_paused") as wait_for_pause:
+            bridge._montage_render_process_heartbeat(settings, 4, 12345)
+            wait_for_pause.assert_not_called()
+
+            bridge._montage_render_process_heartbeat(settings, 4, None)
+            wait_for_pause.assert_called_once_with(settings, 4)
+
+        self.assertEqual(update.call_count, 2)
+        self.assertEqual(update.call_args_list[0].kwargs["ffmpegPid"], 12345)
+        self.assertEqual(update.call_args_list[1].kwargs["ffmpegPid"], 0)
+
     def test_paused_queue_owner_rejects_a_second_start_before_planning(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
