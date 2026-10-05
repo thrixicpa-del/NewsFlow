@@ -5965,6 +5965,7 @@ def reconcile_voice_queue(payload: dict) -> dict:
 
     recovered: set[int] = set()
     blocked = 0
+    skip_reasons: dict[str, int] = {}
     if updates:
         # save_settings recognises this private narrow-mutation contract:
         # it reloads the latest JSON under the existing cross-process lock and
@@ -5978,6 +5979,12 @@ def reconcile_voice_queue(payload: dict) -> dict:
         }
         blocked = int(reconcile_result.get("blocked", 0) or 0)
         skipped += int(reconcile_result.get("skipped", 0) or 0)
+        skip_reasons = {
+            str(reason): int(count)
+            for reason, count in dict(reconcile_result.get("skip_reasons", {}) or {}).items()
+            if str(reason).isupper() and str(reason).replace("_", "").isalpha()
+            and isinstance(count, int) and count > 0
+        }
         if recovered:
             _ensure_ready_voice_maps(recovered)
 
@@ -5990,7 +5997,7 @@ def reconcile_voice_queue(payload: dict) -> dict:
         message += f" Пропущено: {skipped}."
     return {**snapshot(), "operationResult": {
         "kind": "voice-queue-reconcile", "recovered": len(recovered), "blocked": blocked,
-        "ambiguous": ambiguous, "skipped": skipped, "message": message,
+        "ambiguous": ambiguous, "skipped": skipped, "skipReasons": skip_reasons, "message": message,
     }}
 
 
