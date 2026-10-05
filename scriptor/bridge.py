@@ -7055,23 +7055,46 @@ def _browser_topic_session(settings: Settings, session_id: str) -> ChromeSession
 
 
 def _browser_topic_identity_map(settings: Settings, titles: list[str], jobs: list[Job]) -> dict[int, str]:
-    """Return the current durable IDs; titles only migrate legacy blank jobs.
-
-    The renderer action is never resolved by this map alone: it must present
-    the exact ID back in ``productionItemIds``.  The title projection merely
-    supplies an ID to legacy jobs before the first browser route is used.
-    """
-    by_title = {
-        str(item.get("title", "")).casefold(): str(item.get("id", "")).strip()
-        for item in settings.idea_production_items
-        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    """Resolve current topic IDs without guessing among title history."""
+    deleted_ids = {
+        str(value).strip()
+        for value in [
+            *getattr(settings, "idea_deleted_production_ids", []),
+            *getattr(settings, "deleted_scenario_production_ids", []),
+        ]
+        if str(value).strip()
     }
+    context_by_title = {
+        str(title).casefold(): str(item.get("id", "")).strip()
+        for title, item in getattr(settings, "idea_scenario_context", {}).items()
+        if isinstance(item, dict)
+        and str(item.get("id", "")).strip()
+        and str(item.get("id", "")).strip() not in deleted_ids
+    }
+    candidates_by_title: dict[str, set[str]] = {}
+    for item in settings.idea_production_items:
+        if not isinstance(item, dict):
+            continue
+        title_key = str(item.get("title", "")).casefold()
+        identity = str(item.get("id", "")).strip()
+        if title_key and identity and identity not in deleted_ids:
+            candidates_by_title.setdefault(title_key, set()).add(identity)
+
     jobs_by_index = {job.request.index: job for job in jobs}
     identities: dict[int, str] = {}
     for index, title in enumerate(titles):
         job = jobs_by_index.get(index)
-        identity = str(job.request.production_item_id if job else "").strip()
-        identities[index] = identity or by_title.get(str(title).casefold(), "")
+        job_identity = str(job.request.production_item_id if job else "").strip()
+        if job_identity and job_identity not in deleted_ids:
+            identities[index] = job_identity
+            continue
+        title_key = str(title).casefold()
+        context_identity = context_by_title.get(title_key, "")
+        if context_identity:
+            identities[index] = context_identity
+            continue
+        candidates = candidates_by_title.get(title_key, set())
+        identities[index] = next(iter(candidates)) if len(candidates) == 1 else ""
     return identities
 
 
