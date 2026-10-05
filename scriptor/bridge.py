@@ -5900,6 +5900,9 @@ def reconcile_voice_queue(payload: dict) -> dict:
         ]
         if str(value).strip()
     }
+    deleted_ids_hash = hashlib.sha256(
+        "\0".join(sorted(deleted_ids)).encode("utf-8")
+    ).hexdigest()
     updates: list[dict] = []
     ambiguous = 0
     skipped = 0
@@ -5956,6 +5959,7 @@ def reconcile_voice_queue(payload: dict) -> dict:
             "expected_job_id": str(saved.get("id", "")),
             "scenario_index": index,
             "script_hash": actual_script_hash,
+            "deleted_ids_hash": deleted_ids_hash,
             "output_key": key,
             "output_path": str(candidate),
             "duration_seconds": duration,
