@@ -35,7 +35,7 @@ jobs:
       - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice
-      - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session tests.test_core_runtime_guard
+      - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-scenario-story-planner
       - run: pnpm typecheck
@@ -46,3 +46,6 @@ jobs:
         working-directory: studio-ui-remotion-verify
       - run: pnpm build
         working-directory: studio-ui-remotion-verify
+      - run: python tests/run_isolated.py tests.test_core_runtime_guard
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-core-guard
