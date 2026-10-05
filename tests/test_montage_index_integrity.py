@@ -63,6 +63,20 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
             self.assertTrue(any(item.get("pauseRequested") for item in writes))
             self.assertFalse(status["pauseRequested"])
 
+    def test_proxy_warmup_reports_unavailable_roots_as_terminal_error(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-proxy-missing-root-") as temporary:
+            root = Path(temporary)
+            settings = SimpleNamespace(footage_folders=[str(root / "missing-drive")])
+            with patch.object(bridge, "app_data_root", return_value=root), \
+                 patch.object(bridge, "load_settings", return_value=settings), \
+                 self.assertRaisesRegex(ValueError, "доступную папку"):
+                bridge.warm_proxy_cache({})
+            status = bridge._read_proxy_cache_status(check_owner=False)
+
+            self.assertEqual(status["stage"], "error")
+            self.assertFalse(status["active"])
+            self.assertIn("доступную папку", status["error"])
+
     def test_proxy_warmup_uses_configured_roots_and_skips_currently_blocked_footage(self):
         """A prewarm respects the same persisted exclusion verdicts as Montage."""
         worker = getattr(bridge, "warm_proxy_cache", None)
