@@ -5875,9 +5875,9 @@ def reconcile_voice_queue(payload: dict) -> dict:
     """Attach exact, validated completed MP3s to their immutable voice jobs.
 
     Candidate discovery/validation happens without mutating settings. The
-    final commit is a narrow compare-and-swap performed by save_settings
-    under the cross-process settings lock, so a concurrent worker or settings
-    command cannot be overwritten by this recovery action.
+    final commit is a narrow compare-and-swap performed by
+    reconcile_voice_outputs under the cross-process settings lock, so a
+    concurrent worker or settings command cannot be overwritten by recovery.
     """
     del payload
     settings = load_settings()
