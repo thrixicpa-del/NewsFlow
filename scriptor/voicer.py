@@ -11,6 +11,7 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,33 @@ API_BASE = "https://secret-voicer.ru/api/v1"
 PUBLIC_VOICES = "https://secretvoicer.com/api/public/showcase-voices-filtered/"
 VOICE_BROWSER_URL = "https://secretvoicer.com/app/"
 _BROWSER_QUEUE = threading.Lock()
+# WProject documents a 300 request/minute account limit. Reserve headroom for
+# concurrent bridge commands by capping this process below that ceiling. This
+# gate covers submit, polling, catalogue/usage reads and downloads alike.
+_WPROJECT_HTTP_RATE_LIMIT = 240
+_WPROJECT_HTTP_RATE_WINDOW_SECONDS = 60.0
+_WPROJECT_HTTP_RATE_LOCK = threading.Lock()
+_WPROJECT_HTTP_REQUESTS: deque[float] = deque()
+
+
+def _wait_for_wproject_http_slot() -> None:
+    """Throttle all WProject HTTP requests in this process below provider RPM."""
+    while True:
+        with _WPROJECT_HTTP_RATE_LOCK:
+            now = time.monotonic()
+            cutoff = now - _WPROJECT_HTTP_RATE_WINDOW_SECONDS
+            while _WPROJECT_HTTP_REQUESTS and _WPROJECT_HTTP_REQUESTS[0] <= cutoff:
+                _WPROJECT_HTTP_REQUESTS.popleft()
+            if len(_WPROJECT_HTTP_REQUESTS) < _WPROJECT_HTTP_RATE_LIMIT:
+                _WPROJECT_HTTP_REQUESTS.append(now)
+                return
+            delay = max(
+                0.01,
+                _WPROJECT_HTTP_REQUESTS[0] + _WPROJECT_HTTP_RATE_WINDOW_SECONDS - now,
+            )
+        time.sleep(delay)
+
+
 # A Chrome profile can be controlled by only one persistent Playwright context.
 # Keeping it alive also keeps a separate, inspectable tab for every scenario.
 _BROWSER_RUNTIMES: dict[str, tuple[object, object]] = {}
@@ -484,6 +512,7 @@ class WProjectClient:
         if data is not None:
             request_headers["Content-Type"] = "application/json"
         request_headers.update(headers or {})
+        _wait_for_wproject_http_slot()
         try:
             with urllib.request.urlopen(urllib.request.Request(url, data=data, headers=request_headers, method=method), timeout=timeout) as response:
                 return response.read(), response.headers.get_content_type()
