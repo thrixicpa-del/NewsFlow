@@ -225,6 +225,51 @@ class PublicationJobTests(unittest.TestCase):
         self.assertEqual(other["description"], "Other description")
         self.assertEqual(other["tags"], ["other"])
 
+    def test_manual_seo_and_tags_save_reject_missing_or_ambiguous_production_item(self):
+        settings = Settings(seo_queue=[
+            {
+                "production_item_id": "production:duplicate",
+                "source_title": "First",
+                "description": "First description",
+                "tags": ["first"],
+            },
+            {
+                "production_item_id": "production:duplicate",
+                "source_title": "Second",
+                "description": "Second description",
+                "tags": ["second"],
+            },
+        ])
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "save_settings") as save, \
+             patch.object(bridge, "snapshot", return_value={}):
+            with self.assertRaisesRegex(ValueError, "SEO-пакет не найден"):
+                bridge.save_seo_text({
+                    "productionItemId": "production:missing",
+                    "description": "Edited",
+                    "hashtags": "#edited",
+                })
+            with self.assertRaisesRegex(ValueError, "Пакет тегов не найден"):
+                bridge.save_tags_text({
+                    "productionItemId": "production:missing",
+                    "tags": "edited",
+                })
+            with self.assertRaisesRegex(ValueError, "несколько SEO-пакетов"):
+                bridge.save_seo_text({
+                    "productionItemId": "production:duplicate",
+                    "description": "Edited",
+                    "hashtags": "#edited",
+                })
+            with self.assertRaisesRegex(ValueError, "несколько SEO-пакетов"):
+                bridge.save_tags_text({
+                    "productionItemId": "production:duplicate",
+                    "tags": "edited",
+                })
+
+        save.assert_not_called()
+        self.assertEqual(settings.seo_queue[0]["description"], "First description")
+        self.assertEqual(settings.seo_queue[1]["tags"], ["second"])
+
     def test_montage_handoff_persists_production_identity_for_package_linkage(self):
         settings = Settings()
 
