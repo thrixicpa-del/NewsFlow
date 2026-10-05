@@ -5848,7 +5848,9 @@ def _reconcilable_voice_candidates(output_folder: Path, index: int, title: str) 
     """Find exact managed MP3 matches without searching unrelated folders."""
     folders = (output_folder, output_folder / "Импортированные")
     candidates: list[Path] = []
-    expected_key = audio_title_key(title)
+    # Match the canonical managed filename, including the same 120-character
+    # truncation/Windows-safe normalization used when NewsFlow writes the MP3.
+    expected_key = audio_title_key(safe_filename(title))
     for folder in folders:
         if not folder.is_dir():
             continue
