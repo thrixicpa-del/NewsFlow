@@ -329,6 +329,9 @@ export const fallback: NewsFlowSnapshot = {
     semanticVersion: 0,
     databasePath: "",
   },
+  proxyCache: {
+    status: {},
+  },
   cutterSources: [],
   cutterSettings: {
     outputFolder: "",
@@ -9601,6 +9604,11 @@ export function Footage({
   const [liveIndexStatus, setLiveIndexStatus] = useState<
     NonNullable<NewsFlowSnapshot["footageIndex"]["status"]>
   >({});
+  const proxyLock = useRef(false);
+  const [proxyRequested, setProxyRequested] = useState(false);
+  const [liveProxyStatus, setLiveProxyStatus] = useState<
+    NonNullable<NewsFlowSnapshot["proxyCache"]["status"]>
+  >({});
   // A completed incremental run can finish in a fraction of a second when
   // there are no new clips. Keep its result visible instead of replacing the
   // progress strip with the generic global "saved" toast.
@@ -9658,6 +9666,21 @@ export function Footage({
   const progress = indexTotal
     ? Math.min(100, Math.round((processed / indexTotal) * 100))
     : 0;
+  const proxyStatus = {
+    ...(data.proxyCache.status || {}),
+    ...liveProxyStatus,
+  };
+  const proxyActive = Boolean(proxyStatus.active) || proxyRequested;
+  const proxyInterrupted = proxyStatus.stage === "interrupted" && !proxyStatus.active;
+  const proxyPaused = proxyStatus.stage === "paused";
+  const proxyPausePending = Boolean(proxyStatus.pauseRequested) && !proxyPaused;
+  const proxyPauseControlOn = proxyPaused || proxyPausePending;
+  const proxyTotal = Number(proxyStatus.total || 0);
+  const proxyProcessed = Number(proxyStatus.processed || 0);
+  const proxyRemaining = Math.max(0, proxyTotal - proxyProcessed);
+  const proxyProgress = proxyTotal
+    ? Math.min(100, Math.round((proxyProcessed / proxyTotal) * 100))
+    : 0;
   const semanticCurrent = Number(data.footageIndex.semanticCurrent || 0);
   const semanticOutdated = Number(data.footageIndex.semanticOutdated || 0);
   const semanticVersion = Number(data.footageIndex.semanticVersion || 0);
@@ -9667,6 +9690,8 @@ export function Footage({
       try {
         const status = await window.newsflowDesktop?.footageIndexStatus();
         if (!disposed && status) setLiveIndexStatus(status);
+        const proxyStatus = await window.newsflowDesktop?.proxyCacheStatus();
+        if (!disposed && proxyStatus) setLiveProxyStatus(proxyStatus);
       } catch {
         // The overall snapshot remains a safe fallback if the local file is
         // temporarily being written by the index worker.
@@ -9682,12 +9707,12 @@ export function Footage({
     };
   }, []);
   useEffect(() => {
-    if (!indexing) return;
+    if (!indexing && !proxyActive) return;
     const timer = window.setInterval(() => {
       void refresh();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [indexing, refresh]);
+  }, [indexing, proxyActive, refresh]);
   useEffect(() => {
     if (
       indexRequested &&
@@ -9698,6 +9723,16 @@ export function Footage({
       setIndexRequested(false);
     }
   }, [indexRequested, indexStatus.active, indexStatus.stage]);
+  useEffect(() => {
+    if (
+      proxyRequested &&
+      proxyStatus.active === false &&
+      proxyStatus.stage &&
+      !["warming", "paused"].includes(proxyStatus.stage)
+    ) {
+      setProxyRequested(false);
+    }
+  }, [proxyRequested, proxyStatus.active, proxyStatus.stage]);
   const indexLibrary = async (mode: "scan" | "semantic" | "screenText" = "scan") => {
     if (indexLock.current) return;
     indexLock.current = true;
@@ -9763,6 +9798,25 @@ export function Footage({
     } finally {
       indexLock.current = false;
       setIndexRequested(false);
+    }
+  };
+  const startProxyWarmup = async () => {
+    if (proxyLock.current || !data.footageFolders.length) return;
+    proxyLock.current = true;
+    setProxyRequested(true);
+    try {
+      await command("run-proxy-cache-warmup", {});
+    } finally {
+      proxyLock.current = false;
+    }
+  };
+  const setProxyPaused = async (paused: boolean) => {
+    if (proxyLock.current) return;
+    proxyLock.current = true;
+    try {
+      await command("set-proxy-cache-paused", { paused });
+    } finally {
+      proxyLock.current = false;
     }
   };
   const download = (
@@ -9874,6 +9928,73 @@ export function Footage({
             </Button>
           </div>
         </div>
+      </section>
+      <section className="panel footage-semantic-tools" aria-label="Proxy cache warm-up">
+        <div className="panel-title">
+          <div>
+            <b>Proxy-кэш для быстрого FFmpeg монтажа</b>
+            <small>
+              Один отдельный 1080p / 30 FPS proxy на исходный файл из уже
+              добавленных корней. Оригиналы не меняются. Явно заблокированные
+              футажи с текстом и заставки не обрабатываются.
+            </small>
+          </div>
+          <div className="toolbar compact">
+            <Button
+              onClick={
+                proxyActive || !data.footageFolders.length
+                  ? undefined
+                  : () => void startProxyWarmup()
+              }
+            >
+              <Sparkles size={16} />
+              {proxyInterrupted ? "Продолжить подготовку" : "Подготовить proxy-кэш"}
+            </Button>
+            {proxyActive ? (
+              <Button
+                kind={proxyPauseControlOn ? "success" : "secondary"}
+                onClick={() => void setProxyPaused(!proxyPauseControlOn)}
+              >
+                {proxyPauseControlOn ? "Продолжить" : "Пауза"}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        {proxyStatus.stage ? (
+          <div className={`footage-index-timeline ${proxyStatus.error ? "error" : ""}`}>
+            <div>
+              <b>
+                {proxyStatus.error
+                  ? "Ошибка подготовки proxy-кэша"
+                  : proxyPaused
+                    ? "Proxy-кэш на паузе"
+                    : proxyPausePending
+                      ? "Пауза после текущего файла"
+                      : proxyInterrupted
+                        ? "Подготовка proxy-кэша прервана"
+                        : proxyStatus.stage === "complete"
+                          ? "Подготовка proxy-кэша завершена"
+                          : `Подготавливается: ${proxyStatus.current || "список футажей"}`}
+              </b>
+              <span>
+                обработано: {proxyProcessed.toLocaleString("ru-RU")} из {proxyTotal.toLocaleString("ru-RU")} ·
+                осталось: {proxyRemaining.toLocaleString("ru-RU")} · {proxyProgress}%
+              </span>
+            </div>
+            <div className="footage-index-progress">
+              <i style={{ width: `${proxyProgress}%` }} />
+            </div>
+            <small>
+              {proxyStatus.error || proxyStatus.message || (
+                `Готово: ${Number(proxyStatus.ready || 0).toLocaleString("ru-RU")}; уже в кэше: ${Number(proxyStatus.skipped || 0).toLocaleString("ru-RU")}; исключено: ${Number(proxyStatus.excluded || 0).toLocaleString("ru-RU")}; ошибок: ${Number(proxyStatus.failed || 0).toLocaleString("ru-RU")}.`
+              )}
+            </small>
+          </div>
+        ) : (
+          <div className="index-hint">
+            <small>Кэш создаётся отдельно от исходников и ускоряет ручной режим «Только FFmpeg».</small>
+          </div>
+        )}
       </section>
       <section className="panel footage-folders">
         <div className="panel-title">

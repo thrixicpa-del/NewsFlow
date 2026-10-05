@@ -64,6 +64,7 @@ interface NewsFlowSnapshot {
   voiceItems: Array<{ index: number; title: string; state: string; path: string; productionItemId?: string; rangeId?: string; voiceName?: string; voiceProvider?: string; jobSnapshotId?: string; jobState?: string; voiceStatus?: string; voiceProgress?: number; voiceUpdatedAt?: string; voiceError?: string; voiceMapState?: string; voiceMapLabel?: string; voiceMapPath?: string; voiceMapReason?: string; voiceMapTimingMode?: "aligned" | "approximate" | ""; voiceMapEngine?: string; voiceMapConfidence?: number }>;
   footageFolders: string[];
   footageIndex: { total: number; indexed: number; englishBlocked?: number; englishSafe?: number; englishUnchecked?: number; semanticCurrent?: number; semanticOutdated?: number; semanticVersion?: number; databasePath: string; error?: string; status?: { stage?: string; active?: boolean; total?: number; processed?: number; indexed?: number; skipped?: number; failed?: number; current?: string; startedAt?: string; updatedAt?: string; error?: string; message?: string } };
+  proxyCache: { status?: { stage?: string; active?: boolean; pauseRequested?: boolean; total?: number; processed?: number; ready?: number; skipped?: number; excluded?: number; failed?: number; current?: string; sourceBytes?: number; cacheFolder?: string; startedAt?: string; updatedAt?: string; error?: string; message?: string } };
   footageTree?: { total: number; limited: boolean; roots: Array<{ path: string; clips: number; branches: Array<{ name: string; clips: number }> }> };
   cutterSources: string[];
   cutterSettings: { outputFolder: string; downloadFolder: string; mixerOutputFolder: string };
@@ -157,6 +158,7 @@ interface Window {
   newsflowDesktop?: {
     snapshot: () => Promise<NewsFlowSnapshot>;
     footageIndexStatus: () => Promise<NonNullable<NewsFlowSnapshot['footageIndex']['status']>>;
+    proxyCacheStatus: () => Promise<NonNullable<NewsFlowSnapshot['proxyCache']['status']>>;
     saveSettings: (patch: unknown) => Promise<NewsFlowSnapshot>;
     revealApiKey: (input: { kind: string; index: number; fingerprint: string }) => Promise<{ label: string; secret: string; revision: string }>;
     command: <K extends import("./contracts/newsflowCommands").NewsFlowCommand>(

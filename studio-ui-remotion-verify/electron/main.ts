@@ -295,12 +295,45 @@ function startMontageQueue(payload: unknown = {}): Promise<void> {
   });
 }
 
+function startProxyCacheWarmup(payload: unknown = {}): Promise<void> {
+  const executable = pythonExecutable();
+  const bundled = app.isPackaged && executable.toLowerCase().endsWith('.exe') && executable.includes('core-bin');
+  const tracedPayload = actionTracePayload(payload);
+  const args = bundled
+    ? ['run-proxy-cache-warmup', JSON.stringify(tracedPayload)]
+    : ['-m', 'scriptor.bridge', 'run-proxy-cache-warmup', JSON.stringify(tracedPayload)];
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      windowsHide: true,
+      cwd: coreRoot,
+      detached: false,
+      stdio: 'ignore',
+      env: { ...process.env, PYTHONPATH: coreRoot },
+    });
+    child.once('error', (error) => reject(new Error(`Не удалось запустить подготовку proxy-кэша: ${error.message}`)));
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 function readFootageIndexStatus() {
   // Indexing can run for a long time. Reading this tiny local status file is
   // deliberately independent from a full Python snapshot, which may include
   // slow project-wide checks and used to leave the progress panel stale.
   const root = process.env.LOCALAPPDATA || app.getPath('userData');
   const statusPath = path.join(root, 'NewsFlow', 'footage-index-status.json');
+  try {
+    return JSON.parse(readFileSync(statusPath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function readProxyCacheStatus() {
+  const root = process.env.LOCALAPPDATA || app.getPath('userData');
+  const statusPath = path.join(root, 'NewsFlow', 'proxy-cache-status.json');
   try {
     return JSON.parse(readFileSync(statusPath, 'utf8'));
   } catch {
@@ -378,6 +411,7 @@ function handleTrusted(channel: string, handler: TrustedIpcHandler): void {
 
 handleTrusted('newsflow:snapshot', () => callCore('snapshot'));
 handleTrusted('newsflow:footage-index-status', () => readFootageIndexStatus());
+handleTrusted('newsflow:proxy-cache-status', () => readProxyCacheStatus());
 handleTrusted('newsflow:open-path', (_event, target: unknown) => openApprovedPath(target));
 handleTrusted('newsflow:save-settings', (_event, patch: unknown) => callCore('save-settings', patch));
 // Credential responses never enter snapshots or the generic renderer command state.
@@ -394,6 +428,11 @@ handleTrusted('newsflow:command', async (_event, command: unknown, payload: unkn
   assertAllowedCoreCommand(command);
   if (command === 'run-montage-queue') {
     await startMontageQueue(payload);
+    await new Promise(resolve => setTimeout(resolve, 180));
+    return callCore('snapshot');
+  }
+  if (command === 'run-proxy-cache-warmup') {
+    await startProxyCacheWarmup(payload);
     await new Promise(resolve => setTimeout(resolve, 180));
     return callCore('snapshot');
   }

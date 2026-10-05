@@ -680,6 +680,94 @@ def proxy_cache_root() -> Path:
         return _writable_render_folder(app_data_root() / "RenderProxy")
 
 
+def source_proxy_cache_root() -> Path:
+    """Return the immutable-source cache used by explicit proxy warm-up."""
+    return _writable_render_folder(proxy_cache_root() / "Sources")
+
+
+def _source_proxy_key(source: Path, width: int, height: int) -> str:
+    stat = source.stat()
+    value = (
+        f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
+        f"{width}x{height}|30fps|crf20|source-proxy-v1"
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def source_proxy_path(source: Path, width: int, height: int) -> Path:
+    """Return the deterministic full-source proxy path for one original file."""
+    return source_proxy_cache_root() / f"{_source_proxy_key(source, width, height)}.mp4"
+
+
+def render_source_for_proxy(source: Path, width: int, height: int) -> Path:
+    """Use a valid pre-warmed source proxy when one matches the original."""
+    prepared = source_proxy_path(source, width, height)
+    if prepared.is_file() and prepared.stat().st_size >= 1024:
+        return prepared
+    return source
+
+
+def warm_source_proxy(
+    source: Path,
+    width: int,
+    height: int,
+    heartbeat: Callable[[int | None], None] | None = None,
+) -> tuple[Path, bool]:
+    """Build one full 1080p/30fps source proxy without ever touching the original.
+
+    Returns the cache path and whether a current immutable proxy already
+    existed.  The cache key contains the original path, size and mtime, so a
+    changed source naturally receives a new proxy while an unchanged one is
+    never processed twice.
+    """
+    source = Path(source).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Футаж не найден: {source}")
+    target = source_proxy_path(source, width, height)
+    if target.is_file() and target.stat().st_size >= 1024:
+        return target, True
+    ffmpeg = ffmpeg_executable()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _proxy_lock(target):
+        if target.is_file() and target.stat().st_size >= 1024:
+            return target, True
+        partial = target.with_name(
+            f"{target.stem}.{os.getpid()}.{threading.get_ident()}.partial{target.suffix}"
+        )
+        try:
+            command = [
+                ffmpeg, "-y", "-i", str(source), "-map", "0:v:0", "-an",
+                "-vf", (
+                    f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                    f"crop={width}:{height},fps=30,format=yuv420p"
+                ),
+                *video_encoder_args(ffmpeg), "-movflags", "+faststart", str(partial),
+            ]
+            try:
+                _run(command, process_observer=heartbeat)
+            except RuntimeError:
+                if "h264_nvenc" not in command:
+                    raise
+                _ENCODER_CACHE[ffmpeg] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+                _run([
+                    ffmpeg, "-y", "-i", str(source), "-map", "0:v:0", "-an",
+                    "-vf", (
+                        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                        f"crop={width}:{height},fps=30,format=yuv420p"
+                    ),
+                    *_ENCODER_CACHE[ffmpeg], "-movflags", "+faststart", str(partial),
+                ], process_observer=heartbeat)
+            if not partial.is_file() or partial.stat().st_size < 1024:
+                raise RuntimeError("FFmpeg не создал пригодный source proxy")
+            _replace_with_retry(partial, target)
+        finally:
+            try:
+                partial.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return target, False
+
+
 def _proxy_key(clip: TimelineClip, width: int, height: int) -> str:
     source = Path(clip.path)
     stat = source.stat()
@@ -1051,6 +1139,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             source = Path(clip.path)
             if not source.exists():
                 raise FileNotFoundError(f"Футаж не найден: {source}")
+            render_source = render_source_for_proxy(source, width, height)
             target = cache_root / f"{_proxy_key(clip, width, height)}.mp4"
             # FFmpeg's ``-t 6.000`` at 30fps can encode only 179 frames
             # (5.97s). Across 44 ordinary clips that silently removed 1.3s
@@ -1076,10 +1165,10 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                         # The selector still avoids this for normal queue
                         # planning; this is only the renderer's bounded
                         # fallback for an explicit clip already in a project.
-                        available = _remaining_source_duration(probe_video_duration(source), clip.source_start)
+                        available = _remaining_source_duration(probe_video_duration(render_source), clip.source_start)
                         loop_args = ["-stream_loop", "-1"] if available + 0.01 < proxy_duration else []
                         command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
-                                   "-t", f"{proxy_duration:.3f}", "-i", str(source),
+                                   "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
                                    "-vf", filter_value, "-an", *video_encoder_args(ffmpeg),
                                    "-movflags", "+faststart", str(partial)]
                         try:
@@ -1089,7 +1178,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                                 raise
                             _ENCODER_CACHE[ffmpeg] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
                             command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
-                                       "-t", f"{proxy_duration:.3f}", "-i", str(source),
+                                       "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
                                        "-vf", filter_value, "-an", *_ENCODER_CACHE[ffmpeg],
                                        "-movflags", "+faststart", str(partial)]
                             run_ffmpeg(command)

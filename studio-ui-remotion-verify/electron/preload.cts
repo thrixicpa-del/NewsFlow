@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('newsflowDesktop', {
   snapshot: () => ipcRenderer.invoke('newsflow:snapshot'),
   footageIndexStatus: () => ipcRenderer.invoke('newsflow:footage-index-status'),
+  proxyCacheStatus: () => ipcRenderer.invoke('newsflow:proxy-cache-status'),
   saveSettings: (patch: unknown) => ipcRenderer.invoke('newsflow:save-settings', patch),
   revealApiKey: (input: { kind: string; index: number; fingerprint: string }) => ipcRenderer.invoke('newsflow:reveal-api-key', input),
   command: (command: string, payload: unknown = {}) => ipcRenderer.invoke('newsflow:command', command, payload),
