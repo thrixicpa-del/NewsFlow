@@ -229,7 +229,9 @@ class SessionTests(unittest.TestCase):
             stale_jobs = [Job(ScenarioRequest(0, "R1", "P"), RunState.WAITING)]
             newer_jobs = [Job(ScenarioRequest(0, "R2", "P"), RunState.DONE, "new prose", "")]
             save_session(["R1"], stale_jobs)
-            original_remember = __import__("scriptor.session", fromlist=["_remember_session_revision"])._remember_session_revision
+            original_remember = __import__(
+                "scriptor.session", fromlist=["_remember_loaded_session_revision"]
+            )._remember_loaded_session_revision
             committed_newer = False
 
             def commit_r2_before_remember(path, *revision):
@@ -239,7 +241,7 @@ class SessionTests(unittest.TestCase):
                     _write_session_file(path, _session_data(["R2"], newer_jobs))
                 return original_remember(path, *revision)
 
-            with patch("scriptor.session._remember_session_revision", side_effect=commit_r2_before_remember):
+            with patch("scriptor.session._remember_loaded_session_revision", side_effect=commit_r2_before_remember):
                 loaded_titles, _loaded_jobs = load_session()
 
             self.assertEqual(loaded_titles, ["R1"])
