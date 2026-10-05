@@ -10617,7 +10617,9 @@ export function Editor({
   const [queueLaunching, setQueueLaunching] = useState(false);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [queuePausedDraft, setQueuePausedDraft] = useState(
-    data.montageSettings.queuePaused,
+    data.montageSettings.queueRunning === false
+      ? false
+      : data.montageSettings.queuePaused,
   );
   const [ratio, setRatio] = useState(data.montageSettings.aspectRatio);
   const [renderer, setRenderer] = useState(data.montageSettings.renderer);
@@ -10729,9 +10731,9 @@ export function Editor({
   };
   useEffect(() => {
     if (!pauseSaving) {
-      setQueuePausedDraft(data.montageSettings.queuePaused);
+      setQueuePausedDraft(running ? data.montageSettings.queuePaused : false);
     }
-  }, [data.montageSettings.queuePaused, pauseSaving]);
+  }, [data.montageSettings.queuePaused, pauseSaving, running]);
   useEffect(() => {
     setSelected((current) =>
       current.filter((index) => ready.some((item) => item.index === index)),
