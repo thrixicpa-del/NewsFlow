@@ -3719,7 +3719,7 @@ class CoverVisualInstructionTests(unittest.TestCase):
         lowered = plan.casefold()
         self.assertIn("строго из текущей темы", lowered)
         self.assertIn("не подменяй тему знакомым сюжетом", lowered)
-        self.assertIn("не выдуманным происшествием", lowered)
+        self.assertIn("не заменяй её выдуманным происшествием", lowered)
 
 
     def test_named_fixture_does_not_activate_named_runtime_recipe(self):
