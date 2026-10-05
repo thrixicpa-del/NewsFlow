@@ -17213,6 +17213,19 @@ def _montage_wait_if_paused(settings: Settings, scenario_index: int) -> None:
         _montage_task_update(settings, scenario_index, status="В очереди", phase="Продолжаем", progress=None)
 
 
+def _montage_render_process_heartbeat(settings: Settings, scenario_index: int, pid: int | None) -> None:
+    """Expose FFmpeg liveness and honor pause between complete subprocesses."""
+    _montage_task_update(
+        settings, scenario_index, status="Рендер", phase="Рендер футажей", progress=None,
+        detail=("FFmpeg работает" if pid else "FFmpeg завершил этап"), ffmpegPid=int(pid or 0),
+    )
+    # Suspending an encoder process mid-write is unsafe. Once that subprocess
+    # has exited, however, block before the renderer launches its next
+    # proxy/chunk/concat/mux stage.
+    if pid is None:
+        _montage_wait_if_paused(settings, scenario_index)
+
+
 def _remove_montage_output(settings: Settings, scenario_index: int) -> None:
     """Remove only this task's generated artifacts, never a source MP3 or footage."""
     item = settings.montage_task_statuses.get(str(scenario_index)) or {}
