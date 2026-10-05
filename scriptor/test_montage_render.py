@@ -63,6 +63,105 @@ class MontageRenderTests(unittest.TestCase):
             raise AssertionError(made.stderr[-1000:])
         return clip
 
+    def test_source_proxy_cache_reuses_an_unchanged_source_without_touching_it(self):
+        """Warm-up creates a separate deterministic proxy exactly once per source version."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-source-proxy-") as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            source.write_bytes(b"immutable-source" * 256)
+            before = source.stat()
+            runs = []
+
+            def fake_run(command, process_observer=None):
+                del process_observer
+                runs.append(command)
+                Path(command[-1]).write_bytes(b"proxy" * 512)
+
+            with patch.object(timeline_module, "source_proxy_cache_root", return_value=root / "cache"), \
+                 patch.object(timeline_module, "ffmpeg_executable", return_value="ffmpeg"), \
+                 patch.object(timeline_module, "video_encoder_args", return_value=["-c:v", "libx264"]), \
+                 patch.object(timeline_module, "_run", side_effect=fake_run):
+                created, reused = timeline_module.warm_source_proxy(source, 1920, 1080)
+                repeated, repeated_reused = timeline_module.warm_source_proxy(source, 1920, 1080)
+
+            self.assertTrue(created.is_file())
+            self.assertEqual(created, repeated)
+            self.assertFalse(reused)
+            self.assertTrue(repeated_reused)
+            self.assertEqual(len(runs), 1)
+            after = source.stat()
+            self.assertEqual((after.st_size, after.st_mtime_ns), (before.st_size, before.st_mtime_ns))
+
+    def test_source_proxy_warmup_rebuilds_an_incomplete_cached_file(self):
+        """A truncated prior proxy must never be reused as valid footage."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-source-proxy-truncated-") as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            source.write_bytes(b"immutable-source" * 256)
+            target = root / "cache" / "cached.mp4"
+            target.parent.mkdir()
+            target.write_bytes(b"broken")
+            runs = []
+
+            def fake_run(command, process_observer=None):
+                del process_observer
+                runs.append(command)
+                Path(command[-1]).write_bytes(b"proxy" * 512)
+
+            with patch.object(timeline_module, "source_proxy_path", return_value=target), \
+                 patch.object(timeline_module, "ffmpeg_executable", return_value="ffmpeg"), \
+                 patch.object(timeline_module, "video_encoder_args", return_value=["-c:v", "libx264"]), \
+                 patch.object(timeline_module, "_run", side_effect=fake_run):
+                rebuilt, reused = timeline_module.warm_source_proxy(source, 1920, 1080)
+
+            self.assertEqual(rebuilt, target)
+            self.assertFalse(reused)
+            self.assertEqual(len(runs), 1)
+            self.assertGreaterEqual(target.stat().st_size, 1024)
+
+    def test_source_proxy_warmup_writes_a_silent_1080p_30fps_video(self):
+        """The reusable source proxy has the exact legacy FFmpeg input format."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-source-proxy-smoke-") as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            ffmpeg = ffmpeg_executable()
+            created = subprocess.run([
+                ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.4",
+                "-an", "-c:v", "libx264", str(source),
+            ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+            self.assertEqual(created.returncode, 0, created.stderr[-1000:])
+            original = source.stat()
+
+            with patch.object(timeline_module, "source_proxy_cache_root", return_value=root / "cache"):
+                proxy, reused = timeline_module.warm_source_proxy(source, 1920, 1080)
+
+            self.assertFalse(reused)
+            details = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(proxy)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            ).stderr
+            self.assertIn("1920x1080", details)
+            self.assertIn("30 fps", details)
+            self.assertNotIn("Audio:", details)
+            current = source.stat()
+            self.assertEqual((current.st_size, current.st_mtime_ns), (original.st_size, original.st_mtime_ns))
+
+    def test_legacy_renderer_prefers_a_current_prepared_source_proxy(self):
+        """Pre-warmed sources are consumed before the legacy fragment proxy is built."""
+        selector = getattr(timeline_module, "render_source_for_proxy", None)
+        self.assertTrue(callable(selector), "prepared source proxy selector is not implemented")
+        with tempfile.TemporaryDirectory(prefix="newsflow-prepared-source-") as temporary:
+            root = Path(temporary)
+            source = root / "source.mp4"
+            prepared = root / "prepared.mp4"
+            source.write_bytes(b"source")
+            prepared.write_bytes(b"prepared" * 256)
+            with patch.object(timeline_module, "source_proxy_path", return_value=prepared):
+                self.assertEqual(selector(source, 1920, 1080), prepared)
+            prepared.unlink()
+            with patch.object(timeline_module, "source_proxy_path", return_value=prepared):
+                self.assertEqual(selector(source, 1920, 1080), source)
+
     def test_gpu_capability_requires_a_working_nvenc_device_and_caches_the_probe(self):
         """An advertised encoder is not enough when CUDA/GPU initialisation fails."""
         ffmpeg = "C:/NewsFlow/fake-ffmpeg.exe"
