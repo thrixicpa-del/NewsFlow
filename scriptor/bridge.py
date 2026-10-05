@@ -14721,7 +14721,7 @@ def save_montage_settings(payload: dict) -> dict:
     settings.montage_aspect_ratio = ratio
     if "renderer" in payload:
         renderer = str(payload.get("renderer", "ffmpeg")).casefold()
-        settings.montage_renderer = renderer if renderer in {"remotion", "ffmpeg"} else "ffmpeg"
+        settings.montage_renderer = renderer if renderer in {"remotion", "ffmpeg", "gpu-timeline"} else "ffmpeg"
         settings.montage_renderer_explicit = True
     if "remotionFrameConcurrency" in payload:
         settings.montage_remotion_frame_concurrency = max(1, int(payload.get("remotionFrameConcurrency", 2)))

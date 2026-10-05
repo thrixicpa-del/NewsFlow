@@ -6,20 +6,25 @@ The tests do not require DaVinci Resolve, network access or a user profile.
 """
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import types
 import unittest
-import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
-from . import davinci
-from . import bridge
+from . import bridge, davinci
 from .config import Settings
 from .footage import FootageItem
-from .timeline import (TimelineClip, TimelineProject, export_fcpxml, ffmpeg_executable,
-                       probe_media_duration, remotion_payload)
+from .timeline import (
+    TimelineClip,
+    TimelineProject,
+    export_fcpxml,
+    ffmpeg_executable,
+    probe_media_duration,
+    remotion_payload,
+)
 
 
 class DaVinciHandoffTests(unittest.TestCase):
@@ -83,7 +88,7 @@ class DaVinciHandoffTests(unittest.TestCase):
             ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=green:s=320x180:r=30:d=2.4",
             "-f", "lavfi", "-i", "sine=frequency=250:sample_rate=48000:duration=2.4",
             "-shortest", "-c:v", "libx264", "-c:a", "aac", str(intro),
-        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         self.assertEqual(created.returncode, 0, created.stderr[-1000:])
         self.assertGreater(bridge._full_intro_duration(str(intro), fallback=6.0), 2.2)
 
@@ -185,15 +190,18 @@ class DaVinciHandoffTests(unittest.TestCase):
 
     def test_bridge_ffmpeg_render_creates_mp4_remotion_plan_and_xml(self):
         """Exercise the desktop render action, not only the lower FFmpeg helper."""
-        fixture_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"
-        clip = fixture_root / "red.mp4"
-        self.assertTrue(clip.is_file(), "Smoke fixture missing")
+        clip = self.root / "red.mp4"
         voice = self.root / "voice.wav"
         ffmpeg = ffmpeg_executable()
+        made_clip = subprocess.run([
+            ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30:d=2.5",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip),
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        self.assertEqual(made_clip.returncode, 0, made_clip.stderr[-1000:])
         made_voice = subprocess.run([
             ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2.5",
             str(voice),
-        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         self.assertEqual(made_voice.returncode, 0, made_voice.stderr[-1000:])
         settings = Settings()
         settings.montage_renderer = "ffmpeg"
@@ -205,7 +213,7 @@ class DaVinciHandoffTests(unittest.TestCase):
         TimelineProject(
             title="Desktop render",
             voiceover_path=str(voice),
-            clips=[TimelineClip(path=str(clip), narration="Сцена", visual_query_en="news", duration=1.0)],
+            clips=[TimelineClip(path=str(clip), narration="Сцена", visual_query_en="news", duration=2.5)],
         ).save(project_path)
         old_load, old_save, old_snapshot = bridge.load_settings, bridge.save_settings, bridge.snapshot
         try:

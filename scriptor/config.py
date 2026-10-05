@@ -19,6 +19,29 @@ _TEST_MODE_ENV = "NEWSFLOW_TEST_MODE"
 _TEST_ROOT_ENV = "NEWSFLOW_TEST_ROOT"
 _PRODUCTION_LOCALAPPDATA_ENV = "NEWSFLOW_PRODUCTION_LOCALAPPDATA"
 SETTINGS_SCHEMA_VERSION = 4
+_GPU_TIMELINE_AVAILABLE: bool | None = None
+
+
+def _probe_gpu_timeline_available() -> bool:
+    """Probe bundled FFmpeg once without making GPU an import-time requirement."""
+    try:
+        from .timeline import gpu_timeline_capability
+        return bool(gpu_timeline_capability().get("available"))
+    except (OSError, RuntimeError, ImportError):
+        return False
+
+
+def gpu_timeline_available() -> bool:
+    """Return the per-process NVENC capability without repeatedly spawning FFmpeg."""
+    global _GPU_TIMELINE_AVAILABLE
+    if _GPU_TIMELINE_AVAILABLE is None:
+        _GPU_TIMELINE_AVAILABLE = _probe_gpu_timeline_available()
+    return _GPU_TIMELINE_AVAILABLE
+
+
+def default_montage_renderer() -> str:
+    """Choose the fast GPU route for a newly created profile only when usable."""
+    return "gpu-timeline" if gpu_timeline_available() else "ffmpeg"
 
 
 class TestStorageIsolationError(RuntimeError):
@@ -387,9 +410,10 @@ class Settings:
     montage_project_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Проекты монтажа"))
     montage_output_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Готовые ролики"))
     montage_aspect_ratio: str = "16:9"
-    # FAST NEWS MONTAGE uses FFmpeg's direct, cached proxy route by default.
-    # Remotion remains an explicit composition choice for transitions/layers.
-    montage_renderer: str = "ffmpeg"
+    # New profiles prefer the explicit GPU timeline route when bundled FFmpeg
+    # exposes NVENC.  The established FFmpeg proxy route remains a deliberate
+    # manual fallback; Remotion remains an explicit composition choice.
+    montage_renderer: str = field(default_factory=default_montage_renderer)
     montage_renderer_explicit: bool = False
     montage_remotion_frame_concurrency: int = 2
     # FCPXML is a lightweight editable copy of the same montage plan, not an
@@ -1093,14 +1117,19 @@ def load_settings() -> Settings:
         follows_pipeline = bool(data.get("idea_target_follows_pipeline", True))
         idea_target = (pipeline_target if follows_pipeline
                        else max(1, int(data.get("idea_target_count", 100))))
-        saved_montage_renderer = str(data.get("montage_renderer", "ffmpeg")).casefold()
+        saved_renderer_value = data.get("montage_renderer")
+        saved_montage_renderer = (
+            default_montage_renderer()
+            if saved_renderer_value is None
+            else str(saved_renderer_value).casefold()
+        )
         montage_renderer_explicit = bool(data.get("montage_renderer_explicit", False))
         # Earlier builds wrote ``remotion`` merely because it was the default.
         # The absence of the explicit marker means this was never an operator
         # choice, so route it to the current FAST NEWS default. A deliberate
         # Remotion selection is preserved exactly.
-        if saved_montage_renderer not in {"remotion", "ffmpeg"}:
-            saved_montage_renderer = "ffmpeg"
+        if saved_montage_renderer not in {"remotion", "ffmpeg", "gpu-timeline"}:
+            saved_montage_renderer = default_montage_renderer()
         if saved_montage_renderer == "remotion" and "montage_renderer_explicit" not in data:
             saved_montage_renderer = "ffmpeg"
         settings = Settings(

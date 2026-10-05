@@ -18,6 +18,7 @@ from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
+_GPU_TIMELINE_CAPABILITY_CACHE: dict[str, dict[str, object]] = {}
 _PROXY_LOCK_GUARD = threading.RLock()
 _PROXY_LOCKS: dict[str, threading.Lock] = {}
 
@@ -426,6 +427,59 @@ def video_encoder_args(ffmpeg: str) -> list[str]:
     return list(args)
 
 
+def gpu_timeline_capability(ffmpeg: str | None = None) -> dict[str, object]:
+    """Prove that the explicit GPU route can actually initialise NVENC.
+
+    Seeing h264_nvenc in the FFmpeg encoder list is not sufficient: FFmpeg
+    can advertise it on a machine with no usable NVIDIA driver or GPU. Probe
+    one disposable frame once per FFmpeg binary and cache the result so long
+    montage renders never repeat the hardware check per chunk.
+    """
+    binary = ffmpeg or ffmpeg_executable()
+    cached = _GPU_TIMELINE_CAPABILITY_CACHE.get(binary)
+    if cached is not None:
+        return dict(cached)
+
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    result = subprocess.run(
+        [
+            binary, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1:d=1",
+            "-frames:v", "1", "-an", "-c:v", "h264_nvenc",
+            "-preset", "p4", "-cq", "20", "-b:v", "0",
+            "-f", "null", "-",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=flags,
+        check=False,
+    )
+    available = result.returncode == 0
+    diagnostic = (result.stderr or result.stdout or "").strip()
+    if available:
+        reason = ""
+    elif diagnostic:
+        reason = f"NVENC недоступен: {diagnostic.splitlines()[-1][-500:]}"
+    else:
+        reason = "NVENC недоступен в этой системе"
+    capability: dict[str, object] = {
+        "available": available,
+        "encoder": "h264_nvenc",
+        "reason": reason,
+    }
+    _GPU_TIMELINE_CAPABILITY_CACHE[binary] = capability
+    return dict(capability)
+
+
+def gpu_timeline_encoder_args(ffmpeg: str) -> list[str]:
+    """Return strict NVENC settings for the explicit GPU renderer only."""
+    capability = gpu_timeline_capability(ffmpeg)
+    if not capability["available"]:
+        raise RuntimeError(str(capability["reason"]))
+    return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", "-b:v", "0"]
+
 def probe_media_duration(path: Path) -> float:
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -738,6 +792,184 @@ def _render_project_remotion(project: TimelineProject, output: Path,
             pass
 
 
+GPU_TIMELINE_CHUNK_SIZE = 12
+
+
+def _gpu_timeline_render_clips(project: TimelineProject) -> list[TimelineClip]:
+    """Return the exact visual sequence used by GPU timeline rendering."""
+    render_clips = list(project.clips)
+    if project.intro_path and Path(project.intro_path).exists() and project.intro_duration > 0:
+        render_clips.insert(0, TimelineClip(project.intro_path, "Заставка", "intro", project.intro_duration, source="intro"))
+    voice = Path(project.voiceover_path) if project.voiceover_path else None
+    if voice and voice.is_file() and project.clips:
+        try:
+            target = required_video_duration(probe_media_duration(voice), project.intro_duration)
+            needed = target + 0.15 - sum(max(0.0, float(clip.duration)) for clip in render_clips)
+            tail_index = len(render_clips) - 1
+            tail = render_clips[tail_index]
+            available = _remaining_source_duration(probe_video_duration(Path(tail.path)), tail.source_start)
+            if needed > 0.0 and available + 0.01 >= tail.duration + needed:
+                render_clips[tail_index] = replace(tail, duration=tail.duration + needed)
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return render_clips
+
+
+def _gpu_timeline_chunk_command(
+    ffmpeg: str,
+    clips: list[TimelineClip],
+    output: Path,
+    script: Path,
+    width: int,
+    height: int,
+) -> list[str]:
+    """Build one bounded direct-source GPU timeline command.
+
+    The filter script keeps the Windows process command short even when a
+    chunk contains varied local/external source paths.  Input count remains
+    bounded independently of the number of scenes in a long NewsFlow video.
+    """
+    inputs: list[str] = []
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, clip in enumerate(clips):
+        source = Path(clip.path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Футаж не найден: {source}")
+        duration = max(0.1, float(clip.duration) + (1.0 / 30.0) + 0.002)
+        available = _remaining_source_duration(probe_video_duration(source), clip.source_start)
+        loop = ["-stream_loop", "-1"] if available + 0.01 < duration else []
+        inputs.extend([
+            *loop,
+            "-ss", f"{max(0.0, clip.source_start):.3f}",
+            "-t", f"{duration:.3f}",
+            "-i", str(source),
+        ])
+        label = f"v{index}"
+        filters.append(
+            f"[{index}:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},fps=30,format=yuv420p[{label}]"
+        )
+        labels.append(f"[{label}]")
+    filters.append(f"{''.join(labels)}concat=n={len(clips)}:v=1:a=0[outv]")
+    script.write_text(";\n".join(filters), encoding="utf-8")
+    return [
+        ffmpeg, "-y", *inputs,
+        "-filter_complex_script", str(script),
+        "-map", "[outv]", "-an", *gpu_timeline_encoder_args(ffmpeg),
+        "-movflags", "+faststart", str(output),
+    ]
+
+
+def _render_project_gpu_timeline(
+    project: TimelineProject,
+    output: Path,
+    progress: Callable[[int, int, str], None] | None = None,
+    heartbeat: Callable[[int | None], None] | None = None,
+) -> Path:
+    """Render a long project through bounded direct-source NVENC chunks.
+
+    Unlike the legacy route this does not materialise a separately normalised
+    cache file for every source fragment.  The existing sequence, trims and
+    output contract remain identical; only the physical render strategy is
+    different.
+    """
+    ffmpeg = ffmpeg_executable()
+    gpu_timeline_encoder_args(ffmpeg)
+    width, height = (1080, 1920) if project.aspect_ratio == "9:16" else (1920, 1080)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    published_output = output
+    partial_output = published_output.with_name(
+        f"{published_output.stem}.{os.getpid()}.{threading.get_ident()}.partial{published_output.suffix}"
+    )
+    render_clips = _gpu_timeline_render_clips(project)
+    total_chunks = max(1, math.ceil(len(render_clips) / GPU_TIMELINE_CHUNK_SIZE))
+    total_steps = total_chunks + 2
+
+    def run_ffmpeg(command: list[str]) -> None:
+        _run(command, process_observer=heartbeat)
+
+    with tempfile.TemporaryDirectory(prefix="newsflow-gpu-timeline-", dir=render_workspace_root()) as temporary:
+        work = Path(temporary)
+        chunks: list[Path] = []
+        for chunk_number, start in enumerate(range(0, len(render_clips), GPU_TIMELINE_CHUNK_SIZE), start=1):
+            clip_chunk = render_clips[start:start + GPU_TIMELINE_CHUNK_SIZE]
+            chunk = work / f"chunk-{chunk_number:04d}.mp4"
+            script = work / f"chunk-{chunk_number:04d}.ffscript"
+            run_ffmpeg(_gpu_timeline_chunk_command(
+                ffmpeg, clip_chunk, chunk, script, width, height,
+            ))
+            chunks.append(chunk)
+            if progress:
+                progress(chunk_number, total_steps, f"GPU-таймлайн: блок {chunk_number}/{total_chunks}")
+        concat_file = work / "chunks.txt"
+        concat_file.write_text(
+            "\n".join(f"file '{str(path).replace('\\', '/')}'" for path in chunks),
+            encoding="utf-8",
+        )
+        silent = work / "timeline.mp4"
+        run_ffmpeg([
+            ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-c", "copy", "-movflags", "+faststart", str(silent),
+        ])
+        if progress:
+            progress(total_chunks + 1, total_steps, "Склейка GPU-таймлайна")
+        video_source = silent
+        overlay = Path(project.overlay_path) if project.overlay_path else None
+        if overlay and overlay.exists():
+            composited = work / "with-overlay.mp4"
+            filter_value = (
+                f"[1:v]chromakey=0x00FF00:0.12:0.08,scale={width}:-2[overlay];"
+                f"[0:v][overlay]overlay=(W-w)/2:H-h-24:shortest=1[outv]"
+            )
+            run_ffmpeg([
+                ffmpeg, "-y", "-i", str(silent), "-stream_loop", "-1", "-i", str(overlay),
+                "-filter_complex", filter_value, "-map", "[outv]", "-an",
+                *gpu_timeline_encoder_args(ffmpeg), "-movflags", "+faststart", str(composited),
+            ])
+            video_source = composited
+        voiceover = Path(project.voiceover_path) if project.voiceover_path else None
+        if voiceover and voiceover.exists():
+            voice_duration = probe_media_duration(voiceover)
+            visual_duration = probe_media_duration(video_source)
+            required_duration = required_video_duration(voice_duration, project.intro_duration)
+            visual_gap = required_duration - visual_duration
+            if visual_gap > 0.05:
+                raise RuntimeError(
+                    "Таймлайн футажей короче озвучки на "
+                    f"{visual_gap:.1f} сек. Ролик не сохранён, "
+                    "чтобы не получить зависший последний кадр. Нажмите «Переделать» — "
+                    "NewsFlow подберёт дополнительные разные футажи."
+                )
+            intro = Path(project.intro_path) if project.intro_path else None
+            if intro and intro.exists() and project.intro_duration > 0:
+                delay = int(project.intro_duration * 1000)
+                mix = (
+                    f"[1:a]adelay={delay}:all=1[voice];"
+                    f"[2:a]atrim=duration={project.intro_duration:.3f},asetpts=N/SR/TB[intro];"
+                    "[intro][voice]amix=inputs=2:duration=longest:normalize=0[audio]"
+                )
+                run_ffmpeg([
+                    ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-i", str(intro),
+                    "-filter_complex", mix, "-map", "0:v:0", "-map", "[audio]", "-c:v", "copy",
+                    "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(partial_output),
+                ])
+            else:
+                delay = ["-af", f"adelay={int(project.intro_duration * 1000)}:all=1"] if project.intro_duration > 0 else []
+                run_ffmpeg([
+                    ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-map", "0:v:0",
+                    "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                    *delay, "-shortest", "-movflags", "+faststart", str(partial_output),
+                ])
+        else:
+            shutil.copy2(video_source, partial_output)
+        if progress:
+            progress(total_steps, total_steps, "Готово")
+    _replace_with_retry(partial_output, published_output)
+    project.output_path = str(published_output)
+    return published_output
+
+
 def render_project(project: TimelineProject, output: Path, progress: Callable[[int, int, str], None] | None = None,
                    renderer: str = "ffmpeg", remotion_concurrency: int | None = None,
                    remotion_parallel_jobs: int = 1,
@@ -754,6 +986,16 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             project, output, progress,
             frame_concurrency=max(1, int(remotion_concurrency or 1)),
             parallel_jobs=max(1, int(remotion_parallel_jobs or 1)),
+        )
+    if renderer == "gpu-timeline":
+        capability = gpu_timeline_capability()
+        if not capability["available"]:
+            raise RuntimeError(str(capability["reason"]))
+        return _render_project_gpu_timeline(
+            project,
+            output,
+            progress=progress,
+            heartbeat=heartbeat,
         )
     if renderer != "ffmpeg":
         raise ValueError(f"Неподдерживаемый рендерер монтажа: {renderer}")

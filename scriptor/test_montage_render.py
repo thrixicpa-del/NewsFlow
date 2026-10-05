@@ -50,6 +50,157 @@ from .timeline import (
 
 
 class MontageRenderTests(unittest.TestCase):
+    @staticmethod
+    def _make_smoke_clip(root: Path, color: str) -> Path:
+        """Keep render smoke fixtures disposable instead of relying on ignored media."""
+        clip = root / f"{color}.mp4"
+        made = subprocess.run([
+            ffmpeg_executable(), "-y", "-f", "lavfi", "-i",
+            f"color=c={color}:size=640x360:rate=30:duration=2.5",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip),
+        ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if made.returncode:
+            raise AssertionError(made.stderr[-1000:])
+        return clip
+
+    def test_gpu_capability_requires_a_working_nvenc_device_and_caches_the_probe(self):
+        """An advertised encoder is not enough when CUDA/GPU initialisation fails."""
+        ffmpeg = "C:/NewsFlow/fake-ffmpeg.exe"
+        timeline_module._GPU_TIMELINE_CAPABILITY_CACHE.pop(ffmpeg, None)
+        failed_probe = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=" V..... h264_nvenc NVIDIA NVENC H.264 encoder",
+            stderr="Cannot load nvcuda.dll",
+        )
+        try:
+            with patch.object(timeline_module.subprocess, "run", return_value=failed_probe) as run:
+                first = timeline_module.gpu_timeline_capability(ffmpeg)
+                second = timeline_module.gpu_timeline_capability(ffmpeg)
+            self.assertFalse(first["available"])
+            self.assertFalse(second["available"])
+            self.assertIn("nvcuda", str(first["reason"]).casefold())
+            self.assertEqual(run.call_count, 1)
+            command = run.call_args.args[0]
+            self.assertIn("lavfi", command)
+            self.assertIn("h264_nvenc", command)
+        finally:
+            timeline_module._GPU_TIMELINE_CAPABILITY_CACHE.pop(ffmpeg, None)
+
+    def test_gpu_timeline_rejects_missing_nvenc_without_cpu_fallback(self):
+        """The explicit GPU route must fail instead of silently using CPU FFmpeg."""
+        project = TimelineProject(
+            title="GPU contract",
+            clips=[TimelineClip("missing.mp4", "n", "q", duration=1.0)],
+        )
+        with patch.object(
+            timeline_module,
+            "gpu_timeline_capability",
+            return_value={"available": False, "reason": "NVENC недоступен"},
+        ), patch.object(
+            timeline_module,
+            "ffmpeg_executable",
+            side_effect=AssertionError("legacy CPU renderer must not start"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "NVENC недоступен"):
+                render_project(project, Path("result.mp4"), renderer="gpu-timeline")
+
+    def test_gpu_timeline_renders_disposable_clips_as_1080p_30fps(self):
+        """GPU mode renders ordered clips directly, without the proxy-cache path."""
+        if not timeline_module.gpu_timeline_capability().get("available"):
+            self.skipTest("NVENC is not available on this test machine")
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-timeline-") as temporary:
+            root = Path(temporary)
+            ffmpeg = ffmpeg_executable()
+            clips: list[TimelineClip] = []
+            for index, color in enumerate(("red", "blue"), start=1):
+                source = root / f"{color}.mp4"
+                made = subprocess.run([
+                    ffmpeg, "-y", "-f", "lavfi", "-i",
+                    f"color=c={color}:size=640x360:rate=25:duration=1.2",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+                ], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                self.assertEqual(made.returncode, 0, made.stderr[-1000:])
+                clips.append(TimelineClip(str(source), color, color, duration=1.0))
+            output = root / "gpu-timeline.mp4"
+            project = TimelineProject("GPU fixture", clips=clips)
+            render_project(project, output, renderer="gpu-timeline")
+            self.assertTrue(output.is_file())
+            inspected = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            self.assertIn("1920x1080", inspected.stderr)
+            self.assertIn("30 fps", inspected.stderr)
+            self.assertGreaterEqual(probe_media_duration(output), 1.9)
+
+    def test_gpu_chunk_command_preserves_order_and_source_trims(self):
+        """Direct-source GPU chunks must use the saved timeline order and trims."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-command-") as temporary:
+            root = Path(temporary)
+            first = root / "first.mp4"
+            second = root / "second.mp4"
+            first.write_bytes(b"x")
+            second.write_bytes(b"x")
+            script = root / "chunk.ffscript"
+            clips = [
+                TimelineClip(str(first), "a", "a", duration=2.0, source_start=1.25),
+                TimelineClip(str(second), "b", "b", duration=3.0, source_start=4.5),
+            ]
+            with patch.object(timeline_module, "probe_video_duration", return_value=30.0), \
+                 patch.object(timeline_module, "gpu_timeline_encoder_args",
+                              return_value=["-c:v", "h264_nvenc"]):
+                command = timeline_module._gpu_timeline_chunk_command(
+                    "ffmpeg", clips, root / "chunk.mp4", script, 1920, 1080,
+                )
+
+            inputs = [command[index + 1] for index, value in enumerate(command) if value == "-i"]
+            starts = [command[index + 1] for index, value in enumerate(command) if value == "-ss"]
+            self.assertEqual(inputs, [str(first), str(second)])
+            self.assertEqual(starts, ["1.250", "4.500"])
+            filter_script = script.read_text(encoding="utf-8")
+            self.assertLess(filter_script.index("[0:v]"), filter_script.index("[1:v]"))
+            self.assertIn("concat=n=2:v=1:a=0[outv]", filter_script)
+
+    def test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache(self):
+        """Long GPU timelines stay bounded and do not materialise legacy proxies."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-bounded-") as temporary:
+            root = Path(temporary)
+            project = TimelineProject(
+                "GPU bounded",
+                clips=[
+                    TimelineClip(str(root / f"clip-{index}.mp4"), str(index), str(index), duration=1.0)
+                    for index in range(25)
+                ],
+            )
+            output = root / "result.mp4"
+            chunk_sizes: list[int] = []
+
+            def fake_chunk_command(_ffmpeg, clips, chunk_output, _script, _width, _height):
+                chunk_sizes.append(len(clips))
+                return ["ffmpeg", "-y", str(chunk_output)]
+
+            def fake_run(command, process_observer=None):
+                if process_observer:
+                    process_observer(123)
+                    process_observer(None)
+                Path(command[-1]).write_bytes(b"x" * 2048)
+
+            with patch.object(timeline_module, "ffmpeg_executable", return_value="ffmpeg"), \
+                 patch.object(timeline_module, "gpu_timeline_encoder_args",
+                              return_value=["-c:v", "h264_nvenc"]), \
+                 patch.object(timeline_module, "_gpu_timeline_chunk_command",
+                              side_effect=fake_chunk_command), \
+                 patch.object(timeline_module, "_run", side_effect=fake_run), \
+                 patch.object(timeline_module, "render_workspace_root", return_value=root), \
+                 patch.object(timeline_module, "proxy_cache_root",
+                              side_effect=AssertionError("GPU timeline must not use proxy cache")):
+                rendered = timeline_module._render_project_gpu_timeline(project, output)
+
+            self.assertEqual(chunk_sizes, [12, 12, 1])
+            self.assertTrue(rendered.is_file())
+            self.assertEqual(rendered, output)
+
     def test_explicit_remotion_never_silently_falls_back_to_ffmpeg(self):
         """Composition mode must fail diagnostically if its canonical runner is absent."""
         project = TimelineProject(
@@ -419,11 +570,9 @@ class MontageRenderTests(unittest.TestCase):
             self.assertEqual(index.screen_text_stats(), {"blocked": 0, "safe": 0, "unchecked": 1})
 
     def test_ffmpeg_render_is_30fps_has_audio_and_does_not_crop_voice(self):
-        source_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"
-        red, blue = source_root / "red.mp4", source_root / "blue.mp4"
-        self.assertTrue(red.is_file() and blue.is_file(), "Smoke fixtures missing")
         with tempfile.TemporaryDirectory(prefix="newsflow-render-test-") as temporary:
             root = Path(temporary)
+            red, blue = self._make_smoke_clip(root, "red"), self._make_smoke_clip(root, "blue")
             voice = root / "voice.wav"
             ffmpeg = ffmpeg_executable()
             make_voice = subprocess.run([
@@ -454,11 +603,9 @@ class MontageRenderTests(unittest.TestCase):
 
     def test_ffmpeg_intro_keeps_insert_audio_and_delays_voiceover(self):
         """The first news insert is a real audible insert, not a silent cropped frame."""
-        source_root = Path(__file__).resolve().parents[1] / "work" / "smoke-clips"
-        footage = source_root / "red.mp4"
-        self.assertTrue(footage.is_file(), "Smoke fixture missing")
         with tempfile.TemporaryDirectory(prefix="newsflow-intro-test-") as temporary:
             root = Path(temporary)
+            footage = self._make_smoke_clip(root, "red")
             ffmpeg = ffmpeg_executable()
             intro = root / "intro.mp4"
             voice = root / "voice.wav"
