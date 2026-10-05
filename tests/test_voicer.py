@@ -513,15 +513,34 @@ class VoicerTests(unittest.TestCase):
                 return b'{"task_id":"task-1"}'
 
         client = WProjectClient("WA-test", poll_seconds=0)
-        with patch("scriptor.voicer.urllib.request.urlopen", return_value=Response()) as open_url:
+        with patch("scriptor.voicer._wait_for_wproject_http_slot") as rate_gate, \
+             patch("scriptor.voicer.urllib.request.urlopen", return_value=Response()) as open_url:
             self.assertEqual(
                 client._json("POST", "/v1/tts", {"text": "Текст"},
                              headers={"Idempotency-Key": "stable-idempotency-key"}),
                 {"task_id": "task-1"},
             )
 
+        rate_gate.assert_called_once_with()
         request = open_url.call_args.args[0]
         self.assertEqual(request.get_header("Idempotency-key"), "stable-idempotency-key")
+
+    def test_wproject_local_http_limiter_waits_before_exceeding_budget(self):
+        from collections import deque
+
+        from scriptor import voicer
+
+        requests = deque([10.0, 20.0])
+        with patch.object(voicer, "_WPROJECT_HTTP_RATE_LIMIT", 2), \
+             patch.object(voicer, "_WPROJECT_HTTP_RATE_WINDOW_SECONDS", 60.0), \
+             patch.object(voicer, "_WPROJECT_HTTP_REQUESTS", requests), \
+             patch.object(voicer.time, "monotonic", side_effect=[30.0, 70.1]), \
+             patch.object(voicer.time, "sleep") as sleep:
+            voicer._wait_for_wproject_http_slot()
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 40.0)
+        self.assertEqual(list(requests), [20.0, 70.1])
 
     def test_safe_audio_name(self):
         self.assertEqual(safe_audio_name("  <news>?  "), "news.mp3")
