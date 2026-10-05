@@ -37,6 +37,104 @@ describe("Media ingest workspaces", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("exposes proxy warm-up progress from the existing footage roots", () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          proxyCache: {
+            status: {
+              stage: "warming",
+              active: true,
+              total: 10,
+              processed: 4,
+              ready: 3,
+              skipped: 1,
+              excluded: 2,
+              failed: 0,
+              current: "clip-004.mp4",
+            },
+          },
+        }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/готово: 3/i)).toBeTruthy();
+    expect(screen.getByText(/осталось: 6/i)).toBeTruthy();
+    const button = screen.getByRole("button", { name: "Подготовить proxy-кэш" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("starts one proxy warm-up from the existing footage roots", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(
+      <Footage
+        data={{ ...fallback, footageFolders: ["D:/isolated-footage"] }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Подготовить proxy-кэш" });
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    expect(command).toHaveBeenCalledWith("run-proxy-cache-warmup", {});
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an interrupted proxy run as restartable, not as a live pause", () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          proxyCache: {
+            status: {
+              stage: "interrupted",
+              active: false,
+              pauseRequested: false,
+              total: 10,
+              processed: 4,
+              message: "Подготовка proxy прервана. Запустите её снова.",
+            },
+          },
+        }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Продолжить подготовку" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Продолжить" })).toBeNull();
+    expect(screen.getByText(/подготовка proxy-кэша прервана/i)).toBeTruthy();
+  });
+
+  it("requests a safe proxy pause without changing footage roots", async () => {
+    const command = vi.fn().mockResolvedValue(undefined);
+    render(
+      <Footage
+        data={{
+          ...fallback,
+          footageFolders: ["D:/isolated-footage"],
+          proxyCache: { status: { stage: "warming", active: true, total: 10, processed: 4 } },
+        }}
+        command={command}
+        refresh={async () => undefined}
+      />,
+    );
+
+    await act(async () => screen.getByRole("button", { name: "Пауза" }).click());
+
+    expect(command).toHaveBeenCalledWith("set-proxy-cache-paused", { paused: true });
+  });
+
   it("classifies persisted English/Latin verdicts without starting a media rescan", async () => {
     const command = vi.fn().mockResolvedValue({
       indexResult: {
