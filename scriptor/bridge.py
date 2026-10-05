@@ -13604,6 +13604,9 @@ def generate_voice(payload: dict) -> dict:
                 },
             )
             if attempt > maximum:
+                # The command is about to return, so there is no scheduled
+                # retry anymore. Do not persist a misleading future delay.
+                job_snapshot.pop(f"wproject_{kind}_next_retry_seconds", None)
                 set_task_status(index, f"WProject: {exhausted} — задача сохранена в очереди", 5)
                 raise _WProjectBackpressureDeferred(
                     f"WProject {exhausted}; задача сохранена и ждёт безопасного продолжения"
@@ -13612,6 +13615,9 @@ def generate_voice(payload: dict) -> dict:
             return delay
 
         while content is None:
+            # A pause can arrive during a backoff sleep. Re-check it before
+            # every remote create/poll attempt, not only when this job starts.
+            wait_until_resumed()
             retry_for_backpressure = False
             delay = 0
             mark_provider_running(index, "wproject")
@@ -13741,6 +13747,10 @@ def generate_voice(payload: dict) -> dict:
                     continue
                 output = _save_voice_candidate(settings, index, job.request.title, content)
                 return index, str(output)
+            except _WProjectBackpressureDeferred:
+                # Provider capacity/rate backpressure on a WProject reserve is
+                # still a durable queued job, not a failed fallback.
+                raise
             except _BRIDGE_OPERATION_ERRORS:
                 continue
         raise RuntimeError("Резервные активные голоса не смогли принять задачу")
@@ -13790,7 +13800,7 @@ def generate_voice(payload: dict) -> dict:
         state = str(snapshot.get("state", "")).casefold()
         resume_active_provider = (
             resume_requested
-            and state in {"running", "interrupted", "retrying"}
+            and state in {"queued", "running", "interrupted", "retrying"}
             and _voice_job_resume_safe(snapshot)
             and str(snapshot.get("active_provider") or "").strip()
         )
@@ -13900,6 +13910,11 @@ def generate_voice(payload: dict) -> dict:
                         set_task_status(completed_index, "Готово через резервный сервис", 100, artifact={
                             "artifactPath": output, "durationSeconds": duration,
                         })
+                        continue
+                    except _WProjectBackpressureDeferred:
+                        # The reserve WProject contract is already persisted as
+                        # queued. Keep it resumable instead of converting the
+                        # capacity/rate condition into a terminal voice error.
                         continue
                     except _BRIDGE_OPERATION_ERRORS:
                         pass
