@@ -11607,7 +11607,9 @@ export function Editor({
                           : ""
                     }
                   >
-                    {task?.status || "Готов к монтажу"}
+                    {task?.status === "Ошибка" && task.runtimeCurrent !== true
+                      ? "Ошибка · история"
+                      : task?.status || "Готов к монтажу"}
                   </em>
                 </button>
               );
