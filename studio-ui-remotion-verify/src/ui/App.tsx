@@ -4496,10 +4496,16 @@ export function Covers({
     indices
       .map((index) => String(data.covers[index]?.production_item_id || "").trim())
       .filter(Boolean);
-  const coverSelectionPayload = (indices = selected) => ({
-    indices,
-    ...(indices.length ? { productionItemIds: productionItemIdsFor(indices) } : {}),
-  });
+  const coverSelectionPayload = (indices = selected) => {
+    const identityIndices = indices.length
+      ? indices
+      : data.covers.map((_cover, index) => index);
+    const productionItemIds = productionItemIdsFor(identityIndices);
+    return {
+      indices,
+      ...(productionItemIds.length ? { productionItemIds } : {}),
+    };
+  };
   const selectedTopicCount = selected.length;
   const coverQueue = useMemo(
     () => data.covers.map((cover, index) => ({ cover, index })),
