@@ -7314,7 +7314,72 @@ def _browser_topic_export_path(settings: Settings, title: str, production_item_i
     return folder / f"{safe_filename(title)} — {suffix}.txt"
 
 
+def _browser_topic_queue_lock_path() -> Path:
+    return app_data_root() / "browser-topic-scenarios.lock"
+
+
+def _claim_browser_topic_queue_lock() -> Path | None:
+    """Claim the one browser-topic batch across desktop/Core processes."""
+    lock_path = _browser_topic_queue_lock_path()
+    with _exclusive_settings_write(lock_path.with_name("browser-topic-scenarios-owner.json")):
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if lock_path.exists():
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                existing = {}
+            if _montage_process_is_running(existing.get("pid")):
+                return None
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
+        try:
+            with lock_path.open("x", encoding="utf-8") as stream:
+                json.dump({
+                    "pid": os.getpid(),
+                    "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }, stream)
+        except FileExistsError:
+            return None
+        return lock_path
+
+
+def _release_browser_topic_queue_lock(lock_path: Path) -> None:
+    """Release only the browser-topic owner created by this process."""
+    with _exclusive_settings_write(lock_path.with_name("browser-topic-scenarios-owner.json")):
+        try:
+            owner = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            owner = {}
+        if owner.get("pid") != os.getpid():
+            return
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPTBrowserClient) -> dict:
+    """Run one process-owned browser-topic batch and reject overlapping starts."""
+    lock_path = _claim_browser_topic_queue_lock()
+    if lock_path is None:
+        return {**snapshot(), "operationResult": {
+            "kind": "browser-topic-scenarios-already-running",
+            "count": 0,
+            "message": "Очередь ChatGPT через браузер уже выполняется; повторный запуск отклонён.",
+        }}
+    try:
+        return _generate_browser_topic_scenarios_unlocked(
+            payload, transport_factory=transport_factory,
+        )
+    finally:
+        _release_browser_topic_queue_lock(lock_path)
+
+
+def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_factory=ChatGPTBrowserClient) -> dict:
     """Generate new prose via the operator's logged-in ChatGPT browser session.
 
     This is a sibling route to Planner/Writer, not a fallback for them.  A
@@ -7413,7 +7478,7 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
                 target = _browser_topic_export_path(
                     settings, export_title, task.production_item_id,
                 )
-                target.write_text(outcome.text, encoding="utf-8")
+                target.write_bytes(outcome.text.encode("utf-8"))
             except OSError as exc:
                 # The text remains recoverable in the same ProductionItem even
                 # when its separate TXT export cannot be published.
