@@ -531,7 +531,7 @@ describe("Montage Light view", () => {
     expect(screen.getByRole("heading", { name: "Инспектор MP4" })).toBeTruthy();
     expect(screen.getByText("D:/result.mp4")).toBeTruthy();
     expect(screen.getByText("Текущий snapshot не сообщает ProductionItem ID")).toBeTruthy();
-    expect(screen.getByText("Текущий snapshot не сообщает признак устаревания")).toBeTruthy();
+    expect(screen.getByText("Legacy-запись: runtime происхождение не подтверждено")).toBeTruthy();
   });
 
   it("renders one live-status ribbon for the active montage route", () => {
