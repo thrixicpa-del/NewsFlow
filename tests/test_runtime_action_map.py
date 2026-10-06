@@ -72,7 +72,6 @@ class RuntimeActionMapTests(unittest.TestCase):
     def test_montage_snapshot_projection_is_defined_before_release(self):
         bridge = (ROOT / "scriptor" / "bridge.py").read_text(encoding="utf-8")
         self.assertIn("def _montage_task_snapshot_projection(", bridge)
-        self.assertIn('"_montageTasks"', bridge.replace("montageTasks", "_montageTasks")) if False else None
         self.assertIn("_montage_task_snapshot_projection(key, value)", bridge)
 
     def test_current_bridge_path_excludes_legacy_app_and_prompt_fallbacks(self):
