@@ -134,7 +134,11 @@ class ChatGPTBrowserClient:
             await self._submit_message(page, editor)
             # The contract requires an actual downloadable TXT, not merely a
             # filename or a prose caption in the assistant turn.
-            await self._wait_for_answer(page, baseline_count=assistant_count)
+            await self._wait_for_answer(
+                page,
+                baseline_count=assistant_count,
+                download_baseline_count=download_count,
+            )
             return await self._download_txt_attachment(
                 page, baseline_count=download_count,
             )
@@ -218,11 +222,14 @@ class ChatGPTBrowserClient:
         # temporarily disabled.  Give the page a bounded chance to enable it
         # before using the compatibility Enter fallback.
         deadline = asyncio.get_running_loop().time() + 10.0
+        saw_explicit_control = False
         while asyncio.get_running_loop().time() < deadline:
             for selector in selectors:
                 try:
                     button = page.locator(selector).first
-                    if await button.is_visible() and await button.is_enabled():
+                    visible = await button.is_visible()
+                    saw_explicit_control = saw_explicit_control or visible
+                    if visible and await button.is_enabled():
                         await button.click()
                         return
                 except Exception:  # noqa: BLE001,S112 - cross-version selector fallback.
@@ -231,6 +238,10 @@ class ChatGPTBrowserClient:
                 await page.wait_for_timeout(200)
             except Exception:  # noqa: BLE001,S110 - test/legacy page compatibility.
                 break
+        if saw_explicit_control:
+            raise ChatGPTBrowserError(
+                "Кнопка отправки ChatGPT осталась недоступна; файл требований мог не успеть загрузиться"
+            )
         if editor is None:
             raise ChatGPTBrowserError("ChatGPT не показал доступную кнопку отправки")
         try:
@@ -296,20 +307,38 @@ class ChatGPTBrowserClient:
             raise ChatGPTBrowserError("ChatGPT прикрепил пустое TXT-вложение")
         return text
 
-    async def _wait_for_answer(self, page, *, baseline_count: int) -> str:
+    async def _wait_for_answer(
+        self,
+        page,
+        *,
+        baseline_count: int,
+        download_baseline_count: int | None = None,
+    ) -> str:
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         previous = ""
         stable_since = 0.0
         answers = page.locator("[data-message-author-role='assistant']")
         while asyncio.get_running_loop().time() < deadline:
             current = ""
+            has_new_turn = False
             try:
                 count = await answers.count()
                 if count > baseline_count:
                     # Only a newly-created assistant turn can satisfy this task.
+                    has_new_turn = True
                     current = await answers.nth(count - 1).inner_text(timeout=2_000)
             except Exception:  # noqa: BLE001 - no answer is normal while the turn is pending.
                 current = ""
+                has_new_turn = False
+            attachment_ready = False
+            if has_new_turn and download_baseline_count is not None:
+                try:
+                    attachment_ready = (
+                        await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
+                        > download_baseline_count
+                    )
+                except Exception:  # noqa: BLE001,S110 - attachment is optional while generation runs.
+                    attachment_ready = False
             now = asyncio.get_running_loop().time()
             if current and current == previous:
                 stable_since = stable_since or now
@@ -326,6 +355,8 @@ class ChatGPTBrowserClient:
                     stop_visible = stop_visible or await page.locator(selector).is_visible(timeout=250)
                 except Exception:  # noqa: BLE001,S110 - selector is optional across ChatGPT UI versions.
                     pass
+            if attachment_ready and not stop_visible:
+                return current
             if current.strip() and not stop_visible and stable_since and now - stable_since >= 4.0:
                 return current.replace("\r\n", "\n").replace("\r", "\n")
             await page.wait_for_timeout(500)
