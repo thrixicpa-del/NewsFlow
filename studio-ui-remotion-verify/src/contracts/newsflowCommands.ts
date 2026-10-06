@@ -27,7 +27,7 @@ export type NewsFlowCommand = (typeof NEWSFLOW_COMMANDS)[number];
 export type GenericCommandPayload = Record<string, unknown>;
 
 export interface CriticalCommandPayloads {
-  "save-browser-topic-scenario-settings": { projectUrl: string; sessionId: string; requirementsMode: "text" | "file"; requirementsText: string; requirementsFile: string; companionPrompt: string; minimumChars: number; maximumChars: number; concurrency: number; promptOverrides: Record<string, string>; urlOverrides: Record<string, string> };
+  "save-browser-topic-scenario-settings": { projectUrl: string; sessionId: string; requirementsMode: "text" | "file"; requirementsText: string; requirementsFile: string; companionPrompt: string; minimumChars: number; maximumChars: number; concurrency: number; lengthOverrides: Record<string, { minimum_chars: number; maximum_chars: number }>; additionalPromptOverrides: Record<string, string>; promptOverrides: Record<string, string>; urlOverrides: Record<string, string> };
   "generate-browser-topic-scenarios": { indices?: number[]; productionItemIds?: string[] };
   "save-settings": GenericCommandPayload;
   "generate-ideas": { topics?: string[]; count?: number; requirements?: string; provider?: "agent" | "openai"; titleFormulaOnly?: boolean };
