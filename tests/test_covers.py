@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from scriptor.bridge import (
     _clean_cover_headline,
@@ -69,6 +69,136 @@ from scriptor.covers import (
 )
 from scriptor.runner import RunState
 from scriptor.thumbnail_prompt_v2 import build_final_provider_prompt
+
+
+class CoverCurrentSelectionRegressionTests(unittest.TestCase):
+    def test_active_production_item_is_not_rejected_by_historical_deleted_title(self):
+        """A title tombstone must never override the current durable item identity."""
+        from scriptor import bridge
+
+        production_item_id = "production:current-manual-cover"
+        title = "ТЕКУЩАЯ ТЕМА С ТОЧНЫМ ИСТОРИЧЕСКИМ НАЗВАНИЕМ"
+        settings = Settings()
+        settings.cover_queue = [{
+            "production_item_id": production_item_id,
+            "title": title,
+            "image_prompt": "manual scene brief",
+        }]
+        settings.idea_production_items = [{"id": production_item_id, "title": title}]
+        settings.idea_scenario_context = {title: {"id": production_item_id}}
+        settings.deleted_scenario_titles = [title]
+
+        with patch.object(bridge, "load_session", return_value=([], [])):
+            selected = bridge._select_current_cover_generation_rows(
+                settings,
+                {"indices": [0], "productionItemIds": [production_item_id]},
+                lambda _item: True,
+            )
+
+        self.assertEqual([(index, item["production_item_id"]) for index, item in selected], [
+            (0, production_item_id),
+        ])
+
+    def test_all_current_rows_ignore_historical_deleted_titles(self):
+        """The all-topics route must resolve current IDs, not stale title history."""
+        from scriptor import bridge
+
+        current_id = "production:current-all"
+        historical_id = "production:deleted-all"
+        current_title = "ТЕКУЩАЯ ТЕМА"
+        historical_title = "УДАЛЁННАЯ ТЕМА"
+        settings = Settings()
+        settings.cover_queue = [{
+            "production_item_id": current_id,
+            "title": current_title,
+            "image_prompt": "manual scene brief",
+        }]
+        settings.idea_production_items = [{"id": current_id, "title": current_title}]
+        settings.idea_scenario_context = {current_title: {"id": current_id}}
+        settings.idea_deleted_production_ids = [historical_id]
+        settings.deleted_scenario_titles = [current_title, historical_title]
+
+        with patch.object(bridge, "load_session", return_value=([], [])):
+            selected = bridge._select_current_cover_generation_rows(settings, {}, lambda _item: True)
+
+        self.assertEqual([(index, item["production_item_id"]) for index, item in selected], [
+            (0, current_id),
+        ])
+
+    def test_prompt_generation_for_current_id_ignores_historical_title(self):
+        """Prompt creation resolves the durable current row before title history."""
+        from scriptor import bridge
+
+        production_item_id = "production:prompt-current"
+        title = "ТЕКУЩАЯ ТЕМА ДЛЯ СОЗДАНИЯ ПРОМПТА"
+        settings = Settings()
+        settings.cover_prompt_variant_count = 1
+        settings.cover_queue = [{
+            "production_item_id": production_item_id,
+            "title": title,
+            "image_prompt": "",
+        }]
+        settings.idea_production_items = [{"id": production_item_id, "title": title}]
+        settings.idea_scenario_context = {title: {"id": production_item_id}}
+        settings.deleted_scenario_titles = [title]
+
+        provider = SimpleNamespace(generate=AsyncMock(return_value=json.dumps({
+            "prompts": ["A clearly distinct, supported visual scene for the current topic."],
+            "recommended": 1,
+        })))
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([], [])), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=provider), \
+             patch.object(bridge, "_normalize_cover_scene_brief", side_effect=lambda value, _item: value), \
+             patch.object(bridge, "_cover_scene_is_grounded", return_value=(True, "")), \
+             patch.object(bridge, "_cover_distinct_prompt_options", side_effect=lambda values, *_args, **_kwargs: values):
+            bridge.generate_cover_prompts({
+                "indices": [0], "productionItemIds": [production_item_id], "provider": "agent",
+            })
+
+        self.assertTrue(settings.cover_queue[0]["image_prompt"], settings.cover_queue[0])
+        self.assertEqual(settings.cover_queue[0]["status"], "Промпты готовы")
+
+    def test_current_manual_prompt_with_historical_title_reaches_fastgen(self):
+        """A literal manual prompt reaches the renderer when its durable ID is current."""
+        from scriptor import bridge
+
+        production_item_id = "production:manual-fastgen"
+        title = "РУЧНОЙ PROMPT ДЛЯ ТЕКУЩЕЙ ТЕМЫ"
+        settings = Settings(cover_output_folder=".", cover_auto_overlay_text=False, cover_variant_count=1)
+        settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
+        settings.cover_queue = [{
+            "production_item_id": production_item_id,
+            "title": title,
+            "image_prompt": "literal manual scene brief",
+            "image_prompt_options": ["literal manual scene brief"],
+            "prompt_provider": "manual",
+            "cover_face_required": False,
+        }]
+        settings.idea_production_items = [{"id": production_item_id, "title": title}]
+        settings.idea_scenario_context = {title: {"id": production_item_id}}
+        settings.deleted_scenario_titles = [title]
+
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([], [])), \
+             patch.object(bridge, "_hydrate_cover_library", return_value=False), \
+             patch.object(bridge, "_save_cover_state"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge.FastGenPool, "generate_media", return_value=[Path("manual-cover.png")]) as generate:
+            bridge.generate_covers({
+                "indices": [0], "productionItemIds": [production_item_id],
+                "_parallel_cover_worker": True, "forceRegenerate": True,
+                "operation": "gemini_nano_banana_2_image_generate",
+                "buildMode": "fastgen-full", "faceMode": "without", "textMode": "fastgen",
+            })
+
+        generate.assert_called_once()
+        self.assertEqual(generate.call_args.args[3], "gemini_nano_banana_2_image_generate")
+        self.assertEqual(settings.cover_queue[0]["status"], "Готово")
+        self.assertEqual(settings.cover_queue[0]["prompt_provider"], "manual")
 
 
 class CoverPortraitIdentityRegressionTests(unittest.TestCase):
