@@ -151,6 +151,85 @@ class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[-1], "click")
         self.assertIn("button[data-testid='send-button']", calls)
 
+    async def test_submit_does_not_press_enter_when_visible_send_stays_disabled(self):
+        from unittest.mock import patch
+
+        from scriptor.chatgpt_browser import ChatGPTBrowserClient, ChatGPTBrowserError
+        from scriptor.config import ChromeSession
+
+        class FakeLoop:
+            now = 0.0
+            def time(self):
+                return self.now
+
+        fake_loop = FakeLoop()
+        presses = []
+
+        class Button:
+            @property
+            def first(self):
+                return self
+            async def is_visible(self):
+                return True
+            async def is_enabled(self):
+                return False
+
+        class Editor:
+            async def press(self, value):
+                presses.append(value)
+
+        class Page:
+            def locator(self, _selector):
+                return Button()
+            async def wait_for_timeout(self, milliseconds):
+                fake_loop.now += milliseconds / 1000
+
+        client = ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))
+        with patch("scriptor.chatgpt_browser.asyncio.get_running_loop", return_value=fake_loop), \
+             self.assertRaisesRegex(ChatGPTBrowserError, "осталась недоступна"):
+            await client._submit_message(Page(), Editor())
+
+        self.assertEqual(presses, [])
+
+    async def test_wait_for_answer_accepts_a_new_attachment_only_turn(self):
+        from scriptor.chatgpt_browser import ChatGPTBrowserClient
+        from scriptor.config import ChromeSession
+
+        class Answer:
+            async def inner_text(self, timeout=0):
+                return ""
+
+        class Answers:
+            async def count(self):
+                return 2
+            def nth(self, _index):
+                return Answer()
+
+        class Downloads:
+            async def count(self):
+                return 2
+
+        class StopButton:
+            async def is_visible(self, timeout=0):
+                return False
+
+        class Page:
+            def locator(self, selector):
+                if selector == "[data-message-author-role='assistant']":
+                    return Answers()
+                if "Скачать файл" in selector:
+                    return Downloads()
+                return StopButton()
+            async def wait_for_timeout(self, _milliseconds):
+                return None
+
+        client = ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))
+        result = await client._wait_for_answer(
+            Page(), baseline_count=1, download_baseline_count=1,
+        )
+
+        self.assertEqual(result, "")
+
     async def test_wait_for_answer_requires_a_new_assistant_turn(self):
         from unittest.mock import patch
 
