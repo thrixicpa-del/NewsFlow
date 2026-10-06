@@ -330,6 +330,57 @@ describe("Montage Light view", () => {
     expect(css).toMatch(/\.task-timeline-entry\{[^}]*flex:0 1 min\(100%,520px\)/);
   });
 
+  it("labels legacy montage failures as historical without deleting their evidence", () => {
+    const data = {
+      ...fallback,
+      montageTasks: [{
+        index: 1,
+        title: "Старый runtime",
+        status: "Ошибка",
+        phase: "Ошибка подготовки",
+        error: "No module named 'fastembed'",
+        runtimeCurrent: false,
+        runtimeProvenance: "legacy-unattributed" as const,
+        timeline: [{
+          at: "10:20:00",
+          label: "Ошибка подготовки",
+          progress: 100,
+          detail: "No module named 'fastembed'",
+        }],
+      }],
+    };
+
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+
+    expect(screen.getByText("Ошибка · история")).toBeTruthy();
+    expect(screen.getByText(/История предыдущего runtime: No module named 'fastembed'/)).toBeTruthy();
+    expect(screen.getByTitle(/No module named 'fastembed'/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Инспектор MP4" }));
+    expect(screen.getByText("Legacy-запись: runtime происхождение не подтверждено")).toBeTruthy();
+  });
+
+  it("keeps a failure from the current desktop runtime marked as current", () => {
+    const data = {
+      ...fallback,
+      montageTasks: [{
+        index: 1,
+        title: "Текущий runtime",
+        status: "Ошибка",
+        phase: "Ошибка рендера",
+        error: "FFmpeg failed",
+        runtimeCurrent: true,
+        runtimeProvenance: "current-session" as const,
+      }],
+    };
+
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+
+    expect(screen.getByText("Ошибка")).toBeTruthy();
+    expect(screen.getByText(/Причина текущего запуска: FFmpeg failed/)).toBeTruthy();
+    expect(screen.queryByText("Ошибка · история")).toBeNull();
+  });
+
   it("offers explicit selected retry for an error row", async () => {
     const data = {
       ...fallback,
