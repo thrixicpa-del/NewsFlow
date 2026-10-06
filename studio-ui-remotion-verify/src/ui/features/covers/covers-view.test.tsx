@@ -400,7 +400,7 @@ describe("Covers Light view", () => {
     fireEvent.click(screen.getByRole("button", { name: "Создать промпты всем" }));
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "generate-cover-prompts",
-      { indices: [], provider: "agent" },
+      { indices: [], productionItemIds: ["production:ormuz"], provider: "agent" },
     ));
 
     fireEvent.click(screen.getByRole("button", { name: "Выбрать: Ормуз" }));
@@ -415,6 +415,7 @@ describe("Covers Light view", () => {
       "generate-cover-texts",
       {
         indices: [],
+        productionItemIds: ["production:ormuz"],
         provider: "agent",
         useDefault: true,
         useStructure: true,
