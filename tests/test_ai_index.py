@@ -765,7 +765,7 @@ class ClipIndexTests(unittest.TestCase):
             stat = clip.stat()
             self.assertEqual((metadata.size, metadata.mtime_ns), (stat.st_size, stat.st_mtime_ns))
 
-    def test_replaced_file_invalidates_screen_text_but_preserves_three_states(self):
+    def test_replaced_file_preserves_block_until_maintenance_and_preserves_three_states(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             blocked = root / "blocked.mp4"
@@ -794,7 +794,7 @@ class ClipIndexTests(unittest.TestCase):
             time.sleep(0.002)
             blocked.write_bytes(b"changed blocked media")
             index.index_folders([str(root)])
-            self.assertEqual(index.metadata(blocked).english_text, 0)
+            self.assertEqual(index.metadata(blocked).english_text, 1)
             self.assertEqual(
                 {item.name for item in index.all_items(exclude_english_text=True)},
                 {blocked.name, safe.name, unchecked.name},
