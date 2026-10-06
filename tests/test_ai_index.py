@@ -146,10 +146,67 @@ class ClipIndexTests(unittest.TestCase):
             with patch.object(index, "_screen_text_state", return_value=-1):
                 self.assertEqual(index.screen_text_eligibility(clip, deep=True), "SAFE")
 
-            self.assertEqual(
-                events,
-                [("slot-wait", clip.name), ("checking", clip.name)],
+            self.assertEqual(events, [("checking", clip.name)])
+
+    def test_screen_text_reports_slot_wait_only_when_budget_is_exhausted(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-wait-") as temporary:
+            root = Path(temporary)
+            events: list[tuple[str, str]] = []
+            index = FakeClipIndex(
+                root / "footage-index.sqlite3",
+                embedder_factory=lambda: (object(), object()),
+                screen_text_progress=lambda state, name: events.append((state, name)),
             )
+            clips = []
+            with index._connect() as connection:
+                for number in range(3):
+                    clip = root / f"unknown-{number}.mp4"
+                    clip.write_bytes(b"fixture")
+                    stat = clip.stat()
+                    connection.execute(
+                        "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                         0, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                    )
+                    clips.append(clip)
+
+            entered = threading.Barrier(2)
+            release = threading.Event()
+
+            def blocked_state(_path, *, samples):
+                self.assertEqual(samples, 11)
+                entered.wait(timeout=2)
+                release.wait(timeout=2)
+                return -1
+
+            with patch.object(index, "_screen_text_state", side_effect=blocked_state):
+                first_two = [
+                    threading.Thread(
+                        target=index.screen_text_eligibility,
+                        args=(clip,),
+                        kwargs={"deep": True},
+                    )
+                    for clip in clips[:2]
+                ]
+                for worker in first_two:
+                    worker.start()
+                entered.wait(timeout=2)
+
+                third = threading.Thread(
+                    target=index.screen_text_eligibility,
+                    args=(clips[2],),
+                    kwargs={"deep": True},
+                )
+                third.start()
+                time.sleep(0.05)
+                self.assertIn(("slot-wait", clips[2].name), events)
+
+                release.set()
+                for worker in [*first_two, third]:
+                    worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in [*first_two, third]))
 
     def test_unknown_screen_text_candidate_is_deep_scanned_once_across_planning_workers(self):
         """Parallel planners must share one expensive scan for the same clip."""
