@@ -21,8 +21,8 @@ def _format_characters(value: int) -> str:
 
 
 def normalize_browser_response(value: object) -> str:
-    """Preserve returned prose verbatim except for newline normalization."""
-    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    """Preserve the decoded TXT payload verbatim."""
+    return str(value or "")
 
 
 @dataclass(frozen=True)
