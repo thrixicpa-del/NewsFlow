@@ -3,6 +3,35 @@ import { describe, expect, it, vi } from "vitest";
 import { BrowserTopicScenarios, fallback } from "../../App";
 
 describe("browser topic scenarios", () => {
+  it("resolves numbered range assignments to durable IDs before saving", async () => {
+    const data = {
+      ...fallback,
+      browserTopicScenarios: { ...fallback.browserTopicScenarios, companionPrompt: "Общий текст." },
+      scenarios: [{ index: 0, productionItemId: "prod-one", title: "Первая", state: "Ожидает", result: "", error: "" }, {
+        index: 2, productionItemId: "prod-three", title: "Третья", state: "Ожидает", result: "", error: "",
+      }],
+    };
+    const command = vi.fn(async () => data);
+    render(<BrowserTopicScenarios data={data} command={command} />);
+
+    expect(screen.getByText("1")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Номера тем для диапазона"), { target: { value: "1, 3" } });
+    fireEvent.change(screen.getAllByLabelText("Минимум символов")[1], { target: { value: "2000" } });
+    fireEvent.change(screen.getAllByLabelText("Максимум символов")[1], { target: { value: "3000" } });
+    fireEvent.change(screen.getByLabelText("Дополнительный prompt для диапазона"), { target: { value: "Только для выбранных." } });
+    fireEvent.click(screen.getByRole("button", { name: "Применить диапазон" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки" }));
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-browser-topic-scenario-settings", expect.objectContaining({
+      lengthOverrides: {
+        "prod-one": { minimum_chars: 2000, maximum_chars: 3000 },
+        "prod-three": { minimum_chars: 2000, maximum_chars: 3000 },
+      },
+      additionalPromptOverrides: { "prod-one": "Только для выбранных.", "prod-three": "Только для выбранных." },
+    })));
+  });
+
   it("saves and launches selected topics by durable ProductionItem IDs, never previous prose", async () => {
     const data = {
       ...fallback,
