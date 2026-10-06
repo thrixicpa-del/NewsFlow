@@ -3086,6 +3086,7 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
   const [rangeMaximumChars, setRangeMaximumChars] = useState("");
   const [rangeAdditionalPrompt, setRangeAdditionalPrompt] = useState("");
   const [rangeError, setRangeError] = useState("");
+  const [launching, setLaunching] = useState(false);
   const [lengthOverrides, setLengthOverrides] = useState(saved.lengthOverrides || {});
   const [additionalPromptOverrides, setAdditionalPromptOverrides] = useState(saved.additionalPromptOverrides || {});
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>(saved.promptOverrides);
@@ -3170,9 +3171,14 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
         throw new Error("Укажите корректный диапазон символов");
       }
       setLengthOverrides((current) => ({ ...current, ...Object.fromEntries(ids.map((id) => [id, { ...current[id], minimum_chars: minimum, maximum_chars: maximum }])) }));
-      if (rangeAdditionalPrompt.trim()) {
-        setAdditionalPromptOverrides((current) => ({ ...current, ...Object.fromEntries(ids.map((id) => [id, rangeAdditionalPrompt])) }));
-      }
+      setAdditionalPromptOverrides((current) => {
+        const next = { ...current };
+        for (const id of ids) {
+          if (rangeAdditionalPrompt.trim()) next[id] = rangeAdditionalPrompt;
+          else delete next[id];
+        }
+        return next;
+      });
       setRangeError("");
     } catch (error) {
       setRangeError(error instanceof Error ? error.message : "Не удалось применить диапазон");
@@ -3197,12 +3203,18 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
     await command("save-browser-topic-scenario-settings", settingsPayload());
   };
   const runSelected = async () => {
-    const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
-    if (!savedState || !selectedTopics.length) return;
-    await command("generate-browser-topic-scenarios", {
-      indices: selectedTopics.map((topic) => topic.index),
-      productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
-    });
+    if (launching) return;
+    setLaunching(true);
+    try {
+      const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
+      if (!savedState || !selectedTopics.length) return;
+      await command("generate-browser-topic-scenarios", {
+        indices: selectedTopics.map((topic) => topic.index),
+        productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
+      });
+    } finally {
+      setLaunching(false);
+    }
   };
   const sessionIndex = data.chromeSessions.findIndex((session) => session.id === sessionId);
   return (
@@ -3231,7 +3243,7 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
       </section>
       <section className="panel scenario-add">
         <div className="panel-title"><div><b>Темы для запуска</b><small>Привязка выполняется только по ProductionItem ID. Фильтрация, сортировка и положение строки не меняют назначение.</small></div><span className="status">Выбрано: {selectedTopics.length}</span></div>
-        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length || launching} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
         <div className="form-row">
           <Textarea label="Prompt для выбранных тем (необязательно)" value={overridePrompt} onChange={(event) => setOverridePrompt(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий prompt" />
           <Input label="URL для выбранных тем (необязательно)" value={overrideUrl} onChange={(event) => setOverrideUrl(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий URL" />
@@ -3245,7 +3257,7 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
           <Button onClick={applyRangeOverrides}>Применить диапазон</Button>
         </div>
         {rangeError ? <p className="error" role="alert">{rangeError}</p> : null}
-        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult ? "Готово" : isRunning ? "В работе" : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
+        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning || launching} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && !launching && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult ? "Готово" : isRunning ? "В работе" : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
         {!topics.length ? <EmptyState title="Нет тем с ProductionItem ID" description="Добавьте темы в очередь сценариев или выполните восстановление состояния проекта." /> : null}
       </section>
     </div>
