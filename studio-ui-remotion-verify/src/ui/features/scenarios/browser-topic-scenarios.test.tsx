@@ -32,6 +32,51 @@ describe("browser topic scenarios", () => {
     })));
   });
 
+  it("blocks a rapid duplicate launch while the browser queue is still pending", async () => {
+    const data = {
+      ...fallback,
+      chromeSessions: [{ id: "chatgpt-isolated", label: "ChatGPT isolated", active: true, limitStatus: "available", usage: { ideas: false, scenarios: true, covers: false, seo: false } }],
+      browserTopicScenarios: {
+        ...fallback.browserTopicScenarios,
+        projectUrl: "https://chatgpt.com/g/project",
+        sessionId: "chatgpt-isolated",
+        companionPrompt: "Только готовый текст.",
+      },
+      scenarios: [{
+        index: 0,
+        productionItemId: "production-lock",
+        title: "Одна тема",
+        state: "Ожидает",
+        result: "",
+        error: "",
+      }],
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const command = vi.fn(async (name: string) => {
+      if (name === "generate-browser-topic-scenarios") await gate;
+      return data;
+    });
+    render(<BrowserTopicScenarios data={data} command={command} />);
+
+    fireEvent.click(screen.getByLabelText("Выбрать: Одна тема"));
+    const runButton = screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }) as HTMLButtonElement;
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(
+      command.mock.calls.filter(([name]) => name === "generate-browser-topic-scenarios"),
+    ).toHaveLength(1));
+    expect(runButton.disabled).toBe(true);
+
+    fireEvent.click(runButton);
+    expect(
+      command.mock.calls.filter(([name]) => name === "generate-browser-topic-scenarios"),
+    ).toHaveLength(1);
+
+    release();
+    await waitFor(() => expect(runButton.disabled).toBe(false));
+  });
+
   it("saves and launches selected topics by durable ProductionItem IDs, never previous prose", async () => {
     const data = {
       ...fallback,
