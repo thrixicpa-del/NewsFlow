@@ -423,10 +423,12 @@ def _select_current_cover_generation_rows(
 
 def _current_cover_generation_scope(settings: Settings, payload: dict, error_message: str) -> list[tuple[int, dict]]:
     """Resolve and validate the durable scope before filtering completed work."""
+    requested_indices = [int(index) for index in payload.get("indices", [])]
     rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
     if not rows:
+        if requested_indices:
+            raise ValueError("Выбранная задача обложки устарела или больше не существует")
         raise ValueError(error_message)
-    requested_indices = [int(index) for index in payload.get("indices", [])]
     if requested_indices:
         expected_values = payload.get("productionItemIds", payload.get("production_item_ids", [])) or []
         expected_ids = [str(value).strip() for value in expected_values if str(value).strip()]
