@@ -1098,15 +1098,22 @@ class ClipIndex:
                 return int(row["english_text"])
             return 0
         try:
+            acquired = _SCREEN_TEXT_DEEP_SLOTS.acquire(blocking=False)
             try:
-                if self.screen_text_progress:
-                    self.screen_text_progress("slot-wait", candidate.name)
-                with _SCREEN_TEXT_DEEP_SLOTS:
+                if not acquired:
                     if self.screen_text_progress:
-                        self.screen_text_progress("checking", candidate.name)
+                        self.screen_text_progress("slot-wait", candidate.name)
+                    _SCREEN_TEXT_DEEP_SLOTS.acquire()
+                    acquired = True
+                if self.screen_text_progress:
+                    self.screen_text_progress("checking", candidate.name)
+                try:
                     state = self._screen_text_state(candidate, samples=samples)
-            except (OSError, ValueError):
-                state = 0
+                except (OSError, ValueError):
+                    state = 0
+            finally:
+                if acquired:
+                    _SCREEN_TEXT_DEEP_SLOTS.release()
             self._store_screen_text_state(resolved, state)
             return state
         finally:
