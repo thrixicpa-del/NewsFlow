@@ -11797,6 +11797,23 @@ export function Editor({
                     : "Legacy-запись: runtime происхождение не подтверждено"}
               </dd>
             </div>
+            <div>
+              <dt>Причина / diagnostic</dt>
+              <dd>{inspectedMontage.error || "Ошибка не сохранена"}</dd>
+            </div>
+            <div>
+              <dt>Последние события</dt>
+              <dd>
+                {(inspectedMontage.timeline || []).length
+                  ? (inspectedMontage.timeline || []).slice(-6).map((event, index) => (
+                      <div key={`${event.at}-${index}`}>
+                        {event.at} {event.label}
+                        {event.detail ? ` — ${event.detail}` : ""}
+                      </div>
+                    ))
+                  : "Timeline не сохранён"}
+              </dd>
+            </div>
           </dl>
         ) : null}
       </Sheet>
