@@ -360,6 +360,8 @@ describe("Montage Light view", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Инспектор MP4" }));
     expect(screen.getByText("Legacy-запись: runtime происхождение не подтверждено")).toBeTruthy();
+    expect(screen.getAllByText(/No module named 'fastembed'/).length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText(/10:20:00 Ошибка подготовки — No module named 'fastembed'/)).toBeTruthy();
   });
 
   it("keeps a failure from the current desktop runtime marked as current", () => {
