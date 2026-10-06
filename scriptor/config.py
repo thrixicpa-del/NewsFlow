@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import shutil
 import sys
@@ -241,11 +242,17 @@ NEWS_TOPICS = [
 ]
 
 
+
+def _storage_path_text(path: Path) -> str:
+    """Serialize drive-letter paths with Windows separators on every host."""
+    value = str(path)
+    return ntpath.normpath(value) if ntpath.splitdrive(value)[0] else value
+
 def migrate_standard_folder(value: str | None, old_leaf: str, new_leaf: str) -> str:
     old_path = Path.home() / "Documents" / "Scriptor" / old_leaf
     old_newsflow_path = Path.home() / "Documents" / "NewsFlow Studio" / new_leaf
     if not value or Path(value) in {old_path, old_newsflow_path}:
-        return str(storyflow_documents_root() / new_leaf)
+        return _storage_path_text(storyflow_documents_root() / new_leaf)
     return migrate_newsflow_storage(value, new_leaf)
 
 
@@ -258,7 +265,7 @@ def migrate_newsflow_storage(value: str | None, leaf: str) -> str:
     """
     destination = storyflow_documents_root() / leaf
     if not value:
-        return str(destination)
+        return _storage_path_text(destination)
     source = Path(value)
     # Snapshot runs and generic Windows Temp directories are disposable.
     # Keeping either in persisted settings sends later desktop work into a
@@ -270,13 +277,13 @@ def migrate_newsflow_storage(value: str | None, leaf: str) -> str:
         if root.is_absolute()
     )
     if is_temp_path or any(part.casefold().startswith("newsflow-snapshot-") for part in source.parts):
-        return str(destination)
+        return _storage_path_text(destination)
     legacy_root = Path.home() / "Documents" / "NewsFlow Studio"
     try:
         relative = source.relative_to(legacy_root)
     except ValueError:
         return str(source)
-    return str(storyflow_documents_root() / relative)
+    return _storage_path_text(storyflow_documents_root() / relative)
 
 
 def sessions_root() -> Path:
