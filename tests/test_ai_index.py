@@ -123,6 +123,43 @@ class ClipIndexTests(unittest.TestCase):
 
             self.assertEqual(calls, [11])
 
+    def test_completed_uncertain_full_scan_is_reused_across_planner_instances(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-result-cache-") as temporary:
+            root = Path(temporary)
+            clip = root / "unknown.mp4"
+            clip.write_bytes(b"fixture")
+            database = root / "footage-index.sqlite3"
+            first = FakeClipIndex(database, embedder_factory=lambda: (object(), object()))
+            second = FakeClipIndex(database, embedder_factory=lambda: (object(), object()))
+            stat = clip.stat()
+            with first._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     0, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                )
+
+            calls = 0
+
+            def uncertain(_path, *, samples):
+                nonlocal calls
+                calls += 1
+                self.assertEqual(samples, 11)
+                return 0
+
+            with patch.object(FakeClipIndex, "_screen_text_state", side_effect=uncertain):
+                self.assertEqual(
+                    first.screen_text_eligibility(clip, deep=True),
+                    SCREEN_ELIGIBILITY_UNCERTAIN,
+                )
+                self.assertEqual(
+                    second.screen_text_eligibility(clip, deep=True),
+                    SCREEN_ELIGIBILITY_UNCERTAIN,
+                )
+
+            self.assertEqual(calls, 1)
+
     def test_unknown_screen_text_reports_wait_and_check_activity(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-screen-progress-") as temporary:
             root = Path(temporary)
