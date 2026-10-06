@@ -5,8 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from scriptor import bridge, config
-from scriptor.ai_index import SearchHit
+from scriptor.ai_index import SCREEN_TEXT_CLASSIFIER_VERSION, ClipIndex, SearchHit
 from scriptor.config import OpenAIKey, Settings
 from scriptor.core import ScenarioRequest
 from scriptor.footage import FootageItem
@@ -571,6 +573,59 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertTrue(bridge._montage_screen_text_safe(FakeIndex("SAFE"), item))
         self.assertFalse(bridge._montage_screen_text_safe(FakeIndex("BLOCKED"), item))
         self.assertEqual(calls, [False, True, False, True, False, False])
+
+    def test_after_screen_text_maintenance_montage_reuses_final_verdicts_without_deep_decode(self):
+        """After explicit Latin maintenance, montage must not reopen final SAFE/BLOCKED media."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-montage-screen-cache-") as folder:
+            root = Path(folder)
+            safe = root / "safe.mp4"
+            blocked = root / "blocked.mp4"
+            safe.write_bytes(b"safe")
+            blocked.write_bytes(b"blocked")
+            index = ClipIndex(root / "index.sqlite3", embedder_factory=lambda: (object(), object()))
+
+            with index._connect() as connection:
+                connection.executemany(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version,embedding) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    [
+                        (
+                            str(safe.resolve()), safe.name, safe.stat().st_size, safe.stat().st_mtime_ns,
+                            0, SCREEN_TEXT_CLASSIFIER_VERSION,
+                            np.asarray([0.0, 1.0], dtype=np.float32).tobytes(),
+                        ),
+                        (
+                            str(blocked.resolve()), blocked.name, blocked.stat().st_size, blocked.stat().st_mtime_ns,
+                            0, SCREEN_TEXT_CLASSIFIER_VERSION,
+                            np.asarray([1.0, 0.0], dtype=np.float32).tobytes(),
+                        ),
+                    ],
+                )
+
+            query_vectors = np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "_query_vectors", return_value=query_vectors), \
+                 patch.object(index, "_screen_text_state", return_value=0) as maintenance_decode:
+                result = index.classify_english_screen_text()
+
+            self.assertEqual(result, {"checked": 2, "blocked": 1, "safe": 1, "uncertain": 0})
+            maintenance_decode.assert_called_once_with(safe, samples=11)
+
+            safe_item = FootageItem(str(safe), safe.name)
+            blocked_item = FootageItem(str(blocked), blocked.name)
+            with patch.object(
+                index,
+                "_screen_text_state",
+                side_effect=AssertionError("montage must not decode media after final Latin verdict"),
+            ), patch.object(
+                index,
+                "_bounded_screen_text_state",
+                side_effect=AssertionError("montage must not run deep screen-text check after maintenance"),
+            ):
+                self.assertTrue(bridge._montage_screen_text_safe(index, safe_item))
+                self.assertTrue(bridge._montage_screen_text_safe(index, safe_item))
+                self.assertFalse(bridge._montage_screen_text_safe(index, blocked_item))
+                self.assertFalse(bridge._montage_screen_text_safe(index, blocked_item))
 
     def test_semantic_rescue_can_use_best_safe_hit_below_normal_score_floor(self):
         candidate = FootageItem(
