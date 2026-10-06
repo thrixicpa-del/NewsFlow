@@ -50,6 +50,7 @@ from .browser_topic_scenarios import (
     BrowserTopicCompletion,
     BrowserTopicFailure,
     BrowserTopicTask,
+    resolve_topic_route,
     run_browser_topic_tasks,
 )
 from .channel_research import channel_research_state, new_task, parse_txt_sources
@@ -3029,6 +3030,8 @@ def snapshot() -> dict:
             "minimumChars": max(0, int(settings.browser_topic_scenarios.get("minimum_chars", 0) or 0)),
             "maximumChars": max(0, int(settings.browser_topic_scenarios.get("maximum_chars", 0) or 0)),
             "concurrency": max(1, int(settings.browser_topic_scenarios.get("concurrency", 1) or 1)),
+            "lengthOverrides": _browser_topic_snapshot_length_overrides(settings.browser_topic_scenarios.get("length_overrides", {})),
+            "additionalPromptOverrides": dict(settings.browser_topic_scenarios.get("additional_prompt_overrides", {}) or {}),
             "promptOverrides": dict(settings.browser_topic_scenarios.get("prompt_overrides", {}) or {}),
             "urlOverrides": dict(settings.browser_topic_scenarios.get("url_overrides", {}) or {}),
         },
@@ -3229,6 +3232,33 @@ def _browser_topic_override_map(value: object, *, url_values: bool = False) -> d
     return result
 
 
+def _browser_topic_length_override_map(value: object) -> dict[str, dict[str, int]]:
+    """Validate per-topic volume contracts once, keyed by ProductionItem ID."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("Диапазоны тем должны быть объектом")
+    result: dict[str, dict[str, int]] = {}
+    for raw_id, raw_range in value.items():
+        production_item_id = str(raw_id or "").strip()
+        if not production_item_id or not isinstance(raw_range, dict):
+            continue
+        minimum = max(0, int(raw_range.get("minimum_chars", raw_range.get("minimumChars", 0)) or 0))
+        maximum = max(0, int(raw_range.get("maximum_chars", raw_range.get("maximumChars", 0)) or 0))
+        if not minimum or not maximum or minimum > maximum:
+            raise ValueError("Укажите корректный диапазон символов для темы")
+        result[production_item_id] = {"minimum_chars": minimum, "maximum_chars": maximum}
+    return result
+
+
+def _browser_topic_snapshot_length_overrides(value: object) -> dict[str, dict[str, int]]:
+    """A malformed legacy setting must not prevent the settings screen opening."""
+    try:
+        return _browser_topic_length_override_map(value)
+    except (TypeError, ValueError):
+        return {}
+
+
 def save_browser_topic_scenario_settings(payload: dict) -> dict:
     """Persist direct browser-topic settings without API/provider side effects."""
     settings = load_settings()
@@ -3252,6 +3282,8 @@ def save_browser_topic_scenario_settings(payload: dict) -> dict:
         "minimum_chars": minimum,
         "maximum_chars": maximum,
         "concurrency": max(1, min(10, int(payload.get("concurrency", 1) or 1))),
+        "length_overrides": _browser_topic_length_override_map(payload.get("lengthOverrides", {})),
+        "additional_prompt_overrides": _browser_topic_override_map(payload.get("additionalPromptOverrides", {})),
         "prompt_overrides": _browser_topic_override_map(payload.get("promptOverrides", {})),
         "url_overrides": _browser_topic_override_map(payload.get("urlOverrides", {}), url_values=True),
     }
@@ -7161,6 +7193,8 @@ def _browser_topic_settings(settings: Settings) -> BrowserScenarioSettings:
         minimum_chars=max(0, int(raw.get("minimum_chars", 0) or 0)),
         maximum_chars=max(0, int(raw.get("maximum_chars", 0) or 0)),
         concurrency=max(1, min(10, int(raw.get("concurrency", 1) or 1))),
+        length_overrides=_browser_topic_length_override_map(raw.get("length_overrides", {})),
+        additional_prompt_overrides={str(key): str(value) for key, value in dict(raw.get("additional_prompt_overrides", {}) or {}).items()},
         prompt_overrides={str(key): str(value) for key, value in dict(raw.get("prompt_overrides", {}) or {}).items()},
         url_overrides={str(key): str(value) for key, value in dict(raw.get("url_overrides", {}) or {}).items()},
     )
@@ -7298,10 +7332,6 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
         raise ValueError("Выберите источник требований: текст или файл")
     if browser_settings.requirements_mode == "file" and not Path(browser_settings.requirements_file).is_file():
         raise ValueError("Файл требований не найден. Выберите его заново.")
-    if not browser_settings.companion_prompt.strip():
-        raise ValueError("Заполните сопроводительное письмо")
-    if not browser_settings.minimum_chars or browser_settings.minimum_chars > browser_settings.maximum_chars:
-        raise ValueError("Укажите корректный диапазон символов")
     session = _browser_topic_session(settings, str(settings.browser_topic_scenarios.get("session_id", "")))
     tasks, jobs_by_index = _select_browser_topic_tasks(settings, titles, jobs, payload)
     if not tasks:
@@ -7311,17 +7341,22 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
         }}
     # Validate all per-item routes before the first visible browser action.
     for task in tasks:
-        route_url = browser_settings.url_overrides.get(task.production_item_id, browser_settings.project_url)
-        validate_chatgpt_project_url(route_url)
+        route = resolve_topic_route(browser_settings, task)
+        validate_chatgpt_project_url(route.project_url)
+        if not route.companion_prompt.strip():
+            raise ValueError("Заполните сопроводительное письмо")
+        if not route.minimum_chars or route.minimum_chars > route.maximum_chars:
+            raise ValueError("Укажите корректный диапазон символов")
 
     for task in tasks:
         job = jobs_by_index[task.queue_index]
+        route = resolve_topic_route(browser_settings, task)
         job.state = RunState.RUNNING
         job.error = ""
         job.request = ScenarioRequest(
             job.request.index, job.request.title, job.request.prompt, task.production_item_id,
-            (browser_settings.minimum_chars + browser_settings.maximum_chars) // 2,
-            browser_settings.minimum_chars, browser_settings.maximum_chars,
+            (route.minimum_chars + route.maximum_chars) // 2,
+            route.minimum_chars, route.maximum_chars,
         )
     save_session(titles, list(jobs_by_index.values()))
 
@@ -7392,9 +7427,14 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
             job.state = RunState.ERROR
             job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
     save_session(current_titles, current_jobs)
+    export_folder = str(Path(settings.output_folder) / "ChatGPT браузер") if completed else ""
     return {**snapshot(), "operationResult": {
         "kind": "browser-topic-scenarios", "count": completed,
-        "message": f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз.",
+        "folder": export_folder,
+        "message": (
+            f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз."
+            + (f" TXT сохранены: {export_folder}" if export_folder else "")
+        ),
     }}
 
 
