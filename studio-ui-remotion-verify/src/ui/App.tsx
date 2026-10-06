@@ -11651,7 +11651,10 @@ export function Editor({
         </div>
         {data.montageTasks.length ? (
           <div className="montage-task-cards">
-            {data.montageTasks.map((task) => (
+            {data.montageTasks.map((task) => {
+              const historicalError =
+                task.status === "Ошибка" && task.runtimeCurrent !== true;
+              return (
               <article
                 className={`montage-task ${task.status === "Ошибка" ? "error" : task.status === "Готово" ? "done" : ""}`}
                 key={task.index}
@@ -11659,7 +11662,11 @@ export function Editor({
                 <div>
                   <span className="task-number">{task.index + 1}</span>
                   <b>{task.title}</b>
-                  <em>{task.status || "Ожидает"}</em>
+                  <em>
+                    {historicalError
+                      ? "Ошибка · история"
+                      : task.status || "Ожидает"}
+                  </em>
                 </div>
                 <div className="task-progress">
                   <i style={{ width: `${task.progress || 0}%` }} />
@@ -11668,7 +11675,10 @@ export function Editor({
                   </span>
                 </div>
                 {task.error ? (
-                  <p className="task-error">Причина: {task.error}</p>
+                  <p className="task-error">
+                    {historicalError ? "История предыдущего runtime: " : "Причина текущего запуска: "}
+                    {task.error}
+                  </p>
                 ) : null}
                 <div className="task-timeline">
                   {(task.timeline || []).slice(-6).map((event, index) => {
@@ -11723,7 +11733,8 @@ export function Editor({
                   ) : null}
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <Empty
@@ -11776,7 +11787,13 @@ export function Editor({
             </div>
             <div>
               <dt>Актуальность</dt>
-              <dd>Текущий snapshot не сообщает признак устаревания</dd>
+              <dd>
+                {inspectedMontage.runtimeCurrent
+                  ? "Ошибка/статус подтверждены текущей desktop runtime-сессией"
+                  : inspectedMontage.runtimeProvenance === "previous-session"
+                    ? "Сохранено предыдущей desktop runtime-сессией"
+                    : "Legacy-запись: runtime происхождение не подтверждено"}
+              </dd>
             </div>
           </dl>
         ) : null}
