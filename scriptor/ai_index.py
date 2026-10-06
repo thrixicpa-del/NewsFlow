@@ -691,7 +691,7 @@ class ClipIndex:
                     )
                     # Three indexing frames block only high-confidence text
                     # for free. Ambiguous/clean-looking clips remain unchecked
-                    # until the strict five-frame selection gate verifies them.
+                    # until the bounded eleven-frame selection gate verifies them.
                     indexed_english = 1 if obvious_text else 0
                     indexed_english_version = (
                         SCREEN_TEXT_CLASSIFIER_VERSION if indexed_english == 1 else 0
@@ -1159,19 +1159,22 @@ class ClipIndex:
             if not deep:
                 self._screen_text_state_cache[cache_key] = SCREEN_ELIGIBILITY_UNCERTAIN
                 return SCREEN_ELIGIBILITY_UNCERTAIN
+        # Any genuinely unknown candidate that reaches media decoding gets
+        # one full 11-frame verdict. Persisting a 5-frame result as the current
+        # classifier version would let a concurrent maintenance/deep request
+        # mistake a weaker scan for the stronger sparse-caption check.
         state = self._bounded_screen_text_state(
-            candidate, resolved, samples=11 if deep else 5,
+            candidate, resolved, samples=11,
         )
         eligibility = (
             SCREEN_ELIGIBILITY_BLOCKED if state == 1
             else SCREEN_ELIGIBILITY_SAFE if state == -1
             else SCREEN_ELIGIBILITY_UNCERTAIN
         )
-        self._screen_text_state_cache[(resolved, bool(deep))] = eligibility
-        # A BLOCKED verdict remains blocking at either sampling depth.  SAFE is
-        # deliberately depth-specific so a deep request can inspect all frames.
-        if state == 1:
-            self._screen_text_state_cache[(resolved, not bool(deep))] = eligibility
+        # The bounded scan above is already the strongest on-demand check, so
+        # both shallow and deep callers may reuse it without reopening media.
+        self._screen_text_state_cache[(resolved, False)] = eligibility
+        self._screen_text_state_cache[(resolved, True)] = eligibility
         return eligibility
 
     def screen_text_safe(self, path: str | Path) -> bool:
