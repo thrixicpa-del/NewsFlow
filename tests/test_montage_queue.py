@@ -145,6 +145,32 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(render_calls, ["Only row"])
         self.assertEqual(sorted(result["operationResult"]["count"] for result in results), [0, 1])
 
+    def test_ready_27797_clip_index_does_not_rescan_footage_folders_during_planning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Indexed row"])
+
+            class ReadyIndex:
+                def __init__(self, *_args, screen_text_progress=None, **_kwargs):
+                    self.screen_text_progress = screen_text_progress
+
+                def screen_text_stats(self):
+                    return {"safe": 27000, "blocked": 100, "unchecked": 697}
+
+                def count(self, embedded_only=False):
+                    return 27_797
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(["Indexed row"], jobs)), \
+                 patch.object(bridge, "ClipIndex", ReadyIndex), \
+                 patch.object(bridge, "scan_folders",
+                              side_effect=AssertionError("ready index must not rescan folders")), \
+                 patch.object(bridge, "probe_media_duration", return_value=6.0), \
+                 patch.object(bridge, "fallback_scene_plan",
+                              side_effect=RuntimeError("stop after ready-index gate")), \
+                 self.assertRaisesRegex(RuntimeError, "stop after ready-index gate"):
+                bridge.prepare_montage({"scenarioIndex": 0})
+
     def test_empty_selected_scope_is_not_implicit_missing_only(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
