@@ -582,7 +582,12 @@ class MontageQueueStateTests(unittest.TestCase):
             blocked = root / "blocked.mp4"
             safe.write_bytes(b"safe")
             blocked.write_bytes(b"blocked")
-            index = ClipIndex(root / "index.sqlite3", embedder_factory=lambda: (object(), object()))
+            progress_events = []
+            index = ClipIndex(
+                root / "index.sqlite3",
+                embedder_factory=lambda: (object(), object()),
+                screen_text_progress=lambda stage, name: progress_events.append((stage, name)),
+            )
 
             with index._connect() as connection:
                 connection.executemany(
@@ -610,6 +615,8 @@ class MontageQueueStateTests(unittest.TestCase):
 
             self.assertEqual(result, {"checked": 2, "blocked": 1, "safe": 1, "uncertain": 0})
             maintenance_decode.assert_called_once_with(safe, samples=11)
+            self.assertTrue(progress_events)
+            progress_events.clear()
 
             safe_item = FootageItem(str(safe), safe.name)
             blocked_item = FootageItem(str(blocked), blocked.name)
@@ -626,6 +633,7 @@ class MontageQueueStateTests(unittest.TestCase):
                 self.assertTrue(bridge._montage_screen_text_safe(index, safe_item))
                 self.assertFalse(bridge._montage_screen_text_safe(index, blocked_item))
                 self.assertFalse(bridge._montage_screen_text_safe(index, blocked_item))
+            self.assertEqual(progress_events, [], "final verdicts must not surface a montage text-check stage")
 
     def test_semantic_rescue_can_use_best_safe_hit_below_normal_score_floor(self):
         candidate = FootageItem(
