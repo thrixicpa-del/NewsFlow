@@ -29,6 +29,10 @@ const remotionRunner = app.isPackaged
   : path.resolve(dirname, '../remotion/render.mjs');
 
 const approvedOpenPaths = new Set<string>();
+// One opaque ID per desktop process lets Core distinguish a failure produced
+// by this live NewsFlow session from durable evidence left by an older run.
+// It contains no user/account data and is regenerated at every app start.
+const runtimeSessionId = crypto.randomUUID();
 
 function normalizedExistingPath(candidate: unknown): string | null {
   if (typeof candidate !== 'string' || !path.isAbsolute(candidate)) return null;
@@ -198,6 +202,7 @@ function callCore(command: string, payload: unknown = {}) {
           NEWSFLOW_REMOTION_RUNNER: remotionRunner,
           NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2',
           NEWSFLOW_BRIDGE_PAYLOAD_FILE: transport.path,
+          NEWSFLOW_RUNTIME_SESSION_ID: runtimeSessionId,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -286,7 +291,7 @@ function startMontageQueue(payload: unknown = {}): Promise<void> {
   const tracedPayload = actionTracePayload(payload);
   const args = bundled ? ['run-montage-queue', JSON.stringify(tracedPayload)] : ['-m', 'scriptor.bridge', 'run-montage-queue', JSON.stringify(tracedPayload)];
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true, cwd: coreRoot, detached: false, stdio: 'ignore', env: { ...process.env, PYTHONPATH: coreRoot, NEWSFLOW_REMOTION_NODE: process.execPath, NEWSFLOW_REMOTION_RUNNER: remotionRunner, NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2' } });
+    const child = spawn(executable, args, { windowsHide: true, cwd: coreRoot, detached: false, stdio: 'ignore', env: { ...process.env, PYTHONPATH: coreRoot, NEWSFLOW_REMOTION_NODE: process.execPath, NEWSFLOW_REMOTION_RUNNER: remotionRunner, NEWSFLOW_REMOTION_FRAME_CONCURRENCY: process.env.NEWSFLOW_REMOTION_FRAME_CONCURRENCY || '2', NEWSFLOW_RUNTIME_SESSION_ID: runtimeSessionId } });
     child.once('error', (error) => reject(new Error(`Не удалось запустить очередь монтажа: ${error.message}`)));
     child.once('spawn', () => {
       child.unref();

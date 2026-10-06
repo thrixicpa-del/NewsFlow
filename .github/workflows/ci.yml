@@ -21,6 +21,7 @@ jobs:
       - uses: actions/setup-node@v6
         with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
       - run: python -m pip install ruff==0.16.6 pip-audit==2.10.1
+      - run: python -m pip install --require-hashes -r requirements-test.lock
       - run: pnpm install --frozen-lockfile
         working-directory: studio-ui-remotion-verify
       - run: pwsh -NoProfile -File scripts/release-lint.ps1
@@ -32,7 +33,7 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
-      - run: python tests/run_isolated.py tests.test_montage_index_integrity
+      - run: python tests/run_isolated.py tests.test_ai_index tests.test_montage_queue tests.test_montage_index_integrity
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-proxy
       - run: >-

@@ -24,6 +24,7 @@ from . import bridge
 from . import config as config_module
 from . import timeline as timeline_module
 from .ai_index import (
+    _SCREEN_TEXT_COARSE_POSITIVE_QUERY,
     _SCREEN_TEXT_POSITIVE_QUERIES,
     SCREEN_ELIGIBILITY_BLOCKED,
     SCREEN_ELIGIBILITY_SAFE,
@@ -599,7 +600,10 @@ class MontageRenderTests(unittest.TestCase):
         class DummyTextEmbedder:
             def query_embed(self, value, **_):
                 queries = value if isinstance(value, list) else [value]
-                positive = {item.casefold() for item in _SCREEN_TEXT_POSITIVE_QUERIES}
+                positive = {
+                    *(item.casefold() for item in _SCREEN_TEXT_POSITIVE_QUERIES),
+                    _SCREEN_TEXT_COARSE_POSITIVE_QUERY.casefold(),
+                }
                 for query in queries:
                     if str(query).casefold() in positive:
                         yield np.asarray([1.0, 0.0], dtype=np.float32)

@@ -145,6 +145,32 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(render_calls, ["Only row"])
         self.assertEqual(sorted(result["operationResult"]["count"] for result in results), [0, 1])
 
+    def test_ready_27797_clip_index_does_not_rescan_footage_folders_during_planning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Indexed row"])
+
+            class ReadyIndex:
+                def __init__(self, *_args, screen_text_progress=None, **_kwargs):
+                    self.screen_text_progress = screen_text_progress
+
+                def screen_text_stats(self):
+                    return {"safe": 27000, "blocked": 100, "unchecked": 697}
+
+                def count(self, embedded_only=False):
+                    return 27_797
+
+            with patch.object(bridge, "load_settings", return_value=settings), \
+                 patch.object(bridge, "load_session", return_value=(["Indexed row"], jobs)), \
+                 patch.object(bridge, "ClipIndex", ReadyIndex), \
+                 patch.object(bridge, "scan_folders",
+                              side_effect=AssertionError("ready index must not rescan folders")), \
+                 patch.object(bridge, "probe_media_duration", return_value=6.0), \
+                 patch.object(bridge, "fallback_scene_plan",
+                              side_effect=RuntimeError("stop after ready-index gate")), \
+                 self.assertRaisesRegex(RuntimeError, "stop after ready-index gate"):
+                bridge.prepare_montage({"scenarioIndex": 0})
+
     def test_empty_selected_scope_is_not_implicit_missing_only(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -1409,6 +1435,36 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(task["progress"], 42)
         self.assertEqual(task["timeline"][-1]["detail"], "Сцена 2/8: tanker.mp4")
         save.assert_called_once_with(worker_settings)
+
+    def test_montage_task_runtime_provenance_distinguishes_current_and_legacy_evidence(self):
+        settings = Settings()
+        with patch.dict(os.environ, {"NEWSFLOW_RUNTIME_SESSION_ID": "desktop-session-a"}), \
+             patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge.save_settings"):
+            bridge._montage_task_update(
+                settings, 4, status="Ошибка", phase="Ошибка подготовки",
+                progress=100, error="No module named 'fastembed'",
+            )
+            current = bridge._montage_task_snapshot_projection(
+                "4", settings.montage_task_statuses["4"],
+            )
+
+        self.assertTrue(current["runtimeCurrent"])
+        self.assertEqual(current["runtimeProvenance"], "current-session")
+        self.assertNotIn("runtimeSessionId", current)
+
+        with patch.dict(os.environ, {"NEWSFLOW_RUNTIME_SESSION_ID": "desktop-session-b"}):
+            previous = bridge._montage_task_snapshot_projection(
+                "4", settings.montage_task_statuses["4"],
+            )
+        self.assertFalse(previous["runtimeCurrent"])
+        self.assertEqual(previous["runtimeProvenance"], "previous-session")
+
+        legacy = bridge._montage_task_snapshot_projection(
+            "5", {"status": "Ошибка", "error": "historical"},
+        )
+        self.assertFalse(legacy["runtimeCurrent"])
+        self.assertEqual(legacy["runtimeProvenance"], "legacy-unattributed")
 
     def test_render_update_records_heartbeat_and_render_start(self):
         settings = Settings()

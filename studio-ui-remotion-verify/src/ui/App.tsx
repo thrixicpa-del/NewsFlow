@@ -7,6 +7,7 @@ import "./footage.css";
 import "./footage-light.css";
 import "./editor.css";
 import "./montage-light.css";
+import "./montage-overflow.css";
 import "./montage-recommendations.css";
 import "./voice.css";
 import "./voice-light.css";
@@ -10487,7 +10488,9 @@ export function MontageLiveStatus({
   const persistedActive = data.montageTasks.filter(
     (task) => !["Готово", "Ошибка"].includes(task.status || ""),
   );
-  const workerRunning = queueRunning ?? persistedActive.length > 0;
+  // Task statuses are durable history, not proof that a worker process still
+  // owns the queue.  Core snapshots expose the actual owner via queueRunning.
+  const workerRunning = queueRunning === true;
   const active = workerRunning ? persistedActive : [];
   const staleActive = workerRunning ? [] : persistedActive;
   const lead = active[0];
@@ -10673,22 +10676,9 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
-  const statusSuggestsRunning = data.montageTasks.some((item) =>
-    [
-      "В очереди",
-      "Планирование",
-      "Планирование сцен",
-      "Подбор футажей",
-      "Проверка текста",
-      "Внешний поиск",
-      "Нарезка внешнего футажа",
-      "Ожидает рендер",
-      "Рендер",
-      "Склейка",
-      "Пауза",
-    ].includes(item.status || ""),
-  );
-  const running = data.montageSettings.queueRunning ?? statusSuggestsRunning;
+  // A persisted phase can outlive a crashed or closed Core.  Only the
+  // process-backed snapshot field may disable launch controls.
+  const running = data.montageSettings.queueRunning === true;
   const queueActive = running || queueLaunching;
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,
@@ -11617,7 +11607,9 @@ export function Editor({
                           : ""
                     }
                   >
-                    {task?.status || "Готов к монтажу"}
+                    {task?.status === "Ошибка" && task.runtimeCurrent !== true
+                      ? "Ошибка · история"
+                      : task?.status || "Готов к монтажу"}
                   </em>
                 </button>
               );
@@ -11661,7 +11653,10 @@ export function Editor({
         </div>
         {data.montageTasks.length ? (
           <div className="montage-task-cards">
-            {data.montageTasks.map((task) => (
+            {data.montageTasks.map((task) => {
+              const historicalError =
+                task.status === "Ошибка" && task.runtimeCurrent !== true;
+              return (
               <article
                 className={`montage-task ${task.status === "Ошибка" ? "error" : task.status === "Готово" ? "done" : ""}`}
                 key={task.index}
@@ -11669,7 +11664,11 @@ export function Editor({
                 <div>
                   <span className="task-number">{task.index + 1}</span>
                   <b>{task.title}</b>
-                  <em>{task.status || "Ожидает"}</em>
+                  <em>
+                    {historicalError
+                      ? "Ошибка · история"
+                      : task.status || "Ожидает"}
+                  </em>
                 </div>
                 <div className="task-progress">
                   <i style={{ width: `${task.progress || 0}%` }} />
@@ -11678,7 +11677,10 @@ export function Editor({
                   </span>
                 </div>
                 {task.error ? (
-                  <p className="task-error">Причина: {task.error}</p>
+                  <p className="task-error">
+                    {historicalError ? "История предыдущего runtime: " : "Причина текущего запуска: "}
+                    {task.error}
+                  </p>
                 ) : null}
                 <div className="task-timeline">
                   {(task.timeline || []).slice(-6).map((event, index) => {
@@ -11733,7 +11735,8 @@ export function Editor({
                   ) : null}
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <Empty
@@ -11786,7 +11789,30 @@ export function Editor({
             </div>
             <div>
               <dt>Актуальность</dt>
-              <dd>Текущий snapshot не сообщает признак устаревания</dd>
+              <dd>
+                {inspectedMontage.runtimeCurrent
+                  ? "Ошибка/статус подтверждены текущей desktop runtime-сессией"
+                  : inspectedMontage.runtimeProvenance === "previous-session"
+                    ? "Сохранено предыдущей desktop runtime-сессией"
+                    : "Legacy-запись: runtime происхождение не подтверждено"}
+              </dd>
+            </div>
+            <div>
+              <dt>Причина / diagnostic</dt>
+              <dd>{inspectedMontage.error || "Ошибка не сохранена"}</dd>
+            </div>
+            <div>
+              <dt>Последние события</dt>
+              <dd>
+                {(inspectedMontage.timeline || []).length
+                  ? (inspectedMontage.timeline || []).slice(-6).map((event, index) => (
+                      <div key={`${event.at}-${index}`}>
+                        {event.at} {event.label}
+                        {event.detail ? ` — ${event.detail}` : ""}
+                      </div>
+                    ))
+                  : "Timeline не сохранён"}
+              </dd>
             </div>
           </dl>
         ) : null}

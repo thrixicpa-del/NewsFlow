@@ -10,6 +10,7 @@ import difflib
 import hashlib
 import json
 import math
+import ntpath
 import os
 import random
 import re
@@ -2955,9 +2956,13 @@ def snapshot() -> dict:
                             "renderWorkers": settings.montage_render_workers,
                             "queuePaused": settings.montage_queue_paused,
                             "queueRunning": _montage_queue_owner_running()},
-        "montageTasks": [dict(value, index=int(key)) for key, value in sorted(
-            settings.montage_task_statuses.items(), key=lambda pair: int(pair[0]) if str(pair[0]).isdigit() else 10 ** 9
-        )],
+        "montageTasks": [
+            _montage_task_snapshot_projection(key, value)
+            for key, value in sorted(
+                settings.montage_task_statuses.items(),
+                key=lambda pair: int(pair[0]) if str(pair[0]).isdigit() else 10 ** 9,
+            )
+        ],
         "montageProjects": montage_projects,
         "outputs": [{"video": video, "folder": folder} for video, folder in settings.video_result_packages.items()
                     if Path(video).is_file() and Path(folder).is_dir()],
@@ -14789,8 +14794,9 @@ def index_footage(payload: dict) -> dict:
     try:
         screen_text_result = None
         if screen_text:
-            # The batch reads only persisted CLIP vectors. It never discovers
-            # folders or reopens the user's source videos.
+            # Maintenance never rescans folders. Persisted vectors handle
+            # obvious blocks; ambiguous stale clips may be opened for the
+            # bounded eleven-frame sparse-caption/title-card verification.
             screen_text_result = index.classify_english_screen_text(progress=report)
             progress = latest_progress or IndexProgress(
                 total=0, processed=0, indexed=0, skipped=0, failed=0, stage="complete",
@@ -15917,7 +15923,7 @@ def _external_candidate_ok(scene_query: str, candidate: dict) -> bool:
 def _montage_normalized_path_key(raw_path: str) -> str:
     """Normalize one Windows path once for the montage candidate hot path."""
     try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(raw_path)))
+        return ntpath.normcase(ntpath.abspath(ntpath.normpath(raw_path)))
     except (OSError, TypeError, ValueError):
         return raw_path.casefold()
 
@@ -16186,7 +16192,20 @@ def prepare_montage(payload: dict) -> dict:
     # both spellings for direct/manual calls and for the background queue.
     progress_candidate = payload.get("_progress") or payload.get("progress")
     progress = progress_candidate if callable(progress_candidate) else None
-    index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+    def screen_text_progress(state: str, filename: str) -> None:
+        if not progress:
+            return
+        labels = {
+            "same-path-wait": "Ждём уже запущенную проверку надписей",
+            "slot-wait": "Ждём свободный слот проверки надписей",
+            "checking": "Проверяем надписи",
+        }
+        progress("Проверка текста", f"{labels.get(state, 'Проверка надписей')}: {filename}")
+
+    index = ClipIndex(
+        app_data_root() / "footage-index.sqlite3",
+        screen_text_progress=screen_text_progress,
+    )
     if progress and not settings.montage_external_only:
         stats = index.screen_text_stats()
         progress(
@@ -17198,6 +17217,9 @@ def _montage_task_update(settings: Settings, scenario_index: int, *, status: str
                 events.append(marker)
             item["timeline"] = events[-24:]
         item["updatedAt"] = now
+        runtime_session_id = _runtime_session_id()
+        if runtime_session_id:
+            item["runtimeSessionId"] = runtime_session_id
         settings.montage_task_statuses[key] = item
         save_settings(settings)
 
@@ -17249,6 +17271,11 @@ def _remove_montage_output(settings: Settings, scenario_index: int) -> None:
                 shutil.rmtree(package_path)
         except (OSError, ValueError):
             pass
+
+
+def _runtime_session_id() -> str:
+    """Opaque desktop-process provenance; never derived from user data."""
+    return str(os.environ.get("NEWSFLOW_RUNTIME_SESSION_ID", "") or "").strip()[:128]
 
 
 MONTAGE_ACTIVE_STATUSES = frozenset({
@@ -17340,6 +17367,27 @@ def _recover_interrupted_montage_tasks(settings: Settings) -> bool:
         settings.montage_task_statuses[str(key)] = item
         changed = True
     return changed
+
+
+def _montage_task_snapshot_projection(key: str, value: object) -> dict:
+    """Expose task evidence with runtime freshness without rewriting history."""
+    item = dict(value) if isinstance(value, dict) else {}
+    saved_session = str(item.pop("runtimeSessionId", "") or "").strip()
+    current_session = _runtime_session_id()
+    runtime_current = bool(saved_session and current_session and saved_session == current_session)
+    item["runtimeCurrent"] = runtime_current
+    item["runtimeProvenance"] = (
+        "current-session"
+        if runtime_current
+        else "previous-session"
+        if saved_session
+        else "legacy-unattributed"
+    )
+    try:
+        item["index"] = int(key)
+    except (TypeError, ValueError):
+        item["index"] = -1
+    return item
 
 
 def montage_queue_is_active(statuses: dict[str, dict]) -> bool:

@@ -299,7 +299,9 @@ describe("Montage Light view", () => {
     render(<Editor data={data} command={command} refresh={async () => undefined} />);
 
     expect(screen.getByRole("button", { name: /Последняя ручная тема/ })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+    const resume = screen.getByRole("button", { name: "Собрать незавершённые" });
+    expect(resume.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(resume);
 
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "run-montage-queue", { indices: [83], replaceOutput: false },
@@ -322,6 +324,65 @@ describe("Montage Light view", () => {
 
     const event = screen.getByTitle(`20:14:00 Подбор футажей — ${detail}`);
     expect(event.className).toContain("task-timeline-entry");
+
+    const css = readFileSync(resolve(process.cwd(), "src/ui/montage-overflow.css"), "utf8");
+    expect(css).toMatch(/\.task-timeline\{[^}]*overflow:hidden/);
+    expect(css).toMatch(/\.task-timeline-entry\{[^}]*flex:0 1 min\(100%,520px\)/);
+    expect(css).toMatch(/\.montage-provenance dd\{[^}]*overflow-wrap:anywhere/);
+  });
+
+  it("labels legacy montage failures as historical without deleting their evidence", () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Старый runtime", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Старый runtime", state: "Готово", path: "D:/voice.mp3" }],
+      montageTasks: [{
+        index: 1,
+        title: "Старый runtime",
+        status: "Ошибка",
+        phase: "Ошибка подготовки",
+        error: "No module named 'fastembed'",
+        runtimeCurrent: false,
+        runtimeProvenance: "legacy-unattributed" as const,
+        timeline: [{
+          at: "10:20:00",
+          label: "Ошибка подготовки",
+          progress: 100,
+          detail: "No module named 'fastembed'",
+        }],
+      }],
+    };
+
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+
+    expect(screen.getAllByText("Ошибка · история")).toHaveLength(2);
+    expect(screen.getByText(/История предыдущего runtime: No module named 'fastembed'/)).toBeTruthy();
+    expect(screen.getByTitle(/No module named 'fastembed'/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Инспектор MP4" }));
+    expect(screen.getByText("Legacy-запись: runtime происхождение не подтверждено")).toBeTruthy();
+    expect(screen.getAllByText(/No module named 'fastembed'/).length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText(/10:20:00 Ошибка подготовки — No module named 'fastembed'/)).toBeTruthy();
+  });
+
+  it("keeps a failure from the current desktop runtime marked as current", () => {
+    const data = {
+      ...fallback,
+      montageTasks: [{
+        index: 1,
+        title: "Текущий runtime",
+        status: "Ошибка",
+        phase: "Ошибка рендера",
+        error: "FFmpeg failed",
+        runtimeCurrent: true,
+        runtimeProvenance: "current-session" as const,
+      }],
+    };
+
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+
+    expect(screen.getByText(/Причина текущего запуска: FFmpeg failed/)).toBeTruthy();
+    expect(screen.queryByText("Ошибка · история")).toBeNull();
   });
 
   it("offers explicit selected retry for an error row", async () => {
@@ -470,7 +531,7 @@ describe("Montage Light view", () => {
     expect(screen.getByRole("heading", { name: "Инспектор MP4" })).toBeTruthy();
     expect(screen.getByText("D:/result.mp4")).toBeTruthy();
     expect(screen.getByText("Текущий snapshot не сообщает ProductionItem ID")).toBeTruthy();
-    expect(screen.getByText("Текущий snapshot не сообщает признак устаревания")).toBeTruthy();
+    expect(screen.getByText("Legacy-запись: runtime происхождение не подтверждено")).toBeTruthy();
   });
 
   it("renders one live-status ribbon for the active montage route", () => {
