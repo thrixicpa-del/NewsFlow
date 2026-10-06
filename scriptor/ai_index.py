@@ -267,10 +267,12 @@ def proxy_cache_excluded_paths(db_path: str | Path) -> set[str]:
 class ClipIndex:
     """SQLite-backed multimodal index designed for tens of thousands of short clips."""
 
-    def __init__(self, db_path: Path, model_cache: Path | None = None, embedder_factory=None):
+    def __init__(self, db_path: Path, model_cache: Path | None = None, embedder_factory=None,
+                 screen_text_progress: Callable[[str, str], None] | None = None):
         self.db_path = Path(db_path)
         self.model_cache = Path(model_cache or self.db_path.parent / "models")
         self.embedder_factory = embedder_factory
+        self.screen_text_progress = screen_text_progress
         self._image_embedder = None
         self._text_embedder = None
         self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
@@ -1085,6 +1087,8 @@ class ClipIndex:
                 completion = threading.Event()
                 _SCREEN_TEXT_INFLIGHT[key] = completion
         if not leader:
+            if self.screen_text_progress:
+                self.screen_text_progress("same-path-wait", candidate.name)
             completion.wait()
             with self._connect() as connection:
                 row = connection.execute(
@@ -1095,7 +1099,11 @@ class ClipIndex:
             return 0
         try:
             try:
+                if self.screen_text_progress:
+                    self.screen_text_progress("slot-wait", candidate.name)
                 with _SCREEN_TEXT_DEEP_SLOTS:
+                    if self.screen_text_progress:
+                        self.screen_text_progress("checking", candidate.name)
                     state = self._screen_text_state(candidate, samples=samples)
             except (OSError, ValueError):
                 state = 0
@@ -1184,12 +1192,11 @@ class ClipIndex:
     def classify_english_screen_text(self, progress: Callable[[IndexProgress], None] | None = None,
                                      cancel: threading.Event | None = None,
                                      batch_clips: int = 384) -> dict[str, int]:
-        """Refresh stale labels from persisted clip vectors without reopening media.
+        """Refresh stale labels without forcing a hidden migration during montage.
 
-        This is an explicit maintenance pass, separate from montage planning.
-        It conservatively marks ambiguous vectors UNCERTAIN; a later bounded
-        on-demand check may inspect frames only for such genuinely unknown
-        candidates.
+        Persisted vectors fast-block obvious text. Ambiguous stale rows are
+        deliberately verified with the bounded eleven-frame check here, in the
+        explicit maintenance action rather than across ordinary planning.
         """
 
         with self._connect() as connection:
