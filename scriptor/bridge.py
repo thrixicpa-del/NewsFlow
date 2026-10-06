@@ -7318,6 +7318,50 @@ def _browser_topic_queue_lock_path() -> Path:
     return app_data_root() / "browser-topic-scenarios.lock"
 
 
+def _browser_topic_process_is_running(pid: object) -> bool:
+    """Check a browser worker without assuming packaged-vs-source executable names."""
+    try:
+        process_id = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    if process_id == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
+            if not handle:
+                return False
+            try:
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = wintypes.DWORD(len(buffer))
+                query = ctypes.windll.kernel32.QueryFullProcessImageNameW
+                query.argtypes = [
+                    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                    ctypes.POINTER(wintypes.DWORD),
+                ]
+                query.restype = wintypes.BOOL
+                if not query(handle, 0, buffer, ctypes.byref(length)):
+                    return False
+                return (
+                    Path(buffer.value).name.casefold()
+                    == Path(sys.executable).name.casefold()
+                )
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except OSError:
+            return False
+    try:
+        os.kill(process_id, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _claim_browser_topic_queue_lock() -> Path | None:
     """Claim the one browser-topic batch across desktop/Core processes."""
     lock_path = _browser_topic_queue_lock_path()
@@ -7328,7 +7372,7 @@ def _claim_browser_topic_queue_lock() -> Path | None:
                 existing = json.loads(lock_path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
                 existing = {}
-            if _montage_process_is_running(existing.get("pid")):
+            if _browser_topic_process_is_running(existing.get("pid")):
                 return None
             try:
                 lock_path.unlink()
