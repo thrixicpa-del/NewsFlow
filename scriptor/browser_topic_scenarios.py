@@ -35,6 +35,11 @@ class BrowserScenarioSettings:
     minimum_chars: int = 0
     maximum_chars: int = 0
     concurrency: int = 1
+    # These maps are deliberately keyed by immutable ProductionItem IDs.  UI
+    # range selection is resolved before it is stored here, so later queue
+    # filtering or reordering cannot reassign an operator's choice.
+    length_overrides: dict[str, dict[str, int]] = field(default_factory=dict)
+    additional_prompt_overrides: dict[str, str] = field(default_factory=dict)
     prompt_overrides: dict[str, str] = field(default_factory=dict)
     url_overrides: dict[str, str] = field(default_factory=dict)
 
@@ -56,6 +61,8 @@ class BrowserTopicTask:
 class BrowserTopicRoute:
     project_url: str
     companion_prompt: str
+    minimum_chars: int
+    maximum_chars: int
 
 
 @dataclass(frozen=True)
@@ -82,11 +89,21 @@ class BrowserTopicTransport(Protocol):
 def resolve_topic_route(settings: BrowserScenarioSettings, task: BrowserTopicTask) -> BrowserTopicRoute:
     """Resolve only against the immutable ProductionItem identity."""
     production_item_id = _clean_text(task.production_item_id)
+    override = settings.length_overrides.get(production_item_id, {})
+    minimum = max(0, int(override.get("minimum_chars", settings.minimum_chars) or 0))
+    maximum = max(0, int(override.get("maximum_chars", settings.maximum_chars) or 0))
+    # `prompt_overrides` existed in an early preview.  Retain its replacement
+    # meaning for saved profiles; new range assignment uses the explicit
+    # additive map so a global companion message is never silently lost.
+    prompt = _clean_text(settings.prompt_overrides.get(production_item_id, settings.companion_prompt))
+    additional = _clean_text(settings.additional_prompt_overrides.get(production_item_id, ""))
+    if additional:
+        prompt = "\n\n".join(part for part in (prompt, additional) if part)
     return BrowserTopicRoute(
         project_url=_clean_text(settings.url_overrides.get(production_item_id, settings.project_url)),
-        companion_prompt=_clean_text(
-            settings.prompt_overrides.get(production_item_id, settings.companion_prompt)
-        ),
+        companion_prompt=prompt,
+        minimum_chars=minimum,
+        maximum_chars=maximum,
     )
 
 
@@ -102,8 +119,8 @@ def build_browser_message(settings: BrowserScenarioSettings, task: BrowserTopicT
     route = resolve_topic_route(settings, task)
     if not route.companion_prompt:
         raise ValueError("Заполните сопроводительный prompt")
-    minimum = max(0, int(settings.minimum_chars or 0))
-    maximum = max(0, int(settings.maximum_chars or 0))
+    minimum = route.minimum_chars
+    maximum = route.maximum_chars
     if not minimum or not maximum or minimum > maximum:
         raise ValueError("Укажите корректный диапазон символов")
 
@@ -114,17 +131,14 @@ def build_browser_message(settings: BrowserScenarioSettings, task: BrowserTopicT
         sections.append("Используй прикреплённый файл как шаблон требований к стилю и структуре.")
 
     sections.extend((
-        f"Тема сценария:\n{title}",
         route.companion_prompt,
+        f"ТЕМА:\n{title}",
+        f"ОБЪЁМ: {_format_characters(minimum)}–{_format_characters(maximum)} символов.",
         (
-            "Напиши цельный оригинальный новостной сценарий объёмом "
-            f"{_format_characters(minimum)}–{_format_characters(maximum)} символов."
+            "Создай и прикрепи готовый сценарий как UTF-8 файл .txt. "
+            "Не добавляй текста вне вложенного файла."
         ),
-        (
-            "Не указывай дату и время. Не добавляй приветствие, план, "
-            "комментарии автора и служебные пояснения. Выдай только готовый "
-            "текст сценария."
-        ),
+        "Выдай только готовый txt.",
     ))
     return "\n\n".join(section for section in sections if section.strip())
 
