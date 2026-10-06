@@ -56,7 +56,7 @@ class ChatGPTBrowserClient:
                 executable_path=str(chrome_path()),
                 headless=False,
                 args=["--no-first-run", "--no-default-browser-check"],
-                accept_downloads=False,
+                accept_downloads=True,
                 viewport={"width": 1280, "height": 900},
             )
         except Exception as exc:  # noqa: BLE001 - Playwright exposes multiple runtime exception types.
@@ -121,8 +121,11 @@ class ChatGPTBrowserClient:
                 await self._attach_requirements_file(page, requirements_file)
             await editor.click()
             await editor.fill(message)
-            await editor.press("Enter")
-            return await self._wait_for_answer(page, baseline_count=assistant_count)
+            await self._submit_message(page, editor)
+            # The contract requires an actual downloadable TXT, not merely a
+            # filename or a prose caption in the assistant turn.
+            await self._wait_for_answer(page, baseline_count=assistant_count)
+            return await self._download_txt_attachment(page)
         except ChatGPTBrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize Playwright transport failures for the UI.
@@ -184,6 +187,37 @@ class ChatGPTBrowserClient:
         return None
 
     @staticmethod
+    async def _submit_message(page, editor=None) -> None:
+        """Use ChatGPT's explicit send control before falling back to Enter.
+
+        A contenteditable composer can treat Enter as a newline under a user
+        preference.  Clicking the visible enabled send button makes the
+        boundary observable and keeps the fallback compatible with older
+        ChatGPT layouts.
+        """
+        selectors = (
+            "button[data-testid='send-button']",
+            "button[aria-label='Send prompt']",
+            "button[aria-label='Отправить сообщение']",
+            "button:has-text('Send')",
+            "button:has-text('Отправить')",
+        )
+        for selector in selectors:
+            try:
+                button = page.locator(selector).first
+                if await button.is_visible(timeout=800) and await button.is_enabled(timeout=800):
+                    await button.click()
+                    return
+            except Exception:  # noqa: BLE001,S112 - cross-version selector fallback.
+                continue
+        if editor is None:
+            raise ChatGPTBrowserError("ChatGPT не показал доступную кнопку отправки")
+        try:
+            await editor.press("Enter")
+        except Exception as exc:
+            raise ChatGPTBrowserError("Не удалось отправить сообщение в ChatGPT") from exc
+
+    @staticmethod
     async def _attach_requirements_file(page, requirements_file: str) -> None:
         source = Path(requirements_file)
         if not source.is_file():
@@ -196,6 +230,36 @@ class ChatGPTBrowserClient:
             raise ChatGPTBrowserError(
                 "ChatGPT не показал поле прикрепления файла. Откройте новый чат и повторите запуск."
             ) from exc
+
+    @staticmethod
+    async def _download_txt_attachment(page) -> str:
+        """Download exactly the TXT attachment ChatGPT created for this turn."""
+        button = page.locator("button[aria-label='Скачать файл']").last
+        try:
+            if not await button.is_visible(timeout=3_000):
+                raise ChatGPTBrowserError("ChatGPT не прикрепил TXT-вложение со сценарием")
+            async with page.expect_download(timeout=30_000) as download_info:
+                await button.click()
+            download = await download_info.value
+            path = await download.path()
+        except ChatGPTBrowserError:
+            raise
+        except Exception as exc:
+            raise ChatGPTBrowserError("Не удалось скачать TXT-вложение ChatGPT") from exc
+        if not path:
+            raise ChatGPTBrowserError("ChatGPT не передал путь к скачанному TXT-вложению")
+        source = Path(path)
+        if source.suffix.casefold() != ".txt":
+            raise ChatGPTBrowserError("ChatGPT прикрепил файл не в формате TXT")
+        try:
+            text = source.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ChatGPTBrowserError("TXT-вложение ChatGPT имеет недопустимую кодировку UTF-8") from exc
+        except OSError as exc:
+            raise ChatGPTBrowserError("Не удалось прочитать скачанное TXT-вложение ChatGPT") from exc
+        if not text.strip():
+            raise ChatGPTBrowserError("ChatGPT прикрепил пустое TXT-вложение")
+        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     async def _wait_for_answer(self, page, *, baseline_count: int) -> str:
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
