@@ -2955,9 +2955,13 @@ def snapshot() -> dict:
                             "renderWorkers": settings.montage_render_workers,
                             "queuePaused": settings.montage_queue_paused,
                             "queueRunning": _montage_queue_owner_running()},
-        "montageTasks": [dict(value, index=int(key)) for key, value in sorted(
-            settings.montage_task_statuses.items(), key=lambda pair: int(pair[0]) if str(pair[0]).isdigit() else 10 ** 9
-        )],
+        "montageTasks": [
+            _montage_task_snapshot_projection(key, value)
+            for key, value in sorted(
+                settings.montage_task_statuses.items(),
+                key=lambda pair: int(pair[0]) if str(pair[0]).isdigit() else 10 ** 9,
+            )
+        ],
         "montageProjects": montage_projects,
         "outputs": [{"video": video, "folder": folder} for video, folder in settings.video_result_packages.items()
                     if Path(video).is_file() and Path(folder).is_dir()],
@@ -17212,6 +17216,9 @@ def _montage_task_update(settings: Settings, scenario_index: int, *, status: str
                 events.append(marker)
             item["timeline"] = events[-24:]
         item["updatedAt"] = now
+        runtime_session_id = _runtime_session_id()
+        if runtime_session_id:
+            item["runtimeSessionId"] = runtime_session_id
         settings.montage_task_statuses[key] = item
         save_settings(settings)
 
@@ -17263,6 +17270,11 @@ def _remove_montage_output(settings: Settings, scenario_index: int) -> None:
                 shutil.rmtree(package_path)
         except (OSError, ValueError):
             pass
+
+
+def _runtime_session_id() -> str:
+    """Opaque desktop-process provenance; never derived from user data."""
+    return str(os.environ.get("NEWSFLOW_RUNTIME_SESSION_ID", "") or "").strip()[:128]
 
 
 MONTAGE_ACTIVE_STATUSES = frozenset({
