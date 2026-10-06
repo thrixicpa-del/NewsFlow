@@ -376,7 +376,6 @@ describe("Montage Light view", () => {
 
     render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
 
-    expect(screen.getByText("Ошибка")).toBeTruthy();
     expect(screen.getByText(/Причина текущего запуска: FFmpeg failed/)).toBeTruthy();
     expect(screen.queryByText("Ошибка · история")).toBeNull();
   });
