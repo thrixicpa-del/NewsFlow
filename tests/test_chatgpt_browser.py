@@ -79,7 +79,7 @@ class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
 
         with TemporaryDirectory() as directory:
             source = Path(directory) / "random-guid-without-extension"
-            source.write_bytes("Готовый\r\nсценарий\r\n".encode("utf-8"))
+            source.write_bytes("Готовый\r\nсценарий\r\n".encode())
             clicks = []
             selected = []
             selectors = []
