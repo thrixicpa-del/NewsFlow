@@ -19,6 +19,12 @@ class ChatGPTBrowserError(RuntimeError):
     pass
 
 
+_DOWNLOAD_BUTTON_SELECTOR = (
+    "button[aria-label='Скачать файл'], "
+    "button[aria-label='Download file']"
+)
+
+
 def validate_chatgpt_project_url(value: str) -> str:
     url = str(value or "").strip()
     parsed = urlparse(url)
@@ -119,13 +125,19 @@ class ChatGPTBrowserClient:
             assistant_count = await page.locator("[data-message-author-role='assistant']").count()
             if requirements_file:
                 await self._attach_requirements_file(page, requirements_file)
+            # Bind any later download to a control created after this exact
+            # submission.  A stale attachment elsewhere in the page must never
+            # become this ProductionItem's scenario.
+            download_count = await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
             await editor.click()
             await editor.fill(message)
             await self._submit_message(page, editor)
             # The contract requires an actual downloadable TXT, not merely a
             # filename or a prose caption in the assistant turn.
             await self._wait_for_answer(page, baseline_count=assistant_count)
-            return await self._download_txt_attachment(page)
+            return await self._download_txt_attachment(
+                page, baseline_count=download_count,
+            )
         except ChatGPTBrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize Playwright transport failures for the UI.
@@ -202,14 +214,23 @@ class ChatGPTBrowserClient:
             "button:has-text('Send')",
             "button:has-text('Отправить')",
         )
-        for selector in selectors:
+        # File uploads can leave the explicit send control visible but
+        # temporarily disabled.  Give the page a bounded chance to enable it
+        # before using the compatibility Enter fallback.
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
+            for selector in selectors:
+                try:
+                    button = page.locator(selector).first
+                    if await button.is_visible() and await button.is_enabled():
+                        await button.click()
+                        return
+                except Exception:  # noqa: BLE001,S112 - cross-version selector fallback.
+                    continue
             try:
-                button = page.locator(selector).first
-                if await button.is_visible(timeout=800) and await button.is_enabled(timeout=800):
-                    await button.click()
-                    return
-            except Exception:  # noqa: BLE001,S112 - cross-version selector fallback.
-                continue
+                await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001,S110 - test/legacy page compatibility.
+                break
         if editor is None:
             raise ChatGPTBrowserError("ChatGPT не показал доступную кнопку отправки")
         try:
@@ -232,15 +253,31 @@ class ChatGPTBrowserClient:
             ) from exc
 
     @staticmethod
-    async def _download_txt_attachment(page) -> str:
-        """Download exactly the TXT attachment ChatGPT created for this turn."""
-        button = page.locator("button[aria-label='Скачать файл']").last
+    async def _download_txt_attachment(page, *, baseline_count: int = 0, timeout_ms: int = 15_000) -> str:
+        """Download only a TXT control created after this request was sent."""
+        buttons = page.locator(_DOWNLOAD_BUTTON_SELECTOR)
+        deadline = asyncio.get_running_loop().time() + max(1_000, int(timeout_ms)) / 1000.0
+        button = None
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                count = await buttons.count()
+                if count > baseline_count:
+                    candidate = buttons.nth(count - 1)
+                    if await candidate.is_visible():
+                        button = candidate
+                        break
+            except Exception:  # noqa: BLE001,S112 - UI can re-render while the file card appears.
+                pass
+            await page.wait_for_timeout(200)
+        if button is None:
+            raise ChatGPTBrowserError("ChatGPT не прикрепил новое TXT-вложение со сценарием")
         try:
-            if not await button.is_visible(timeout=3_000):
-                raise ChatGPTBrowserError("ChatGPT не прикрепил TXT-вложение со сценарием")
             async with page.expect_download(timeout=30_000) as download_info:
                 await button.click()
             download = await download_info.value
+            suggested_filename = str(getattr(download, "suggested_filename", "") or "")
+            if Path(suggested_filename).suffix.casefold() != ".txt":
+                raise ChatGPTBrowserError("ChatGPT прикрепил файл не в формате TXT")
             path = await download.path()
         except ChatGPTBrowserError:
             raise
@@ -249,17 +286,15 @@ class ChatGPTBrowserClient:
         if not path:
             raise ChatGPTBrowserError("ChatGPT не передал путь к скачанному TXT-вложению")
         source = Path(path)
-        if source.suffix.casefold() != ".txt":
-            raise ChatGPTBrowserError("ChatGPT прикрепил файл не в формате TXT")
         try:
-            text = source.read_text(encoding="utf-8")
+            text = source.read_bytes().decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ChatGPTBrowserError("TXT-вложение ChatGPT имеет недопустимую кодировку UTF-8") from exc
         except OSError as exc:
             raise ChatGPTBrowserError("Не удалось прочитать скачанное TXT-вложение ChatGPT") from exc
         if not text.strip():
             raise ChatGPTBrowserError("ChatGPT прикрепил пустое TXT-вложение")
-        return text.replace("\r\n", "\n").replace("\r", "\n")
+        return text
 
     async def _wait_for_answer(self, page, *, baseline_count: int) -> str:
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
