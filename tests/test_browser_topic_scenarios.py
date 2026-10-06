@@ -416,7 +416,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
             self.assertEqual(len(exports), 1)
             self.assertEqual(
                 exports[0].read_bytes(),
-                "Новый\r\nтекст для первой темы\r\n".encode("utf-8"),
+                "Новый\r\nтекст для первой темы\r\n".encode(),
             )
             self.assertEqual(result["operationResult"]["folder"], str(Path(directory) / "ChatGPT браузер"))
 
