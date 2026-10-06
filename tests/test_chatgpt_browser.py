@@ -25,6 +25,104 @@ class ChatGPTBrowserUrlTests(unittest.TestCase):
 
 
 class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_downloads_the_txt_attachment_instead_of_using_chat_caption(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from scriptor.chatgpt_browser import ChatGPTBrowserClient
+        from scriptor.config import ChromeSession
+
+        class Download:
+            async def path(self):
+                return str(source)
+
+        class DownloadInfo:
+            @property
+            def value(self):
+                async def resolve():
+                    return Download()
+                return resolve()
+
+        class DownloadWait:
+            async def __aenter__(self):
+                return DownloadInfo()
+            async def __aexit__(self, *_args):
+                return False
+
+        class Button:
+            @property
+            def last(self):
+                return self
+            async def is_visible(self, timeout=0):
+                return True
+            async def click(self):
+                clicks.append("download")
+
+        class Page:
+            def locator(self, selector):
+                self.selector = selector
+                return Button()
+            def expect_download(self, timeout=0):
+                self.timeout = timeout
+                return DownloadWait()
+
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "scenario.txt"
+            source.write_text("Готовый сценарий\n", encoding="utf-8")
+            clicks = []
+            page = Page()
+            result = await ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))._download_txt_attachment(page)
+
+        self.assertEqual(result, "Готовый сценарий\n")
+        self.assertEqual(clicks, ["download"])
+        self.assertIn("Скачать файл", page.selector)
+
+    async def test_rejects_a_chatgpt_answer_without_txt_attachment(self):
+        from scriptor.chatgpt_browser import ChatGPTBrowserClient, ChatGPTBrowserError
+        from scriptor.config import ChromeSession
+
+        class Button:
+            @property
+            def last(self):
+                return self
+            async def is_visible(self, timeout=0):
+                return False
+
+        class Page:
+            def locator(self, _selector):
+                return Button()
+
+        client = ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))
+        with self.assertRaisesRegex(ChatGPTBrowserError, "TXT-вложение"):
+            await client._download_txt_attachment(Page())
+
+    async def test_submit_prefers_the_visible_send_button_after_filling(self):
+        from scriptor.chatgpt_browser import ChatGPTBrowserClient
+        from scriptor.config import ChromeSession
+
+        calls = []
+
+        class Button:
+            @property
+            def first(self):
+                return self
+            async def is_visible(self, timeout=0):
+                return True
+            async def is_enabled(self, timeout=0):
+                return True
+            async def click(self):
+                calls.append("click")
+
+        class Page:
+            def locator(self, selector):
+                calls.append(selector)
+                return Button()
+
+        await ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))._submit_message(Page())
+
+        self.assertEqual(calls[-1], "click")
+        self.assertIn("button[data-testid='send-button']", calls)
+
     async def test_wait_for_answer_requires_a_new_assistant_turn(self):
         from unittest.mock import patch
 
