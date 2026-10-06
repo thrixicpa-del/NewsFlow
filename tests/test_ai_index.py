@@ -831,6 +831,38 @@ class ClipIndexTests(unittest.TestCase):
                 (1, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
             )
 
+    def test_reindexing_changed_current_block_stays_blocked_but_becomes_maintenance_stale(self):
+        """A current BLOCKED verdict survives shallow reindex but remains eligible for deep refresh."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            clip = root / "current-blocked.mp4"
+            clip.write_bytes(b"first bytes")
+            index = FakeClipIndex(
+                root / "index.sqlite3",
+                embedder_factory=lambda: (FakeImageEmbedding(), FakeTextEmbedding()),
+            )
+            index.index_folders([str(root)])
+            with index._connect() as connection:
+                connection.execute(
+                    "UPDATE clips SET english_text=1,english_text_version=? WHERE path=?",
+                    (SCREEN_TEXT_CLASSIFIER_VERSION, str(clip.resolve())),
+                )
+
+            time.sleep(0.002)
+            clip.write_bytes(b"changed bytes require deep refresh")
+            index.index_folders([str(root)])
+
+            with index._connect() as connection:
+                row = connection.execute(
+                    "SELECT english_text,english_text_version FROM clips WHERE path=?",
+                    (str(clip.resolve()),),
+                ).fetchone()
+            self.assertEqual(
+                (int(row["english_text"]), int(row["english_text_version"])),
+                (1, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+            )
+            self.assertEqual(index.screen_text_eligibility(clip, deep=False), "BLOCKED")
+
     def test_indexing_obvious_text_sets_current_classifier_version_without_second_decode(self):
         class TextImageEmbedding:
             def embed(self, images, **_):
@@ -998,13 +1030,90 @@ class ClipIndexTests(unittest.TestCase):
                 result = index.classify_english_screen_text()
 
             self.assertEqual(result["checked"], 1)
-            classify.assert_called_once_with(clip, str(clip.resolve()), samples=11)
+            classify.assert_called_once_with(
+                clip,
+                str(clip.resolve()),
+                samples=11,
+                finalize_uncertain_as_safe=True,
+                raise_on_decode_error=True,
+            )
 
     def test_screen_text_maintenance_finalizes_ambiguous_current_rows_as_safe(self):
-        """One explicit full maintenance pass must leave no repeatable UNKNOWN verdict."""
+        """A successful full maintenance pass finalizes ambiguity and clears stale planner cache."""
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             clip = root / "ambiguous.mp4"
+            clip.write_bytes(b"fixture")
+            index = ClipIndex(root / "index.sqlite3", embedder_factory=lambda: (object(), object()))
+            stat = clip.stat()
+            resolved = str(clip.resolve())
+            with index._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version,embedding) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (resolved, clip.name, stat.st_size, stat.st_mtime_ns,
+                     0, SCREEN_TEXT_CLASSIFIER_VERSION,
+                     np.asarray([0.0, 1.0], dtype=np.float32).tobytes()),
+                )
+
+            index._screen_text_state_cache[(resolved, False)] = SCREEN_ELIGIBILITY_UNCERTAIN
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "_query_vectors", return_value=np.asarray(
+                     [[0.0, 1.0], [0.0, 1.0]], dtype=np.float32,
+                 )), \
+                 patch.object(index, "_screen_text_state", return_value=0) as classify:
+                result = index.classify_english_screen_text()
+
+            self.assertEqual(result, {"checked": 1, "blocked": 0, "safe": 1, "uncertain": 0})
+            classify.assert_called_once_with(clip, samples=11)
+            with index._connect() as connection:
+                row = connection.execute(
+                    "SELECT english_text,english_text_version FROM clips WHERE path=?",
+                    (resolved,),
+                ).fetchone()
+            self.assertEqual(
+                (int(row["english_text"]), int(row["english_text_version"])),
+                (-1, SCREEN_TEXT_CLASSIFIER_VERSION),
+            )
+            self.assertEqual(index.screen_text_eligibility(clip, deep=False), "SAFE")
+            with patch.object(
+                index,
+                "_screen_text_state",
+                side_effect=AssertionError("final SAFE result must be reused"),
+            ):
+                self.assertEqual(index.screen_text_eligibility(clip, deep=True), "SAFE")
+
+    def test_screen_text_maintenance_deep_checks_rows_without_embedding(self):
+        """Missing mean vectors do not prevent the explicit 11-frame maintenance verdict."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            clip = root / "missing-vector.mp4"
+            clip.write_bytes(b"fixture")
+            index = ClipIndex(root / "index.sqlite3", embedder_factory=lambda: (object(), object()))
+            stat = clip.stat()
+            with index._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     0, SCREEN_TEXT_CLASSIFIER_VERSION),
+                )
+
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "_query_vectors", return_value=np.asarray(
+                     [[0.0, 1.0], [0.0, 1.0]], dtype=np.float32,
+                 )), \
+                 patch.object(index, "_screen_text_state", return_value=-1) as classify:
+                result = index.classify_english_screen_text()
+
+            self.assertEqual(result, {"checked": 1, "blocked": 0, "safe": 1, "uncertain": 0})
+            classify.assert_called_once_with(clip, samples=11)
+
+    def test_screen_text_maintenance_decode_failure_remains_uncertain_and_retriable(self):
+        """A decode error must never be promoted to SAFE by ambiguity finalization."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            clip = root / "decode-failure.mp4"
             clip.write_bytes(b"fixture")
             index = ClipIndex(root / "index.sqlite3", embedder_factory=lambda: (object(), object()))
             stat = clip.stat()
@@ -1017,23 +1126,22 @@ class ClipIndexTests(unittest.TestCase):
                      np.asarray([0.0, 1.0], dtype=np.float32).tobytes()),
                 )
 
+            query_vectors = np.asarray([[0.0, 1.0], [0.0, 1.0]], dtype=np.float32)
             with patch.object(index, "_text_model_is_cached", return_value=True), \
-                 patch.object(index, "_query_vectors", return_value=np.asarray(
-                     [[0.0, 1.0], [0.0, 1.0]], dtype=np.float32,
-                 )), \
-                 patch.object(index, "_bounded_screen_text_state", return_value=0):
-                result = index.classify_english_screen_text()
+                 patch.object(index, "_query_vectors", return_value=query_vectors), \
+                 patch.object(index, "_screen_text_state", side_effect=OSError("decode failed")) as failed:
+                first = index.classify_english_screen_text()
 
-            self.assertEqual(result, {"checked": 1, "blocked": 0, "safe": 1, "uncertain": 0})
-            with index._connect() as connection:
-                row = connection.execute(
-                    "SELECT english_text,english_text_version FROM clips WHERE path=?",
-                    (str(clip.resolve()),),
-                ).fetchone()
-            self.assertEqual(
-                (int(row["english_text"]), int(row["english_text_version"])),
-                (-1, SCREEN_TEXT_CLASSIFIER_VERSION),
-            )
+            self.assertEqual(first, {"checked": 0, "blocked": 0, "safe": 0, "uncertain": 1})
+            failed.assert_called_once_with(clip, samples=11)
+
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "_query_vectors", return_value=query_vectors), \
+                 patch.object(index, "_screen_text_state", return_value=-1) as retried:
+                second = index.classify_english_screen_text()
+
+            self.assertEqual(second, {"checked": 1, "blocked": 0, "safe": 1, "uncertain": 0})
+            retried.assert_called_once_with(clip, samples=11)
 
     def test_failed_embedding_transaction_is_recoverable_without_partial_rows(self):
         class FailingImageEmbedding:
