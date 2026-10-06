@@ -126,7 +126,11 @@ SCREEN_ELIGIBILITY_BLOCKED = "BLOCKED"
 _SCREEN_TEXT_DEEP_WORKERS = 2
 _SCREEN_TEXT_DEEP_SLOTS = threading.BoundedSemaphore(_SCREEN_TEXT_DEEP_WORKERS)
 _SCREEN_TEXT_INFLIGHT_LOCK = threading.RLock()
-_SCREEN_TEXT_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
+_SCREEN_TEXT_INFLIGHT: dict[tuple[str, str, int, int], threading.Event] = {}
+# Completed full-frame checks are shared by all planner ClipIndex instances in
+# this process, including UNCERTAIN results. The file signature keeps a changed
+# source from inheriting a verdict for older bytes.
+_SCREEN_TEXT_FULL_RESULTS: dict[tuple[str, str, int, int], int] = {}
 
 
 # A montage batch creates several ClipIndex instances (one per worker).  The
@@ -1079,8 +1083,15 @@ class ClipIndex:
 
     def _bounded_screen_text_state(self, candidate: Path, resolved: str, *, samples: int) -> int:
         """Classify a path once across ClipIndex instances, with a small budget."""
-        key = (self._cache_key(), resolved)
+        try:
+            stat = candidate.stat()
+            identity = (int(stat.st_size), int(stat.st_mtime_ns))
+        except OSError:
+            identity = (0, 0)
+        key = (self._cache_key(), resolved, *identity)
         with _SCREEN_TEXT_INFLIGHT_LOCK:
+            if key in _SCREEN_TEXT_FULL_RESULTS:
+                return _SCREEN_TEXT_FULL_RESULTS[key]
             completion = _SCREEN_TEXT_INFLIGHT.get(key)
             leader = completion is None
             if leader:
@@ -1090,6 +1101,9 @@ class ClipIndex:
             if self.screen_text_progress:
                 self.screen_text_progress("same-path-wait", candidate.name)
             completion.wait()
+            with _SCREEN_TEXT_INFLIGHT_LOCK:
+                if key in _SCREEN_TEXT_FULL_RESULTS:
+                    return _SCREEN_TEXT_FULL_RESULTS[key]
             with self._connect() as connection:
                 row = connection.execute(
                     "SELECT english_text,english_text_version FROM clips WHERE path=?", (resolved,)
@@ -1115,6 +1129,8 @@ class ClipIndex:
                 if acquired:
                     _SCREEN_TEXT_DEEP_SLOTS.release()
             self._store_screen_text_state(resolved, state)
+            with _SCREEN_TEXT_INFLIGHT_LOCK:
+                _SCREEN_TEXT_FULL_RESULTS[key] = state
             return state
         finally:
             with _SCREEN_TEXT_INFLIGHT_LOCK:
