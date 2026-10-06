@@ -14789,8 +14789,9 @@ def index_footage(payload: dict) -> dict:
     try:
         screen_text_result = None
         if screen_text:
-            # The batch reads only persisted CLIP vectors. It never discovers
-            # folders or reopens the user's source videos.
+            # Maintenance never rescans folders. Persisted vectors handle
+            # obvious blocks; ambiguous stale clips may be opened for the
+            # bounded eleven-frame sparse-caption/title-card verification.
             screen_text_result = index.classify_english_screen_text(progress=report)
             progress = latest_progress or IndexProgress(
                 total=0, processed=0, indexed=0, skipped=0, failed=0, stage="complete",
@@ -16186,7 +16187,20 @@ def prepare_montage(payload: dict) -> dict:
     # both spellings for direct/manual calls and for the background queue.
     progress_candidate = payload.get("_progress") or payload.get("progress")
     progress = progress_candidate if callable(progress_candidate) else None
-    index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+    def screen_text_progress(state: str, filename: str) -> None:
+        if not progress:
+            return
+        labels = {
+            "same-path-wait": "Ждём уже запущенную проверку надписей",
+            "slot-wait": "Ждём свободный слот проверки надписей",
+            "checking": "Проверяем надписи",
+        }
+        progress("Проверка текста", f"{labels.get(state, 'Проверка надписей')}: {filename}")
+
+    index = ClipIndex(
+        app_data_root() / "footage-index.sqlite3",
+        screen_text_progress=screen_text_progress,
+    )
     if progress and not settings.montage_external_only:
         stats = index.screen_text_stats()
         progress(
