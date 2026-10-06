@@ -236,7 +236,7 @@ class ChatGPTBrowserClient:
                     continue
             try:
                 await page.wait_for_timeout(200)
-            except Exception:  # noqa: BLE001,S110 - test/legacy page compatibility.
+            except Exception:  # noqa: BLE001 - test/legacy page compatibility.
                 break
         if saw_explicit_control:
             raise ChatGPTBrowserError(
@@ -277,7 +277,7 @@ class ChatGPTBrowserClient:
                     if await candidate.is_visible():
                         button = candidate
                         break
-            except Exception:  # noqa: BLE001,S112 - UI can re-render while the file card appears.
+            except Exception:  # noqa: BLE001,S110 - UI can re-render while the file card appears.
                 pass
             await page.wait_for_timeout(200)
         if button is None:
@@ -337,7 +337,7 @@ class ChatGPTBrowserClient:
                         await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
                         > download_baseline_count
                     )
-                except Exception:  # noqa: BLE001,S110 - attachment is optional while generation runs.
+                except Exception:  # noqa: BLE001 - attachment is optional while generation runs.
                     attachment_ready = False
             now = asyncio.get_running_loop().time()
             if current and current == previous:
