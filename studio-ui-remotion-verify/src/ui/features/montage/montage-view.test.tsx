@@ -299,7 +299,9 @@ describe("Montage Light view", () => {
     render(<Editor data={data} command={command} refresh={async () => undefined} />);
 
     expect(screen.getByRole("button", { name: /Последняя ручная тема/ })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+    const resume = screen.getByRole("button", { name: "Собрать незавершённые" });
+    expect(resume.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(resume);
 
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "run-montage-queue", { indices: [83], replaceOutput: false },
@@ -322,6 +324,10 @@ describe("Montage Light view", () => {
 
     const event = screen.getByTitle(`20:14:00 Подбор футажей — ${detail}`);
     expect(event.className).toContain("task-timeline-entry");
+
+    const css = readFileSync(resolve(process.cwd(), "src/ui/montage-overflow.css"), "utf8");
+    expect(css).toMatch(/\.task-timeline\{[^}]*overflow:hidden/);
+    expect(css).toMatch(/\.task-timeline-entry\{[^}]*flex:0 1 min\(100%,520px\)/);
   });
 
   it("offers explicit selected retry for an error row", async () => {

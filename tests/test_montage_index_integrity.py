@@ -275,15 +275,41 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
                     "VALUES(?,?,?,?,?,?)",
-                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns, -1, previous_version),
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     -1, previous_version),
                 )
 
             with patch.object(index, "_text_model_is_cached", return_value=True), \
-                 patch.object(index, "screen_text_eligibility", return_value="SAFE") as classify:
+                 patch.object(index, "_query_vectors", return_value=[]):
                 result = index.classify_english_screen_text()
 
-            classify.assert_called_once_with(str(clip.resolve()), deep=True)
             self.assertEqual(result["checked"], 1)
+
+    def test_screen_text_maintenance_reports_progress_before_a_full_batch_finishes(self):
+        """A long V7 maintenance run must visibly advance before 384 files."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-text-progress-") as temporary:
+            root = Path(temporary)
+            index = ClipIndex(root / "footage-index.sqlite3", embedder_factory=lambda: (object(), object()))
+            for number in range(2):
+                clip = root / f"clip-{number}.mp4"
+                clip.write_bytes(b"fixture")
+                stat = clip.stat()
+                with index._connect() as connection:
+                    connection.execute(
+                        "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                         -1, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                    )
+
+            progress: list[int] = []
+            with patch.object(index, "_text_model_is_cached", return_value=True), \
+                 patch.object(index, "_query_vectors", return_value=[]):
+                index.classify_english_screen_text(
+                    progress=lambda state: progress.append(state.processed), batch_clips=384,
+                )
+
+            self.assertIn(1, progress)
 
     def test_screen_text_maintenance_reuses_existing_index_without_media_roots(self):
         """The desktop command must classify stored vectors, not rescan footage."""

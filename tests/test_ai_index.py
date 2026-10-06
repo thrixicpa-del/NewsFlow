@@ -66,6 +66,118 @@ class ClipIndexTests(unittest.TestCase):
         self.assertIn("title card", queries)
         self.assertIn("interstitial", queries)
 
+    def test_previous_safe_screen_text_verdict_does_not_deep_scan_during_montage(self):
+        """A V7 maintenance migration must not stall normal montage selection."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-stale-screen-safe-") as temporary:
+            root = Path(temporary)
+            clip = root / "already-screened.mp4"
+            clip.write_bytes(b"fixture")
+            index = FakeClipIndex(root / "footage-index.sqlite3", embedder_factory=lambda: (object(), object()))
+            stat = clip.stat()
+            with index._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     -1, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                )
+
+            with patch.object(index, "_screen_text_state", side_effect=AssertionError("must not deep scan")):
+                self.assertEqual(index.screen_text_eligibility(clip, deep=True), "SAFE")
+
+    def test_unknown_screen_text_candidate_is_deep_scanned_once_across_planning_workers(self):
+        """Parallel planners must share one expensive scan for the same clip."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-singleflight-") as temporary:
+            root = Path(temporary)
+            clip = root / "unknown.mp4"
+            clip.write_bytes(b"fixture")
+            database = root / "footage-index.sqlite3"
+            first = FakeClipIndex(database, embedder_factory=lambda: (object(), object()))
+            second = FakeClipIndex(database, embedder_factory=lambda: (object(), object()))
+            stat = clip.stat()
+            with first._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     0, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                )
+
+            calls = 0
+            calls_lock = threading.Lock()
+
+            def deep_state(_path, *, samples):
+                nonlocal calls
+                self.assertEqual(samples, 11)
+                with calls_lock:
+                    calls += 1
+                time.sleep(0.05)
+                return -1
+
+            with patch.object(FakeClipIndex, "_screen_text_state", side_effect=deep_state):
+                started = threading.Barrier(2)
+                results: list[str] = []
+
+                def check(index):
+                    started.wait()
+                    results.append(index.screen_text_eligibility(clip, deep=True))
+
+                workers = [threading.Thread(target=check, args=(index,)) for index in (first, second)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(calls, 1)
+            self.assertEqual(results, ["SAFE", "SAFE"])
+
+    def test_distinct_unknown_candidates_use_the_bounded_screen_text_budget(self):
+        """Twelve planners cannot turn into twelve simultaneous frame decoders."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-budget-") as temporary:
+            root = Path(temporary)
+            index = FakeClipIndex(root / "footage-index.sqlite3", embedder_factory=lambda: (object(), object()))
+            clips = []
+            with index._connect() as connection:
+                for number in range(3):
+                    clip = root / f"unknown-{number}.mp4"
+                    clip.write_bytes(b"fixture")
+                    stat = clip.stat()
+                    connection.execute(
+                        "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                         0, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                    )
+                    clips.append(clip)
+
+            active = peak = 0
+            state_lock = threading.Lock()
+
+            def deep_state(_path, *, samples):
+                nonlocal active, peak
+                self.assertEqual(samples, 11)
+                with state_lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.05)
+                with state_lock:
+                    active -= 1
+                return -1
+
+            with patch.object(index, "_screen_text_state", side_effect=deep_state):
+                workers = [
+                    threading.Thread(target=index.screen_text_eligibility, args=(clip,), kwargs={"deep": True})
+                    for clip in clips
+                ]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertLessEqual(peak, 2)
+
     def test_neutral_filenames_retrieve_by_visual_meaning_after_deep_enrichment(self):
         class CategoryImageEmbedding:
             vectors: ClassVar[dict[str, np.ndarray]] = {
@@ -611,17 +723,15 @@ class ClipIndexTests(unittest.TestCase):
             self.assertEqual(rows["blocked.mp4"], (1, SCREEN_TEXT_CLASSIFIER_VERSION))
             self.assertEqual(rows["safe.mp4"], (-1, SCREEN_TEXT_CLASSIFIER_VERSION))
 
-    def test_batch_screen_classifier_uses_persisted_clip_embedding_without_redecoding(self):
-        """The 2.1.136-style maintenance pass must not reopen source videos."""
+    def test_batch_screen_classifier_deep_checks_ambiguous_persisted_embeddings(self):
+        """Explicit maintenance may inspect ambiguous clips to catch sparse text."""
         class TextEmbedding:
             def query_embed(self, queries, **_):
                 values = queries if isinstance(queries, list) else [queries]
                 for query in values:
                     text = str(query).casefold()
-                    if "prominent english words" in text:
+                    if text in {value.casefold() for value in _SCREEN_TEXT_POSITIVE_QUERIES}:
                         yield np.asarray([1.0, 0.0], dtype=np.float32)
-                    elif "no readable writing" in text:
-                        yield np.asarray([0.0, 1.0], dtype=np.float32)
                     else:
                         yield np.asarray([0.0, 1.0], dtype=np.float32)
 
@@ -656,9 +766,11 @@ class ClipIndexTests(unittest.TestCase):
                         ),
                     ],
                 )
-            index._sample_frames = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("batch screen classifier reopened source media")
-            )
+            def sampled(path, samples=3):
+                image = "red" if Path(path).name == "blocked.mp4" else "blue"
+                return [image] * samples, 6.0, 1920, 1080, 30.0
+
+            index._sample_frames = sampled
             result = index.classify_english_screen_text()
 
             self.assertEqual(result, {"checked": 2, "blocked": 1, "safe": 1, "uncertain": 0})

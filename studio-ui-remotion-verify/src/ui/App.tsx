@@ -7,6 +7,7 @@ import "./footage.css";
 import "./footage-light.css";
 import "./editor.css";
 import "./montage-light.css";
+import "./montage-overflow.css";
 import "./montage-recommendations.css";
 import "./voice.css";
 import "./voice-light.css";
@@ -10487,7 +10488,9 @@ export function MontageLiveStatus({
   const persistedActive = data.montageTasks.filter(
     (task) => !["Готово", "Ошибка"].includes(task.status || ""),
   );
-  const workerRunning = queueRunning ?? persistedActive.length > 0;
+  // Task statuses are durable history, not proof that a worker process still
+  // owns the queue.  Core snapshots expose the actual owner via queueRunning.
+  const workerRunning = queueRunning === true;
   const active = workerRunning ? persistedActive : [];
   const staleActive = workerRunning ? [] : persistedActive;
   const lead = active[0];
@@ -10673,22 +10676,9 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
-  const statusSuggestsRunning = data.montageTasks.some((item) =>
-    [
-      "В очереди",
-      "Планирование",
-      "Планирование сцен",
-      "Подбор футажей",
-      "Проверка текста",
-      "Внешний поиск",
-      "Нарезка внешнего футажа",
-      "Ожидает рендер",
-      "Рендер",
-      "Склейка",
-      "Пауза",
-    ].includes(item.status || ""),
-  );
-  const running = data.montageSettings.queueRunning ?? statusSuggestsRunning;
+  // A persisted phase can outlive a crashed or closed Core.  Only the
+  // process-backed snapshot field may disable launch controls.
+  const running = data.montageSettings.queueRunning === true;
   const queueActive = running || queueLaunching;
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,

@@ -1,0 +1,6 @@
+/* Task diagnostics are untrusted-length runtime text.  They may never make
+   the montage list or its surrounding desktop document wider than the view. */
+.montage-task-cards{max-width:100%}
+.montage-task{max-width:100%;overflow:hidden}
+.task-timeline{max-width:100%;overflow:hidden}
+.task-timeline-entry{flex:0 1 min(100%,520px)}
