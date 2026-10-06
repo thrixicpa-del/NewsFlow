@@ -25,7 +25,7 @@ class ChatGPTBrowserUrlTests(unittest.TestCase):
 
 
 class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
-    async def test_downloads_the_txt_attachment_instead_of_using_chat_caption(self):
+    async def test_downloads_only_the_new_txt_attachment_and_uses_suggested_filename(self):
         from pathlib import Path
         from tempfile import TemporaryDirectory
 
@@ -33,7 +33,10 @@ class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
         from scriptor.config import ChromeSession
 
         class Download:
+            suggested_filename = "scenario.txt"
+
             async def path(self):
+                # Playwright documents this as a random temporary GUID name.
                 return str(source)
 
         class DownloadInfo:
@@ -50,51 +53,76 @@ class ChatGPTBrowserTurnTests(unittest.IsolatedAsyncioTestCase):
                 return False
 
         class Button:
-            @property
-            def last(self):
-                return self
-            async def is_visible(self, timeout=0):
+            def __init__(self, index):
+                self.index = index
+            async def is_visible(self):
                 return True
             async def click(self):
-                clicks.append("download")
+                clicks.append(self.index)
+
+        class Buttons:
+            async def count(self):
+                return 2
+            def nth(self, index):
+                selected.append(index)
+                return Button(index)
 
         class Page:
             def locator(self, selector):
-                self.selector = selector
-                return Button()
+                selectors.append(selector)
+                return Buttons()
             def expect_download(self, timeout=0):
                 self.timeout = timeout
                 return DownloadWait()
+            async def wait_for_timeout(self, _milliseconds):
+                return None
 
         with TemporaryDirectory() as directory:
-            source = Path(directory) / "scenario.txt"
-            source.write_text("Готовый сценарий\n", encoding="utf-8")
+            source = Path(directory) / "random-guid-without-extension"
+            source.write_bytes("Готовый\r\nсценарий\r\n".encode("utf-8"))
             clicks = []
+            selected = []
+            selectors = []
             page = Page()
-            result = await ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))._download_txt_attachment(page)
+            result = await ChatGPTBrowserClient(
+                ChromeSession(label="T", profile_id="p")
+            )._download_txt_attachment(page, baseline_count=1)
 
-        self.assertEqual(result, "Готовый сценарий\n")
-        self.assertEqual(clicks, ["download"])
-        self.assertIn("Скачать файл", page.selector)
+        self.assertEqual(result, "Готовый\r\nсценарий\r\n")
+        self.assertEqual(selected, [1])
+        self.assertEqual(clicks, [1])
+        self.assertTrue(any("Скачать файл" in selector for selector in selectors))
 
-    async def test_rejects_a_chatgpt_answer_without_txt_attachment(self):
+    async def test_rejects_a_chatgpt_answer_without_a_new_txt_attachment(self):
+        from unittest.mock import patch
+
         from scriptor.chatgpt_browser import ChatGPTBrowserClient, ChatGPTBrowserError
         from scriptor.config import ChromeSession
 
-        class Button:
-            @property
-            def last(self):
-                return self
-            async def is_visible(self, timeout=0):
-                return False
+        class FakeLoop:
+            now = 0.0
+            def time(self):
+                return self.now
+
+        fake_loop = FakeLoop()
+
+        class Buttons:
+            async def count(self):
+                # One old attachment exists, but this request created none.
+                return 1
 
         class Page:
             def locator(self, _selector):
-                return Button()
+                return Buttons()
+            async def wait_for_timeout(self, milliseconds):
+                fake_loop.now += milliseconds / 1000
 
         client = ChatGPTBrowserClient(ChromeSession(label="T", profile_id="p"))
-        with self.assertRaisesRegex(ChatGPTBrowserError, "TXT-вложение"):
-            await client._download_txt_attachment(Page())
+        with patch("scriptor.chatgpt_browser.asyncio.get_running_loop", return_value=fake_loop), \
+             self.assertRaisesRegex(ChatGPTBrowserError, "новое TXT-вложение"):
+            await client._download_txt_attachment(
+                Page(), baseline_count=1, timeout_ms=1_000,
+            )
 
     async def test_submit_prefers_the_visible_send_button_after_filling(self):
         from scriptor.chatgpt_browser import ChatGPTBrowserClient
