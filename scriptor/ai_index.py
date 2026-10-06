@@ -727,10 +727,30 @@ class ClipIndex:
                         height=excluded.height,fps=excluded.fps,
                         source_family=CASE WHEN clips.source_url<>'' THEN clips.source_family ELSE excluded.source_family END,
                         tags=excluded.tags,embedding=excluded.embedding,model=excluded.model,
-                        indexed_at=excluded.indexed_at,english_text=excluded.english_text,
-                        english_text_version=excluded.english_text_version,
+                        indexed_at=excluded.indexed_at,
+                        -- A shallow reindex can prove a new block, but it
+                        -- cannot disprove a previously confirmed legacy one.
+                        -- Keep that block until explicit full maintenance
+                        -- replaces it with frame-level evidence.
+                        english_text=CASE
+                            WHEN clips.english_text=1
+                             AND clips.english_text_version < {SCREEN_TEXT_CLASSIFIER_VERSION}
+                             AND excluded.english_text=0
+                            THEN clips.english_text
+                            ELSE excluded.english_text
+                        END,
+                        english_text_version=CASE
+                            WHEN clips.english_text=1
+                             AND clips.english_text_version < {SCREEN_TEXT_CLASSIFIER_VERSION}
+                             AND excluded.english_text=0
+                            THEN clips.english_text_version
+                            ELSE excluded.english_text_version
+                        END,
                         semantic_version=0,semantic_scores='{}'
-                        """, rows)
+                        """.replace(
+                            "{SCREEN_TEXT_CLASSIFIER_VERSION}",
+                            str(SCREEN_TEXT_CLASSIFIER_VERSION),
+                        ), rows)
                 self._invalidate_search_cache()
                 state.indexed += len(rows)
                 state.processed += len(rows)
@@ -1225,7 +1245,7 @@ class ClipIndex:
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT path,embedding FROM clips
-                   WHERE english_text_version < ?
+                   WHERE english_text_version < ? OR english_text=0
                    ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
@@ -1292,6 +1312,16 @@ class ClipIndex:
                                 verdict = self._bounded_screen_text_state(
                                     Path(row["path"]), row["path"], samples=11,
                                 )
+                                # An explicit 11-frame maintenance pass is the
+                                # terminal decision point.  If it finds no
+                                # evidence strong enough to block a clip, make
+                                # the conservative operational choice used by
+                                # the prior index contract: leave the clip
+                                # eligible and persist SAFE.  Keeping UNKNOWN
+                                # at the current version forces every later
+                                # montage to decode the same source again.
+                                if verdict == 0:
+                                    verdict = -1
                 except (OSError, RuntimeError, ValueError):
                     state.failed += 1
                     continue
