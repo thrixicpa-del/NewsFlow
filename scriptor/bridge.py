@@ -11920,7 +11920,9 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         expected_values = payload.get(
             "productionItemIds", payload.get("production_item_ids", []),
         ) or []
-        for raw_identity in expected_values if isinstance(expected_values, list) else []:
+        if not isinstance(expected_values, list):
+            raise TypeError("productionItemIds должен быть списком durable ProductionItem ID")
+        for raw_identity in expected_values:
             identity = str(raw_identity or "").strip()
             if not identity or identity in scope_ids:
                 continue
@@ -11928,6 +11930,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 "productionItemId": identity,
                 "reason": "deleted" if identity in deleted_ids else "stale-or-not-current",
             })
+    scope_requested = set(requested)
     if not payload.get("resumeOnly") and not payload.get("indices"):
         # The primary action is always missing-only. Keep the durable all-topic
         # ID scope resolved above instead of expanding back to unrelated rows.
@@ -11937,19 +11940,20 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             and not _cover_has_valid_image(settings.cover_queue[index])
         }
     if not payload.get("forceRegenerate"):
-        before_missing_only = set(requested)
         requested = {
             index for index in requested
             if 0 <= index < len(settings.cover_queue)
             and not _cover_has_valid_image(settings.cover_queue[index])
         }
-        for index in sorted(before_missing_only - requested):
-            identity = str(settings.cover_queue[index].get("production_item_id", "") or "").strip()
-            if identity:
-                rejected_scope.append({
-                    "productionItemId": identity,
-                    "reason": "already-rendered",
-                })
+    for index in sorted(scope_requested - requested):
+        if not 0 <= index < len(settings.cover_queue):
+            continue
+        identity = str(settings.cover_queue[index].get("production_item_id", "") or "").strip()
+        if identity:
+            rejected_scope.append({
+                "productionItemId": identity,
+                "reason": "already-rendered",
+            })
     if not requested:
         return _cover_generation_result(
             snapshot(),
