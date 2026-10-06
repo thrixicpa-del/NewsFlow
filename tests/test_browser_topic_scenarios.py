@@ -363,7 +363,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
                 output_folder=directory,
                 chrome_sessions=[session],
                 browser_topic_scenarios={
-                    "project_url": "https://chatgpt.com/g/project",
+                    "project_url": "",
                     "session_id": "chatgpt-test",
                     "requirements_mode": "text",
                     "requirements_text": "Только прямой текст.",
@@ -371,6 +371,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
                     "minimum_chars": 10,
                     "maximum_chars": 20,
                     "concurrency": 2,
+                    "url_overrides": {"prod-first": "https://chatgpt.com/g/project"},
                 },
             )
             titles = ["Первая тема", "Вторая тема"]
@@ -404,6 +405,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
 
             self.assertEqual(result["operationResult"]["count"], 1)
             self.assertEqual(len(transport.calls), 1)
+            self.assertEqual(transport.calls[0][0], "https://chatgpt.com/g/project")
             self.assertIn("ТЕМА:\nПервая тема", transport.calls[0][1])
             self.assertNotIn("Старый сценарий", transport.calls[0][1])
             final = saved_jobs[-1]
