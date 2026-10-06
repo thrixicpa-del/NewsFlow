@@ -171,12 +171,18 @@ class ClipIndexTests(unittest.TestCase):
                     )
                     clips.append(clip)
 
-            entered = threading.Barrier(2)
+            entered = threading.Event()
+            entered_lock = threading.Lock()
+            entered_count = 0
             release = threading.Event()
 
             def blocked_state(_path, *, samples):
+                nonlocal entered_count
                 self.assertEqual(samples, 11)
-                entered.wait(timeout=2)
+                with entered_lock:
+                    entered_count += 1
+                    if entered_count == 2:
+                        entered.set()
                 release.wait(timeout=2)
                 return -1
 
@@ -191,7 +197,7 @@ class ClipIndexTests(unittest.TestCase):
                 ]
                 for worker in first_two:
                     worker.start()
-                entered.wait(timeout=2)
+                self.assertTrue(entered.wait(timeout=2))
 
                 third = threading.Thread(
                     target=index.screen_text_eligibility,
