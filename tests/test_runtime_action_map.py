@@ -54,6 +54,16 @@ class RuntimeActionMapTests(unittest.TestCase):
         self.assertIn("callCore('start-youtube-channel-handoff'", main)
         self.assertIn("callCore('finish-youtube-channel-handoff'", main)
 
+    def test_montage_worker_inherits_desktop_runtime_provenance(self):
+        """Detached Montage and short Core calls must share one desktop runtime ID."""
+        main = (APP_ROOT / "electron" / "main.ts").read_text(encoding="utf-8")
+
+        self.assertIn("const runtimeSessionId = crypto.randomUUID()", main)
+        self.assertGreaterEqual(
+            main.count("NEWSFLOW_RUNTIME_SESSION_ID: runtimeSessionId"),
+            2,
+        )
+
     def test_desktop_ui_does_not_use_unsupported_browser_prompt_dialogs(self):
         """Electron does not provide browser prompt(); use NewsFlow-owned dialogs."""
         source = (APP_ROOT / "src" / "ui" / "App.tsx").read_text(encoding="utf-8")
