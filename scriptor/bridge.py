@@ -376,11 +376,6 @@ def _select_current_cover_generation_rows(
         ]
         if str(value).strip()
     }
-    tombstoned_titles = {
-        " ".join(str(value).split()).casefold()
-        for value in getattr(settings, "deleted_scenario_titles", [])
-        if str(value).strip()
-    }
     # A direct manual operation can be issued before a scenario session exists
     # (for example while composing one imported current cover).  Its durable
     # ProductionItem ID is sufficient authority.  A legacy registry identity
@@ -421,7 +416,6 @@ def _select_current_cover_generation_rows(
         if index in requested
         and isinstance(item, dict)
         and (identity := str(item.get("production_item_id", "")).strip()) in current_ids
-        and " ".join(str(item.get("title", "")).split()).casefold() not in tombstoned_titles
         and (not expected_ids or identity in expected_ids)
         and should_generate(item)
     ]
