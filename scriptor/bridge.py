@@ -17368,6 +17368,27 @@ def _recover_interrupted_montage_tasks(settings: Settings) -> bool:
     return changed
 
 
+def _montage_task_snapshot_projection(key: str, value: object) -> dict:
+    """Expose task evidence with runtime freshness without rewriting history."""
+    item = dict(value) if isinstance(value, dict) else {}
+    saved_session = str(item.pop("runtimeSessionId", "") or "").strip()
+    current_session = _runtime_session_id()
+    runtime_current = bool(saved_session and current_session and saved_session == current_session)
+    item["runtimeCurrent"] = runtime_current
+    item["runtimeProvenance"] = (
+        "current-session"
+        if runtime_current
+        else "previous-session"
+        if saved_session
+        else "legacy-unattributed"
+    )
+    try:
+        item["index"] = int(key)
+    except (TypeError, ValueError):
+        item["index"] = -1
+    return item
+
+
 def montage_queue_is_active(statuses: dict[str, dict]) -> bool:
     """True while a batch is running, including a deliberately paused batch."""
     return any(
