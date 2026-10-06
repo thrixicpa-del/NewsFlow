@@ -50,6 +50,7 @@ from .browser_topic_scenarios import (
     BrowserTopicCompletion,
     BrowserTopicFailure,
     BrowserTopicTask,
+    resolve_topic_route,
     run_browser_topic_tasks,
 )
 from .channel_research import channel_research_state, new_task, parse_txt_sources
@@ -3029,6 +3030,8 @@ def snapshot() -> dict:
             "minimumChars": max(0, int(settings.browser_topic_scenarios.get("minimum_chars", 0) or 0)),
             "maximumChars": max(0, int(settings.browser_topic_scenarios.get("maximum_chars", 0) or 0)),
             "concurrency": max(1, int(settings.browser_topic_scenarios.get("concurrency", 1) or 1)),
+            "lengthOverrides": _browser_topic_snapshot_length_overrides(settings.browser_topic_scenarios.get("length_overrides", {})),
+            "additionalPromptOverrides": dict(settings.browser_topic_scenarios.get("additional_prompt_overrides", {}) or {}),
             "promptOverrides": dict(settings.browser_topic_scenarios.get("prompt_overrides", {}) or {}),
             "urlOverrides": dict(settings.browser_topic_scenarios.get("url_overrides", {}) or {}),
         },
@@ -3229,6 +3232,33 @@ def _browser_topic_override_map(value: object, *, url_values: bool = False) -> d
     return result
 
 
+def _browser_topic_length_override_map(value: object) -> dict[str, dict[str, int]]:
+    """Validate per-topic volume contracts once, keyed by ProductionItem ID."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("Диапазоны тем должны быть объектом")
+    result: dict[str, dict[str, int]] = {}
+    for raw_id, raw_range in value.items():
+        production_item_id = str(raw_id or "").strip()
+        if not production_item_id or not isinstance(raw_range, dict):
+            continue
+        minimum = max(0, int(raw_range.get("minimum_chars", raw_range.get("minimumChars", 0)) or 0))
+        maximum = max(0, int(raw_range.get("maximum_chars", raw_range.get("maximumChars", 0)) or 0))
+        if not minimum or not maximum or minimum > maximum:
+            raise ValueError("Укажите корректный диапазон символов для темы")
+        result[production_item_id] = {"minimum_chars": minimum, "maximum_chars": maximum}
+    return result
+
+
+def _browser_topic_snapshot_length_overrides(value: object) -> dict[str, dict[str, int]]:
+    """A malformed legacy setting must not prevent the settings screen opening."""
+    try:
+        return _browser_topic_length_override_map(value)
+    except (TypeError, ValueError):
+        return {}
+
+
 def save_browser_topic_scenario_settings(payload: dict) -> dict:
     """Persist direct browser-topic settings without API/provider side effects."""
     settings = load_settings()
@@ -3252,6 +3282,8 @@ def save_browser_topic_scenario_settings(payload: dict) -> dict:
         "minimum_chars": minimum,
         "maximum_chars": maximum,
         "concurrency": max(1, min(10, int(payload.get("concurrency", 1) or 1))),
+        "length_overrides": _browser_topic_length_override_map(payload.get("lengthOverrides", {})),
+        "additional_prompt_overrides": _browser_topic_override_map(payload.get("additionalPromptOverrides", {})),
         "prompt_overrides": _browser_topic_override_map(payload.get("promptOverrides", {})),
         "url_overrides": _browser_topic_override_map(payload.get("urlOverrides", {}), url_values=True),
     }
@@ -7161,6 +7193,8 @@ def _browser_topic_settings(settings: Settings) -> BrowserScenarioSettings:
         minimum_chars=max(0, int(raw.get("minimum_chars", 0) or 0)),
         maximum_chars=max(0, int(raw.get("maximum_chars", 0) or 0)),
         concurrency=max(1, min(10, int(raw.get("concurrency", 1) or 1))),
+        length_overrides=_browser_topic_length_override_map(raw.get("length_overrides", {})),
+        additional_prompt_overrides={str(key): str(value) for key, value in dict(raw.get("additional_prompt_overrides", {}) or {}).items()},
         prompt_overrides={str(key): str(value) for key, value in dict(raw.get("prompt_overrides", {}) or {}).items()},
         url_overrides={str(key): str(value) for key, value in dict(raw.get("url_overrides", {}) or {}).items()},
     )
@@ -7280,7 +7314,116 @@ def _browser_topic_export_path(settings: Settings, title: str, production_item_i
     return folder / f"{safe_filename(title)} — {suffix}.txt"
 
 
+def _browser_topic_queue_lock_path() -> Path:
+    return app_data_root() / "browser-topic-scenarios.lock"
+
+
+def _browser_topic_process_is_running(pid: object) -> bool:
+    """Check a browser worker without assuming packaged-vs-source executable names."""
+    try:
+        process_id = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    if process_id == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
+            if not handle:
+                return False
+            try:
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = wintypes.DWORD(len(buffer))
+                query = ctypes.windll.kernel32.QueryFullProcessImageNameW
+                query.argtypes = [
+                    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                    ctypes.POINTER(wintypes.DWORD),
+                ]
+                query.restype = wintypes.BOOL
+                if not query(handle, 0, buffer, ctypes.byref(length)):
+                    return False
+                return (
+                    Path(buffer.value).name.casefold()
+                    == Path(sys.executable).name.casefold()
+                )
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        except OSError:
+            return False
+    try:
+        os.kill(process_id, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _claim_browser_topic_queue_lock() -> Path | None:
+    """Claim the one browser-topic batch across desktop/Core processes."""
+    lock_path = _browser_topic_queue_lock_path()
+    with _exclusive_settings_write(lock_path.with_name("browser-topic-scenarios-owner.json")):
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if lock_path.exists():
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                existing = {}
+            if _browser_topic_process_is_running(existing.get("pid")):
+                return None
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
+        try:
+            with lock_path.open("x", encoding="utf-8") as stream:
+                json.dump({
+                    "pid": os.getpid(),
+                    "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }, stream)
+        except FileExistsError:
+            return None
+        return lock_path
+
+
+def _release_browser_topic_queue_lock(lock_path: Path) -> None:
+    """Release only the browser-topic owner created by this process."""
+    with _exclusive_settings_write(lock_path.with_name("browser-topic-scenarios-owner.json")):
+        try:
+            owner = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            owner = {}
+        if owner.get("pid") != os.getpid():
+            return
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPTBrowserClient) -> dict:
+    """Run one process-owned browser-topic batch and reject overlapping starts."""
+    lock_path = _claim_browser_topic_queue_lock()
+    if lock_path is None:
+        return {**snapshot(), "operationResult": {
+            "kind": "browser-topic-scenarios-already-running",
+            "count": 0,
+            "message": "Очередь ChatGPT через браузер уже выполняется; повторный запуск отклонён.",
+        }}
+    try:
+        return _generate_browser_topic_scenarios_unlocked(
+            payload, transport_factory=transport_factory,
+        )
+    finally:
+        _release_browser_topic_queue_lock(lock_path)
+
+
+def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_factory=ChatGPTBrowserClient) -> dict:
     """Generate new prose via the operator's logged-in ChatGPT browser session.
 
     This is a sibling route to Planner/Writer, not a fallback for them.  A
@@ -7292,16 +7435,13 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
     if ensure_idea_production_items(settings, active_titles=titles):
         save_settings(settings)
     browser_settings = _browser_topic_settings(settings)
-    # Validate all global technical prerequisites before changing any job.
-    validate_chatgpt_project_url(browser_settings.project_url)
+    # Validate global non-route prerequisites before changing any job.
+    # Project URL is resolved per ProductionItem below, so an explicit
+    # per-topic URL remains valid even when the optional global URL is empty.
     if browser_settings.requirements_mode not in {"text", "file"}:
         raise ValueError("Выберите источник требований: текст или файл")
     if browser_settings.requirements_mode == "file" and not Path(browser_settings.requirements_file).is_file():
         raise ValueError("Файл требований не найден. Выберите его заново.")
-    if not browser_settings.companion_prompt.strip():
-        raise ValueError("Заполните сопроводительное письмо")
-    if not browser_settings.minimum_chars or browser_settings.minimum_chars > browser_settings.maximum_chars:
-        raise ValueError("Укажите корректный диапазон символов")
     session = _browser_topic_session(settings, str(settings.browser_topic_scenarios.get("session_id", "")))
     tasks, jobs_by_index = _select_browser_topic_tasks(settings, titles, jobs, payload)
     if not tasks:
@@ -7311,17 +7451,22 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
         }}
     # Validate all per-item routes before the first visible browser action.
     for task in tasks:
-        route_url = browser_settings.url_overrides.get(task.production_item_id, browser_settings.project_url)
-        validate_chatgpt_project_url(route_url)
+        route = resolve_topic_route(browser_settings, task)
+        validate_chatgpt_project_url(route.project_url)
+        if not route.companion_prompt.strip():
+            raise ValueError("Заполните сопроводительное письмо")
+        if not route.minimum_chars or route.minimum_chars > route.maximum_chars:
+            raise ValueError("Укажите корректный диапазон символов")
 
     for task in tasks:
         job = jobs_by_index[task.queue_index]
+        route = resolve_topic_route(browser_settings, task)
         job.state = RunState.RUNNING
         job.error = ""
         job.request = ScenarioRequest(
             job.request.index, job.request.title, job.request.prompt, task.production_item_id,
-            (browser_settings.minimum_chars + browser_settings.maximum_chars) // 2,
-            browser_settings.minimum_chars, browser_settings.maximum_chars,
+            (route.minimum_chars + route.maximum_chars) // 2,
+            route.minimum_chars, route.maximum_chars,
         )
     save_session(titles, list(jobs_by_index.values()))
 
@@ -7378,7 +7523,7 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
                 target = _browser_topic_export_path(
                     settings, export_title, task.production_item_id,
                 )
-                target.write_text(outcome.text, encoding="utf-8")
+                target.write_bytes(outcome.text.encode("utf-8"))
             except OSError as exc:
                 # The text remains recoverable in the same ProductionItem even
                 # when its separate TXT export cannot be published.
@@ -7392,9 +7537,14 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
             job.state = RunState.ERROR
             job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
     save_session(current_titles, current_jobs)
+    export_folder = str(Path(settings.output_folder) / "ChatGPT браузер") if completed else ""
     return {**snapshot(), "operationResult": {
         "kind": "browser-topic-scenarios", "count": completed,
-        "message": f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз.",
+        "folder": export_folder,
+        "message": (
+            f"ChatGPT обработал тем: {completed}/{len(tasks)}. Каждая тема запускалась только один раз."
+            + (f" TXT сохранены: {export_folder}" if export_folder else "")
+        ),
     }}
 
 

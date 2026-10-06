@@ -19,6 +19,12 @@ class ChatGPTBrowserError(RuntimeError):
     pass
 
 
+_DOWNLOAD_BUTTON_SELECTOR = (
+    "button[aria-label='Скачать файл'], "
+    "button[aria-label='Download file']"
+)
+
+
 def validate_chatgpt_project_url(value: str) -> str:
     url = str(value or "").strip()
     parsed = urlparse(url)
@@ -56,7 +62,7 @@ class ChatGPTBrowserClient:
                 executable_path=str(chrome_path()),
                 headless=False,
                 args=["--no-first-run", "--no-default-browser-check"],
-                accept_downloads=False,
+                accept_downloads=True,
                 viewport={"width": 1280, "height": 900},
             )
         except Exception as exc:  # noqa: BLE001 - Playwright exposes multiple runtime exception types.
@@ -119,10 +125,23 @@ class ChatGPTBrowserClient:
             assistant_count = await page.locator("[data-message-author-role='assistant']").count()
             if requirements_file:
                 await self._attach_requirements_file(page, requirements_file)
+            # Bind any later download to a control created after this exact
+            # submission.  A stale attachment elsewhere in the page must never
+            # become this ProductionItem's scenario.
+            download_count = await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
             await editor.click()
             await editor.fill(message)
-            await editor.press("Enter")
-            return await self._wait_for_answer(page, baseline_count=assistant_count)
+            await self._submit_message(page, editor)
+            # The contract requires an actual downloadable TXT, not merely a
+            # filename or a prose caption in the assistant turn.
+            await self._wait_for_answer(
+                page,
+                baseline_count=assistant_count,
+                download_baseline_count=download_count,
+            )
+            return await self._download_txt_attachment(
+                page, baseline_count=download_count,
+            )
         except ChatGPTBrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize Playwright transport failures for the UI.
@@ -184,6 +203,53 @@ class ChatGPTBrowserClient:
         return None
 
     @staticmethod
+    async def _submit_message(page, editor=None) -> None:
+        """Use ChatGPT's explicit send control before falling back to Enter.
+
+        A contenteditable composer can treat Enter as a newline under a user
+        preference.  Clicking the visible enabled send button makes the
+        boundary observable and keeps the fallback compatible with older
+        ChatGPT layouts.
+        """
+        selectors = (
+            "button[data-testid='send-button']",
+            "button[aria-label='Send prompt']",
+            "button[aria-label='Отправить сообщение']",
+            "button:has-text('Send')",
+            "button:has-text('Отправить')",
+        )
+        # File uploads can leave the explicit send control visible but
+        # temporarily disabled.  Give the page a bounded chance to enable it
+        # before using the compatibility Enter fallback.
+        deadline = asyncio.get_running_loop().time() + 10.0
+        saw_explicit_control = False
+        while asyncio.get_running_loop().time() < deadline:
+            for selector in selectors:
+                try:
+                    button = page.locator(selector).first
+                    visible = await button.is_visible()
+                    saw_explicit_control = saw_explicit_control or visible
+                    if visible and await button.is_enabled():
+                        await button.click()
+                        return
+                except Exception:  # noqa: BLE001,S112 - cross-version selector fallback.
+                    continue
+            try:
+                await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001 - test/legacy page compatibility.
+                break
+        if saw_explicit_control:
+            raise ChatGPTBrowserError(
+                "Кнопка отправки ChatGPT осталась недоступна; файл требований мог не успеть загрузиться"
+            )
+        if editor is None:
+            raise ChatGPTBrowserError("ChatGPT не показал доступную кнопку отправки")
+        try:
+            await editor.press("Enter")
+        except Exception as exc:
+            raise ChatGPTBrowserError("Не удалось отправить сообщение в ChatGPT") from exc
+
+    @staticmethod
     async def _attach_requirements_file(page, requirements_file: str) -> None:
         source = Path(requirements_file)
         if not source.is_file():
@@ -197,20 +263,82 @@ class ChatGPTBrowserClient:
                 "ChatGPT не показал поле прикрепления файла. Откройте новый чат и повторите запуск."
             ) from exc
 
-    async def _wait_for_answer(self, page, *, baseline_count: int) -> str:
+    @staticmethod
+    async def _download_txt_attachment(page, *, baseline_count: int = 0, timeout_ms: int = 15_000) -> str:
+        """Download only a TXT control created after this request was sent."""
+        buttons = page.locator(_DOWNLOAD_BUTTON_SELECTOR)
+        deadline = asyncio.get_running_loop().time() + max(1_000, int(timeout_ms)) / 1000.0
+        button = None
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                count = await buttons.count()
+                if count > baseline_count:
+                    candidate = buttons.nth(count - 1)
+                    if await candidate.is_visible():
+                        button = candidate
+                        break
+            except Exception:  # noqa: BLE001,S110 - UI can re-render while the file card appears.
+                pass
+            await page.wait_for_timeout(200)
+        if button is None:
+            raise ChatGPTBrowserError("ChatGPT не прикрепил новое TXT-вложение со сценарием")
+        try:
+            async with page.expect_download(timeout=30_000) as download_info:
+                await button.click()
+            download = await download_info.value
+            suggested_filename = str(getattr(download, "suggested_filename", "") or "")
+            if Path(suggested_filename).suffix.casefold() != ".txt":
+                raise ChatGPTBrowserError("ChatGPT прикрепил файл не в формате TXT")
+            path = await download.path()
+        except ChatGPTBrowserError:
+            raise
+        except Exception as exc:
+            raise ChatGPTBrowserError("Не удалось скачать TXT-вложение ChatGPT") from exc
+        if not path:
+            raise ChatGPTBrowserError("ChatGPT не передал путь к скачанному TXT-вложению")
+        source = Path(path)
+        try:
+            text = source.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ChatGPTBrowserError("TXT-вложение ChatGPT имеет недопустимую кодировку UTF-8") from exc
+        except OSError as exc:
+            raise ChatGPTBrowserError("Не удалось прочитать скачанное TXT-вложение ChatGPT") from exc
+        if not text.strip():
+            raise ChatGPTBrowserError("ChatGPT прикрепил пустое TXT-вложение")
+        return text
+
+    async def _wait_for_answer(
+        self,
+        page,
+        *,
+        baseline_count: int,
+        download_baseline_count: int | None = None,
+    ) -> str:
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         previous = ""
         stable_since = 0.0
         answers = page.locator("[data-message-author-role='assistant']")
         while asyncio.get_running_loop().time() < deadline:
             current = ""
+            has_new_turn = False
             try:
                 count = await answers.count()
                 if count > baseline_count:
                     # Only a newly-created assistant turn can satisfy this task.
+                    has_new_turn = True
                     current = await answers.nth(count - 1).inner_text(timeout=2_000)
             except Exception:  # noqa: BLE001 - no answer is normal while the turn is pending.
                 current = ""
+                has_new_turn = False
+            attachment_ready = False
+            if has_new_turn and download_baseline_count is not None:
+                try:
+                    attachment_ready = (
+                        await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
+                        > download_baseline_count
+                    )
+                except Exception:  # noqa: BLE001 - attachment is optional while generation runs.
+                    attachment_ready = False
             now = asyncio.get_running_loop().time()
             if current and current == previous:
                 stable_since = stable_since or now
@@ -227,6 +355,8 @@ class ChatGPTBrowserClient:
                     stop_visible = stop_visible or await page.locator(selector).is_visible(timeout=250)
                 except Exception:  # noqa: BLE001,S110 - selector is optional across ChatGPT UI versions.
                     pass
+            if attachment_ready and not stop_visible:
+                return current
             if current.strip() and not stop_visible and stable_since and now - stable_since >= 4.0:
                 return current.replace("\r\n", "\n").replace("\r", "\n")
             await page.wait_for_timeout(500)

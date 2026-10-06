@@ -7,6 +7,62 @@ from unittest.mock import patch
 
 
 class BrowserTopicScenarioContractTests(unittest.TestCase):
+    def test_message_uses_only_operator_text_plus_dynamic_topic_and_length(self):
+        """The fixed envelope must not silently add an editorial brief."""
+        from scriptor.browser_topic_scenarios import (
+            BrowserScenarioSettings,
+            BrowserTopicTask,
+            build_browser_message,
+        )
+
+        message = build_browser_message(
+            BrowserScenarioSettings(
+                companion_prompt="Пиши только готовый текст.",
+                minimum_chars=12_345,
+                maximum_chars=16_789,
+            ),
+            BrowserTopicTask("production-42", "Точная тема из очереди"),
+        )
+
+        self.assertEqual(
+            message,
+            "Пиши только готовый текст.\n\n"
+            "ТЕМА:\nТочная тема из очереди\n\n"
+            "ОБЪЁМ: 12 345–16 789 символов.\n\n"
+            "Создай и прикрепи готовый сценарий как UTF-8 файл .txt. "
+            "Не добавляй текста вне вложенного файла.\n\n"
+            "Выдай только готовый txt.",
+        )
+        self.assertNotIn("Не указывай дату", message)
+
+    def test_downloaded_txt_payload_preserves_original_newlines(self):
+        from scriptor.browser_topic_scenarios import normalize_browser_response
+
+        payload = "Первая строка\r\nВторая строка\r\n"
+        self.assertEqual(normalize_browser_response(payload), payload)
+
+    def test_id_bound_range_and_extra_prompt_are_added_without_queue_position(self):
+        from scriptor.browser_topic_scenarios import (
+            BrowserScenarioSettings,
+            BrowserTopicTask,
+            build_browser_message,
+        )
+
+        settings = BrowserScenarioSettings(
+            companion_prompt="Общий prompt.",
+            minimum_chars=12_000,
+            maximum_chars=18_000,
+            length_overrides={"production-b": {"minimum_chars": 2_000, "maximum_chars": 3_000}},
+            additional_prompt_overrides={"production-b": "Дополнение только для этой темы."},
+        )
+        # `queue_index` is deliberately unrelated to the override identity.
+        message = build_browser_message(settings, BrowserTopicTask("production-b", "Тема B", queue_index=99))
+
+        self.assertIn("Общий prompt.", message)
+        self.assertIn("Дополнение только для этой темы.", message)
+        self.assertIn("ОБЪЁМ: 2 000–3 000 символов.", message)
+        self.assertNotIn("12 000–18 000", message)
+
     def test_builds_message_from_topic_and_ui_length_not_from_operator_prompt(self):
         from scriptor.browser_topic_scenarios import (
             BrowserScenarioSettings,
@@ -29,11 +85,11 @@ class BrowserTopicScenarioContractTests(unittest.TestCase):
 
         message = build_browser_message(settings, task)
 
-        self.assertIn("Тема сценария:\nТЕМА ИЗ ОЧЕРЕДИ", message)
-        self.assertIn("12 000–18 000 символов", message)
+        self.assertIn("ТЕМА:\nТЕМА ИЗ ОЧЕРЕДИ", message)
+        self.assertIn("ОБЪЁМ: 12 000–18 000 символов.", message)
         self.assertIn("Пиши прямой новостной текст без литературности.", message)
         self.assertIn("Не добавляй дату, приветствие и служебные пояснения.", message)
-        self.assertIn("Выдай только готовый текст сценария.", message)
+        self.assertTrue(message.endswith("Выдай только готовый txt."))
         self.assertNotIn("{title}", message)
         self.assertNotIn("{minimum_chars}", message)
 
@@ -92,6 +148,8 @@ class BrowserTopicScenarioContractTests(unittest.TestCase):
                     "minimum_chars": 12000,
                     "maximum_chars": 18000,
                     "concurrency": 10,
+                    "length_overrides": {"topic-1": {"minimum_chars": 14000, "maximum_chars": 16000}},
+                    "additional_prompt_overrides": {"topic-1": "Диапазонное дополнение."},
                     "prompt_overrides": {"topic-1": "Особый prompt."},
                     "url_overrides": {"topic-1": "https://chatgpt.com/g/one/project"},
                 }))
@@ -99,6 +157,8 @@ class BrowserTopicScenarioContractTests(unittest.TestCase):
 
         self.assertEqual(restored.browser_topic_scenarios["minimum_chars"], 12000)
         self.assertEqual(restored.browser_topic_scenarios["maximum_chars"], 18000)
+        self.assertEqual(restored.browser_topic_scenarios["length_overrides"], {"topic-1": {"minimum_chars": 14000, "maximum_chars": 16000}})
+        self.assertEqual(restored.browser_topic_scenarios["additional_prompt_overrides"], {"topic-1": "Диапазонное дополнение."})
         self.assertEqual(restored.browser_topic_scenarios["prompt_overrides"], {"topic-1": "Особый prompt."})
         self.assertEqual(restored.browser_topic_scenarios["url_overrides"], {"topic-1": "https://chatgpt.com/g/one/project"})
 
@@ -167,12 +227,16 @@ class BrowserTopicScenarioContractTests(unittest.TestCase):
                     "minimumChars": 12000,
                     "maximumChars": 18000,
                     "concurrency": 10,
+                    "lengthOverrides": {"production-17": {"minimum_chars": 14000, "maximum_chars": 16000}},
+                    "additionalPromptOverrides": {"production-17": "Диапазонное дополнение."},
                     "promptOverrides": {"production-17": "Отдельный prompt."},
                     "urlOverrides": {"production-17": "https://chatgpt.com/g/other/project"},
                 })
 
         saved = state["browserTopicScenarios"]
         self.assertEqual(saved["promptOverrides"], {"production-17": "Отдельный prompt."})
+        self.assertEqual(saved["lengthOverrides"], {"production-17": {"minimum_chars": 14000, "maximum_chars": 16000}})
+        self.assertEqual(saved["additionalPromptOverrides"], {"production-17": "Диапазонное дополнение."})
         self.assertEqual(saved["urlOverrides"], {"production-17": "https://chatgpt.com/g/other/project"})
         self.assertEqual(saved["concurrency"], 10)
 
@@ -219,7 +283,7 @@ class BrowserTopicScenarioPoolTests(unittest.IsolatedAsyncioTestCase):
         calls = {production_id: (url, prompt) for url, prompt, _file, production_id in transport.calls}
         self.assertEqual(calls["id-b"][0], "https://chatgpt.com/g/b/project")
         self.assertEqual(calls["id-a"][0], "https://chatgpt.com/g/default/project")
-        self.assertIn("Тема сценария:\nТема B", calls["id-b"][1])
+        self.assertIn("ТЕМА:\nТема B", calls["id-b"][1])
 
     async def test_one_failed_tab_is_reported_without_replaying_another_topic(self):
         from scriptor.browser_topic_scenarios import (
@@ -251,6 +315,27 @@ class BrowserTopicScenarioPoolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserTopicBridgeTests(unittest.TestCase):
+    def test_browser_topic_queue_rejects_a_second_process_owner_before_transport(self):
+        from scriptor import bridge
+
+        with tempfile.TemporaryDirectory(prefix="newsflow-browser-topic-lock-") as directory:
+            root = Path(directory)
+            with patch.object(bridge, "app_data_root", return_value=root):
+                owner = bridge._claim_browser_topic_queue_lock()
+                self.assertIsNotNone(owner)
+                try:
+                    with patch.object(bridge, "_generate_browser_topic_scenarios_unlocked") as run, \
+                         patch.object(bridge, "snapshot", return_value={}):
+                        result = bridge.generate_browser_topic_scenarios({})
+                finally:
+                    bridge._release_browser_topic_queue_lock(owner)
+
+        run.assert_not_called()
+        self.assertEqual(
+            result["operationResult"]["kind"],
+            "browser-topic-scenarios-already-running",
+        )
+
     def test_topic_without_a_preexisting_scenario_job_gets_its_own_durable_job(self):
         from scriptor import bridge
         from scriptor.config import Settings
@@ -278,7 +363,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
                 output_folder=directory,
                 chrome_sessions=[session],
                 browser_topic_scenarios={
-                    "project_url": "https://chatgpt.com/g/project",
+                    "project_url": "",
                     "session_id": "chatgpt-test",
                     "requirements_mode": "text",
                     "requirements_text": "Только прямой текст.",
@@ -286,6 +371,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
                     "minimum_chars": 10,
                     "maximum_chars": 20,
                     "concurrency": 2,
+                    "url_overrides": {"prod-first": "https://chatgpt.com/g/project"},
                 },
             )
             titles = ["Первая тема", "Вторая тема"]
@@ -303,7 +389,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
                     return None
                 async def generate(self, *, project_url, message, requirements_file, task):
                     self.calls.append((project_url, message, requirements_file, task.production_item_id))
-                    return "Новый текст для первой темы"
+                    return "Новый\r\nтекст для первой темы\r\n"
 
             transport = FakeTransport(session)
             with patch.object(bridge, "load_settings", return_value=settings), \
@@ -319,13 +405,20 @@ class BrowserTopicBridgeTests(unittest.TestCase):
 
             self.assertEqual(result["operationResult"]["count"], 1)
             self.assertEqual(len(transport.calls), 1)
-            self.assertIn("Тема сценария:\nПервая тема", transport.calls[0][1])
+            self.assertEqual(transport.calls[0][0], "https://chatgpt.com/g/project")
+            self.assertIn("ТЕМА:\nПервая тема", transport.calls[0][1])
             self.assertNotIn("Старый сценарий", transport.calls[0][1])
             final = saved_jobs[-1]
             self.assertEqual(final[0].state, RunState.DONE)
-            self.assertEqual(final[0].result, "Новый текст для первой темы")
+            self.assertEqual(final[0].result, "Новый\r\nтекст для первой темы\r\n")
             self.assertEqual(final[1].result, "Старый сценарий нельзя передавать в браузер.")
-            self.assertTrue(list((Path(directory) / "ChatGPT браузер").glob("*.txt")))
+            exports = list((Path(directory) / "ChatGPT браузер").glob("*.txt"))
+            self.assertEqual(len(exports), 1)
+            self.assertEqual(
+                exports[0].read_bytes(),
+                "Новый\r\nтекст для первой темы\r\n".encode(),
+            )
+            self.assertEqual(result["operationResult"]["folder"], str(Path(directory) / "ChatGPT браузер"))
 
     def test_browser_route_never_overwrites_existing_prose_even_when_job_is_error(self):
         from scriptor import bridge

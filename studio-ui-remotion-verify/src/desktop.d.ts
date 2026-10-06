@@ -29,6 +29,8 @@ interface NewsFlowSnapshot {
     minimumChars: number;
     maximumChars: number;
     concurrency: number;
+    lengthOverrides: Record<string, { minimum_chars: number; maximum_chars: number }>;
+    additionalPromptOverrides: Record<string, string>;
     promptOverrides: Record<string, string>;
     urlOverrides: Record<string, string>;
   };

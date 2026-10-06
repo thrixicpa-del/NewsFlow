@@ -210,6 +210,8 @@ export const fallback: NewsFlowSnapshot = {
     minimumChars: 12000,
     maximumChars: 18000,
     concurrency: 1,
+    lengthOverrides: {},
+    additionalPromptOverrides: {},
     promptOverrides: {},
     urlOverrides: {},
   },
@@ -3079,6 +3081,14 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [overridePrompt, setOverridePrompt] = useState("");
   const [overrideUrl, setOverrideUrl] = useState("");
+  const [rangeTopics, setRangeTopics] = useState("");
+  const [rangeMinimumChars, setRangeMinimumChars] = useState("");
+  const [rangeMaximumChars, setRangeMaximumChars] = useState("");
+  const [rangeAdditionalPrompt, setRangeAdditionalPrompt] = useState("");
+  const [rangeError, setRangeError] = useState("");
+  const [launching, setLaunching] = useState(false);
+  const [lengthOverrides, setLengthOverrides] = useState(saved.lengthOverrides || {});
+  const [additionalPromptOverrides, setAdditionalPromptOverrides] = useState(saved.additionalPromptOverrides || {});
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>(saved.promptOverrides);
   const [urlOverrides, setUrlOverrides] = useState<Record<string, string>>(saved.urlOverrides);
 
@@ -3092,16 +3102,18 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
     setMinimumChars(String(saved.minimumChars || 12000));
     setMaximumChars(String(saved.maximumChars || 18000));
     setConcurrency(String(saved.concurrency || 1));
+    setLengthOverrides(saved.lengthOverrides || {});
+    setAdditionalPromptOverrides(saved.additionalPromptOverrides || {});
     setPromptOverrides(saved.promptOverrides);
     setUrlOverrides(saved.urlOverrides);
   }, [saved]);
 
   const topics = data.scenarios.filter((item) => item.productionItemId);
   const selectedTopics = topics.filter((item) =>
-    selectedIds.includes(String(item.productionItemId)) && !item.result.trim()
+    selectedIds.includes(String(item.productionItemId)) && !item.result.trim() && item.state !== "В работе"
   );
   const selectAllNew = () => setSelectedIds(topics
-    .filter((item) => !item.result.trim())
+    .filter((item) => !item.result.trim() && item.state !== "В работе")
     .map((item) => String(item.productionItemId)));
   const toggle = (productionItemId: string) => setSelectedIds((current) =>
     current.includes(productionItemId)
@@ -3131,6 +3143,47 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
       return next;
     });
   };
+  const resolveRangeIds = (value: string) => {
+    const available = new Map(topics.map((topic) => [topic.index + 1, String(topic.productionItemId)]));
+    const requested = new Set<number>();
+    for (const token of value.split(",").map((part) => part.trim()).filter(Boolean)) {
+      const match = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(token);
+      if (!match) throw new Error("Укажите номера тем как 1-3, 8");
+      const start = Number(match[1]);
+      const end = Number(match[2] || match[1]);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) {
+        throw new Error("Укажите корректные номера тем");
+      }
+      for (let position = start; position <= end; position += 1) {
+        if (!available.has(position)) throw new Error(`Темы №${position} нет в текущей очереди`);
+        requested.add(position);
+      }
+    }
+    if (!requested.size) throw new Error("Укажите хотя бы один номер темы");
+    return [...requested].map((position) => available.get(position)!).filter(Boolean);
+  };
+  const applyRangeOverrides = () => {
+    try {
+      const ids = resolveRangeIds(rangeTopics);
+      const minimum = Number(rangeMinimumChars);
+      const maximum = Number(rangeMaximumChars);
+      if (!Number.isInteger(minimum) || !Number.isInteger(maximum) || minimum < 1 || maximum < minimum) {
+        throw new Error("Укажите корректный диапазон символов");
+      }
+      setLengthOverrides((current) => ({ ...current, ...Object.fromEntries(ids.map((id) => [id, { ...current[id], minimum_chars: minimum, maximum_chars: maximum }])) }));
+      setAdditionalPromptOverrides((current) => {
+        const next = { ...current };
+        for (const id of ids) {
+          if (rangeAdditionalPrompt.trim()) next[id] = rangeAdditionalPrompt;
+          else delete next[id];
+        }
+        return next;
+      });
+      setRangeError("");
+    } catch (error) {
+      setRangeError(error instanceof Error ? error.message : "Не удалось применить диапазон");
+    }
+  };
   const settingsPayload = () => ({
       projectUrl,
       sessionId,
@@ -3141,6 +3194,8 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
       minimumChars: Number(minimumChars),
       maximumChars: Number(maximumChars),
       concurrency: Number(concurrency),
+      lengthOverrides,
+      additionalPromptOverrides,
       promptOverrides,
       urlOverrides,
     });
@@ -3148,18 +3203,24 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
     await command("save-browser-topic-scenario-settings", settingsPayload());
   };
   const runSelected = async () => {
-    const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
-    if (!savedState || !selectedTopics.length) return;
-    await command("generate-browser-topic-scenarios", {
-      indices: selectedTopics.map((topic) => topic.index),
-      productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
-    });
+    if (launching) return;
+    setLaunching(true);
+    try {
+      const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
+      if (!savedState || !selectedTopics.length) return;
+      await command("generate-browser-topic-scenarios", {
+        indices: selectedTopics.map((topic) => topic.index),
+        productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
+      });
+    } finally {
+      setLaunching(false);
+    }
   };
   const sessionIndex = data.chromeSessions.findIndex((session) => session.id === sessionId);
   return (
     <div className="nf-scenarios">
       <section className="panel scenario-add">
-        <div className="panel-title"><div><b>ChatGPT через браузер — темы очереди</b><small>В ChatGPT уходит только точное название темы. Старый текст сценария не используется как вход.</small></div></div>
+        <div className="panel-title"><div><b>ChatGPT через браузер — темы очереди</b><small>В ChatGPT уходит только ваш текст и динамические строки «ТЕМА» и «ОБЪЁМ». Старый сценарий не используется как вход.</small></div></div>
         <div className="form-row">
           <Input label="URL проекта ChatGPT" value={projectUrl} onChange={(event) => setProjectUrl(event.target.value)} placeholder="https://chatgpt.com/g/.../project" />
           <Select label="Изолированная сессия Chrome" value={sessionId} onChange={(event) => setSessionId(event.target.value)} options={[
@@ -3175,20 +3236,28 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
         </div>
       </section>
       <section className="panel scenario-add">
-        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённый файл или текст. Тема и диапазон символов добавляются NewsFlow автоматически.</small></div></div>
+        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённый файл или текст. NewsFlow добавляет только точные строки «ТЕМА» и «ОБЪЁМ» из текущей темы и таблицы.</small></div></div>
         <Select label="Источник требований" value={requirementsMode} onChange={(event) => setRequirementsMode(event.target.value as 'text' | 'file')} options={[{ value: "text", label: "Вставить текст в сообщение" }, { value: "file", label: "Прикрепить файл к ChatGPT" }]} />
         {requirementsMode === "text" ? <Textarea label="Требования к стилю и структуре" value={requirementsText} onChange={(event) => setRequirementsText(event.target.value)} placeholder="Вставьте требования…" /> : <div className="form-row"><Input label="Файл требований" value={requirementsFile} readOnly placeholder="Выберите TXT или Markdown" /><Button onClick={() => void chooseRequirementsFile()}><FolderOpen size={16} />Выбрать файл</Button></div>}
         <Textarea label="Сопроводительное письмо" value={companionPrompt} onChange={(event) => setCompanionPrompt(event.target.value)} placeholder="Укажите требования, общие для каждого сценария. Тему и объём сюда писать не нужно." />
       </section>
       <section className="panel scenario-add">
         <div className="panel-title"><div><b>Темы для запуска</b><small>Привязка выполняется только по ProductionItem ID. Фильтрация, сортировка и положение строки не меняют назначение.</small></div><span className="status">Выбрано: {selectedTopics.length}</span></div>
-        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length || launching} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
         <div className="form-row">
           <Textarea label="Prompt для выбранных тем (необязательно)" value={overridePrompt} onChange={(event) => setOverridePrompt(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий prompt" />
           <Input label="URL для выбранных тем (необязательно)" value={overrideUrl} onChange={(event) => setOverrideUrl(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий URL" />
           <Button disabled={!selectedIds.length} onClick={applyOverrides}>Применить к выбранным</Button>
         </div>
-        <div className="table-wrap scenario-table"><table><thead><tr><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Источник prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); return <tr key={id}><td><Checkbox disabled={hasResult} checked={!hasResult && selectedIds.includes(id)} onCheckedChange={() => !hasResult && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
+        <div className="form-row">
+          <Input label="Номера тем для диапазона" value={rangeTopics} onChange={(event) => setRangeTopics(event.target.value)} placeholder="Например: 1-3, 8" />
+          <Input label="Минимум символов" type="number" min="1" value={rangeMinimumChars} onChange={(event) => setRangeMinimumChars(event.target.value)} />
+          <Input label="Максимум символов" type="number" min="1" value={rangeMaximumChars} onChange={(event) => setRangeMaximumChars(event.target.value)} />
+          <Textarea label="Дополнительный prompt для диапазона" value={rangeAdditionalPrompt} onChange={(event) => setRangeAdditionalPrompt(event.target.value)} placeholder="Необязательно: добавляется после общего prompt" />
+          <Button onClick={applyRangeOverrides}>Применить диапазон</Button>
+        </div>
+        {rangeError ? <p className="error" role="alert">{rangeError}</p> : null}
+        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning || launching} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && !launching && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult ? "Готово" : isRunning ? "В работе" : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
         {!topics.length ? <EmptyState title="Нет тем с ProductionItem ID" description="Добавьте темы в очередь сценариев или выполните восстановление состояния проекта." /> : null}
       </section>
     </div>
