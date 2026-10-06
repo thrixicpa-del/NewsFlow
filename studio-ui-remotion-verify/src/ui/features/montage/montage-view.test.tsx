@@ -333,6 +333,8 @@ describe("Montage Light view", () => {
   it("labels legacy montage failures as historical without deleting their evidence", () => {
     const data = {
       ...fallback,
+      scenarios: [{ index: 1, title: "Старый runtime", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Старый runtime", state: "Готово", path: "D:/voice.mp3" }],
       montageTasks: [{
         index: 1,
         title: "Старый runtime",
@@ -352,7 +354,7 @@ describe("Montage Light view", () => {
 
     render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
 
-    expect(screen.getByText("Ошибка · история")).toBeTruthy();
+    expect(screen.getAllByText("Ошибка · история")).toHaveLength(2);
     expect(screen.getByText(/История предыдущего runtime: No module named 'fastembed'/)).toBeTruthy();
     expect(screen.getByTitle(/No module named 'fastembed'/)).toBeTruthy();
 
