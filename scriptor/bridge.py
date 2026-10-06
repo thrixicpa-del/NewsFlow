@@ -10,6 +10,7 @@ import difflib
 import hashlib
 import json
 import math
+import ntpath
 import os
 import random
 import re
@@ -15922,7 +15923,7 @@ def _external_candidate_ok(scene_query: str, candidate: dict) -> bool:
 def _montage_normalized_path_key(raw_path: str) -> str:
     """Normalize one Windows path once for the montage candidate hot path."""
     try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(raw_path)))
+        return ntpath.normcase(ntpath.abspath(ntpath.normpath(raw_path)))
     except (OSError, TypeError, ValueError):
         return raw_path.casefold()
 
