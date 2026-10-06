@@ -294,6 +294,29 @@ describe("Covers Light view", () => {
     })));
   });
 
+  it("sends exact durable IDs when the primary FastGen action targets all visible topics", async () => {
+    const command = vi.fn(async () => undefined);
+    const data = {
+      ...fallback,
+      covers: [
+        { production_item_id: "production:a", title: "A", image_prompt: "scene A", paths: [] },
+        { production_item_id: "production:b", title: "B", image_prompt: "scene B", paths: [] },
+      ],
+    };
+    render(<Covers data={data} command={command} />);
+
+    fireEvent.click(screen.getByText("Создать обложки").closest("button")!);
+
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "generate-covers",
+      expect.objectContaining({
+        indices: [],
+        productionItemIds: ["production:a", "production:b"],
+        resumeGeneration: true,
+      }),
+    ));
+  });
+
   it("exposes exactly the two all-FastGen routes and sends the my-faces route", async () => {
     const command = vi.fn(async () => undefined);
     const data = {
