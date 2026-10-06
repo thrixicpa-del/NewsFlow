@@ -35,6 +35,12 @@ class BrowserTopicScenarioContractTests(unittest.TestCase):
         )
         self.assertNotIn("Не указывай дату", message)
 
+    def test_downloaded_txt_payload_preserves_original_newlines(self):
+        from scriptor.browser_topic_scenarios import normalize_browser_response
+
+        payload = "Первая строка\r\nВторая строка\r\n"
+        self.assertEqual(normalize_browser_response(payload), payload)
+
     def test_id_bound_range_and_extra_prompt_are_added_without_queue_position(self):
         from scriptor.browser_topic_scenarios import (
             BrowserScenarioSettings,
@@ -309,6 +315,27 @@ class BrowserTopicScenarioPoolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserTopicBridgeTests(unittest.TestCase):
+    def test_browser_topic_queue_rejects_a_second_process_owner_before_transport(self):
+        from scriptor import bridge
+
+        with tempfile.TemporaryDirectory(prefix="newsflow-browser-topic-lock-") as directory:
+            root = Path(directory)
+            with patch.object(bridge, "app_data_root", return_value=root):
+                owner = bridge._claim_browser_topic_queue_lock()
+                self.assertIsNotNone(owner)
+                try:
+                    with patch.object(bridge, "_generate_browser_topic_scenarios_unlocked") as run, \
+                         patch.object(bridge, "snapshot", return_value={}):
+                        result = bridge.generate_browser_topic_scenarios({})
+                finally:
+                    bridge._release_browser_topic_queue_lock(owner)
+
+        run.assert_not_called()
+        self.assertEqual(
+            result["operationResult"]["kind"],
+            "browser-topic-scenarios-already-running",
+        )
+
     def test_topic_without_a_preexisting_scenario_job_gets_its_own_durable_job(self):
         from scriptor import bridge
         from scriptor.config import Settings
@@ -361,7 +388,7 @@ class BrowserTopicBridgeTests(unittest.TestCase):
                     return None
                 async def generate(self, *, project_url, message, requirements_file, task):
                     self.calls.append((project_url, message, requirements_file, task.production_item_id))
-                    return "Новый текст для первой темы"
+                    return "Новый\r\nтекст для первой темы\r\n"
 
             transport = FakeTransport(session)
             with patch.object(bridge, "load_settings", return_value=settings), \
@@ -381,11 +408,14 @@ class BrowserTopicBridgeTests(unittest.TestCase):
             self.assertNotIn("Старый сценарий", transport.calls[0][1])
             final = saved_jobs[-1]
             self.assertEqual(final[0].state, RunState.DONE)
-            self.assertEqual(final[0].result, "Новый текст для первой темы")
+            self.assertEqual(final[0].result, "Новый\r\nтекст для первой темы\r\n")
             self.assertEqual(final[1].result, "Старый сценарий нельзя передавать в браузер.")
             exports = list((Path(directory) / "ChatGPT браузер").glob("*.txt"))
             self.assertEqual(len(exports), 1)
-            self.assertEqual(exports[0].read_text(encoding="utf-8"), "Новый текст для первой темы")
+            self.assertEqual(
+                exports[0].read_bytes(),
+                "Новый\r\nтекст для первой темы\r\n".encode("utf-8"),
+            )
             self.assertEqual(result["operationResult"]["folder"], str(Path(directory) / "ChatGPT браузер"))
 
     def test_browser_route_never_overwrites_existing_prose_even_when_job_is_error(self):
