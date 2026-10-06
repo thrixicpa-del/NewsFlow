@@ -280,10 +280,18 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
                 )
 
             with patch.object(index, "_text_model_is_cached", return_value=True), \
-                 patch.object(index, "_query_vectors", return_value=[]):
+                 patch.object(index, "_query_vectors", return_value=[]), \
+                 patch.object(index, "_bounded_screen_text_state", return_value=-1) as classify:
                 result = index.classify_english_screen_text()
 
             self.assertEqual(result["checked"], 1)
+            classify.assert_called_once_with(
+                clip,
+                str(clip.resolve()),
+                samples=11,
+                finalize_uncertain_as_safe=True,
+                raise_on_decode_error=True,
+            )
 
     def test_screen_text_maintenance_reports_progress_before_a_full_batch_finishes(self):
         """A long V7 maintenance run must visibly advance before 384 files."""
@@ -304,7 +312,8 @@ class MontageIndexBridgeIntegrityTests(unittest.TestCase):
 
             progress: list[int] = []
             with patch.object(index, "_text_model_is_cached", return_value=True), \
-                 patch.object(index, "_query_vectors", return_value=[]):
+                 patch.object(index, "_query_vectors", return_value=[]), \
+                 patch.object(index, "_bounded_screen_text_state", return_value=-1):
                 index.classify_english_screen_text(
                     progress=lambda state: progress.append(state.processed), batch_clips=384,
                 )
