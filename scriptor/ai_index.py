@@ -727,10 +727,27 @@ class ClipIndex:
                         height=excluded.height,fps=excluded.fps,
                         source_family=CASE WHEN clips.source_url<>'' THEN clips.source_family ELSE excluded.source_family END,
                         tags=excluded.tags,embedding=excluded.embedding,model=excluded.model,
-                        indexed_at=excluded.indexed_at,english_text=excluded.english_text,
-                        english_text_version=excluded.english_text_version,
+                        indexed_at=excluded.indexed_at,
+                        -- A shallow reindex can prove a new block, but it
+                        -- cannot disprove any previously confirmed block.
+                        -- Preserve BLOCKED while marking a current-version
+                        -- block stale so explicit full maintenance can replace
+                        -- it with frame-level evidence for the changed file.
+                        english_text=CASE
+                            WHEN clips.english_text=1 AND excluded.english_text=0
+                            THEN clips.english_text
+                            ELSE excluded.english_text
+                        END,
+                        english_text_version=CASE
+                            WHEN clips.english_text=1 AND excluded.english_text=0
+                            THEN MIN(clips.english_text_version, {SCREEN_TEXT_STALE_VERSION})
+                            ELSE excluded.english_text_version
+                        END,
                         semantic_version=0,semantic_scores='{}'
-                        """, rows)
+                        """.replace(
+                            "{SCREEN_TEXT_STALE_VERSION}",
+                            str(max(0, SCREEN_TEXT_CLASSIFIER_VERSION - 1)),
+                        ), rows)
                 self._invalidate_search_cache()
                 state.indexed += len(rows)
                 state.processed += len(rows)
@@ -1081,7 +1098,15 @@ class ClipIndex:
         if state == 1:
             self._invalidate_search_cache()
 
-    def _bounded_screen_text_state(self, candidate: Path, resolved: str, *, samples: int) -> int:
+    def _bounded_screen_text_state(
+        self,
+        candidate: Path,
+        resolved: str,
+        *,
+        samples: int,
+        finalize_uncertain_as_safe: bool = False,
+        raise_on_decode_error: bool = False,
+    ) -> int:
         """Classify a path once across ClipIndex instances, with a small budget."""
         try:
             stat = candidate.stat()
@@ -1089,21 +1114,35 @@ class ClipIndex:
         except OSError:
             identity = (0, 0)
         key = (self._cache_key(), resolved, *identity)
+
+        def finalized(state: int) -> int:
+            if not finalize_uncertain_as_safe or state != 0:
+                return state
+            state = -1
+            self._store_screen_text_state(resolved, state)
+            with _SCREEN_TEXT_INFLIGHT_LOCK:
+                _SCREEN_TEXT_FULL_RESULTS[key] = state
+            return state
+
         with _SCREEN_TEXT_INFLIGHT_LOCK:
-            if key in _SCREEN_TEXT_FULL_RESULTS:
-                return _SCREEN_TEXT_FULL_RESULTS[key]
+            cached = _SCREEN_TEXT_FULL_RESULTS.get(key)
             completion = _SCREEN_TEXT_INFLIGHT.get(key)
-            leader = completion is None
+            leader = completion is None and cached is None
             if leader:
                 completion = threading.Event()
                 _SCREEN_TEXT_INFLIGHT[key] = completion
+        if cached is not None:
+            return finalized(cached)
         if not leader:
             if self.screen_text_progress:
                 self.screen_text_progress("same-path-wait", candidate.name)
             completion.wait()
             with _SCREEN_TEXT_INFLIGHT_LOCK:
-                if key in _SCREEN_TEXT_FULL_RESULTS:
-                    return _SCREEN_TEXT_FULL_RESULTS[key]
+                cached = _SCREEN_TEXT_FULL_RESULTS.get(key)
+            if cached is not None:
+                return finalized(cached)
+            if raise_on_decode_error:
+                raise RuntimeError("screen-text deep check did not produce a final result")
             with self._connect() as connection:
                 row = connection.execute(
                     "SELECT english_text,english_text_version FROM clips WHERE path=?", (resolved,)
@@ -1124,10 +1163,14 @@ class ClipIndex:
                 try:
                     state = self._screen_text_state(candidate, samples=samples)
                 except (OSError, ValueError):
-                    state = 0
+                    if raise_on_decode_error:
+                        raise
+                    return 0
             finally:
                 if acquired:
                     _SCREEN_TEXT_DEEP_SLOTS.release()
+            if finalize_uncertain_as_safe and state == 0:
+                state = -1
             self._store_screen_text_state(resolved, state)
             with _SCREEN_TEXT_INFLIGHT_LOCK:
                 _SCREEN_TEXT_FULL_RESULTS[key] = state
@@ -1225,7 +1268,7 @@ class ClipIndex:
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT path,embedding FROM clips
-                   WHERE english_text_version < ?
+                   WHERE english_text_version < ? OR english_text=0
                    ORDER BY path""",
                 (SCREEN_TEXT_CLASSIFIER_VERSION,),
             ).fetchall()
@@ -1265,38 +1308,40 @@ class ClipIndex:
                 state.stage = "cancelled"
                 break
             updates: list[tuple[int, int, str]] = []
-            blocked_in_batch = False
             for row in rows[offset:offset + max(1, int(batch_clips))]:
                 state.processed += 1
                 state.current = Path(row["path"]).name
                 try:
                     raw_embedding = row["embedding"] or b""
-                    if not raw_embedding:
-                        verdict = 0
-                    else:
+                    verdict = None
+                    if raw_embedding:
                         import numpy as np
 
                         embedding = np.frombuffer(raw_embedding, dtype=np.float32)
-                        if not embedding.size:
-                            verdict = 0
-                        else:
+                        if embedding.size:
                             vector = self._normalize(embedding)
                             positive = float(np.dot(vector, query_vectors[0]))
                             negative = float(np.dot(vector, query_vectors[1]))
                             if positive >= negative + _SCREEN_TEXT_OBVIOUS_MARGIN:
                                 verdict = 1
-                            else:
-                                # A mean vector can miss a sparse lower-third or
-                                # end-card entirely.  It may fast-block obvious
-                                # text, but an all-clear requires frame evidence.
-                                verdict = self._bounded_screen_text_state(
-                                    Path(row["path"]), row["path"], samples=11,
-                                )
+                    if verdict is None:
+                        # Mean vectors may be missing or may miss a sparse
+                        # lower-third/end-card. Explicit maintenance therefore
+                        # performs the full 11-frame check before declaring
+                        # SAFE. A successful ambiguous scan is finalized SAFE;
+                        # a decode failure propagates and leaves the prior
+                        # persisted verdict untouched for a later retry.
+                        verdict = self._bounded_screen_text_state(
+                            Path(row["path"]),
+                            row["path"],
+                            samples=11,
+                            finalize_uncertain_as_safe=True,
+                            raise_on_decode_error=True,
+                        )
                 except (OSError, RuntimeError, ValueError):
                     state.failed += 1
                     continue
                 updates.append((verdict, SCREEN_TEXT_CLASSIFIER_VERSION, row["path"]))
-                blocked_in_batch = blocked_in_batch or verdict == 1
                 state.indexed += 1
                 if progress and (state.processed == 1 or state.processed % 16 == 0):
                     progress(state)
@@ -1305,8 +1350,7 @@ class ClipIndex:
                     connection.executemany(
                         "UPDATE clips SET english_text=?,english_text_version=? WHERE path=?", updates,
                     )
-                if blocked_in_batch:
-                    self._invalidate_search_cache()
+                self._invalidate_search_cache()
             if progress:
                 progress(state)
         if state.stage != "cancelled":
