@@ -328,6 +328,7 @@ describe("Montage Light view", () => {
     const css = readFileSync(resolve(process.cwd(), "src/ui/montage-overflow.css"), "utf8");
     expect(css).toMatch(/\.task-timeline\{[^}]*overflow:hidden/);
     expect(css).toMatch(/\.task-timeline-entry\{[^}]*flex:0 1 min\(100%,520px\)/);
+    expect(css).toMatch(/\.montage-provenance dd\{[^}]*overflow-wrap:anywhere/);
   });
 
   it("labels legacy montage failures as historical without deleting their evidence", () => {
