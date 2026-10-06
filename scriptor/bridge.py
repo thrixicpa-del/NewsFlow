@@ -376,11 +376,6 @@ def _select_current_cover_generation_rows(
         ]
         if str(value).strip()
     }
-    tombstoned_titles = {
-        " ".join(str(value).split()).casefold()
-        for value in getattr(settings, "deleted_scenario_titles", [])
-        if str(value).strip()
-    }
     # A direct manual operation can be issued before a scenario session exists
     # (for example while composing one imported current cover).  Its durable
     # ProductionItem ID is sufficient authority.  A legacy registry identity
@@ -421,7 +416,6 @@ def _select_current_cover_generation_rows(
         if index in requested
         and isinstance(item, dict)
         and (identity := str(item.get("production_item_id", "")).strip()) in current_ids
-        and " ".join(str(item.get("title", "")).split()).casefold() not in tombstoned_titles
         and (not expected_ids or identity in expected_ids)
         and should_generate(item)
     ]
@@ -429,10 +423,12 @@ def _select_current_cover_generation_rows(
 
 def _current_cover_generation_scope(settings: Settings, payload: dict, error_message: str) -> list[tuple[int, dict]]:
     """Resolve and validate the durable scope before filtering completed work."""
+    requested_indices = [int(index) for index in payload.get("indices", [])]
     rows = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
     if not rows:
+        if requested_indices:
+            raise ValueError("Выбранная задача обложки устарела или больше не существует")
         raise ValueError(error_message)
-    requested_indices = [int(index) for index in payload.get("indices", [])]
     if requested_indices:
         expected_values = payload.get("productionItemIds", payload.get("production_item_ids", [])) or []
         expected_ids = [str(value).strip() for value in expected_values if str(value).strip()]
@@ -453,6 +449,49 @@ def _current_cover_generation_scope(settings: Settings, payload: dict, error_mes
 
 def _cover_noop_result(kind: str, message: str) -> dict:
     return {**snapshot(), "operationResult": {"kind": kind, "count": 0, "message": message}}
+
+
+def _cover_generation_result(
+    state: dict,
+    *,
+    count: int,
+    message: str,
+    accepted_ids: list[str] | None = None,
+    rejected: list[dict[str, str]] | None = None,
+) -> dict:
+    """Expose safe scope diagnostics without prompts, provider payloads or keys."""
+    accepted = list(dict.fromkeys(
+        str(value).strip() for value in (accepted_ids or []) if str(value).strip()
+    ))
+    rejected_rows: list[dict[str, str]] = []
+    seen_rejected: set[tuple[str, str]] = set()
+    for row in rejected or []:
+        identity = str(row.get("productionItemId", "") or "").strip()
+        reason = str(row.get("reason", "") or "").strip()
+        if not identity or not reason or (identity, reason) in seen_rejected:
+            continue
+        seen_rejected.add((identity, reason))
+        rejected_rows.append({"productionItemId": identity, "reason": reason})
+    diagnostics: list[str] = []
+    if accepted:
+        diagnostics.append("приняты ID: " + ", ".join(accepted[:10]))
+    if rejected_rows:
+        diagnostics.append(
+            "отсеяны: "
+            + ", ".join(
+                f"{row['productionItemId']} ({row['reason']})"
+                for row in rejected_rows[:10]
+            )
+        )
+    if diagnostics:
+        message = f"{message} " + " · ".join(diagnostics)
+    return {**state, "operationResult": {
+        "kind": "cover-generate",
+        "count": int(count),
+        "message": message,
+        "acceptedProductionItemIds": accepted,
+        "rejectedProductionItems": rejected_rows,
+    }}
 
 
 def _hydrate_cover_library(settings: Settings) -> bool:
@@ -11843,39 +11882,101 @@ def _generate_covers_unlocked(payload: dict) -> dict:
     if payload.get("resumeGeneration") and settings.cover_generation_paused:
         settings.cover_generation_paused = False
         _save_cover_state(settings)
+    rejected_scope: list[dict[str, str]] = []
     if payload.get("resumeOnly"):
-        requested = {
-            index for index, _item in _select_current_cover_generation_rows(
-                settings, {"indices": []}, lambda item: item.get("status") == "Приостановлено",
-            )
-        }
+        scope_rows = _select_current_cover_generation_rows(
+            settings, {"indices": []}, lambda item: item.get("status") == "Приостановлено",
+        )
+        requested = {index for index, _item in scope_rows}
         if not requested:
             return {**snapshot(), "operationResult": {
                 "kind": "cover-resume", "count": 0,
                 "message": "Нет приостановленных обложек: очередь уже завершена или ещё не запускалась.",
             }}
     else:
-        requested = {
-            index for index, _item in _select_current_cover_generation_rows(settings, payload, lambda _item: True)
+        # Explicit UI selections are strict: index and ProductionItem ID must
+        # still describe the same current row.  Bulk/all remains a current-ID
+        # filtered scope without requiring positional stability.
+        if payload.get("indices"):
+            scope_rows = _current_cover_generation_scope(
+                settings, payload, "Выберите хотя бы одну актуальную тему для генерации обложки",
+            )
+        else:
+            scope_rows = _select_current_cover_generation_rows(
+                settings, payload, lambda _item: True,
+            )
+        requested = {index for index, _item in scope_rows}
+        scope_ids = {
+            str(item.get("production_item_id", "") or "").strip()
+            for _index, item in scope_rows
+            if str(item.get("production_item_id", "") or "").strip()
         }
+        deleted_ids = {
+            str(value).strip()
+            for value in [
+                *getattr(settings, "idea_deleted_production_ids", []),
+                *getattr(settings, "deleted_scenario_production_ids", []),
+            ]
+            if str(value).strip()
+        }
+        expected_values = payload.get(
+            "productionItemIds", payload.get("production_item_ids", []),
+        ) or []
+        if not isinstance(expected_values, list):
+            raise TypeError("productionItemIds должен быть списком durable ProductionItem ID")
+        for raw_identity in expected_values:
+            identity = str(raw_identity or "").strip()
+            if not identity or identity in scope_ids:
+                continue
+            rejected_scope.append({
+                "productionItemId": identity,
+                "reason": "deleted" if identity in deleted_ids else "stale-or-not-current",
+            })
+    scope_requested = set(requested)
     if not payload.get("resumeOnly") and not payload.get("indices"):
-        # The primary action is always missing-only. Existing valid files are
-        # preserved even after a model change; deliberate replacement uses
-        # the separate regenerate action.
+        # The primary action is always missing-only. Keep the durable all-topic
+        # ID scope resolved above instead of expanding back to unrelated rows.
         requested = {
-            index for index, item in enumerate(settings.cover_queue)
-            if not _cover_has_valid_image(item)
+            index for index in requested
+            if 0 <= index < len(settings.cover_queue)
+            and not _cover_has_valid_image(settings.cover_queue[index])
         }
     if not payload.get("forceRegenerate"):
         requested = {
             index for index in requested
-            if 0 <= index < len(settings.cover_queue) and not _cover_has_valid_image(settings.cover_queue[index])
+            if 0 <= index < len(settings.cover_queue)
+            and not _cover_has_valid_image(settings.cover_queue[index])
         }
+    for index in sorted(scope_requested - requested):
+        if not 0 <= index < len(settings.cover_queue):
+            continue
+        identity = str(settings.cover_queue[index].get("production_item_id", "") or "").strip()
+        if identity:
+            rejected_scope.append({
+                "productionItemId": identity,
+                "reason": "already-rendered",
+            })
     if not requested:
-        return {**snapshot(), "operationResult": {
-            "kind": "cover-generate", "count": 0,
-            "message": "Все выбранные обложки уже существуют и не требуют генерации.",
-        }}
+        return _cover_generation_result(
+            snapshot(),
+            count=0,
+            message="Все выбранные обложки уже существуют и не требуют генерации.",
+            accepted_ids=[],
+            rejected=rejected_scope,
+        )
+    if not repeat_current_contract and not payload.get("resumeOnly"):
+        missing_prompt_ids = [
+            str(settings.cover_queue[index].get("production_item_id", "") or "").strip()
+            for index in sorted(requested)
+            if not _cover_active_prompt_options(settings.cover_queue[index])
+        ]
+        missing_prompt_ids = [identity for identity in missing_prompt_ids if identity]
+        if missing_prompt_ids:
+            raise ValueError(
+                "Нет готового visual prompt для ProductionItem ID: "
+                + ", ".join(missing_prompt_ids)
+                + ". Сначала создайте или импортируйте prompt; FastGen не запускался."
+            )
     # One cover topic is self-contained (variants, retries and optional local
     # composition).  Dispatch topics, not individual image variants, so an
     # automatic retry cannot race a sibling worker for the same output file.
@@ -11894,7 +11995,18 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             return generate_covers(worker_payload)
 
         _run_parallel_cover_workers(sorted(requested), run_topic)
-        return snapshot()
+        accepted_ids = [
+            str(settings.cover_queue[index].get("production_item_id", "") or "").strip()
+            for index in sorted(requested)
+            if 0 <= index < len(settings.cover_queue)
+        ]
+        return _cover_generation_result(
+            snapshot(),
+            count=len(requested),
+            message=f"FastGen получил текущих тем: {len(requested)}.",
+            accepted_ids=accepted_ids,
+            rejected=rejected_scope,
+        )
     refine_with_face = bool(payload.get("refineWithFace"))
     requested_index = min(requested)
     saved_profile = (
@@ -12506,14 +12618,32 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     and settings.cover_queue[index].get("face_composite_requested")]
     if face_indices:
         compose_cover_faces({"indices": face_indices})
+    accepted_ids = [
+        str(settings.cover_queue[index].get("production_item_id", "") or "").strip()
+        for index in sorted(requested)
+        if 0 <= index < len(settings.cover_queue)
+    ]
     if settings.cover_auto_overlay_text and text_mode == "overlay":
         try:
-            return render_cover_text({"indices": sorted(requested)})
+            rendered = render_cover_text({"indices": sorted(requested)})
         except ValueError:
             # Rendering a clean visual-only cover remains a success when this
             # topic has no approved cover words yet.
-            pass
-    return snapshot()
+            rendered = snapshot()
+        return _cover_generation_result(
+            rendered,
+            count=len(requested),
+            message=f"FastGen обработал текущих тем: {len(requested)}.",
+            accepted_ids=accepted_ids,
+            rejected=rejected_scope,
+        )
+    return _cover_generation_result(
+        snapshot(),
+        count=len(requested),
+        message=f"FastGen обработал текущих тем: {len(requested)}.",
+        accepted_ids=accepted_ids,
+        rejected=rejected_scope,
+    )
 
 
 def render_cover_text_fastgen(payload: dict) -> dict:
