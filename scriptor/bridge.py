@@ -7391,8 +7391,9 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
     if ensure_idea_production_items(settings, active_titles=titles):
         save_settings(settings)
     browser_settings = _browser_topic_settings(settings)
-    # Validate all global technical prerequisites before changing any job.
-    validate_chatgpt_project_url(browser_settings.project_url)
+    # Validate global non-route prerequisites before changing any job.
+    # Project URL is resolved per ProductionItem below, so an explicit
+    # per-topic URL remains valid even when the optional global URL is empty.
     if browser_settings.requirements_mode not in {"text", "file"}:
         raise ValueError("Выберите источник требований: текст или файл")
     if browser_settings.requirements_mode == "file" and not Path(browser_settings.requirements_file).is_file():
