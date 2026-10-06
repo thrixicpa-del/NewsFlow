@@ -85,6 +85,43 @@ class ClipIndexTests(unittest.TestCase):
             with patch.object(index, "_screen_text_state", side_effect=AssertionError("must not deep scan")):
                 self.assertEqual(index.screen_text_eligibility(clip, deep=True), "SAFE")
 
+    def test_unknown_planning_check_uses_one_full_scan_and_deep_reuses_it(self):
+        """A weak planning probe must never become a current V7 verdict."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-full-once-") as temporary:
+            root = Path(temporary)
+            clip = root / "unknown.mp4"
+            clip.write_bytes(b"fixture")
+            index = FakeClipIndex(
+                root / "footage-index.sqlite3",
+                embedder_factory=lambda: (object(), object()),
+            )
+            stat = clip.stat()
+            with index._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     0, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                )
+
+            calls: list[int] = []
+
+            def classify(_path, *, samples):
+                calls.append(samples)
+                return 0
+
+            with patch.object(index, "_screen_text_state", side_effect=classify):
+                self.assertEqual(
+                    index.screen_text_eligibility(clip, deep=False),
+                    SCREEN_ELIGIBILITY_UNCERTAIN,
+                )
+                self.assertEqual(
+                    index.screen_text_eligibility(clip, deep=True),
+                    SCREEN_ELIGIBILITY_UNCERTAIN,
+                )
+
+            self.assertEqual(calls, [11])
+
     def test_unknown_screen_text_candidate_is_deep_scanned_once_across_planning_workers(self):
         """Parallel planners must share one expensive scan for the same clip."""
         with tempfile.TemporaryDirectory(prefix="newsflow-screen-singleflight-") as temporary:
