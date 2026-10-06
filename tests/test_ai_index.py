@@ -123,6 +123,34 @@ class ClipIndexTests(unittest.TestCase):
 
             self.assertEqual(calls, [11])
 
+    def test_unknown_screen_text_reports_wait_and_check_activity(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-screen-progress-") as temporary:
+            root = Path(temporary)
+            clip = root / "unknown.mp4"
+            clip.write_bytes(b"fixture")
+            events: list[tuple[str, str]] = []
+            index = FakeClipIndex(
+                root / "footage-index.sqlite3",
+                embedder_factory=lambda: (object(), object()),
+                screen_text_progress=lambda state, name: events.append((state, name)),
+            )
+            stat = clip.stat()
+            with index._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,english_text,english_text_version) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns,
+                     0, SCREEN_TEXT_CLASSIFIER_VERSION - 1),
+                )
+
+            with patch.object(index, "_screen_text_state", return_value=-1):
+                self.assertEqual(index.screen_text_eligibility(clip, deep=True), "SAFE")
+
+            self.assertEqual(
+                events,
+                [("slot-wait", clip.name), ("checking", clip.name)],
+            )
+
     def test_unknown_screen_text_candidate_is_deep_scanned_once_across_planning_workers(self):
         """Parallel planners must share one expensive scan for the same clip."""
         with tempfile.TemporaryDirectory(prefix="newsflow-screen-singleflight-") as temporary:
