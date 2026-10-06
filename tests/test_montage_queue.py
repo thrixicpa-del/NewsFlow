@@ -1410,6 +1410,36 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(task["timeline"][-1]["detail"], "Сцена 2/8: tanker.mp4")
         save.assert_called_once_with(worker_settings)
 
+    def test_montage_task_runtime_provenance_distinguishes_current_and_legacy_evidence(self):
+        settings = Settings()
+        with patch.dict(os.environ, {"NEWSFLOW_RUNTIME_SESSION_ID": "desktop-session-a"}), \
+             patch("scriptor.bridge.load_settings", return_value=settings), \
+             patch("scriptor.bridge.save_settings"):
+            bridge._montage_task_update(
+                settings, 4, status="Ошибка", phase="Ошибка подготовки",
+                progress=100, error="No module named 'fastembed'",
+            )
+            current = bridge._montage_task_snapshot_projection(
+                "4", settings.montage_task_statuses["4"],
+            )
+
+        self.assertTrue(current["runtimeCurrent"])
+        self.assertEqual(current["runtimeProvenance"], "current-session")
+        self.assertNotIn("runtimeSessionId", current)
+
+        with patch.dict(os.environ, {"NEWSFLOW_RUNTIME_SESSION_ID": "desktop-session-b"}):
+            previous = bridge._montage_task_snapshot_projection(
+                "4", settings.montage_task_statuses["4"],
+            )
+        self.assertFalse(previous["runtimeCurrent"])
+        self.assertEqual(previous["runtimeProvenance"], "previous-session")
+
+        legacy = bridge._montage_task_snapshot_projection(
+            "5", {"status": "Ошибка", "error": "historical"},
+        )
+        self.assertFalse(legacy["runtimeCurrent"])
+        self.assertEqual(legacy["runtimeProvenance"], "legacy-unattributed")
+
     def test_render_update_records_heartbeat_and_render_start(self):
         settings = Settings()
         with patch("scriptor.bridge.load_settings", return_value=settings), \
