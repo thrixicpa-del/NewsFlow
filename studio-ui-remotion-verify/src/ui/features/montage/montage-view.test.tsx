@@ -481,7 +481,7 @@ describe("Montage Light view", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { indices: [1] }));
 
     fireEvent.click(screen.getByRole("button", { name: "Удалить все MP4" }));
-    await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { all: true }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { all: true, resetHistory: true }));
     confirm.mockRestore();
   });
 
@@ -496,7 +496,7 @@ describe("Montage Light view", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Удалить все MP4" }));
 
-    await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { all: true }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("remove-montage-results", { all: true, resetHistory: true }));
     confirm.mockRestore();
   });
 

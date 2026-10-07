@@ -213,11 +213,14 @@ class MontageRenderTests(unittest.TestCase):
             root = Path(temporary)
             ffmpeg = ffmpeg_executable()
             clips: list[TimelineClip] = []
-            for index, color in enumerate(("red", "blue"), start=1):
+            for index, (color, sample_aspect_ratio) in enumerate(
+                (("red", "13824/13825"), ("blue", "1/1")), start=1,
+            ):
                 source = root / f"{color}.mp4"
                 made = subprocess.run([
                     ffmpeg, "-y", "-f", "lavfi", "-i",
                     f"color=c={color}:size=640x360:rate=25:duration=1.2",
+                    "-vf", f"setsar={sample_aspect_ratio}",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
                 ], capture_output=True, text=True, encoding="utf-8", errors="replace")
                 self.assertEqual(made.returncode, 0, made.stderr[-1000:])
@@ -261,6 +264,30 @@ class MontageRenderTests(unittest.TestCase):
             filter_script = script.read_text(encoding="utf-8")
             self.assertLess(filter_script.index("[0:v]"), filter_script.index("[1:v]"))
             self.assertIn("concat=n=2:v=1:a=0[outv]", filter_script)
+
+    def test_gpu_chunk_command_normalizes_sample_aspect_ratio_before_concat(self):
+        """GPU concat must receive square-pixel streams from every source clip."""
+        with tempfile.TemporaryDirectory(prefix="newsflow-gpu-sar-") as temporary:
+            root = Path(temporary)
+            first = root / "anamorphic.mp4"
+            second = root / "square-pixel.mp4"
+            first.write_bytes(b"x")
+            second.write_bytes(b"x")
+            script = root / "chunk.ffscript"
+            clips = [
+                TimelineClip(str(first), "a", "a", duration=2.0),
+                TimelineClip(str(second), "b", "b", duration=2.0),
+            ]
+            with patch.object(timeline_module, "probe_video_duration", return_value=30.0), \
+                 patch.object(timeline_module, "gpu_timeline_encoder_args",
+                              return_value=["-c:v", "h264_nvenc"]):
+                timeline_module._gpu_timeline_chunk_command(
+                    "ffmpeg", clips, root / "chunk.mp4", script, 1920, 1080,
+                )
+
+            filter_script = script.read_text(encoding="utf-8")
+            self.assertEqual(filter_script.count("setsar=1"), len(clips))
+            self.assertLess(filter_script.rfind("setsar=1"), filter_script.index("concat="))
 
     def test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache(self):
         """Long GPU timelines stay bounded and do not materialise legacy proxies."""

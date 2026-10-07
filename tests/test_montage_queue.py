@@ -250,7 +250,7 @@ class MontageQueueStateTests(unittest.TestCase):
             with patch.object(bridge, "app_data_root", return_value=root):
                 lock_path = bridge._montage_queue_lock_path()
                 lock_path.write_text(
-                    '{"pid": %d, "startedAt": "now"}' % os.getpid(),
+                    f'{{"pid": {os.getpid()}, "startedAt": "now"}}',
                     encoding="utf-8",
                 )
                 before = lock_path.read_text(encoding="utf-8")
@@ -1705,8 +1705,8 @@ class MontageQueueStateTests(unittest.TestCase):
             self.assertNotIn(str(generated), settings.pipeline_montage_outputs)
             self.assertIn(str(outside), settings.pipeline_montage_outputs)
 
-    def test_remove_all_montage_results_deletes_only_generated_mp4_and_cannot_resurrect_them(self):
-        """The bulk MP4 action clears current render rows, never the audio or source footage."""
+    def test_remove_all_montage_results_resets_render_history_without_touching_inputs(self):
+        """Bulk MP4 cleanup makes rows ready for a new render without deleting inputs."""
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             output = root / "MP4"
@@ -1731,7 +1731,7 @@ class MontageQueueStateTests(unittest.TestCase):
             with patch("scriptor.bridge.load_settings", return_value=settings), \
                     patch("scriptor.bridge.save_settings"), \
                     patch("scriptor.bridge.snapshot", return_value={}):
-                result = bridge.remove_montage_results({"all": True})
+                result = bridge.remove_montage_results({"all": True, "resetHistory": True})
 
             self.assertEqual(result["operationResult"]["count"], 2)
             self.assertFalse(first.exists())
@@ -1740,12 +1740,42 @@ class MontageQueueStateTests(unittest.TestCase):
             self.assertTrue(footage.exists())
             self.assertTrue(outside.exists())
             self.assertEqual(settings.pipeline_montage_outputs, [str(outside)])
-            self.assertTrue(all(item["status"] == "Удалено" and not item["outputPath"]
+            self.assertTrue(all(item["status"] == "Готов к монтажу" and not item["outputPath"]
+                                and not item["error"]
+                                and item["timeline"][-1]["label"] == "MP4 и история очищены"
                                 for item in settings.montage_task_statuses.values()))
 
             bridge._reconcile_montage_outputs(settings)
-            self.assertTrue(all(item["status"] == "Удалено"
+            self.assertTrue(all(item["status"] == "Готов к монтажу"
                                 for item in settings.montage_task_statuses.values()))
+
+    def test_remove_all_montage_results_resets_failed_row_without_an_output_file(self):
+        """A prior renderer error must not survive an explicit full reset."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            output = root / "MP4"
+            output.mkdir()
+            voice = root / "voice.mp3"
+            voice.write_bytes(b"voice")
+            settings = Settings(montage_output_folder=str(output))
+            settings.montage_task_statuses = {
+                "5": {
+                    "title": "Ошибка рендера", "status": "Ошибка", "phase": "Ошибка рендера",
+                    "progress": 100, "voicePath": str(voice), "outputPath": "",
+                    "error": "FFmpeg failed", "timeline": [{"label": "Ошибка рендера"}],
+                },
+            }
+
+            with patch("scriptor.bridge.load_settings", return_value=settings), \
+                    patch("scriptor.bridge.save_settings"), \
+                    patch("scriptor.bridge.snapshot", return_value={}):
+                result = bridge.remove_montage_results({"all": True, "resetHistory": True})
+
+            self.assertEqual(result["operationResult"]["count"], 1)
+            item = settings.montage_task_statuses["5"]
+            self.assertEqual(item["status"], "Готов к монтажу")
+            self.assertEqual(item["error"], "")
+            self.assertEqual(item["timeline"][-1]["label"], "MP4 и история очищены")
 
     def test_remove_project_keeps_rendered_mp4_and_media(self):
         with tempfile.TemporaryDirectory() as folder:
