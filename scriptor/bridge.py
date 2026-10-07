@@ -18488,6 +18488,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
 def remove_montage_results(payload: dict) -> dict:
     settings = load_settings()
     requested = payload.get("indices")
+    clear_history = bool(payload.get("all") and payload.get("resetHistory"))
     if payload.get("all"):
         indices = [int(key) for key in settings.montage_task_statuses if str(key).isdigit()]
     else:
@@ -18495,6 +18496,39 @@ def remove_montage_results(payload: dict) -> dict:
     removed = 0
     for index in indices:
         previous = dict(settings.montage_task_statuses.get(str(index)) or {})
+        if clear_history:
+            _remove_montage_output(settings, index)
+            voice_path = str(previous.get("voicePath") or "")
+            has_voice = bool(voice_path and Path(voice_path).is_file())
+            title = str(previous.get("title") or "Без названия")
+            reset_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            reset_detail = (
+                "Готов к новому монтажу с текущими настройками"
+                if has_voice
+                else "MP4 и история очищены; нужен готовый MP3"
+            )
+            item = {
+                **previous,
+                "title": title,
+                "status": "Готов к монтажу" if has_voice else "Ожидает MP3",
+                "phase": "MP4 и история очищены",
+                "progress": 0,
+                "detail": reset_detail,
+                "outputPath": "",
+                "error": "",
+                "timeline": [{
+                    "at": time.strftime("%H:%M:%S"),
+                    "label": "MP4 и история очищены",
+                    "progress": 0,
+                    "detail": reset_detail,
+                }],
+                "updatedAt": reset_at,
+            }
+            for key in ("ffmpegPid", "queuePid", "runtimeSessionId", "renderAttempt", "retryAt"):
+                item.pop(key, None)
+            settings.montage_task_statuses[str(index)] = item
+            removed += 1
+            continue
         if previous.get("outputPath") or previous.get("status") == "Готово":
             _remove_montage_output(settings, index)
             title = previous.get("title", "Без названия")
@@ -18505,7 +18539,8 @@ def remove_montage_results(payload: dict) -> dict:
             removed += 1
     save_settings(settings)
     return {**snapshot(), "operationResult": {"kind": "montage-remove", "count": removed,
-                                                "folder": settings.montage_output_folder}}
+                                                "folder": settings.montage_output_folder,
+                                                "historyCleared": clear_history}}
 
 
 def remove_montage_projects(payload: dict) -> dict:

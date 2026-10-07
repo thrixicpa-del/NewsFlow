@@ -936,7 +936,7 @@ def _gpu_timeline_chunk_command(
         label = f"v{index}"
         filters.append(
             f"[{index}:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},fps=30,format=yuv420p[{label}]"
+            f"crop={width}:{height},setsar=1,fps=30,format=yuv420p[{label}]"
         )
         labels.append(f"[{label}]")
     filters.append(f"{''.join(labels)}concat=n={len(clips)}:v=1:a=0[outv]")

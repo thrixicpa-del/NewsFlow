@@ -10900,14 +10900,14 @@ export function Editor({
       !indices.length ||
       !window.confirm(
         all
-          ? "Удалить все готовые MP4 и их пакеты результатов?"
+          ? "Удалить все MP4 и пакеты результатов, очистить историю монтажа и подготовить задачи к новой сборке? Сценарии, MP3 и исходные футажи останутся."
           : `Удалить готовые MP4: ${indices.length}?`,
       )
     )
       return;
     const result = await command(
       "remove-montage-results",
-      all ? { all: true } : { indices },
+      all ? { all: true, resetHistory: true } : { indices },
     );
     if (result) setSelected([]);
   };
