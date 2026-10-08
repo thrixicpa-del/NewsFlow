@@ -811,19 +811,32 @@ export function App() {
     return () => window.removeEventListener("keydown", closeInspector);
   }, [selectedTask]);
 
+  const snapshotRefresh = useRef<Promise<void> | null>(null);
   const refresh = useCallback(async () => {
     if (visualFixture) {
       setData(visualFixture);
       return;
     }
-    try {
-      const state = await window.newsflowDesktop?.snapshot();
-      if (state) {
-        setData(state);
-        setTarget(String(state.pipelineTarget));
+    // A workspace can unmount while its read is still pending. Share that
+    // read across navigation and manual refreshes instead of spawning Core
+    // again for the same outstanding snapshot.
+    if (snapshotRefresh.current) return snapshotRefresh.current;
+    const pending = (async () => {
+      try {
+        const state = await window.newsflowDesktop?.snapshot();
+        if (state) {
+          setData(state);
+          setTarget(String(state.pipelineTarget));
+        }
+      } catch (error) {
+        setNotice(coreAvailabilityNotice(error));
       }
-    } catch (error) {
-      setNotice(coreAvailabilityNotice(error));
+    })();
+    snapshotRefresh.current = pending;
+    try {
+      await pending;
+    } finally {
+      snapshotRefresh.current = null;
     }
   }, [visualFixture]);
   useEffect(() => {
@@ -13266,6 +13279,10 @@ export function VoiceQueue({
   const [reconciling, setReconciling] = useState(false);
   const voiceGenerationLock = useRef(false);
   const voiceReconcileLock = useRef(false);
+  const voiceRefresh = useRef(refresh);
+  useEffect(() => {
+    voiceRefresh.current = refresh;
+  }, [refresh]);
   type VoiceQueueItem = (typeof data.voiceItems)[number] & {
     jobProvider?: string;
     resumeSafe?: boolean;
@@ -13371,14 +13388,29 @@ export function VoiceQueue({
     setProvider(data.voiceProvider);
     setOutputFolder(data.voiceOutputFolder);
   }, [data.voiceProvider, data.voiceOutputFolder]);
+  const shouldRefreshVoiceQueue = generating || queued.length > 0;
   useEffect(() => {
-    if (!generating) return;
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 900);
-    void refresh();
-    return () => window.clearInterval(timer);
-  }, [generating, refresh]);
+    if (!shouldRefreshVoiceQueue) return;
+    let stopped = false;
+    let timer: number;
+    const poll = async () => {
+      try {
+        await voiceRefresh.current();
+      } catch {
+        // App.refresh reports the read error. A failed read must not stop
+        // observing the external worker or submit a replacement voice job.
+      } finally {
+        if (!stopped) timer = window.setTimeout(() => void poll(), 3000);
+      }
+    };
+    // Poll existing work after returning to this workspace as well. Wait
+    // after each completed read so slow snapshots never accumulate.
+    timer = window.setTimeout(() => void poll(), 3000);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [shouldRefreshVoiceQueue]);
   const setVoiceProvider = (value: string) => {
     setProvider(value);
     void command("save-voice-settings", { provider: value });
