@@ -89,6 +89,38 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             self.assertTrue(artifact.is_file())
             browser.close()
 
+    @unittest.skipUnless(os.name == "nt", "native Windows window-title regression")
+    def test_test_window_identity_survives_renderer_title_changes(self):
+        """HTML title updates must not disguise an isolated TEST window as production."""
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            page.evaluate("document.title = 'Renderer title update'")
+            page.wait_for_timeout(250)
+            self.assertIsNotNone(self.process)
+            observed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Process -Id {self.process.pid}).MainWindowTitle"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=10, check=True,
+            )
+            self.assertEqual("NewsFlow Studio [TEST]", observed.stdout.strip())
+            page.reload()
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            observed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Process -Id {self.process.pid}).MainWindowTitle"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=10, check=True,
+            )
+            self.assertEqual("NewsFlow Studio [TEST]", observed.stdout.strip())
+            browser.close()
+
     def test_covers_poll_completed_files_by_production_id_without_provider_calls(self):
         """Real source Electron/IPC/Core refreshes a synthetic 84-topic queue."""
         if os.environ.get("NEWSFLOW_E2E_TARGET", "source") != "source":
