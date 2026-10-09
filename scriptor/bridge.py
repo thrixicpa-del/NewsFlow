@@ -9278,15 +9278,19 @@ def _cover_prompt_key(value: object) -> str:
 
 def _cover_active_prompt_options(item: dict) -> list[str]:
     """Return every active visual option, including legacy single-prompt rows."""
+    manual = str(item.get("prompt_provider", "") or "").casefold() == "manual"
     values = item.get("image_prompt_options")
     candidates = list(values) if isinstance(values, list) else []
     candidates.append(item.get("image_prompt", ""))
     result: list[str] = []
     seen: set[str] = set()
     for value in candidates:
-        prompt = _cover_scene_brief_for_memory(value)
+        # Accepted operator text is not an AUTO scene/history brief. Applying
+        # the 800-char semantic extractor here can make a saved manual prompt
+        # disappear before FastGen even sees it. History stays bounded below.
+        prompt = str(value or "") if manual else _cover_scene_brief_for_memory(value)
         key = _cover_prompt_key(prompt)
-        if prompt and key not in seen:
+        if key and key not in seen:
             result.append(prompt)
             seen.add(key)
     return result
