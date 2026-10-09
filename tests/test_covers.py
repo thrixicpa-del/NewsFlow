@@ -221,13 +221,13 @@ class CoverCurrentSelectionRegressionTests(unittest.TestCase):
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
              patch.object(bridge, "_save_cover_state"), \
              patch.object(bridge, "snapshot", return_value={}), \
-             patch.object(bridge.FastGenPool, "generate_media") as generate:
-            with self.assertRaisesRegex(ValueError, "устарела"):
-                bridge.generate_covers({
-                    "indices": [0],
-                    "productionItemIds": ["production:stale"],
-                    "_parallel_cover_worker": True,
-                })
+             patch.object(bridge.FastGenPool, "generate_media") as generate, \
+             self.assertRaisesRegex(ValueError, "устарела"):
+            bridge.generate_covers({
+                "indices": [0],
+                "productionItemIds": ["production:stale"],
+                "_parallel_cover_worker": True,
+            })
 
         generate.assert_not_called()
 
@@ -250,13 +250,13 @@ class CoverCurrentSelectionRegressionTests(unittest.TestCase):
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
              patch.object(bridge, "_save_cover_state"), \
              patch.object(bridge, "snapshot", return_value={}), \
-             patch.object(bridge.FastGenPool, "generate_media") as generate:
-            with self.assertRaisesRegex(ValueError, "Нет готового visual prompt"):
-                bridge.generate_covers({
-                    "indices": [0],
-                    "productionItemIds": [production_item_id],
-                    "_parallel_cover_worker": True,
-                })
+             patch.object(bridge.FastGenPool, "generate_media") as generate, \
+             self.assertRaisesRegex(ValueError, "Нет готового visual prompt"):
+            bridge.generate_covers({
+                "indices": [0],
+                "productionItemIds": [production_item_id],
+                "_parallel_cover_worker": True,
+            })
 
         generate.assert_not_called()
 
@@ -4491,7 +4491,7 @@ class CoverLocalCompositorTests(unittest.TestCase):
         item = {
             "production_item_id": "production:scene-preservation",
             "title": "Municipal infrastructure update",
-            "script": "Routine maintenance notice.",
+            "script": provider_scene,
         }
         prior_prompt = _normalize_cover_photo_prompt(provider_scene, item)
         settings.cover_queue = [{
@@ -4531,7 +4531,7 @@ class CoverLocalCompositorTests(unittest.TestCase):
         item = {
             "production_item_id": "production:all-composition-directions",
             "title": "Municipal infrastructure update",
-            "script": "Routine maintenance notice.",
+            "script": ". ".join(provider_scenes),
         }
         prior_options = [_normalize_cover_photo_prompt(scene, item) for scene in provider_scenes]
         provider_scene_snapshot = tuple(provider_scenes)
@@ -7176,13 +7176,16 @@ class CoverRenderQueueSafetyTests(unittest.TestCase):
             settings.cover_api_keys = [FastGenKey(label="test", secret="test")]
             lock = threading.Lock()
             active = maximum = 0
+            batch_started = threading.Barrier(10)
 
             def render(_prompt, output, stem, *_args, **_kwargs):
                 nonlocal active, maximum
                 with lock:
                     active += 1
                     maximum = max(maximum, active)
-                time.sleep(0.01)
+                # Prove ten workers can enter together without depending on
+                # scheduler speed under simultaneous UI/build verification.
+                batch_started.wait(timeout=10)
                 path = output / f"{stem}.png"
                 path.write_bytes(b"tiny-image")
                 with lock:

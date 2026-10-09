@@ -352,7 +352,11 @@ async function resumeFastGenAtHourlyReset() {
   // provider's accounting and works even while the covers screen is closed.
   if (fastGenResumeRunning || new Date().getMinutes() !== 1) return;
   try {
-    const state = await callCore('snapshot') as { covers?: Array<{ status?: string; rate_limit_wait_until?: string }> };
+    const state = await callCore('snapshot') as {
+      covers?: Array<{ status?: string; rate_limit_wait_until?: string }>;
+      coverSettings?: { rateAutoResume?: boolean; generationPaused?: boolean };
+    };
+    if (state.coverSettings?.rateAutoResume !== true || state.coverSettings.generationPaused) return;
     const now = Date.now();
     const due = (state.covers || []).some((cover) =>
       cover.status === 'Ожидает лимит FastGen' &&
@@ -361,7 +365,7 @@ async function resumeFastGenAtHourlyReset() {
     if (!due) return;
     fastGenResumeRunning = true;
     await callCore('refresh-fastgen');
-    await callCore('resume-cover-generation');
+    await callCore('resume-cover-generation', { automatic: true });
   } catch {
     // The queued rows stay persisted; the next minute-01 check retries them.
   } finally {

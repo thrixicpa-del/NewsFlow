@@ -55,20 +55,21 @@ class CoverQueueTombstoneTests(unittest.TestCase):
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
              patch.object(bridge, "load_session", return_value=(["Текущая тема"], [])), \
-             self.assertRaisesRegex(ValueError, "Выберите сценарии"):
+             self.assertRaisesRegex(ValueError, "Выбранная задача обложки устарела"):
             bridge.generate_cover_headlines({
                 "indices": [0], "productionItemIds": ["legacy-cover:0"], "provider": "agent",
             })
 
         self.assertEqual(current, before)
 
-    def test_title_tombstone_blocks_a_stale_session_before_cover_generation(self):
-        """A pre-ID deleted title must not become active through an old session snapshot."""
+    def test_id_tombstone_blocks_a_stale_session_before_cover_generation(self):
+        """A deleted ProductionItem must not become active through an old session snapshot."""
         current = {"production_item_id": "current:deleted", "title": "Удалённая тема"}
         settings = Settings(
             cover_queue=[current],
             idea_scenario_context={"Удалённая тема": {"id": "current:deleted", "title": "Удалённая тема"}},
             deleted_scenario_titles=["удалённая тема"],
+            deleted_scenario_production_ids=["current:deleted"],
         )
         with patch.object(bridge, "load_session", return_value=(["Удалённая тема"], [])):
             selected = bridge._select_current_cover_generation_rows(
@@ -120,12 +121,12 @@ class CoverQueueTombstoneTests(unittest.TestCase):
         before = dict(current)
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "_hydrate_cover_library", return_value=False), \
-             patch.object(bridge, "load_session", return_value=(["Текущая тема"], [])):
-            result = bridge._generate_covers_unlocked({
+             patch.object(bridge, "load_session", return_value=(["Текущая тема"], [])), \
+             self.assertRaisesRegex(ValueError, "Выбранная задача обложки устарела"):
+            bridge._generate_covers_unlocked({
                 "indices": [0], "productionItemIds": ["legacy-cover:0"], "operation": "test",
             })
 
-        self.assertEqual(result["operationResult"]["count"], 0)
         self.assertEqual(current, before)
 
     def test_explicitly_removed_cover_does_not_return_from_stale_settings_save(self):

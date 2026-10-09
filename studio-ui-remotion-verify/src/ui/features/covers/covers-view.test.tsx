@@ -842,6 +842,7 @@ describe("Covers Light view", () => {
     fireEvent.submit(headline.closest("form")!);
     await waitFor(() => expect(command).toHaveBeenCalledWith("save-cover-headline", {
       index: 0,
+      productionItemId: "production:manual",
       headline: "НОВЫЙ РУЧНОЙ ЗАГОЛОВОК",
     }));
 

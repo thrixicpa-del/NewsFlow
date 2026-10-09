@@ -720,12 +720,27 @@ def reconcile_cover_gallery(payload: dict | None = None) -> dict:
             *(item.get("paths") or []), *(item.get("raw_paths") or []),
             *(item.get("face_composite_paths") or []), item.get("selected_path", ""),
             item.get("selected_base_path", ""), item.get("path", ""), item.get("text_overlay_path", ""),
+            *(path for record in (item.get("prompt_image_paths") or [])
+              if isinstance(record, dict) for path in (record.get("paths") or [])),
         ]
-        # Old projects often kept no path at all even though the canonical
-        # image still exists. The numbered title prefix is deterministic and
-        # safe; ambiguous matches are intentionally left untouched.
-        title_prefix = f"{index + 1:03d} — {safe_filename(str(item.get('title', '')))}"
-        discovered = [str(path) for path in physical.values() if path.name.startswith(title_prefix)]
+        # Current ProductionItems may only recover their own recorded paths.
+        # A reused title/queue number is not ownership evidence. Keep the
+        # title-only compatibility path for unambiguous legacy rows, never
+        # promote an unknown file to a current ProductionItem ID.
+        discovered = []
+        title = safe_filename(str(item.get("title", "")))
+        identity = str(item.get("production_item_id") or item.get("productionItemId") or "").strip()
+        unique_title = title and sum(
+            safe_filename(str(row.get("title", ""))) == title for row in settings.cover_queue
+        ) == 1
+        if not identity and unique_title:
+            for path in physical.values():
+                number, separator, name = path.stem.partition(" — ")
+                owners = [row for row in settings.cover_queue
+                          if (candidate_title := safe_filename(str(row.get("title", ""))))
+                          and (name == candidate_title or name.startswith(candidate_title + " — "))]
+                if separator and number.isdigit() and len(owners) == 1 and owners[0] is source:
+                    discovered.append(str(path))
         candidates = list(dict.fromkeys(str(path) for path in [*candidates, *discovered] if str(path).strip()))
         valid = [record["path"] for record in (cover_file_state(path) for path in candidates)
                  if record["state"] == "ready"]
@@ -11500,12 +11515,25 @@ def import_cover_topics(payload: dict) -> dict:
                                                 "message": f"Тем добавлено в обложки: {added}."}}
 
 
-def save_cover_headline(payload: dict) -> dict:
-    settings = load_settings()
-    _hydrate_cover_library(settings)
+def _cover_manual_text_index(settings: Settings, payload: dict) -> int:
+    identity = str(payload.get("productionItemId") or payload.get("production_item_id") or "").strip()
+    if identity:
+        matches = [index for index, row in enumerate(settings.cover_queue)
+                   if str(row.get("production_item_id") or row.get("productionItemId") or "").strip() == identity]
+        if len(matches) != 1:
+            raise ValueError("ProductionItem обложки не найден или неоднозначен")
+        return matches[0]
+    # Compatibility with older callers; current editors always supply ID.
     index = int(payload.get("index", -1))
     if not 0 <= index < len(settings.cover_queue):
         raise ValueError("Сценарий обложки не найден")
+    return index
+
+
+def save_cover_headline(payload: dict) -> dict:
+    settings = load_settings()
+    _hydrate_cover_library(settings)
+    index = _cover_manual_text_index(settings, payload)
     text = " ".join(str(payload.get("headline", "")).split())
     settings.cover_queue[index].update(cover_headline=text, headline_source="MANUAL",
                                        headline_status="MANUAL" if text else "", headline_error="")
@@ -11518,9 +11546,7 @@ def save_cover_subheadline(payload: dict) -> dict:
     """Save the secondary thumbnail line typed directly in the cover row."""
     settings = load_settings()
     _hydrate_cover_library(settings)
-    index = int(payload.get("index", -1))
-    if not 0 <= index < len(settings.cover_queue):
-        raise ValueError("Сценарий обложки не найден")
+    index = _cover_manual_text_index(settings, payload)
     text = _clean_cover_subheadline(str(payload.get("subheadline", "")))
     headline = _clean_cover_headline(str(settings.cover_queue[index].get("cover_headline", "")))
     if settings.cover_text_avoid_repeats and headline and text and _cover_lines_repeat_meaningful_words(headline, text):
@@ -21704,12 +21730,15 @@ def main() -> None:
         elif command == "pause-cover-generation":
             result = set_cover_generation_paused(True)
         elif command == "resume-cover-generation":
-            set_cover_generation_paused(False)
+            automatic = isinstance(payload, dict) and payload.get("automatic") is True
+            if not automatic:
+                set_cover_generation_paused(False)
             settings = load_settings()
             _hydrate_cover_library(settings)
+            automatic_blocked = automatic and (not settings.cover_rate_auto_resume or settings.cover_generation_paused)
             paused_rows = _select_current_cover_generation_rows(
                 settings, {}, lambda item: item.get("status") in {"Приостановлено", "Ожидает лимит FastGen"},
-            )
+            ) if not automatic_blocked else []
             # A click on Continue must never look like a failure when the
             # queue was not paused. In that case return a normal notice;
             # the UI's primary button starts the selected ready topics.
@@ -21720,7 +21749,9 @@ def main() -> None:
             }) if paused_rows else {
                 **snapshot(), "operationResult": {
                     "kind": "cover-resume", "count": 0,
-                    "message": "Паузы нет: выберите готовые темы и запустите создание обложек.",
+                    "message": ("Автопродолжение отключено или очередь на паузе; задачи сохранены."
+                                if automatic_blocked else
+                                "Паузы нет: выберите готовые темы и запустите создание обложек."),
                 }
             }
         elif command == "prepare-cover-face-library":

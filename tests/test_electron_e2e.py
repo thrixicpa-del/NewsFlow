@@ -89,6 +89,75 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             self.assertTrue(artifact.is_file())
             browser.close()
 
+    def test_covers_poll_completed_files_by_production_id_without_provider_calls(self):
+        """Real source Electron/IPC/Core refreshes a synthetic 84-topic queue."""
+        if os.environ.get("NEWSFLOW_E2E_TARGET", "source") != "source":
+            self.skipTest("source-only bug regression; do not modify immutable packages")
+        from PIL import Image
+
+        from scriptor import config
+
+        settings = config.Settings(montage_renderer="ffmpeg", cover_rate_auto_resume=False)
+        settings.cover_queue = [
+            {"production_item_id": f"e2e-cover:{i}", "title": f"Offline cover topic {i}",
+             "status": "FastGen генерирует", "paths": [], "image_prompt": "Manual scene",
+             "prompt_provider": "manual"} for i in range(1, 85)
+        ]
+        config.save_settings(settings)
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            page.get_by_role("button", name="ОБЛОЖКИ И ГЕНЕРАЦИИ", exact=True).click()
+            page.get_by_role("button", name="Обложки YouTube", exact=True).click()
+            row = page.get_by_role("button", name="1. Offline cover topic 1", exact=True).locator("xpath=ancestor::tr")
+            row.wait_for(timeout=20_000)
+            settings = config.load_settings()
+            output = Path(settings.cover_output_folder)
+            output.mkdir(parents=True, exist_ok=True)
+            for i, item in enumerate(settings.cover_queue, 1):
+                if i <= 78:
+                    image = output / f"offline-{i}.png"
+                    Image.new("RGB", (8, 8), "blue").save(image)
+                    item.update(status="Готово", progress=100, paths=[str(image)])
+                elif i == 79:
+                    item.update(status="Ожидает лимит FastGen", progress=5, rate_limit_wait_until="2099-01-01T00:00:00Z")
+                else:
+                    item.update(status="Требуется восстановление FastGen", progress=100,
+                                accepted_generation_id=f"offline-accepted-{i}")
+            config.save_settings(settings)
+            page.wait_for_function("""() => document.querySelectorAll('tr').length > 78
+                && [...document.querySelectorAll('tr')].filter(row => row.innerText.includes('1 картинок')).length === 78""",
+                                   timeout=30_000)
+            self.assertIn("Готово", row.inner_text())
+            snapshot = page.evaluate("async () => window.newsflowDesktop.snapshot()")
+            self.assertEqual(len(snapshot["covers"]), 84)
+            self.assertEqual(sum(bool(item.get("paths")) for item in snapshot["covers"]), 78)
+            self.assertEqual(sum(item.get("status") == "Требуется восстановление FastGen"
+                                 for item in snapshot["covers"]), 5)
+            self.assertEqual(sum(item.get("status") == "Ожидает лимит FastGen"
+                                 for item in snapshot["covers"]), 1)
+            self.assertEqual(snapshot["covers"][0]["production_item_id"], "e2e-cover:1")
+            self.assertFalse(snapshot.get("safeMode", False))
+            artifact_root = Path(os.environ.get("NEWSFLOW_TEST_ARTIFACTS_DIR", self.test_root / "artifacts"))
+            artifact = artifact_root / "issue-375-covers-refresh.png"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(artifact))
+            page.get_by_role("button", name="Галерея обложек", exact=True).click()
+            gallery_row = page.get_by_role("button", name="79. Offline cover topic 79", exact=True).locator("xpath=ancestor::tr")
+            gallery_row.get_by_text("Нет файлов", exact=True).wait_for(timeout=20_000)
+            image = output / "offline-79.png"
+            Image.new("RGB", (8, 8), "blue").save(image)
+            settings.cover_queue[78].update(status="Готово", progress=100, paths=[str(image)])
+            config.save_settings(settings)
+            gallery_row.get_by_text("1 готово", exact=True).wait_for(timeout=30_000)
+            page.screenshot(path=str(artifact.with_name("issue-375-gallery-refresh.png")))
+            browser.close()
+
     def test_preload_bridge_and_safe_core_command_round_trip(self):
         """A packaged renderer must expose preload IPC and persist one local command."""
         self._launch()

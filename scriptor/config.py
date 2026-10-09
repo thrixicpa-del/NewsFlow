@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import ntpath
@@ -114,6 +115,43 @@ class SettingsFileCorruptError(RuntimeError):
     def __init__(self, path: Path):
         super().__init__(f"Настройки NewsFlow повреждены и не были изменены: {path}")
         self.path = path
+
+
+class SettingsFileReadError(RuntimeError):
+    """An inaccessible file is not evidence of malformed persisted JSON."""
+
+    def __init__(self, path: Path):
+        super().__init__(f"Не удалось прочитать настройки NewsFlow; данные не изменены: {path}")
+        self.path = path
+
+
+def _read_settings_text(path: Path, *, missing_under_lock: bool = False) -> str:
+    """Retry bounded Windows sharing/delete-pending races, never JSON errors.
+
+    Readers do not hold the writer lock while opening the atomic replacement.
+    Windows can briefly deny access or hide the destination during that rename.
+    Persistent failures must surface without returning an empty/default state.
+    """
+    for attempt in range(20):
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeError as error:
+            raise SettingsFileCorruptError(path) from error
+        except OSError as error:
+            # Only the holder of the writer lock can establish a genuinely
+            # absent initial profile. A retained lock file is not live work.
+            if (missing_under_lock and isinstance(error, FileNotFoundError)
+                    and attempt == 19 and not path.is_file()):
+                return "{}"
+            retryable = (
+                isinstance(error, (PermissionError, FileNotFoundError))
+                or error.errno in {errno.EACCES, errno.EPERM, errno.ENOENT, errno.EBUSY}
+                or getattr(error, "winerror", None) in {5, 32, 33}
+            )
+            if not retryable or attempt == 19:
+                raise SettingsFileReadError(path) from error
+            time.sleep(0.05)
+    raise AssertionError("settings read retry exhausted")
 
 
 class SettingsSchemaVersionError(RuntimeError):
@@ -873,9 +911,9 @@ def seal_current_runtime_storage() -> bool:
         raise FileNotFoundError(f"Нет canonical settings для runtime seal: {path}")
     with _exclusive_settings_write(path):
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = _read_settings_text(path)
             data = json.loads(raw)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
+        except (ValueError, json.JSONDecodeError) as error:
             raise SettingsFileCorruptError(path) from error
         if not isinstance(data, dict):
             raise SettingsFileCorruptError(path)
@@ -1051,15 +1089,16 @@ def _newsflow_auth_library_candidates() -> list[dict]:
 
 def load_settings() -> Settings:
     path = config_path()
-    if not path.exists():
-        data = {}
-    else:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            raise SettingsFileCorruptError(path) from error
-        if not isinstance(data, dict):
-            raise SettingsFileCorruptError(path)
+    try:
+        if not path.exists():
+            with _exclusive_settings_write(path):
+                data = json.loads(_read_settings_text(path, missing_under_lock=True))
+        else:
+            data = json.loads(_read_settings_text(path))
+    except (ValueError, json.JSONDecodeError) as error:
+        raise SettingsFileCorruptError(path) from error
+    if not isinstance(data, dict):
+        raise SettingsFileCorruptError(path)
     try:
         try:
             stored_schema_version = max(0, int(data.get("schema_version", 0) or 0))
@@ -1519,6 +1558,13 @@ def _merge_api_key_records(persisted: object, incoming: object, observed: object
 
 def _cover_queue_key(item: dict, position: int) -> str:
     """Stable identity for a cover row while two workers save in parallel."""
+    identity = str(item.get("production_item_id") or item.get("productionItemId") or "").strip()
+    if identity:
+        return f"production:{identity}"
+    return _legacy_cover_queue_key(item, position)
+
+
+def _legacy_cover_queue_key(item: dict, position: int) -> str:
     scenario_index = item.get("scenario_index")
     if scenario_index not in (None, ""):
         return f"scenario:{scenario_index}"
@@ -1670,9 +1716,9 @@ def reconcile_voice_outputs(updates: list[dict]) -> dict:
             result["skip_reasons"] = {"SETTINGS_MISSING": len(clean_updates)}
             return result
         try:
-            raw_on_disk = path.read_text(encoding="utf-8")
+            raw_on_disk = _read_settings_text(path)
             data = json.loads(raw_on_disk)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
+        except (ValueError, json.JSONDecodeError) as error:
             raise SettingsFileCorruptError(path) from error
         if not isinstance(data, dict):
             raise SettingsFileCorruptError(path)
@@ -2076,17 +2122,13 @@ def save_settings(settings: Settings):
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_settings_write(path):
-        if path.is_file():
-            try:
-                raw_on_disk = path.read_text(encoding="utf-8")
-                on_disk = json.loads(raw_on_disk)
-            except (OSError, ValueError, json.JSONDecodeError) as error:
-                raise SettingsFileCorruptError(path) from error
-            if not isinstance(on_disk, dict):
-                raise SettingsFileCorruptError(path)
-        else:
-            raw_on_disk = ""
-            on_disk = {}
+        try:
+            raw_on_disk = _read_settings_text(path, missing_under_lock=True)
+            on_disk = json.loads(raw_on_disk)
+        except (ValueError, json.JSONDecodeError) as error:
+            raise SettingsFileCorruptError(path) from error
+        if not isinstance(on_disk, dict):
+            raise SettingsFileCorruptError(path)
         replacement = getattr(settings, "_api_key_replacement", None)
         if replacement:
             # A credential edit is a narrow mutation, not a stale whole-profile

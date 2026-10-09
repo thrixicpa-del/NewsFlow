@@ -896,6 +896,9 @@ export function App() {
       return state;
     } catch (error) {
       const detail = humanCommandError(error);
+      // A cover worker may have committed images before a later status save
+      // failed. Re-read durable state; never repeat the billable command.
+      if (name.includes("cover")) await refresh();
       setNotice(
         detail
           ? `Не выполнено: ${detail}`
@@ -994,9 +997,9 @@ export function App() {
           <TemplateEditor data={data} command={command} onDirtyChange={setTemplateDirty} onSaveRequest={registerTemplateSave} />
         ) : null}
         {page === "agents" ? <Agents data={data} go={navigate} /> : null}
-        {page === "covers" ? <WorkspaceErrorBoundary workspace="Covers" onRetry={() => void refresh()}><Covers data={data} command={command} /></WorkspaceErrorBoundary> : null}
+        {page === "covers" ? <WorkspaceErrorBoundary workspace="Covers" onRetry={() => void refresh()}><Covers data={data} command={command} refresh={refresh} /></WorkspaceErrorBoundary> : null}
         {page === "coverGallery" ? (
-          <CoverGallery data={data} command={command} />
+          <CoverGallery data={data} command={command} refresh={refresh} />
         ) : null}
         {page === "media" ? <Media data={data} command={command} /> : null}
         {page === "seo" ? <Seo data={data} command={command} /> : null}
@@ -4142,6 +4145,9 @@ function CoverPreviewImage({
   );
 }
 
+const coverRowIdentity = (cover: NewsFlowSnapshot["covers"][number]) =>
+  String(cover.production_item_id || `legacy:${cover.scenario_index || ""}:${cover.title}`);
+
 const coverManualRetryStatuses = new Set([
   "Ошибка FastGen",
   "Нужен новый промпт",
@@ -4165,13 +4171,35 @@ const isCoverRenderActive = (cover: NewsFlowSnapshot["covers"][number]) => {
     status.startsWith("FastGen генерирует");
 };
 
+function useCoverSnapshotPolling(refresh?: () => Promise<void>) {
+  const coverRefreshRef = useRef(refresh);
+  coverRefreshRef.current = refresh;
+  useEffect(() => {
+    if (!coverRefreshRef.current) return;
+    let pending = false;
+    const timer = window.setInterval(() => {
+      if (pending) return;
+      pending = true;
+      void Promise.resolve().then(() => coverRefreshRef.current?.())
+        .catch(() => { /* A transient read must not stop the next refresh. */ })
+        .finally(() => { pending = false; });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, []);
+}
+
 export function Covers({
   data: rawData,
   command,
+  refresh,
 }: {
   data: NewsFlowSnapshot;
   command: Command;
+  refresh?: () => Promise<void>;
 }) {
+  useCoverSnapshotPolling(refresh);
+  const coverResumeCommandRef = useRef(command);
+  coverResumeCommandRef.current = command;
   // A portable build can briefly run with a previous Python core after a UI
   // update.  Keep the covers page usable even if that core has not yet sent a
   // newly added optional setting.
@@ -4224,8 +4252,11 @@ export function Covers({
   const [selected, setSelected] = useState<number[]>([]);
   const selectionAnchorRef = useRef<number | null>(null);
   const selectedProductionIdsRef = useRef<string[]>([]);
-  const [inspectedCoverIndex, setInspectedCoverIndex] = useState<number | null>(
+  const [inspectedCoverIdentity, setInspectedCoverIdentity] = useState<string | null>(
     null,
+  );
+  const inspectedCoverIndex = inspectedCoverIdentity === null ? null : data.covers.findIndex(
+    (cover) => coverRowIdentity(cover) === inspectedCoverIdentity,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [operation, setOperation] = useState(data.coverSettings.operation);
@@ -4367,7 +4398,9 @@ export function Covers({
   );
   const [coverGenerationStarting, setCoverGenerationStarting] = useState(false);
   const coverGenerationStartRef = useRef(false);
+  const persistedCoverSettingsKey = JSON.stringify(rawData.coverSettings);
   useEffect(() => {
+    if (settingsOpen) return; // Background refresh must not erase an open Studio draft.
     setOperation(data.coverSettings.operation);
     setRatio(data.coverSettings.aspectRatio);
     setCount(String(data.coverSettings.variantCount));
@@ -4401,21 +4434,20 @@ export function Covers({
     setBuildModeRanges(data.coverSettings.buildModeRanges || []);
     setAllowVariedTextPalette(data.coverSettings.allowVariedTextPalette);
     setSceneIntensityMode(Boolean(data.coverSettings.sceneIntensityMode));
-  // `data.coverSettings` above is a deliberately normalised object created
-  // for every render. Depending on it here makes a missing optional field
-  // (for example `selectedKeyLabels`) allocate a new fallback array forever
-  // and re-run this synchronisation loop. A new core snapshot is the only
-  // event that may replace the local draft controls.
-  }, [rawData.coverSettings]);
+  // Equal background snapshots are not changes to persisted controls.
+  // Defer changed settings until Studio closes, preserving operator drafts.
+  }, [persistedCoverSettingsKey, settingsOpen]);
   useEffect(() => {
+    if (settingsOpen) return;
     setAiReferences(data.coverSettings.aiReferencePaths || []);
     setAiReferenceMode(data.coverSettings.aiReferenceMode || "off");
     setAiReferenceRanges(data.coverSettings.aiReferenceRanges || []);
     setAiReferenceToFastgen(data.coverSettings.aiReferenceToFastgen || false);
   }, [
-    data.coverSettings.aiReferencePaths,
+    settingsOpen,
+    JSON.stringify(data.coverSettings.aiReferencePaths),
     data.coverSettings.aiReferenceMode,
-    data.coverSettings.aiReferenceRanges,
+    JSON.stringify(data.coverSettings.aiReferenceRanges),
     data.coverSettings.aiReferenceToFastgen,
   ]);
   const rateWaitingCovers = data.covers.filter(
@@ -4426,14 +4458,14 @@ export function Covers({
     .filter(Boolean)
     .sort()[0];
   useEffect(() => {
-    if (!nextRateResume) return;
+    if (!rateAutoResume || data.coverSettings.generationPaused || !nextRateResume) return;
     const delay = Math.max(0, new Date(nextRateResume).getTime() - Date.now());
     const timer = window.setTimeout(
-      () => void command("resume-cover-generation"),
+      () => void coverResumeCommandRef.current("resume-cover-generation", { automatic: true }),
       delay + 500,
     );
     return () => window.clearTimeout(timer);
-  }, [command, nextRateResume, rateAutoResume]);
+  }, [nextRateResume, rateAutoResume, data.coverSettings.generationPaused]);
   const liveModels = (data.fastgenCapabilities.image || []).filter(
     (item) => item.id,
   );
@@ -4557,7 +4589,7 @@ export function Covers({
             <Button
               onClick={() => {
                 setSelected([index]);
-                setInspectedCoverIndex(index);
+                setInspectedCoverIdentity(coverRowIdentity(cover));
               }}
             >
               {cover.scenario_index || index + 1}. {cover.title}
@@ -7598,7 +7630,7 @@ export function Covers({
             }
             onRowActivate={(row) => {
               setSelected([row.index]);
-              setInspectedCoverIndex(row.index);
+              setInspectedCoverIdentity(coverRowIdentity(row.cover));
             }}
           />
         ) : (
@@ -7609,9 +7641,9 @@ export function Covers({
         )}
       </section>
       <Sheet
-        open={inspectedCoverIndex !== null}
+        open={inspectedCoverIndex !== null && inspectedCoverIndex >= 0}
         onOpenChange={(open) => {
-          if (!open) setInspectedCoverIndex(null);
+          if (!open) setInspectedCoverIdentity(null);
         }}
         title="Инспектор обложки"
         description="Текущий ProductionItem: текст, референсы, лицо и варианты FastGen."
@@ -7623,7 +7655,7 @@ export function Covers({
               inspectedCoverIndex === index ? (
               <article
                 className={`cover-row ${selected.includes(index) ? "selected" : ""}`}
-                key={`${cover.title}-${index}`}
+                key={coverRowIdentity(cover)}
               >
                 <dl className="cover-provenance" aria-label="Происхождение обложки">
                   <div>
@@ -7824,14 +7856,14 @@ export function Covers({
                   onSubmit={(event) => {
                     event.preventDefault();
                     const value = new FormData(event.currentTarget).get("headline");
-                    void command("save-cover-headline", { index, headline: String(value || "") });
+                    void command("save-cover-headline", { index, productionItemId: cover.production_item_id, headline: String(value || "") });
                   }}
                 >
                   <label>
                     <small>Заголовок на обложке</small>
                     <input
                       name="headline"
-                      key={`${cover.title}-${cover.cover_headline || ""}`}
+                      key={`${coverRowIdentity(cover)}-${cover.cover_headline || ""}`}
                       defaultValue={cover.cover_headline || ""}
                       placeholder="Создай заголовок или впишите его вручную"
                     />
@@ -7848,14 +7880,14 @@ export function Covers({
                   onSubmit={(event) => {
                     event.preventDefault();
                     const value = new FormData(event.currentTarget).get("subheadline");
-                    void command("save-cover-subheadline", { index, subheadline: String(value || "") });
+                    void command("save-cover-subheadline", { index, productionItemId: cover.production_item_id, subheadline: String(value || "") });
                   }}
                 >
                   <label>
                     <small>Подзаголовок на обложке</small>
                     <input
                       name="subheadline"
-                      key={`${cover.title}-${cover.cover_subheadline || ""}`}
+                      key={`${coverRowIdentity(cover)}-${cover.cover_subheadline || ""}`}
                       defaultValue={cover.cover_subheadline || ""}
                       placeholder="Создай подзаголовок или впишите его вручную"
                     />
@@ -7957,17 +7989,23 @@ export function Covers({
 export function CoverGallery({
   data,
   command,
+  refresh,
 }: {
   data: NewsFlowSnapshot;
   command: Command;
+  refresh?: () => Promise<void>;
 }) {
+  useCoverSnapshotPolling(refresh);
   const coverCounts = data.coverCounts || fallback.coverCounts;
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
-  const [inspectedTopicIndex, setInspectedTopicIndex] = useState<number | null>(
+  const [inspectedTopicIdentity, setInspectedTopicIdentity] = useState<string | null>(
     null,
   );
-  const [faceByTopic, setFaceByTopic] = useState<Record<number, string>>({});
+  const inspectedTopicIndex = inspectedTopicIdentity === null ? null : data.covers.findIndex(
+    (cover) => coverRowIdentity(cover) === inspectedTopicIdentity,
+  );
+  const [faceByTopic, setFaceByTopic] = useState<Record<string, string>>({});
   const [operation, setOperation] = useState(data.coverSettings.operation);
   useEffect(
     () => setOperation(data.coverSettings.operation),
@@ -8012,7 +8050,7 @@ export function CoverGallery({
           index,
           cover,
           ...variant,
-          key: `${index}::${variant.path}`,
+          key: `${coverRowIdentity(cover)}::${variant.path}`,
         })),
       ),
     [topics],
@@ -8040,7 +8078,7 @@ export function CoverGallery({
         cell: ({ row }) => {
           const { cover, index } = row.original;
           return (
-            <Button onClick={() => setInspectedTopicIndex(index)}>
+            <Button onClick={() => setInspectedTopicIdentity(coverRowIdentity(cover))}>
               {cover.scenario_index || index + 1}. {cover.title}
             </Button>
           );
@@ -8132,7 +8170,7 @@ export function CoverGallery({
     setSelectedPaths([]);
   };
   const replaceOnlyFace = async (index: number) => {
-    const person = faceByTopic[index];
+    const person = faceByTopic[coverRowIdentity(data.covers[index])];
     if (!person) return;
     if (person === "__none__") {
       await command("clear-cover-face", { index });
@@ -8149,7 +8187,7 @@ export function CoverGallery({
     });
   };
   const rerenderWithFace = async (index: number) => {
-    const person = faceByTopic[index];
+    const person = faceByTopic[coverRowIdentity(data.covers[index])];
     if (!person) return;
     await command("regenerate-cover-with-face", {
       ...coverSelectionPayload([index]),
@@ -8397,9 +8435,9 @@ export function CoverGallery({
         )}
       </section>
       <Sheet
-        open={inspectedTopicIndex !== null}
+        open={inspectedTopicIndex !== null && inspectedTopicIndex >= 0}
         onOpenChange={(open) => {
-          if (!open) setInspectedTopicIndex(null);
+          if (!open) setInspectedTopicIdentity(null);
         }}
         title="Инспектор результата обложки"
         description="Текущий результат, варианты, выбор лица и повторный рендер."
@@ -8410,7 +8448,7 @@ export function CoverGallery({
             inspectedTopicIndex === index ? (
             <article
               className={`panel cover-gallery-topic ${cover.error || cover.status?.includes("Ошибка") ? "has-error" : ""}`}
-              key={`${cover.title}-${index}`}
+              key={coverRowIdentity(cover)}
             >
               <header>
                 <div>
@@ -8518,11 +8556,11 @@ export function CoverGallery({
                   </small>
                 </div>
                 <select
-                  value={faceByTopic[index] || ""}
+                  value={faceByTopic[coverRowIdentity(cover)] || ""}
                   onChange={(event) =>
                     setFaceByTopic((current) => ({
                       ...current,
-                      [index]: event.target.value,
+                      [coverRowIdentity(cover)]: event.target.value,
                     }))
                   }
                 >
@@ -8537,20 +8575,20 @@ export function CoverGallery({
                 </select>
                 <Button
                   onClick={
-                    faceByTopic[index]
+                    faceByTopic[coverRowIdentity(cover)]
                       ? () => void replaceOnlyFace(index)
                       : undefined
                   }
                 >
                   <Image size={15} />
-                  {faceByTopic[index] === "__none__"
+                  {faceByTopic[coverRowIdentity(cover)] === "__none__"
                     ? "Убрать лицо"
                     : "Только заменить лицо"}
                 </Button>
                 <Button
                   kind="primary"
                   onClick={
-                    faceByTopic[index] && faceByTopic[index] !== "__none__"
+                    faceByTopic[coverRowIdentity(cover)] && faceByTopic[coverRowIdentity(cover)] !== "__none__"
                       ? () => void rerenderWithFace(index)
                       : undefined
                   }
@@ -8568,7 +8606,7 @@ export function CoverGallery({
               {variants.length ? (
                 <div className="cover-gallery-grid">
                   {variants.map(({ path, state, message }, variant) => {
-                    const key = `${index}::${path}`;
+                    const key = `${coverRowIdentity(cover)}::${path}`;
                     const selected = selectedPaths.includes(key);
                     const primary = cover.selected_path === path;
                     const available = state === "ready";
