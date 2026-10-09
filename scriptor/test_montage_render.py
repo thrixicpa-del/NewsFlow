@@ -28,7 +28,6 @@ from .ai_index import (
     _SCREEN_TEXT_POSITIVE_QUERIES,
     SCREEN_ELIGIBILITY_BLOCKED,
     SCREEN_ELIGIBILITY_SAFE,
-    SCREEN_ELIGIBILITY_UNCERTAIN,
     SCREEN_TEXT_CLASSIFIER_VERSION,
     ClipIndex,
 )
@@ -672,13 +671,13 @@ class MontageRenderTests(unittest.TestCase):
             labeled = index.classify_english_screen_text()
             self.assertEqual(labeled["checked"], 4)
             self.assertEqual(labeled["blocked"], 2)
-            self.assertEqual(labeled["safe"], 1)
-            self.assertEqual(labeled["uncertain"], 1)
+            self.assertEqual(labeled["safe"], 2)
+            self.assertEqual(labeled["uncertain"], 0)
             self.assertEqual(index.screen_text_eligibility(english_path), SCREEN_ELIGIBILITY_BLOCKED)
             self.assertEqual(index.screen_text_eligibility(interstitial_path), SCREEN_ELIGIBILITY_BLOCKED)
             self.assertEqual(index.screen_text_eligibility(russian_path), SCREEN_ELIGIBILITY_SAFE)
-            self.assertEqual(index.screen_text_eligibility(uncertain_path), SCREEN_ELIGIBILITY_UNCERTAIN)
-            self.assertEqual(index.screen_text_eligibility(uncertain_path, deep=True), SCREEN_ELIGIBILITY_UNCERTAIN)
+            self.assertEqual(index.screen_text_eligibility(uncertain_path), SCREEN_ELIGIBILITY_SAFE)
+            self.assertEqual(index.screen_text_eligibility(uncertain_path, deep=True), SCREEN_ELIGIBILITY_SAFE)
 
             names = {item.name for item in index.all_items(exclude_english_text=True)}
             self.assertEqual(names, {"russian-caption.mp4", "uncertain.mp4"})

@@ -1681,7 +1681,15 @@ def _archive_pre_write_settings(path: Path, raw_on_disk: str) -> None:
     temporary = archive.with_name(f".{archive.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         temporary.write_text(raw_on_disk, encoding="utf-8")
-        os.replace(temporary, archive)
+        deadline = time.monotonic() + 8.0
+        while True:
+            try:
+                os.replace(temporary, archive)
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.10)
     finally:
         try:
             if temporary.exists():
