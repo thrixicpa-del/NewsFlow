@@ -7,7 +7,7 @@ const appSource = readFileSync(resolve(process.cwd(), "src/ui/App.tsx"), "utf8")
 describe("current workstation route exclusivity", () => {
   it("keeps Covers, Voice, Montage, Analytics and Publication on their current workstation implementations", () => {
     expect(appSource).toContain('workspace="Covers"');
-    expect(appSource).toContain("<Covers data={data} command={command} />");
+    expect(appSource).toContain("<Covers data={data} command={command} refresh={refresh} />");
     expect(appSource).toContain('workspace="Voice"');
     expect(appSource).toContain("<VoiceQueue");
     expect(appSource).toContain('workspace="Montage"');
