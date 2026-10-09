@@ -375,6 +375,10 @@ function createWindow() {
     backgroundColor: '#07101d', title: environmentWindowTitle(process.env),
     webPreferences: { preload: path.join(dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
+  // Renderer <title> updates must not hide the isolated TEST identity.
+  window.on('page-title-updated', (event) => {
+    if (isolatedUserDataRoot) event.preventDefault();
+  });
   window.setMenuBarVisibility(false);
   window.webContents.setWindowOpenHandler(({ url }) => {
     try {
