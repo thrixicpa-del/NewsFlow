@@ -64,6 +64,68 @@ class SettingsReadRaceTests(unittest.TestCase):
         self.assertEqual(result["cover_variant_count"], 3)
         self.assertEqual(result["cover_queue"][0]["production_item_id"], "pi-preserved")
 
+    def test_save_retries_transient_replacement_locks_for_each_destination(self):
+        archive = self.path.parent / "state-backups" / "settings-last-known-good.json"
+        real_replace = os.replace
+        for destination in (archive, self.path):
+            with self.subTest(destination=destination.name):
+                self.path.write_text(self.raw, encoding="utf-8")
+                settings = config.load_settings()
+                settings.cover_variant_count = 3
+                attempts = []
+
+                def briefly_locked(source, target, destination=destination, attempts=attempts):
+                    if Path(target) == destination:
+                        attempts.append(1)
+                        if len(attempts) == 1:
+                            raise PermissionError(errno.EACCES, "sharing race")
+                    return real_replace(source, target)
+
+                with patch.object(os, "replace", briefly_locked), patch.object(config.time, "sleep"):
+                    config.save_settings(settings)
+                result = json.loads(self.path.read_text(encoding="utf-8"))
+                self.assertEqual(result["cover_variant_count"], 3)
+                self.assertEqual(result["cover_queue"][0]["image_prompt"], "Literal manual prompt")
+                self.assertEqual(archive.read_text(encoding="utf-8"), self.raw)
+                self.assertEqual(json.loads(archive.read_text(encoding="utf-8"))["unknown_operator_setting"],
+                                 "preserve on save")
+                self.assertEqual(len(attempts), 2)
+
+    def test_archive_failure_keeps_settings_and_previous_backup_and_cleans_temporary(self):
+        archive = self.path.parent / "state-backups" / "settings-last-known-good.json"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        previous = b'{"previous": "rollback point"}'
+        real_replace = os.replace
+        for error in (PermissionError(errno.EACCES, "persistent lock"),
+                      OSError(errno.EIO, "disk failure")):
+            with self.subTest(error=type(error).__name__):
+                archive.write_bytes(previous)
+                settings = config.load_settings()
+                settings.cover_variant_count = 3
+                attempts = []
+                clock = iter(range(0, 100, 4))
+
+                def denied(source, target, attempts=attempts, error=error):
+                    if Path(target) == archive:
+                        attempts.append(1)
+                        raise error
+                    return real_replace(source, target)
+
+                with patch.object(os, "replace", denied), \
+                        patch.object(config.time, "monotonic", side_effect=lambda clock=clock: next(clock)), \
+                        patch.object(config.time, "sleep") as delay, self.assertRaises(type(error)):
+                    config.save_settings(settings)
+                self.assertEqual(self.path.read_bytes(), self.raw.encode("utf-8"))
+                self.assertEqual(archive.read_bytes(), previous)
+                self.assertEqual(list(archive.parent.glob("*.tmp")), [])
+                self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
+                if isinstance(error, PermissionError):
+                    self.assertEqual(len(attempts), 2)
+                    delay.assert_called_once_with(0.10)
+                else:
+                    self.assertEqual(len(attempts), 1)
+                    delay.assert_not_called()
+
     def test_save_transient_missing_file_preserves_concurrent_manual_rows(self):
         stale = config.load_settings()
         latest = config.load_settings()
