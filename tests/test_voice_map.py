@@ -669,7 +669,8 @@ class VoiceMapTests(unittest.TestCase):
         footage = self.root / "footage"
         footage.mkdir()
         source = footage / "rescue emergency aftermath.mp4"
-        source.write_bytes(b"video")
+        from tests.media_fixtures import write_readable_video
+        write_readable_video(source, duration=8.0)
         projects = self.root / "projects"
         settings = Settings(
             footage_folders=[str(footage)],
