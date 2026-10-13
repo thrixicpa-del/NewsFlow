@@ -1600,6 +1600,11 @@ def _cover_semantic_person_candidate(value: object, *, political_portrait: bool)
     }
 
 
+def _cover_has_manual_prompt(item: dict) -> bool:
+    """Only explicit persisted prompt ownership opts out of auxiliary text AI."""
+    return str(item.get("prompt_provider", "") or "").strip().casefold() == "manual"
+
+
 def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> bool:
     """Run one bounded semantic recovery when a current Cover has no public person.
 
@@ -1608,6 +1613,10 @@ def _resolve_missing_cover_primary_person(item: dict, settings: Settings) -> boo
     This is intentionally a face-only repair: it never alters prompt text,
     scenario prose, or the accepted Story Map.
     """
+    # Loading or rendering operator-owned text is not consent to a paid
+    # person-resolution request, even when a caller forgets the route guard.
+    if _cover_has_manual_prompt(item):
+        return False
     active_keys = [key for key in settings.openai_api_keys if key.active and key.secret.strip()]
     if not active_keys:
         item["cover_face_resolution_status"] = "FACE_RESOLUTION_ERROR"
@@ -11891,7 +11900,7 @@ def _cover_repeat_political_contract_error(item: dict, face_mode: str) -> str:
     into a new prompt contract instead.  Manual and no-face contracts are
     operator choices and remain valid regardless of the automatic policy.
     """
-    if not _cover_requires_political_portrait(item):
+    if _cover_has_manual_prompt(item) or not _cover_requires_political_portrait(item):
         return ""
     portrait_source = str(item.get("portrait_source", "") or "").strip().casefold()
     if (
@@ -12166,12 +12175,14 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         # A saved scene, ordinary participant or semantic provider answer can
         # never pre-empt this.  Manual portraits and explicit no-face mode are
         # operator choices and therefore remain outside the automatic policy.
+        manual_prompt = _cover_has_manual_prompt(item)
         manual_portrait = (
             str(item.get("face_reference_source", "") or "").strip().casefold() == "manual"
             and bool(str(item.get("face_reference_label", "") or "").strip())
         ) or str(item.get("portrait_source", "") or "").strip().casefold() == "manual"
         automatic_political = (
             not repeat_current_contract
+            and not manual_prompt
             and face_mode != "without"
             and not item.get("face_reference_disabled")
             and not manual_portrait
@@ -12261,7 +12272,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         # canonical registry president above and never wait for the provider
         # to volunteer a face identity.
         face_required = bool(item.get("cover_face_required")) or _cover_requires_political_portrait(item)
-        if face_mode != "without" and face_required and not portrait["portrait_subject"]:
+        # Manual prompts still use local identity/reference resolution above,
+        # but missing automatic identity must neither buy text AI nor block
+        # the explicitly requested FastGen image render.
+        if not manual_prompt and face_mode != "without" and face_required and not portrait["portrait_subject"]:
             if _resolve_missing_cover_primary_person(item, settings):
                 portrait = _resolve_cover_portrait(
                     item, settings, face_mode=face_mode, allow_manual_reference=use_my_face,
