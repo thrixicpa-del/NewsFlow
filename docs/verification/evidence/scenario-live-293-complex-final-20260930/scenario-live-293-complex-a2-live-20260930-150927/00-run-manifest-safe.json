@@ -1,0 +1,17 @@
+{
+  "active_key_count": 7,
+  "configured_model": "gpt-5.4-mini",
+  "contract": {
+    "allowed_max": 12500,
+    "allowed_min": 11500,
+    "target_chars": 12000
+  },
+  "created_at_utc": "2026-09-30T12:09:27.974602+00:00",
+  "git_status_short": "",
+  "key_material": "NOT_CAPTURED_MEMORY_ONLY",
+  "production_context": "NONE: headline is not factual evidence",
+  "provider": "openai",
+  "run_id": "scenario-live-293-complex-a2-live-20260930-150927",
+  "source_head": "a22ac5db20a5940ebafe572d9722af292ec1e5b1",
+  "test_context_origin": "HEADLINE_ONLY_DRAMATIZED_TEST"
+}

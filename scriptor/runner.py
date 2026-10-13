@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 
 from .core import ScenarioRequest
+from .openai_client import OpenAIResponseStatusError
 from .story_planner import (
     StoryPlan,
     build_story_plan_structure_repair_prompt,
@@ -20,7 +21,12 @@ from .story_planner import (
     calculate_story_part_targets,
     parse_story_plan_response,
     repair_story_plan_parts_response,
+    split_story_plan_structure_repair_request,
+    split_story_planner_request,
+    split_story_writer_request,
     story_plan_from_dict,
+    story_plan_structure_repair_response_format,
+    story_planner_response_format,
 )
 
 
@@ -106,35 +112,118 @@ class Job:
     # Bounded, non-content diagnostics for a Planner response which exhausted
     # the accepted schema-recovery path. Provider prose never belongs here.
     story_planner_failure: dict[str, str] = field(default_factory=dict)
+    # A Responses request that reached the provider but ended without a
+    # completed Writer part.  It is deliberately separate from the immutable
+    # accepted prefix so a normal resume cannot silently send Pn again.
+    writer_partial_response: dict[str, str] = field(default_factory=dict)
 
 
 def _planner_schema_reason(error: BaseException) -> str:
     """Map local Story Map validation failures to stable, safe UI codes."""
     message = " ".join(str(error).casefold().split())
     known_reasons = (
+        ("must return strict json", "NON_JSON"),
+        ("response must be an object", "NON_OBJECT_JSON"),
         ("requires thesis", "MISSING_THESIS"),
         ("requires macro_blocks", "MISSING_MACRO_BLOCKS"),
         ("requires content_atoms", "MISSING_CONTENT_ATOMS"),
-        ("requires exactly", "PART_TOPOLOGY"),
+        ("content atom must be an object", "MISSING_CONTENT_ATOMS"),
+        ("content atom ids must be unique", "ATOM_SEMANTIC_DUPLICATE"),
+        ("content_kind", "INVALID_CONTENT_KIND"),
+        ("requires before_development_after state transition contract", "INVALID_TRANSITION_CONTRACT"),
+        ("requires structured concrete change", "MISSING_TRANSITION_FIELDS"),
+        ("must describe an observable concrete change", "ABSTRACT_OR_NONCONCRETE_TRANSITION"),
+        ("requires concrete story developments", "SEMANTIC_DENSITY"),
+        ("requires at least", "SEMANTIC_DENSITY"),
+        ("content atoms must be materially distinct", "ATOM_SEMANTIC_DUPLICATE"),
+        ("parts must own materially distinct semantic content", "PART_SEMANTIC_DUPLICATE"),
         ("owner_part_id", "CONTENT_OWNERSHIP"),
         ("content atom owner", "CONTENT_OWNERSHIP"),
         ("content atom ownership", "CONTENT_OWNERSHIP"),
-        ("must return strict json", "NON_JSON"),
-        ("response must be an object", "NON_OBJECT_JSON"),
+        ("content atom is assigned more than once", "CONTENT_OWNERSHIP"),
+        ("structural repair must assign every existing atom exactly once", "CONTENT_OWNERSHIP"),
+        ("requires exactly", "PART_COUNT"),
+        ("part ids must be ordered", "PART_ID_ORDER"),
+        ("part must be an object", "PART_CONTENT_IDS"),
+        ("references unknown macro block", "PART_MACRO_REF"),
+        (" role must be ", "PART_ROLE"),
+        (" requires content_ids", "PART_CONTENT_IDS"),
+        (" duplicates content ids", "CONTENT_OWNERSHIP"),
+        ("macro block", "MISSING_MACRO_BLOCKS"),
     )
     for marker, code in known_reasons:
         if marker in message:
             return code
-    return "INVALID_STORY_MAP"
+    # This remains a safe direct-retry category. The structural repairer can
+    # only change parts, so an unknown schema failure must never be presented
+    # to it as though it could repair atoms or top-level fields.
+    return "MISSING_CONTENT_ATOMS"
 
 
-def _pause_for_planner_schema_failure(job: Job, response: str, error: BaseException) -> None:
+_PARTS_ONLY_PLANNER_REASONS = frozenset({
+    "PART_COUNT", "PART_ID_ORDER", "PART_ROLE", "PART_MACRO_REF",
+    "PART_CONTENT_IDS", "CONTENT_OWNERSHIP",
+})
+
+_FRESH_PLANNER_REASON_GUIDANCE = {
+    "INVALID_TRANSITION_CONTRACT": "Include the exact BEFORE_DEVELOPMENT_AFTER transition contract.",
+    "MISSING_TRANSITION_FIELDS": (
+        "For EVERY content_atoms[] object include non-empty exact keys "
+        "state_before, changed_subject, development, resulting_state and state_after, "
+        "plus top-level state_transition_contract=BEFORE_DEVELOPMENT_AFTER. "
+        "Before returning JSON, check those five keys on every atom."
+    ),
+    "ABSTRACT_OR_NONCONCRETE_TRANSITION": "Make every atom an observable concrete change, not an interpretation.",
+    "ATOM_SEMANTIC_DUPLICATE": "Keep every content atom materially distinct from the others.",
+    "PART_SEMANTIC_DUPLICATE": "Give every part distinct semantic ownership and novelty.",
+    "SEMANTIC_DENSITY": "Provide enough distinct concrete developments for each part's target.",
+    "PART_COUNT": "Use the exact runtime part count from the technical skeleton.",
+    "PART_ID_ORDER": "Use the exact ordered part IDs from the technical skeleton.",
+    "PART_ROLE": "Use the exact runtime roles from the technical skeleton.",
+    "PART_MACRO_REF": "Reference only an existing macro block from each technical part.",
+    "PART_CONTENT_IDS": "Give every technical part a valid, non-empty list of content IDs.",
+    "CONTENT_OWNERSHIP": "Assign every existing content atom exactly once to a matching planned part.",
+    "INVALID_CONTENT_KIND": "Use only SUPPORTED or DRAMATIZED as content_kind values.",
+    "MISSING_THESIS": "Include one compact thesis.",
+    "MISSING_MACRO_BLOCKS": "Include valid macro_blocks with unique IDs and purposes.",
+    "MISSING_CONTENT_ATOMS": "Include valid content_atoms with the required schema.",
+    "NON_JSON": "Return one strict JSON object only.",
+    "NON_OBJECT_JSON": "Return one JSON object, not an array or prose.",
+}
+
+
+def _fresh_planner_retry_prompt(planner_prompt: str, reason: str) -> str:
+    """Build a safe recovery prompt without reflecting provider output."""
+    guidance = _FRESH_PLANNER_REASON_GUIDANCE[reason]
+    return (
+        "FRESH STORY PLANNER RETRY. The previous planning response failed a local "
+        f"schema check with safe reason {reason}. {guidance} "
+        "Plan the SAME NewsFlow story again from the original task below. Return only "
+        "the complete JSON Story Map; do not write scenario prose. Do not quote or "
+        "reuse any previous planner response.\n\n"
+        f"TASK:\n{planner_prompt}"
+    )
+
+
+def _pause_for_planner_schema_failure(
+    job: Job,
+    response: str,
+    error: BaseException,
+    *,
+    initial_reason: str,
+    recovery_route: str,
+    structural_repair_reason: str = "",
+) -> None:
     """Pause safely after bounded recovery without retaining provider content."""
     reason = _planner_schema_reason(error)
     job.story_planner_status = "SCHEMA_RECOVERY_EXHAUSTED"
     job.story_planner_failure = {
         "phase": "FRESH_SCHEMA",
         "reason": reason,
+        "initial_reason": initial_reason,
+        "recovery_route": recovery_route,
+        "fresh_reason": reason,
+        "structural_repair_reason": structural_repair_reason,
         "response_chars": str(len(str(response or "").strip())),
         "response_sha256": hashlib.sha256(
             str(response or "").encode("utf-8"),
@@ -236,36 +325,99 @@ class ParallelRunner:
                    for parameter in parameters)
 
     async def _generate_for_request(
-        self, method, prompt: str, request: ScenarioRequest, expected_chars: int | None = None,
+        self,
+        method,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
+        text_format: dict[str, Any] | None = None,
     ) -> str:
-        budget = scenario_output_token_budget(request, expected_chars)
-        if budget and self._accepts_keyword(method, "max_output_tokens"):
-            return await method(prompt, max_output_tokens=budget)
-        return await method(prompt)
+        """Call modern Responses adapters with stages, legacy adapters with one prompt.
 
-    async def _generate_usable(self, prompt: str, request: ScenarioRequest, expected_chars: int | None = None) -> str:
+        The fallback is intentionally capability-based rather than exception-
+        based: a provider TypeError must never be misclassified as an old
+        signature and trigger a second logical request.
+        """
+        budget = scenario_output_token_budget(request, expected_chars)
+        supports_instructions = bool(instructions) and self._accepts_keyword(
+            method, "instructions",
+        )
+        supports_text_format = text_format is None or self._accepts_keyword(
+            method, "text_format",
+        )
+        # A Planner stage without its requested schema is not equivalent to a
+        # structured Planner stage.  Old adapters deliberately receive the
+        # legacy flat request instead of a split request with text.format
+        # silently dropped; Writer calls have no text_format and keep their
+        # historical compatibility path.
+        supports_stage_contract = supports_instructions and supports_text_format
+        call_prompt = prompt if supports_stage_contract else (legacy_prompt or prompt)
+        kwargs: dict[str, Any] = {}
+        if budget and self._accepts_keyword(method, "max_output_tokens"):
+            kwargs["max_output_tokens"] = budget
+        if supports_stage_contract:
+            kwargs["instructions"] = instructions
+        if text_format is not None and supports_text_format:
+            kwargs["text_format"] = text_format
+        return await method(call_prompt, **kwargs)
+
+    async def _generate_usable(
+        self,
+        prompt: str,
+        request: ScenarioRequest,
+        expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
+        text_format: dict[str, Any] | None = None,
+    ) -> str:
         """Retry an unusable provider reply before any scenario prose is accepted."""
-        result = await self._generate_for_request(self.client.generate, prompt, request, expected_chars)
+        result = await self._generate_for_request(
+            self.client.generate,
+            prompt,
+            request,
+            expected_chars,
+            instructions=instructions,
+            legacy_prompt=legacy_prompt,
+            text_format=text_format,
+        )
         refused = looks_like_action_required(result)
         for attempt in range(1, 3):
             if not refused:
                 break
-            retry_prompt = (
+            retry_prefix = (
                 "This is a new standalone task. Complete it now without discussing prior replies. "
                 "Return only the requested result, with no questions or meta commentary.\n\n"
-                f"TASK:\n{prompt}"
             )
             generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-            result = await self._generate_for_request(generate_fresh, retry_prompt, request, expected_chars)
+            result = await self._generate_for_request(
+                generate_fresh,
+                prompt,
+                request,
+                expected_chars,
+                instructions=(retry_prefix + instructions) if instructions else None,
+                legacy_prompt=retry_prefix + f"TASK:\n{legacy_prompt or prompt}",
+                text_format=text_format,
+            )
             refused = looks_like_action_required(result)
         if refused:
             generate_openai = getattr(self.client, "generate_openai", None)
             if generate_openai is not None:
-                openai_prompt = (
+                openai_prefix = (
                     "Return only the completed requested result. Do not ask questions or explain limitations.\n\n"
-                    f"TASK:\n{prompt}"
                 )
-                result = await self._generate_for_request(generate_openai, openai_prompt, request, expected_chars)
+                result = await self._generate_for_request(
+                    generate_openai,
+                    prompt,
+                    request,
+                    expected_chars,
+                    instructions=(openai_prefix + instructions) if instructions else None,
+                    legacy_prompt=openai_prefix + f"TASK:\n{legacy_prompt or prompt}",
+                    text_format=text_format,
+                )
         return result
 
     @staticmethod
@@ -305,28 +457,15 @@ class ParallelRunner:
     def _next_story_part_target(
         self, job: Job, plan: StoryPlan, part_index: int,
     ) -> int:
-        """Rebalance only the remaining character budget; never rewrite accepted prose."""
-        part = plan.parts[part_index]
-        if not job.accepted_story_parts:
-            return max(0, int(part.target_chars or 0))
-        overall_target = self._story_target_chars(job.request)
-        if not overall_target:
-            return max(0, int(part.target_chars or 0))
-        accepted_text = self._assembled_story(plan, job.accepted_story_parts)
-        remaining_parts = len(plan.parts) - part_index
-        # Each future accepted part adds one deterministic "\n\n" separator
-        # to the already assembled prefix.
-        remaining_separators = 2 * remaining_parts
-        remaining_prose = max(
-            remaining_parts,
-            overall_target - len(accepted_text) - remaining_separators,
-        )
-        quotient, remainder = divmod(remaining_prose, remaining_parts)
-        balanced_target = max(1, quotient + (1 if remainder else 0))
-        # Length bounds are advisory for completed prose. If an earlier part
-        # runs long, never starve future planned content just to force the
-        # assembled story back under target; keep at least the planned budget.
-        return max(max(0, int(part.target_chars or 0)), balanced_target)
+        """Keep Writer volume aligned with material reserved in the Story Map.
+
+        Accepted prose is immutable.  Its length cannot manufacture new
+        content for later parts, so a short P1 must not turn a P3 designed for
+        ~4k of owned material into an impossible ~8k assignment.  Final
+        length remains an honest advisory diagnostic after all first passes.
+        """
+        del job
+        return max(0, int(plan.parts[part_index].target_chars or 0))
 
     @staticmethod
     def _assembled_story(plan: StoryPlan, accepted_parts: list[dict[str, Any]]) -> str:
@@ -353,29 +492,65 @@ class ParallelRunner:
             str(text or "").strip(),
         ))
 
+    def _writer_output_rejection_reason(self, text: str) -> str:
+        """Reject only technically unusable Writer responses.
+
+        Scenario quality is owned upstream by the Story Map and Writer prompt.
+        The runtime never rewrites or regenerates a completed Writer response
+        merely because its style is analytical, literary, or otherwise weak.
+        """
+        if looks_like_action_required(text):
+            return "ACTION_REQUIRED"
+        if not str(text or "").strip():
+            return "EMPTY"
+        if self._writer_output_is_structural(text):
+            return "STRUCTURAL"
+        return ""
+
     def _writer_output_unusable(self, text: str) -> bool:
-        return (
-            looks_like_action_required(text)
-            or not str(text or "").strip()
-            or self._writer_output_is_structural(text)
-        )
+        return bool(self._writer_output_rejection_reason(text))
+
+    @staticmethod
+    def _writer_partial_diagnostic(part_id: str, error: OpenAIResponseStatusError) -> dict[str, str]:
+        """Keep an observed non-complete Writer response outside accepted prose."""
+        text = str(error.visible_text or "")
+        return {
+            "part_id": part_id,
+            "status": str(error.status or "UNKNOWN"),
+            "response_id": str(error.response_id or ""),
+            "incomplete_reason": str(error.incomplete_reason or ""),
+            "response_chars": str(len(text)),
+            "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            # This is user-visible partial scenario prose, not an API key,
+            # hidden reasoning, or provider diagnostic.  It remains separate
+            # from accepted_story_parts for an explicit future user action.
+            "text": text,
+        }
 
     async def _generate_fresh_result(
         self,
         prompt: str,
         request: ScenarioRequest,
         expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
+        text_format: dict[str, Any] | None = None,
     ) -> str:
         """Run one bounded fresh-chat recovery before any new artifact is accepted."""
         generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
         result = await self._generate_for_request(
             generate_fresh, prompt, request, expected_chars,
+            instructions=instructions, legacy_prompt=legacy_prompt,
+            text_format=text_format,
         )
         if looks_like_action_required(result):
             generate_openai = getattr(self.client, "generate_openai", None)
             if generate_openai is not None:
                 result = await self._generate_for_request(
                     generate_openai, prompt, request, expected_chars,
+                    instructions=instructions, legacy_prompt=legacy_prompt,
+                    text_format=text_format,
                 )
         return result
 
@@ -384,41 +559,21 @@ class ParallelRunner:
         prompt: str,
         request: ScenarioRequest,
         expected_chars: int | None = None,
+        *,
+        instructions: str | None = None,
+        legacy_prompt: str | None = None,
     ) -> str:
-        """Retry only the current unaccepted Writer part.
+        """Generate one Writer part exactly once.
 
-        This is not continuation or regeneration of accepted prose: every retry
-        receives the same bounded Story Map/ledger/seam prompt and happens
-        before the current part is appended to accepted_story_parts.
+        Planner recovery may happen before prose exists, but Writer prose is
+        never regenerated. A technical failure pauses the job; a style defect
+        must be fixed in the planning/writing architecture and verified by a
+        new end-to-end run, not hidden by rewriting the same part.
         """
-        result = await self._generate_for_request(
+        return await self._generate_for_request(
             self.client.generate, prompt, request, expected_chars,
+            instructions=instructions, legacy_prompt=legacy_prompt,
         )
-        for _attempt in range(2):
-            if not self._writer_output_unusable(result):
-                return result
-            retry_prompt = (
-                "Retry the SAME unfinished NewsFlow story segment in a fresh chat. "
-                "Do not restart the whole story, do not emit a part label or JSON, "
-                "and return only the requested continuous prose segment.\n\n"
-                f"TASK:\n{prompt}"
-            )
-            generate_fresh = getattr(self.client, "generate_fresh", self.client.generate)
-            result = await self._generate_for_request(
-                generate_fresh, retry_prompt, request, expected_chars,
-            )
-        if self._writer_output_unusable(result):
-            generate_openai = getattr(self.client, "generate_openai", None)
-            if generate_openai is not None:
-                openai_prompt = (
-                    "Write only the SAME unfinished NewsFlow story segment below. "
-                    "Do not restart the story, ask questions, emit labels/JSON, or explain limitations.\n\n"
-                    f"TASK:\n{prompt}"
-                )
-                result = await self._generate_for_request(
-                    generate_openai, openai_prompt, request, expected_chars,
-                )
-        return result
 
     async def _run_planned_story(self, job: Job) -> bool:
         """Plan long work once, then accept and persist a contiguous writer prefix."""
@@ -444,14 +599,47 @@ class ParallelRunner:
                 job.actual_chars = len(job.result)
                 job.length_status = "PLAN_LENGTH_CHANGED"
                 return False
+            if job.writer_partial_response:
+                job.state = RunState.PAUSED
+                job.error = (
+                    "Писатель ранее вернул незавершённый фрагмент; "
+                    "сохранённый префикс не перезаписан. Нужен явный перезапуск."
+                )
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = "WRITER_INCOMPLETE"
+                return False
         else:
             # A user-triggered retry starts a new bounded Planner attempt. Never
             # present a previous failure fingerprint as if it described it.
             job.story_planner_status = ""
             job.story_planner_failure = {}
             planner_prompt = build_story_planner_prompt(job.request, part_targets)
-            planner_budget = max(2048, min(8192, 1024 + len(part_targets) * 350))
-            planner_response = await self._generate_usable(planner_prompt, job.request, planner_budget)
+            planner_instructions, planner_input = split_story_planner_request(
+                job.request, part_targets,
+            )
+            # A Planner response carries every atom's transition fields plus
+            # the complete technical topology.  Three 4k parts own at least
+            # nine atoms, so the former ~2k expected-character budget could
+            # truncate a valid JSON map before content_atoms/parts completed.
+            # This is an output allowance only; it neither adds provider
+            # attempts nor changes the Writer's one-call contract.
+            # Scale with the complete immutable map.  The provider-budget
+            # helper remains the single global safety cap; an additional 8k
+            # ceiling here would truncate the tail atoms of 50k+ scenarios.
+            # Each planned part now carries several concrete coverage beats
+            # for its first and only Writer call. Reserve enough output for
+            # that complete map at every supported target size; the provider
+            # helper below remains the only global cap.
+            planner_budget = max(3072, 1536 + len(part_targets) * 1536)
+            planner_response = await self._generate_usable(
+                planner_input,
+                job.request,
+                planner_budget,
+                instructions=planner_instructions,
+                legacy_prompt=planner_prompt,
+                text_format=story_planner_response_format(),
+            )
             if looks_like_action_required(planner_response):
                 job.result = planner_response
                 job.actual_chars = len(planner_response.strip())
@@ -460,33 +648,70 @@ class ParallelRunner:
                 job.error = "Планировщик сценария не вернул рабочий план"
                 return False
             try:
-                plan = parse_story_plan_response(planner_response, part_targets)
-            except (TypeError, ValueError):
-                # Prefer the non-regenerative repair: keep the original Story
-                # Map substance and correct only its part topology/ownership.
-                try:
-                    structural_repair = await self._generate_usable(
-                        build_story_plan_structure_repair_prompt(job.request, planner_response, part_targets),
-                        job.request,
-                        planner_budget,
+                plan = parse_story_plan_response(
+                    planner_response,
+                    part_targets,
+                    require_state_transitions=True,
+                )
+            except (TypeError, ValueError) as initial_error:
+                initial_reason = _planner_schema_reason(initial_error)
+                recovery_route = "FRESH_DIRECT"
+                structural_repair_reason = ""
+                needs_fresh_planner = True
+
+                # Parts-only repair is deliberately narrow. It preserves the
+                # original Story Map and can correct only ordered part topology
+                # and atom ownership. Atom, transition, semantic and top-level
+                # schema errors instead get the one permitted fresh Planner
+                # call directly; sending them to the repairer wastes a call and
+                # cannot make the invalid map valid.
+                if initial_reason in _PARTS_ONLY_PLANNER_REASONS:
+                    recovery_route = "STRUCTURAL_REPAIR"
+                    try:
+                        repair_instructions, repair_input = split_story_plan_structure_repair_request(
+                            job.request, planner_response, part_targets,
+                        )
+                        structural_repair = await self._generate_usable(
+                            repair_input,
+                            job.request,
+                            planner_budget,
+                            instructions=repair_instructions,
+                            legacy_prompt=build_story_plan_structure_repair_prompt(
+                                job.request, planner_response, part_targets,
+                            ),
+                            text_format=story_plan_structure_repair_response_format(),
+                        )
+                        plan = repair_story_plan_parts_response(
+                            structural_repair,
+                            planner_response,
+                            part_targets,
+                            require_state_transitions=True,
+                        )
+                        needs_fresh_planner = False
+                    except (TypeError, ValueError) as repair_error:
+                        # The original map is still unaccepted and no Writer
+                        # prose exists. Fall through to one fresh Planner call.
+                        structural_repair_reason = _planner_schema_reason(repair_error)
+
+                if needs_fresh_planner:
+                    fresh_planner_prompt = _fresh_planner_retry_prompt(
+                        planner_prompt, initial_reason,
                     )
-                    plan = repair_story_plan_parts_response(
-                        structural_repair, planner_response, part_targets,
-                    )
-                except (TypeError, ValueError):
-                    # Some real provider failures are outside the parts-only
-                    # repair scope (missing content_kind, malformed macro/thesis,
-                    # empty/non-JSON response). No Writer prose exists yet, so
-                    # one fresh Planner retry is safe and does not regenerate an
-                    # accepted scenario or mutate an accepted prefix.
-                    fresh_planner_prompt = (
-                        "FRESH STORY PLANNER RETRY. The previous planning response was invalid. "
-                        "Plan the SAME NewsFlow story again from the original task below. "
-                        "Return only the complete JSON Story Map; do not write scenario prose.\n\n"
-                        f"TASK:\n{planner_prompt}"
+                    fresh_planner_instructions = (
+                        "FRESH STORY PLANNER RETRY. The previous planning response failed a local "
+                        f"schema check with safe reason {initial_reason}. "
+                        f"{_FRESH_PLANNER_REASON_GUIDANCE[initial_reason]} "
+                        "Plan the SAME NewsFlow story again. Return only the complete JSON Story Map; "
+                        "do not write scenario prose or quote a previous provider response.\n\n"
+                        f"{planner_instructions}"
                     )
                     fresh_planner_response = await self._generate_fresh_result(
-                        fresh_planner_prompt, job.request, planner_budget,
+                        planner_input,
+                        job.request,
+                        planner_budget,
+                        instructions=fresh_planner_instructions,
+                        legacy_prompt=fresh_planner_prompt,
+                        text_format=story_planner_response_format(),
                     )
                     if looks_like_action_required(fresh_planner_response):
                         job.result = fresh_planner_response
@@ -497,7 +722,9 @@ class ParallelRunner:
                         return False
                     try:
                         plan = parse_story_plan_response(
-                            fresh_planner_response, part_targets,
+                            fresh_planner_response,
+                            part_targets,
+                            require_state_transitions=True,
                         )
                     except (TypeError, ValueError) as fresh_error:
                         # The bounded Planner recovery is exhausted before any
@@ -505,7 +732,12 @@ class ParallelRunner:
                         # diagnostic instead of leaking a raw exception or
                         # persisting provider text.
                         _pause_for_planner_schema_failure(
-                            job, fresh_planner_response, fresh_error,
+                            job,
+                            fresh_planner_response,
+                            fresh_error,
+                            initial_reason=initial_reason,
+                            recovery_route=recovery_route,
+                            structural_repair_reason=structural_repair_reason,
                         )
                         return False
             job.story_plan = plan.to_dict()
@@ -513,6 +745,7 @@ class ParallelRunner:
                 job.request,
             )
             job.accepted_story_parts = []
+            job.writer_partial_response = {}
             job.story_planner_status = "READY"
             job.story_planner_failure = {}
             # Persist the complete plan before a prose part is accepted.
@@ -526,10 +759,31 @@ class ParallelRunner:
             writer_prompt = build_story_writer_prompt(
                 job.request, plan, job.accepted_story_parts, part_index, active_target,
             )
-            writer_result = await self._generate_writer_usable(
-                writer_prompt, job.request, active_target,
+            writer_instructions, writer_input = split_story_writer_request(
+                job.request,
+                plan,
+                job.accepted_story_parts,
+                part_index,
+                active_target,
             )
-            if self._writer_output_unusable(writer_result):
+            try:
+                writer_result = await self._generate_writer_usable(
+                    writer_input,
+                    job.request,
+                    active_target,
+                    instructions=writer_instructions,
+                    legacy_prompt=writer_prompt,
+                )
+            except OpenAIResponseStatusError as error:
+                job.state = RunState.PAUSED
+                job.error = f"Писатель части {part.id} не завершил ответ ({error.status})"
+                job.writer_partial_response = self._writer_partial_diagnostic(part.id, error)
+                job.result = self._assembled_story(plan, job.accepted_story_parts)
+                job.actual_chars = len(job.result)
+                job.length_status = "WRITER_INCOMPLETE"
+                return False
+            writer_failure = self._writer_output_rejection_reason(writer_result)
+            if writer_failure:
                 job.state = RunState.PAUSED
                 job.error = f"Писатель части {part.id} не вернул готовый фрагмент"
                 job.result = self._assembled_story(plan, job.accepted_story_parts)

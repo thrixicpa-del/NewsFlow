@@ -1,0 +1,8 @@
+{
+  "evidence_dir": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-event-spine-20260930-143000",
+  "job_state": "Нужно действие",
+  "logical_calls": 2,
+  "production_write_guard": "PASS",
+  "transport_attempts_captured": 2,
+  "zip": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-event-spine-20260930-143000.zip"
+}

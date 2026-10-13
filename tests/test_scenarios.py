@@ -20,11 +20,17 @@ from scriptor.story_planner import (
 def _story_plan(part_count: int = 2) -> str:
     roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
     return json.dumps({
+        "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
         "thesis": "Одна история",
         "macro_blocks": [{"id": "M1", "purpose": "Развитие"}],
         "content_atoms": [
             {"id": f"C{index:03d}", "summary": f"Факт {index}", "owner_part_id": f"P{index}",
-             "content_kind": "SUPPORTED"}
+             "content_kind": "SUPPORTED",
+             "state_before": f"Состояние до шага {index}.",
+             "state_after": f"Состояние после шага {index}.",
+             "changed_subject": f"Рабочий объект {index}",
+             "development": f"исполнитель выполнил действие {index}",
+             "resulting_state": f"рабочий объект {index} получил новый статус"}
             for index in range(1, part_count + 1)
         ],
         "parts": [
@@ -222,14 +228,134 @@ class ScenarioGenerationTests(unittest.TestCase):
                 self.assertIn("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW", prompt)
                 self.assertIn("Целевой объем: 10000 символов", prompt)
                 self.assertIn("Допустимый итоговый диапазон: 9000–11000 символов", prompt)
-                self.assertIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", prompt)
-                self.assertIn("ПЕРЕД ОТПРАВКОЙ ФИНАЛЬНОГО ОТВЕТА сам проверь длину", prompt)
-                self.assertIn("len(text.strip())", prompt)
-                self.assertIn("а не слова, токены или приблизительный объем", prompt)
+                self.assertIn("Не утверждай, что выполнял код или использовал счётчик символов", prompt)
+                self.assertIn("NewsFlow после получения ответа независимо измерит", prompt)
+                self.assertNotIn("ОБЯЗАТЕЛЬНО сам контролируй количество символов", prompt)
+                self.assertNotIn("len(text.strip())", prompt)
                 self.assertLess(
                     prompt.index("ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW"),
                     prompt.index("FULL_USER_PROMPT_BEGIN"),
                 )
+
+    def test_event_first_production_contract_reaches_planner_and_writer_without_editorial_injection(self):
+        """Generated context is event-first in both model-visible pipeline stages."""
+        title = "Проверочная тема"
+        manual_requirement = "Ручная формулировка: раскрой политическую цену решения."
+        settings = Settings(
+            scenario_provider="openai",
+            template="Сохрани ручной шаблон для {title}.",
+            scenario_target_chars=6000,
+            scenario_allowed_min=5500,
+            scenario_allowed_max=6500,
+            idea_production_items=[{"id": "item-1", "title": title}],
+            idea_scenario_context={title: {
+                "id": "item-1",
+                "framing_type": "EDITORIAL",
+                "core_event": "Комиссия опубликовала решение.",
+                "script_requirements": [manual_requirement],
+            }},
+        )
+
+        class CapturePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
+                target = int(re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt).group(1))
+                return "Т" * target
+
+        pool = CapturePool()
+        with patch.object(bridge, "load_settings", return_value=settings), \
+             patch.object(bridge, "load_session", return_value=([title], [])), \
+             patch.object(bridge, "save_session"), \
+             patch.object(bridge, "save_settings"), \
+             patch.object(bridge, "snapshot", return_value={}), \
+             patch.object(bridge, "HybridTextPool", return_value=pool):
+            bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+
+        self.assertEqual(len(pool.prompts), 2)
+        for prompt in pool.prompts:
+            self.assertIn(manual_requirement, prompt)
+            self.assertIn("Режим материала: EVENT_FIRST", prompt)
+            self.assertIn("действия, решения, реакции и результаты", prompt)
+            self.assertNotIn("Режим подачи: EDITORIAL", prompt)
+            self.assertNotIn("раскрой конфликт, давление, политическую цену", prompt)
+
+    def test_production_material_mode_reaches_planner_without_prompt_text_inference(self):
+        """Evidence availability and permission for reconstruction stay independent end-to-end."""
+        title = "Проверочная тема"
+        manual_template = (
+            "MANUAL_TEMPLATE_MARKER {title}. "
+            "DRAMATIZED_POLICY: ALLOWED -- this is ordinary user text, not a mode switch."
+        )
+
+        class CapturePool:
+            concurrency = 1
+
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, prompt):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return _story_plan(1)
+                target = int(re.search(r"CURRENT TARGET: approximately (\d+) characters", prompt).group(1))
+                return "Т" * target
+
+        cases = (
+            ("factual-empty", "FACTUAL", [], False, False, False),
+            ("factual-supported", "FACTUAL", ["Подтверждённый контекст."], True, False, False),
+            ("hypothetical-empty", "HYPOTHETICAL", [], False, True, True),
+            ("hypothetical-supported", "HYPOTHETICAL", ["Подтверждённый контекст."], True, True, False),
+            ("editorial-empty", "EDITORIAL", [], False, True, True),
+            ("editorial-supported", "EDITORIAL", ["Подтверждённый контекст."], True, True, False),
+        )
+        for _name, framing, context, factual_available, dramatized_allowed, every_atom_dramatized in cases:
+            with self.subTest(mode=_name):
+                settings = Settings(
+                    scenario_provider="openai",
+                    template=manual_template,
+                    scenario_target_chars=6000,
+                    scenario_allowed_min=5500,
+                    scenario_allowed_max=6500,
+                    idea_production_items=[{"id": "item-1", "title": title}],
+                    idea_scenario_context={title: {
+                        "id": "item-1",
+                        "framing_type": framing,
+                        "core_event": "Тема для проверки контракта.",
+                        "supporting_context": context,
+                    }},
+                )
+                pool = CapturePool()
+                saved_batches = []
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", return_value=([title], [])), \
+                     patch.object(bridge, "save_session", side_effect=lambda _titles, jobs, batches=saved_batches: batches.append(jobs)), \
+                     patch.object(bridge, "save_settings"), \
+                     patch.object(bridge, "snapshot", return_value={}), \
+                     patch.object(bridge, "HybridTextPool", return_value=pool):
+                    bridge.generate_scenarios({"provider": "openai", "indices": [0]})
+
+                request = saved_batches[0][0].request
+                planner_prompt = pool.prompts[0]
+                self.assertEqual(request.factual_context_available, factual_available)
+                self.assertEqual(request.dramatized_allowed, dramatized_allowed)
+                self.assertIn("MANUAL_TEMPLATE_MARKER", planner_prompt)
+                self.assertEqual(
+                    "EVERY atom must be DRAMATIZED" in planner_prompt,
+                    every_atom_dramatized,
+                )
+                if dramatized_allowed:
+                    self.assertIn("DRAMATIZED_POLICY: ALLOWED", planner_prompt)
+                else:
+                    self.assertIn("DRAMATIZED_POLICY: FORBIDDEN", planner_prompt)
+                    self.assertNotIn("create logical DRAMATIZED transitions", planner_prompt)
+                    self.assertNotIn("If supplied facts are thin, add distinct DRAMATIZED", planner_prompt)
 
     def test_add_scenarios_persists_identity_before_any_read_only_snapshot(self):
         """A typed title gets one durable ID on the explicit Add action."""

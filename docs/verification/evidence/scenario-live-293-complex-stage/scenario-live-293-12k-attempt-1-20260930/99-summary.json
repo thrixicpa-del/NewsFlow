@@ -1,0 +1,8 @@
+{
+  "evidence_dir": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-12k-attempt-1-20260930",
+  "job_state": "MISSING",
+  "logical_calls": 0,
+  "production_write_guard": "PASS",
+  "transport_attempts_captured": 0,
+  "zip": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-12k-attempt-1-20260930.zip"
+}

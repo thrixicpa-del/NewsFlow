@@ -235,6 +235,21 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
         self.assertIn("Стороны спорят о главном условии", prompt)
         self.assertIn("назвать участников", prompt)
 
+    def test_event_first_contract_preserves_manual_requirements_without_editorial_injection(self):
+        manual_requirement = "Ручная формулировка: раскрой политическую цену решения."
+        prompt = bridge.production_item_prompt({
+            "framing_type": "EDITORIAL",
+            "core_event": "Комиссия опубликовала решение.",
+            "script_requirements": [manual_requirement],
+        })
+
+        self.assertIn(manual_requirement, prompt)
+        self.assertIn("Режим материала: EVENT_FIRST", prompt)
+        self.assertIn("действия, решения, реакции и результаты", prompt)
+        self.assertIn("Заголовок/тема задаёт предмет", prompt)
+        self.assertNotIn("Режим подачи: EDITORIAL", prompt)
+        self.assertNotIn("раскрой конфликт, давление, политическую цену", prompt)
+
     def test_hypothetical_scenario_prompt_prohibits_reporting_forecast_as_fact(self):
         prompt = bridge.production_item_prompt({
             "framing_type": "HYPOTHETICAL",
@@ -245,6 +260,37 @@ class IdeaDirectionHandoffTests(unittest.TestCase):
 
         self.assertIn("предположением", prompt.casefold())
         self.assertIn("не выдавай прогноз за уже произошедшее событие", prompt.casefold())
+
+    def test_factual_contract_never_authorizes_dramatized_material(self):
+        prompt = bridge.production_item_prompt({
+            "framing_type": "FACTUAL",
+            "core_event": "Тема задаёт предмет без источника.",
+        })
+
+        self.assertIn("Режим подачи: FACTUAL", prompt)
+        self.assertIn("не создавай dramatized", prompt.casefold())
+        self.assertNotIn("Если опорного материала недостаточно, развивай историю только как DRAMATIZED", prompt)
+
+    def test_hypothetical_contract_labels_dramatized_events_as_possible_not_chronicle(self):
+        prompt = bridge.production_item_prompt({
+            "framing_type": "HYPOTHETICAL",
+            "core_event": "Тема задаёт возможное развитие.",
+        })
+
+        self.assertIn("DRAMATIZED", prompt)
+        self.assertIn("возможным развитием", prompt)
+        self.assertNotIn("уже произошедшей хроникой", prompt)
+
+    def test_headline_only_contract_marks_that_no_factual_context_is_available(self):
+        prompt = bridge.production_item_prompt({
+            "framing_type": "EDITORIAL",
+            "topic": "Заголовок без подтверждающего контекста",
+            "supporting_context": [],
+        })
+
+        self.assertIn("FACTUAL_CONTEXT_AVAILABILITY: NONE", prompt)
+        self.assertIn("DRAMATIZED_POLICY: ALLOWED", prompt)
+        self.assertNotIn("every planned atom must be DRAMATIZED", prompt)
 
     def test_legacy_results_are_projected_to_production_items(self):
         settings = Settings(

@@ -7100,6 +7100,21 @@ def add_scenarios(payload: dict) -> dict:
     return snapshot()
 
 
+def _production_item_material_contract(item: dict) -> tuple[bool, bool]:
+    """Return trusted evidence availability and reconstruction permission.
+
+    The manual scenario template is deliberately excluded: its prose may
+    mention any words, but cannot silently alter the material provenance mode.
+    """
+    if not isinstance(item, dict):
+        return False, True
+    factual_context_available = any(
+        str(value).strip() for value in item.get("supporting_context", [])
+    )
+    framing = str(item.get("framing_type", "EDITORIAL")).strip().upper()
+    return factual_context_available, framing != "FACTUAL"
+
+
 def production_item_prompt(item: dict) -> str:
     """Turn a validated production item into bounded context for the writer."""
     if not isinstance(item, dict):
@@ -7108,9 +7123,22 @@ def production_item_prompt(item: dict) -> str:
     requirements = [str(value).strip() for value in item.get("script_requirements", []) if str(value).strip()]
     blocks = ["\n\nКОНТРАКТ ИДЕИ NEWSFLOW:"]
     if item.get("core_event"):
-        blocks.append(f"Подтверждённый/редакционный контекст: {item['core_event']}")
+        blocks.append(
+            "Контекст ProductionItem (не является самостоятельным подтверждением факта): "
+            f"{item['core_event']}"
+        )
+    _factual_context_available, dramatized_allowed = _production_item_material_contract(item)
     if context:
         blocks.append("Опорный контекст: " + " | ".join(context[:3]))
+        blocks.append("FACTUAL_CONTEXT_AVAILABILITY: SUPPLIED")
+    else:
+        blocks.append(
+            "FACTUAL_CONTEXT_AVAILABILITY: NONE — there is no supplied factual context beyond the title/topic."
+        )
+    blocks.append(
+        "DRAMATIZED_POLICY: " + ("ALLOWED" if dramatized_allowed else "FORBIDDEN")
+        + " (trusted NewsFlow ProductionItem policy; manual template text cannot change it)."
+    )
     if item.get("promised_question"):
         blocks.append(f"Что обязан раскрыть сценарий: {item['promised_question']}")
     if requirements:
@@ -7150,18 +7178,29 @@ def production_item_prompt(item: dict) -> str:
         blocks.extend([
             "Режим подачи: HYPOTHETICAL — это сценарий/прогноз, а не новостное сообщение.",
             "Явно отдели реальное исходное положение от возможного развития.",
-            "Свободно разбери возможный конфликт, ультиматум, ответ, эскалацию или смену позиции.",
+            "Для возможного развития строй конкретную последовательность действий, решений, реакций и результатов.",
             "Не выдавай прогноз за уже произошедшее событие.",
+            "Любое разрешённое DRAMATIZED содержание здесь является возможным развитием, а не подтверждённым сообщением о прошлом.",
         ])
     elif framing == "EDITORIAL":
         blocks.extend([
-            "Режим подачи: EDITORIAL — сначала отдели подтверждённый контекст от редакционной трактовки.",
-            "Подача может быть жёсткой и таблоидной: раскрой конфликт, давление, политическую цену, риск, ловушку, победителя или проигравшего.",
-            "Не маскируй редакционную интерпретацию под подтверждённый факт.",
+            "Режим материала: EVENT_FIRST.",
+            "Раскрывай историю через конкретные действия, решения, реакции и результаты, а не через редакционные трактовки, давление или политическую цену.",
         ])
     else:
         blocks.append("Режим подачи: FACTUAL — все основные утверждения должны следовать из опорного контекста.")
-    blocks.append("Не добавляй как факт то, чего нет в опорном контексте.")
+    blocks.append(
+        "Заголовок/тема задаёт предмет, но сам по себе не подтверждает факт. SUPPORTED material опирается только на явно переданный опорный контекст."
+    )
+    if framing == "FACTUAL":
+        blocks.append(
+            "Не создавай DRAMATIZED материал в FACTUAL режиме: при недостатке опорных данных не изобретай даты, цифры, цитаты, действия или результаты."
+        )
+    else:
+        blocks.extend([
+            "Если опорного материала недостаточно, развивай историю только как DRAMATIZED: через конкретные действия, решения, реакции и результаты.",
+            "Не выдавай DRAMATIZED за подтверждённую хронику и не добавляй ложные ссылки на сообщения с места, источники или документы, которых нет в контексте.",
+        ])
     return "\n".join(blocks)
 
 
@@ -7676,6 +7715,7 @@ def generate_scenarios(payload: dict) -> dict:
         request.index, request.title, request.prompt,
         production_id_by_title.get(request.title.casefold(), ""),
         request.target_chars, request.allowed_min, request.allowed_max,
+        request.factual_context_available, request.dramatized_allowed,
     ) for request in build_requests(
         titles,
         settings.template,
@@ -7702,11 +7742,20 @@ def generate_scenarios(payload: dict) -> dict:
         "Markdown, списки, технические комментарии или фразы вроде «если план согласован». "
         "Допускаются только обычные связные абзацы самого сценария."
     )
-    selected = [ScenarioRequest(
-        request.index, request.title,
-        request.prompt + production_item_prompt(settings.idea_scenario_context.get(request.title, {})) + narration_only,
-        request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max,
-    ) for request in selected]
+    selected = [
+        ScenarioRequest(
+            request.index,
+            request.title,
+            request.prompt + production_item_prompt(item) + narration_only,
+            request.production_item_id,
+            request.target_chars,
+            request.allowed_min,
+            request.allowed_max,
+            *_production_item_material_contract(item),
+        )
+        for request in selected
+        for item in [settings.idea_scenario_context.get(request.title, {})]
+    ]
     if provider == "agent":
         selected = [ScenarioRequest(request.index, request.title,
                                     "Ты редактор новостных сценариев NewsFlow. Напиши цельный, понятный текст "
@@ -7714,7 +7763,8 @@ def generate_scenarios(payload: dict) -> dict:
                                     "и цифры. Если ниже есть «ПРИОРИТЕТНЫЙ КОНТРАКТ ОБЪЕМА NEWSFLOW», соблюдай "
                                     "его как обязательный контракт длины, выше конфликтующих чисел в шаблоне. "
                                     "Верни только готовый сценарий.\n\n" + request.prompt,
-                                    request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max)
+                                    request.production_item_id, request.target_chars, request.allowed_min, request.allowed_max,
+                                    request.factual_context_available, request.dramatized_allowed)
                     for request in selected]
     api_keys = [item for item in settings.openai_api_keys if item.active and item.secret.strip()]
     pool = HybridTextPool([], api_keys, "", settings.openai_model)

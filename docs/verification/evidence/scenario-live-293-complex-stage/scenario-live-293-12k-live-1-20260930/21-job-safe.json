@@ -1,0 +1,18 @@
+{
+  "accepted_story_parts": [],
+  "actual_chars": 0,
+  "error": "Планировщик не вернул совместимую карту истории после безопасного восстановления. Код диагностики: FRESH_SCHEMA:MISSING_TRANSITION_FIELDS.",
+  "length_status": "FAILED",
+  "state": "Нужно действие",
+  "story_planner_failure": {
+    "fresh_reason": "MISSING_TRANSITION_FIELDS",
+    "initial_reason": "MISSING_CONTENT_ATOMS",
+    "phase": "FRESH_SCHEMA",
+    "reason": "MISSING_TRANSITION_FIELDS",
+    "recovery_route": "FRESH_DIRECT",
+    "response_chars": "12691",
+    "response_sha256": "b54e15e4113d826b58865446c4490d2d7f1dbb7a18387da9382419b8019ade69",
+    "structural_repair_reason": ""
+  },
+  "story_planner_status": "SCHEMA_RECOVERY_EXHAUSTED"
+}

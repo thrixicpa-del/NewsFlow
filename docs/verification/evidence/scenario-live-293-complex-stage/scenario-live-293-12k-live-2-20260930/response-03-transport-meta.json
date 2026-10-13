@@ -1,0 +1,21 @@
+{
+  "capture": "CAPTURED",
+  "id": "resp_06951ec862a85d41006abce346d76087d2bda4ba56c1d8cfc2",
+  "incomplete_details": null,
+  "model": "gpt-5.4-mini-2026-03-17",
+  "output_text_chars": 0,
+  "status": "completed",
+  "transport_attempt": 3,
+  "usage": {
+    "input_tokens": 12323,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_tokens": 9984
+    },
+    "output_tokens": 719,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 13042
+  }
+}

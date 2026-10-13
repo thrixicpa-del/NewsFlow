@@ -3,15 +3,20 @@ import json
 import threading
 import unittest
 from hashlib import sha256
+from pathlib import Path
 
 from scriptor.core import ScenarioRequest
+from scriptor.openai_client import OpenAIResponseIncompleteError
 from scriptor.runner import (
     Job,
     ParallelRunner,
     RunState,
+    _planner_schema_reason,
     looks_like_action_required,
     scenario_length_status,
+    scenario_output_token_budget,
 )
+from scriptor.story_planner import calculate_story_part_targets, story_plan_from_dict
 
 
 class FakeClient:
@@ -30,15 +35,146 @@ class FakeClient:
 
 
 class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incomplete_writer_part_is_durable_but_never_accepted_or_retried_on_resume(self):
+        """A delivered partial P2 is reviewable, not a new Writer attempt."""
+        class IncompleteWriterClient:
+            def __init__(self):
+                self.calls = []
+
+            async def generate(self, prompt, on_progress=None, **kwargs):
+                self.calls.append(prompt)
+                if "NewsFlow Story Planner" in (kwargs.get("instructions") or prompt):
+                    return ParallelRunnerTests._story_plan_json(3)
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 4999
+                if "CURRENT PART: P2" in prompt:
+                    raise OpenAIResponseIncompleteError(
+                        "OpenAI returned incomplete response",
+                        status="incomplete",
+                        visible_text="Частичный текст P2",
+                        response_id="resp_p2_partial",
+                        incomplete_reason="max_output_tokens",
+                    )
+                raise AssertionError("P3 must not start after a partial P2")
+
+        request = ScenarioRequest(0, "Тема", "Шаблон", target_chars=15000)
+        client = IncompleteWriterClient()
+        job = (await ParallelRunner(client, 1).run([request]))[0]
+
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual([part["part_id"] for part in job.accepted_story_parts], ["P1"])
+        self.assertEqual(job.writer_partial_response["part_id"], "P2")
+        self.assertEqual(job.writer_partial_response["text"], "Частичный текст P2")
+        self.assertEqual(job.writer_partial_response["status"], "incomplete")
+        self.assertEqual(sum("CURRENT PART: P3" in call for call in client.calls), 0)
+
+        class NoReplayClient:
+            async def generate(self, *_args, **_kwargs):
+                raise AssertionError("ordinary resume must not repeat a delivered Writer call")
+
+        resumed = (await ParallelRunner(NoReplayClient(), 1).run(
+            [request], resume_jobs={0: job},
+        ))[0]
+        self.assertEqual(resumed.state, RunState.PAUSED)
+        self.assertEqual([part["part_id"] for part in resumed.accepted_story_parts], ["P1"])
+
+    async def test_planner_adapter_without_text_format_uses_explicit_legacy_request(self):
+        """Do not silently send a split Planner request after dropping its schema."""
+        class LegacyPlannerClient:
+            def __init__(self):
+                self.calls = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None,
+                               instructions=None):
+                self.calls.append((prompt, instructions))
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(1)
+                return "Г" * 5000
+
+        client = LegacyPlannerClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "MANUAL_LEGACY_TEMPLATE", target_chars=5000),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        planner_prompt, planner_instructions = client.calls[0]
+        self.assertIn("NewsFlow Story Planner", planner_prompt)
+        self.assertIn("MANUAL_LEGACY_TEMPLATE", planner_prompt)
+        self.assertIsNone(planner_instructions)
+
+    async def test_low_density_map_starts_one_writer_call_per_part_without_planner_recovery(self):
+        """The prior live map remains runnable; material density is advisory."""
+        evidence = (
+            Path(__file__).resolve().parents[1]
+            / "docs" / "verification" / "evidence"
+            / "scenario-live-293-event-spine-20260930-143000"
+            / "response-01-visible.txt"
+        ).read_text(encoding="utf-8")
+
+        class StageClient:
+            def __init__(self):
+                self.calls = []
+
+            async def generate(
+                self, prompt, on_progress=None, max_output_tokens=None, instructions=None,
+                text_format=None,
+            ):
+                self.calls.append((prompt, instructions, max_output_tokens, text_format))
+                if instructions and "NewsFlow Story Planner" in instructions:
+                    return evidence
+                if "CURRENT PART: P1" in prompt:
+                    return "А" * 3999
+                if "CURRENT PART: P2" in prompt:
+                    return "Б" * 3999
+                if "CURRENT PART: P3" in prompt:
+                    return "В" * 3998
+                raise AssertionError("unexpected stage request")
+
+            async def generate_fresh(self, *_args, **_kwargs):
+                raise AssertionError("low atom count must not trigger Planner recovery")
+
+        client = StageClient()
+        request = ScenarioRequest(
+            0, "Тема", "MANUAL_STAGE_TEMPLATE", target_chars=12000,
+            allowed_min=11500, allowed_max=12500,
+        )
+        job = (await ParallelRunner(client, 1).run([request]))[0]
+
+        self.assertEqual(job.state, RunState.DONE)
+        self.assertEqual(len(client.calls), 4)
+        self.assertIn("NewsFlow Story Planner", client.calls[0][1])
+        self.assertNotIn("MANUAL_STAGE_TEMPLATE", client.calls[0][1])
+        self.assertIn("MANUAL_STAGE_TEMPLATE", client.calls[0][0])
+        self.assertEqual(client.calls[0][3]["type"], "json_schema")
+        self.assertTrue(client.calls[0][3]["strict"])
+        self.assertTrue(all(call[3] is None for call in client.calls[1:]))
+        self.assertEqual(
+            ["P1", "P2", "P3"],
+            [record["part_id"] for record in job.accepted_story_parts],
+        )
+
     @staticmethod
     def _story_plan_json(part_count: int) -> str:
         roles = ["COMPLETE"] if part_count == 1 else ["OPENING", *(["MIDDLE"] * (part_count - 2)), "FINAL"]
         return json.dumps({
+            "state_transition_contract": "BEFORE_DEVELOPMENT_AFTER",
             "thesis": "Одна последовательная история без второго смыслового круга.",
             "macro_blocks": [{"id": "M1", "purpose": "Развитие истории"}],
             "content_atoms": [
                 {"id": f"C{index:03d}", "summary": f"Новый материал {index}", "owner_part_id": f"P{index}",
-                 "content_kind": "SUPPORTED" if index == 1 else "DRAMATIZED"}
+                 "content_kind": "SUPPORTED",
+                 "state_before": f"Состояние до шага {index}.",
+                 "state_after": f"Состояние после шага {index}.",
+                 "changed_subject": f"Рабочий объект {index}",
+                 "development": f"исполнитель выполнил действие {index}",
+                 "resulting_state": f"рабочий объект {index} получил новый статус",
+                 "writer_material": [
+                     f"объект {index} работал в прежнем порядке",
+                     f"исполнитель выполнил действие {index} над объектом",
+                     f"ответственная служба проверила изменение объекта {index}",
+                     f"участники получили новый статус объекта {index}",
+                     f"следующий шаг использует результат действия {index}",
+                 ]}
                 for index in range(1, part_count + 1)
             ],
             "parts": [
@@ -59,6 +195,33 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scenario_length_status(request, "а" * 10000), ("READY", 10000))
         self.assertEqual(scenario_length_status(request, "а" * 15000), ("READY", 15000))
         self.assertEqual(scenario_length_status(request, "а" * 15001), ("LONG", 15001))
+
+    def test_planner_schema_reasons_cover_stable_validator_failures(self):
+        """Recovery routing receives the specific local validator category."""
+        cases = {
+            "story plan requires BEFORE_DEVELOPMENT_AFTER state transition contract": "INVALID_TRANSITION_CONTRACT",
+            "story plan atom requires structured concrete change": "MISSING_TRANSITION_FIELDS",
+            "story plan atom must describe an observable concrete change": "ABSTRACT_OR_NONCONCRETE_TRANSITION",
+            "story plan content atoms must be materially distinct": "ATOM_SEMANTIC_DUPLICATE",
+            "story plan parts must own materially distinct semantic content": "PART_SEMANTIC_DUPLICATE",
+            "story plan part P1 requires at least 3 distinct content atoms for semantic density": "SEMANTIC_DENSITY",
+            "story plan requires exactly 2 parts": "PART_COUNT",
+            "story plan part IDs must be ordered as P2": "PART_ID_ORDER",
+            "story plan part P1 role must be OPENING": "PART_ROLE",
+            "story plan part P1 references unknown macro block": "PART_MACRO_REF",
+            "story plan part P1 requires content_ids": "PART_CONTENT_IDS",
+            "story plan content atom ownership must cover every planned atom exactly once": "CONTENT_OWNERSHIP",
+            "story plan content_kind must be SUPPORTED or DRAMATIZED": "INVALID_CONTENT_KIND",
+            "story plan requires thesis": "MISSING_THESIS",
+            "story plan requires macro_blocks": "MISSING_MACRO_BLOCKS",
+            "story plan requires content_atoms": "MISSING_CONTENT_ATOMS",
+            "story planner must return strict JSON": "NON_JSON",
+            "story planner response must be an object": "NON_OBJECT_JSON",
+        }
+
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(_planner_schema_reason(ValueError(message)), expected)
 
     async def test_long_script_is_planned_before_three_writer_parts_without_generic_continuation(self):
         class PlannedClient:
@@ -158,7 +321,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("CURRENT ROLE: MIDDLE", middle_prompt)
                     self.assertIn("NO GLOBAL FINAL", middle_prompt)
 
-    async def test_remaining_part_targets_rebalance_after_a_shorter_accepted_part(self):
+    async def test_remaining_part_targets_stay_aligned_with_reserved_material_after_a_shorter_part(self):
         class RebalanceClient:
             def __init__(self):
                 self.prompts = []
@@ -183,10 +346,13 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         p2_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P2" in prompt)
         p3_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P3" in prompt)
-        self.assertIn("CURRENT TARGET: approximately 5498 characters", p2_prompt)
-        self.assertIn("CURRENT TARGET: approximately 5498 characters", p3_prompt)
-        self.assertEqual(jobs[0].actual_chars, 15000)
-        self.assertEqual(jobs[0].length_status, "READY")
+        # A short accepted prefix is immutable.  Its missing volume must not
+        # silently turn P2/P3 into larger assignments than their Story Map
+        # material was planned to support.
+        self.assertIn("CURRENT TARGET: approximately 4999 characters", p2_prompt)
+        self.assertIn("CURRENT TARGET: approximately 4998 characters", p3_prompt)
+        self.assertEqual(jobs[0].actual_chars, 14001)
+        self.assertEqual(jobs[0].length_status, "SHORT")
         self.assertEqual(jobs[0].state, RunState.DONE)
 
     async def test_early_overlong_part_is_accepted_without_length_retry(self):
@@ -407,12 +573,91 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.prompts), 31)
         part_17_prompt = next(prompt for prompt in client.prompts if "CURRENT PART: P17" in prompt)
         self.assertIn("P18/M1: Смысловой блок 18", part_17_prompt)
-        self.assertIn("C018 [DRAMATIZED]: Новый материал 18", part_17_prompt)
-        self.assertIn("USED CONTENT (do not repeat): C001 [SUPPORTED]: Новый материал 1", part_17_prompt)
+        self.assertIn("C018 [SUPPORTED]: Новый материал 18", part_17_prompt)
+        self.assertIn("EARLIER USED IDS: C001, C002", part_17_prompt)
+        self.assertIn("USED CONTENT (do not repeat): C011 [SUPPORTED]: Новый материал 11", part_17_prompt)
+        self.assertIn("FUTURE RESERVED IDS ONLY: P20: [C020]", part_17_prompt)
         self.assertIn("PREVIOUS SEAM TAIL", part_17_prompt)
         self.assertNotIn(chr(0x0401) * 5000, part_17_prompt)
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual(len(jobs[0].accepted_story_parts), 30)
+
+    async def test_planner_material_and_writer_targets_scale_without_final_deficit_transfer(self):
+        """Every size plans complete material and keeps each Writer to its reserved budget."""
+        cases = (
+            0, 2000, 6000, 9000, 9001, 10000, 12000, 12501,
+            20000, 24999, 30000, 50000, 75001, 100000,
+        )
+
+        for target_chars in cases:
+            with self.subTest(target_chars=target_chars):
+                targets = calculate_story_part_targets(target_chars)
+
+                class MatrixClient:
+                    def __init__(self, planned_targets):
+                        self.planned_targets = planned_targets
+                        self.planner_budgets = []
+                        self.writer_prompts = []
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        if "NewsFlow Story Planner" in prompt:
+                            self.planner_budgets.append(max_output_tokens)
+                            return ParallelRunnerTests._story_plan_json(len(self.planned_targets))
+                        self.writer_prompts.append(prompt)
+                        target_match = __import__("re").search(
+                            r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                        )
+                        if target_match is None:
+                            if "CURRENT TARGET: no explicit character target" not in prompt:
+                                raise AssertionError("zero-target Writer prompt lost its natural-length contract")
+                            return "Б"
+                        current = int(target_match.group(1))
+                        # P1 is deliberately short. Later assignments must
+                        # still reflect their reserved material, not fill P1's
+                        # deficit in the FINAL part.
+                        if "CURRENT PART: P1" in prompt and len(self.planned_targets) > 1:
+                            return "А" * max(1, current // 2)
+                        return "Б" * current
+
+                client = MatrixClient(targets)
+                request = ScenarioRequest(
+                    0, "Масштабируемая тема", "CONTRACT",
+                    target_chars=target_chars,
+                    allowed_min=max(1, target_chars - 500) if target_chars else 0,
+                    allowed_max=target_chars + 500 if target_chars else 0,
+                )
+                job = (await ParallelRunner(client, 1).run([request]))[0]
+
+                self.assertEqual([part.id for part in story_plan_from_dict(job.story_plan).parts], [
+                    f"P{index}" for index in range(1, len(targets) + 1)
+                ])
+                self.assertEqual(len(client.writer_prompts), len(targets))
+                self.assertEqual(
+                    [row["target_chars"] for row in job.accepted_story_parts], list(targets),
+                )
+                self.assertTrue(all("MATERIAL ALLOCATION:" in prompt for prompt in client.writer_prompts))
+                self.assertTrue(all(
+                    "CURRENT EVENT SEQUENCE (the only content to develop):" in prompt
+                    and "[SUPPORTED]:\n  1. объект" in prompt
+                    and "ответственная служба проверила изменение" in prompt
+                    and "следующий шаг использует результат" in prompt
+                    for prompt in client.writer_prompts
+                ))
+                self.assertEqual(
+                    client.planner_budgets,
+                    [scenario_output_token_budget(request, 1536 + len(targets) * 1536)],
+                )
+                self.assertEqual(job.state, RunState.DONE)
+
+        # 50k+ maps are complete multi-part maps; their Planner allowance must
+        # scale past the old 8192 ceiling instead of truncating tail atoms.
+        self.assertGreater(
+            scenario_output_token_budget(
+                ScenarioRequest(0, "T", "P", target_chars=50000),
+                1536 + len(calculate_story_part_targets(50000)) * 1536,
+            ),
+            8192,
+        )
 
     async def test_headline_only_multipart_story_completes_without_capacity_pause(self):
         class HeadlineOnlyClient:
@@ -505,6 +750,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.structural_calls = 0
                 self.fresh_calls = 0
                 self.writer_calls = 0
+                self.fresh_prompt = ""
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
@@ -536,11 +782,160 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         ])
 
         self.assertEqual(client.initial_planner_calls, 1)
-        self.assertEqual(client.structural_calls, 1)
+        self.assertEqual(client.structural_calls, 0)
         self.assertEqual(client.fresh_calls, 1)
         self.assertEqual(client.writer_calls, 2)
         self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
         self.assertEqual(len(jobs[0].accepted_story_parts), 2)
+
+    async def test_missing_transition_fields_skip_structural_repair_and_use_one_fresh_planner(self):
+        """Atom-contract failures cannot be repaired by changing only parts."""
+        class TransitionRecoveryClient:
+            def __init__(self):
+                self.structural_calls = 0
+                self.fresh_calls = 0
+                self.writer_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    self.structural_calls += 1
+                    raise AssertionError("missing transition fields must skip parts-only repair")
+                if "NewsFlow Story Planner" in prompt:
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                    raw["content_atoms"][0].pop("state_after")
+                    return json.dumps(raw, ensure_ascii=False)
+                self.writer_calls += 1
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_calls += 1
+                self.fresh_prompt = prompt
+                if "MISSING_TRANSITION_FIELDS" not in prompt:
+                    raise AssertionError("fresh retry must carry only a safe normalized reason")
+                return ParallelRunnerTests._story_plan_json(2)
+
+        client = TransitionRecoveryClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(client.structural_calls, 0)
+        self.assertEqual(client.fresh_calls, 1)
+        self.assertIn("state_before, changed_subject, development, resulting_state and state_after", client.fresh_prompt)
+        self.assertIn("state_transition_contract=BEFORE_DEVELOPMENT_AFTER", client.fresh_prompt)
+        self.assertEqual(client.writer_calls, 2)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+
+    async def test_invalid_atom_precedes_wrong_part_count_and_skips_structural_repair(self):
+        """The Runner must classify atoms before topology from the same malformed map."""
+        class OrderedValidationClient:
+            def __init__(self):
+                self.structural_calls = 0
+                self.fresh_prompt = ""
+                self.planner_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    self.structural_calls += 1
+                    raise AssertionError("invalid atoms must not be hidden by part-count repair")
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(3))
+                    raw["parts"] = raw["parts"][:1]
+                    raw["content_atoms"][0].pop("state_after")
+                    return json.dumps(raw, ensure_ascii=False)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_prompt = prompt
+                return ParallelRunnerTests._story_plan_json(3)
+
+        client = OrderedValidationClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=12000,
+                            allowed_min=11000, allowed_max=13000),
+        ])
+
+        self.assertEqual(client.structural_calls, 0)
+        self.assertIn("MISSING_TRANSITION_FIELDS", client.fresh_prompt)
+        self.assertIn("EXACT_PART_COUNT=3; P1=OPENING; P2=MIDDLE; P3=FINAL", client.fresh_prompt)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+
+    async def test_structured_transition_does_not_trigger_lexical_planner_recovery(self):
+        """A lexical diagnostic cannot spend a fresh Planner call."""
+        marker = "UNIQUE_ABSTRACT_PLANNER_PAYLOAD_293"
+
+        class AbstractTransitionClient:
+            def __init__(self):
+                self.structural_calls = 0
+                self.fresh_prompt = ""
+                self.planner_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    self.structural_calls += 1
+                    raise AssertionError("abstract transition must skip structural repair")
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                    raw["thesis"] = marker
+                    raw["content_atoms"][0].update({
+                        "summary": "Известное событие воспринимается как более жёсткая фаза",
+                        "changed_subject": "смысл прежнего события",
+                        "development": "событие воспринимается как более важный сигнал",
+                        "resulting_state": "политическая цена воспринимается как выросшая",
+                    })
+                    return json.dumps(raw, ensure_ascii=False)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_prompt = prompt
+                return ParallelRunnerTests._story_plan_json(2)
+
+        client = AbstractTransitionClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        self.assertEqual(client.structural_calls, 0)
+        self.assertEqual(client.fresh_prompt, "")
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+
+    async def test_three_part_planner_has_budget_for_a_complete_transition_map(self):
+        """A 12k plan owns nine rich atoms and cannot fit in the old 2k cap."""
+        class BudgetClient:
+            def __init__(self):
+                self.planner_budgets = []
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_budgets.append(max_output_tokens)
+                    return ParallelRunnerTests._story_plan_json(3)
+                target = int(__import__("re").search(
+                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                ).group(1))
+                return "Т" * target
+
+        client = BudgetClient()
+        jobs = await ParallelRunner(client, 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=12000,
+                            allowed_min=11500, allowed_max=12500),
+        ])
+
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(client.planner_budgets, [6144])
 
     async def test_scenario_runner_never_requests_or_persists_cover_face_metadata(self):
         """Cover identity work belongs to Covers, never Planner/Writer execution."""
@@ -666,32 +1061,49 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].accepted_story_parts, [])
         self.assertEqual(jobs[0].story_planner_failure["phase"], "FRESH_SCHEMA")
         self.assertEqual(jobs[0].story_planner_failure["reason"], "MISSING_THESIS")
+        self.assertEqual(jobs[0].story_planner_failure["initial_reason"], "MISSING_THESIS")
+        self.assertEqual(jobs[0].story_planner_failure["recovery_route"], "FRESH_DIRECT")
+        self.assertEqual(jobs[0].story_planner_failure["fresh_reason"], "MISSING_THESIS")
         self.assertEqual(jobs[0].story_planner_failure["response_chars"], "54")
         self.assertRegex(jobs[0].story_planner_failure["response_sha256"], r"^[0-9a-f]{64}$")
 
-    async def test_real_parser_ownership_failure_has_content_ownership_diagnostic(self):
-        """The runner maps the actual Story Map ownership validator, not a synthetic error."""
+    async def test_real_parser_ownership_failure_uses_parts_only_repair(self):
+        """The real ownership parser error is repairable without a fresh Planner."""
         invalid_plan = json.loads(self._story_plan_json(2))
         invalid_plan["content_atoms"][0]["owner_part_id"] = "P3"
 
         class OwnershipFailureClient:
+            def __init__(self):
+                self.structural_calls = 0
+                self.fresh_calls = 0
+
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
-                    return json.dumps({"parts": []})
+                    self.structural_calls += 1
+                    return json.dumps({
+                        "parts": json.loads(ParallelRunnerTests._story_plan_json(2))["parts"],
+                    }, ensure_ascii=False)
+                if "NewsFlow Story Planner" not in prompt:
+                    target = int(__import__("re").search(
+                        r"CURRENT TARGET: approximately (\d+) characters", prompt,
+                    ).group(1))
+                    return "Т" * target
                 return json.dumps(invalid_plan, ensure_ascii=False)
 
             async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
-                return json.dumps(invalid_plan, ensure_ascii=False)
+                self.fresh_calls += 1
+                raise AssertionError("correctable ownership must not regenerate the Story Map")
 
-        jobs = await ParallelRunner(OwnershipFailureClient(), 1).run([
+        client = OwnershipFailureClient()
+        jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
                             allowed_min=9000, allowed_max=11000),
         ])
 
-        self.assertEqual(jobs[0].state, RunState.PAUSED)
-        self.assertEqual(jobs[0].story_planner_failure["reason"], "CONTENT_OWNERSHIP")
-        self.assertIn("FRESH_SCHEMA:CONTENT_OWNERSHIP", jobs[0].error)
-        self.assertEqual(jobs[0].accepted_story_parts, [])
+        self.assertEqual(client.structural_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
+        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
 
     async def test_exhausted_planner_never_persists_raw_fresh_provider_payload(self):
         """Actual Runner diagnostics retain only a fingerprint of invalid provider prose."""
@@ -701,15 +1113,24 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         fresh_response = f"not valid Story Map {marker}"
 
         class PrivateInvalidPlannerClient:
+            def __init__(self):
+                self.fresh_prompt = ""
+                self.writer_calls = 0
+
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
                     return json.dumps({"parts": []})
+                if "NewsFlow Story Planner" not in prompt:
+                    self.writer_calls += 1
+                    raise AssertionError("Writer must not run after Planner recovery exhausts")
                 return json.dumps({"macro_blocks": [], "content_atoms": [], "parts": []})
 
             async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                self.fresh_prompt = prompt
                 return fresh_response
 
-        jobs = await ParallelRunner(PrivateInvalidPlannerClient(), 1).run([
+        client = PrivateInvalidPlannerClient()
+        jobs = await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
                             allowed_min=9000, allowed_max=11000),
         ])
@@ -718,11 +1139,19 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         diagnostics = persisted["jobs"][0]["story_planner_failure"]
 
         self.assertEqual(jobs[0].story_planner_status, "SCHEMA_RECOVERY_EXHAUSTED")
+        self.assertEqual(client.writer_calls, 0)
+        self.assertNotIn(marker, client.fresh_prompt)
+        self.assertNotIn(marker, jobs[0].error)
         self.assertNotIn(marker, serialized)
         self.assertNotIn("sk_test_never_persist", serialized)
         self.assertEqual(set(diagnostics), {
-            "phase", "reason", "response_chars", "response_sha256",
+            "phase", "reason", "initial_reason", "recovery_route", "fresh_reason",
+            "structural_repair_reason", "response_chars", "response_sha256",
         })
+        self.assertEqual(diagnostics["initial_reason"], "MISSING_THESIS")
+        self.assertEqual(diagnostics["recovery_route"], "FRESH_DIRECT")
+        self.assertEqual(diagnostics["fresh_reason"], "NON_JSON")
+        self.assertEqual(diagnostics["structural_repair_reason"], "")
         self.assertEqual(diagnostics["response_chars"], str(len(fresh_response)))
         self.assertEqual(diagnostics["response_sha256"], sha256(fresh_response.encode("utf-8")).hexdigest())
 
@@ -735,7 +1164,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "structural repairer" in prompt:
-                    return json.dumps({"parts": []})
+                    raise AssertionError("missing thesis must skip parts-only repair")
                 if "NewsFlow Story Planner" in prompt:
                     raw = json.loads(ParallelRunnerTests._story_plan_json(2))
                     raw.pop("thesis")
@@ -768,15 +1197,16 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_part_count_gets_one_structural_repair_then_exact_two_part_story(self):
         class StructuralRepairClient:
             def __init__(self):
-                self.prompts = []
+                self.calls = []
 
-            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
-                self.prompts.append(prompt)
-                if "NewsFlow Story Planner" in prompt:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None,
+                               instructions=None, text_format=None):
+                self.calls.append((prompt, instructions, text_format))
+                if "NewsFlow Story Planner" in (instructions or ""):
                     raw = json.loads(ParallelRunnerTests._story_plan_json(2))
                     raw["parts"] = raw["parts"][:1]
                     return json.dumps(raw, ensure_ascii=False)
-                if "structural repairer" in prompt:
+                if "structural repairer" in (instructions or ""):
                     return json.dumps({"parts": json.loads(ParallelRunnerTests._story_plan_json(2))["parts"]}, ensure_ascii=False)
                 target = __import__("re").search(r"CURRENT TARGET: approximately (\d+) characters", prompt)
                 return "С" * int(target.group(1))
@@ -785,8 +1215,38 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "Тема", "контекст", target_chars=10000, allowed_min=9000, allowed_max=11000)])
         self.assertEqual(jobs[0].state, RunState.DONE)
         self.assertEqual([part["part_id"] for part in jobs[0].accepted_story_parts], ["P1", "P2"])
-        self.assertEqual(sum("NewsFlow Story Planner" in prompt for prompt in client.prompts), 1)
-        self.assertEqual(sum("structural repairer" in prompt for prompt in client.prompts), 1)
+        self.assertEqual(sum("NewsFlow Story Planner" in instructions for _prompt, instructions, _format in client.calls), 1)
+        self.assertEqual(sum("structural repairer" in instructions for _prompt, instructions, _format in client.calls), 1)
+        self.assertEqual(client.calls[0][2]["name"], "newsflow_story_plan")
+        repair = next(call for call in client.calls if "structural repairer" in call[1])
+        self.assertEqual(repair[2]["name"], "newsflow_story_plan_parts_repair")
+
+    async def test_failed_structural_repair_persists_only_safe_repair_reason_before_fresh_failure(self):
+        """A failed parts-only repair exposes its code, never either provider payload."""
+        class FailedRepairClient:
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "structural repairer" in prompt:
+                    return json.dumps({"parts": []})
+                raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                raw["parts"] = raw["parts"][:1]
+                return json.dumps(raw, ensure_ascii=False)
+
+            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+                raw = json.loads(ParallelRunnerTests._story_plan_json(2))
+                raw["parts"] = raw["parts"][:1]
+                return json.dumps(raw, ensure_ascii=False)
+
+        jobs = await ParallelRunner(FailedRepairClient(), 1).run([
+            ScenarioRequest(0, "Тема", "контекст", target_chars=10000,
+                            allowed_min=9000, allowed_max=11000),
+        ])
+
+        failure = jobs[0].story_planner_failure
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(failure["initial_reason"], "PART_COUNT")
+        self.assertEqual(failure["recovery_route"], "STRUCTURAL_REPAIR")
+        self.assertEqual(failure["structural_repair_reason"], "CONTENT_OWNERSHIP")
+        self.assertEqual(failure["fresh_reason"], "PART_COUNT")
 
     async def test_structural_repair_reassigns_one_or_three_part_atoms_before_writers_finish(self):
         """Bounded topology repair fixes realistic 1→2 and 3→2 ownership before prose starts."""
@@ -808,7 +1268,12 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                             else:
                                 raw["content_atoms"].append({
                                     "id": "C003", "summary": "Кульминация", "owner_part_id": "P3",
-                                    "content_kind": "DRAMATIZED",
+                                    "content_kind": "SUPPORTED",
+                                    "state_before": "Состояние до кульминации.",
+                                    "state_after": "Состояние после кульминации.",
+                                    "changed_subject": "Рабочий объект кульминации",
+                                    "development": "исполнитель выполнил кульминационное действие",
+                                    "resulting_state": "рабочий объект получил новый статус",
                                 })
                                 raw["parts"].append({
                                     "id": "P3", "role": "FINAL", "purpose": "Кульминация", "macro_id": "M1",
@@ -1096,7 +1561,8 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].accepted_story_parts, [])
         self.assertIn("P1", jobs[0].error)
 
-    async def test_multipart_writer_refusal_retries_same_unaccepted_part_without_replanning(self):
+
+    async def test_multipart_writer_refusal_pauses_same_unaccepted_part_without_regeneration(self):
         class RetryMultipartClient:
             def __init__(self):
                 self.planner_calls = 0
@@ -1112,68 +1578,53 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.writer_calls.append(part_id)
                 if part_id == 1:
                     return "К сожалению, я не могу написать такой сценарий. Измените тему."
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "Б" * target
+                raise AssertionError("P2 must not start after an unaccepted P1")
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                if "NewsFlow Story Planner" in prompt:
-                    raise AssertionError("Writer retry must not regenerate the Story Map")
-                if "CURRENT PART: P1" not in prompt:
-                    raise AssertionError("retry must stay on the same unfinished part")
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "А" * target
+                raise AssertionError("Writer refusal must not trigger regeneration")
 
         client = RetryMultipartClient()
-        jobs = await ParallelRunner(client, 1).run([
+        job = (await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Военная тема", "CONTRACT", target_chars=10000,
                             allowed_min=9000, allowed_max=11000),
-        ])
+        ]))[0]
 
         self.assertEqual(client.planner_calls, 1)
-        self.assertEqual(client.fresh_calls, 1)
-        self.assertEqual(client.writer_calls, [1, 2])
-        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual([row["part_id"] for row in jobs[0].accepted_story_parts], ["P1", "P2"])
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(client.writer_calls, [1])
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual(job.accepted_story_parts, [])
 
-    async def test_multipart_writer_structural_label_gets_fresh_retry_before_acceptance(self):
+    async def test_multipart_writer_structural_label_pauses_without_regeneration(self):
         class RetryLabelClient:
             def __init__(self):
                 self.fresh_calls = 0
+                self.writer_calls = []
 
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(2)
                 if "CURRENT PART: P1" in prompt:
+                    self.writer_calls.append("P1")
                     return "PART 1: техническая разметка вместо готового текста"
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "Б" * target
+                self.writer_calls.append("P2")
+                raise AssertionError("P2 must not start after a structural P1 response")
 
-            async def generate_fresh(self, prompt, on_progress=None, max_output_tokens=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                if "CURRENT PART: P1" not in prompt:
-                    raise AssertionError("structural retry must stay on P1")
-                target = int(__import__("re").search(
-                    r"CURRENT TARGET: approximately (\d+) characters", prompt,
-                ).group(1))
-                return "А" * target
+                raise AssertionError("Structural Writer output must not trigger regeneration")
 
         client = RetryLabelClient()
-        jobs = await ParallelRunner(client, 1).run([
+        job = (await ParallelRunner(client, 1).run([
             ScenarioRequest(0, "Тема", "CONTRACT", target_chars=10000,
                             allowed_min=9000, allowed_max=11000),
-        ])
+        ]))[0]
 
-        self.assertEqual(client.fresh_calls, 1)
-        self.assertEqual(jobs[0].state, RunState.DONE, jobs[0].error)
-        self.assertEqual(len(jobs[0].accepted_story_parts), 2)
-
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(client.writer_calls, ["P1"])
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual(job.accepted_story_parts, [])
     def test_structural_writer_filter_rejects_part_labels_but_not_normal_part_prose(self):
         self.assertTrue(ParallelRunner._writer_output_is_structural("PART 1: техническая разметка"))
         self.assertTrue(ParallelRunner._writer_output_is_structural("Часть 2: продолжение"))
@@ -1188,6 +1639,80 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
             "Part of the evidence was published later."
         ))
 
+
+    def test_writer_runtime_gate_rejects_only_technical_failures(self):
+        filler = (
+            "В этом и заключается главный нерв ситуации. "
+            "Именно поэтому пространство для манёвра сузилось. "
+            "Это меняет политическую рамку переговоров. "
+            "По сути, новая конфигурация делает баланс менее устойчивым. "
+            "В этой точке выросла политическая цена решения. "
+            "Москва получила новый сигнал о смене логики. "
+            "Именно поэтому поле выбора стало ещё уже."
+        )
+        event_prose = (
+            "Ночью Россия нанесла удар по нескольким районам Киева. "
+            "После тревоги городские службы перевели критические объекты на резервное питание. "
+            "Утром украинская сторона направила партнёрам запрос на дополнительные средства защиты."
+        )
+
+        runner = ParallelRunner(FakeClient(), 1)
+        self.assertFalse(runner._writer_output_unusable(filler))
+        self.assertFalse(runner._writer_output_unusable(event_prose))
+        self.assertFalse(runner._writer_output_unusable(
+            "Это драматизированная реконструкция событий, а не подтверждённая хроника. "
+            "Россия нанесла удар по Киеву."
+        ))
+        self.assertTrue(runner._writer_output_unusable(""))
+        self.assertTrue(runner._writer_output_unusable("P2: служебный блок"))
+        self.assertTrue(runner._writer_output_unusable(
+            "К сожалению, я не могу написать такой сценарий. Измените тему."
+        ))
+
+    async def test_writer_style_is_never_regenerated_at_runtime(self):
+        filler = (
+            "В этом и заключается главный нерв ситуации. "
+            "Именно поэтому пространство для манёвра сузилось. "
+            "Это меняет политическую рамку переговоров. "
+            "По сути, новая конфигурация делает баланс менее устойчивым. "
+            "В этой точке выросла политическая цена решения. "
+            "Москва получила новый сигнал о смене логики."
+        )
+
+        class NoRewriteClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_calls = []
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(2)
+                if "CURRENT PART: P1" in prompt:
+                    self.writer_calls.append("P1")
+                    return "А" * 5000
+                if "CURRENT PART: P2" in prompt:
+                    self.writer_calls.append("P2")
+                    return filler
+                raise AssertionError("unexpected writer part")
+
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("Writer prose must never be regenerated")
+
+        client = NoRewriteClient()
+        job = (await ParallelRunner(client, 1).run([ScenarioRequest(
+            0, "Тема", "CONTRACT", target_chars=10000,
+            allowed_min=9000, allowed_max=11000,
+        )]))[0]
+
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.writer_calls, ["P1", "P2"])
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(job.accepted_story_parts[0]["text"], "А" * 5000)
+        self.assertEqual(job.accepted_story_parts[1]["text"], filler)
+        self.assertEqual(job.state, RunState.DONE, job.error)
     def test_detects_claude_request_to_rephrase_but_not_normal_script(self):
         self.assertTrue(looks_like_action_required("К сожалению, я не могу написать это. Переформулируйте тему."))
         self.assertTrue(looks_like_action_required("Please rephrase the topic and try again."))
@@ -1210,22 +1735,23 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].state, RunState.PAUSED)
         self.assertIn("Измените тему", jobs[0].result)
 
-    async def test_refusal_is_retried_in_fresh_chat(self):
+
+    async def test_writer_refusal_pauses_without_regeneration(self):
         class RetryClient:
             fresh_calls = 0
             async def generate(self, prompt, on_progress=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
                 return "К сожалению, я не могу написать такой сценарий. Измените тему."
-            async def generate_fresh(self, prompt, on_progress=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                return "Полный готовый сценарий"
+                raise AssertionError("Writer refusal must not trigger regeneration")
 
         client = RetryClient()
         jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "S", "P")])
-        self.assertEqual(client.fresh_calls, 1)
-        self.assertEqual(jobs[0].state, RunState.DONE)
-
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(jobs[0].state, RunState.PAUSED)
+        self.assertEqual(jobs[0].accepted_story_parts, [])
     async def test_single_part_targets_use_one_planner_and_one_complete_writer(self):
         for target_chars in (5000, 6000, 7000):
             with self.subTest(target_chars=target_chars):
@@ -1320,7 +1846,7 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                     raise AssertionError("single writer must use COMPLETE role")
                 if "DRAMATIZED OPENING DISCLOSURE" not in prompt:
                     raise AssertionError("single-part disclosure rule is missing")
-                return "а" * 6000
+                return "Первое событие произошло. Это драматизированная реконструкция. " + "а" * 6000
 
         client = SingleWriterClient()
         jobs = await ParallelRunner(client, 1).run([
@@ -1331,12 +1857,120 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.prompts), 2)
         self.assertEqual(jobs[0].state, RunState.DONE)
 
+
+    async def test_dramatized_complete_missing_disclosure_does_not_regenerate_writer(self):
+        class MissingDisclosureClient:
+            def __init__(self):
+                self.planner_calls = 0
+                self.writer_calls = 0
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                if "NewsFlow Story Planner" in prompt:
+                    self.planner_calls += 1
+                    return ParallelRunnerTests._story_plan_json(1).replace(
+                        '"SUPPORTED"', '"DRAMATIZED"',
+                    )
+                self.writer_calls += 1
+                self.assertIn("DRAMATIZED OPENING DISCLOSURE", prompt)
+                return "Первое событие произошло. Службы начали работу. Последствия уточняются."
+
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("Writer disclosure defects must not trigger regeneration")
+
+            @staticmethod
+            def assertIn(member, container):
+                if member not in container:
+                    raise AssertionError(f"{member!r} is missing")
+
+        client = MissingDisclosureClient()
+        job = (await ParallelRunner(client, 1).run([ScenarioRequest(
+            0, "Headline only", "", target_chars=2000, allowed_min=1600, allowed_max=2400,
+        )]))[0]
+
+        self.assertEqual(client.planner_calls, 1)
+        self.assertEqual(client.writer_calls, 1)
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(job.state, RunState.DONE)
+        self.assertEqual(len(job.accepted_story_parts), 1)
+
+    async def test_dramatized_opening_missing_disclosure_still_uses_one_writer_call_per_part(self):
+        class MissingOpeningDisclosureClient:
+            def __init__(self):
+                self.prompts = []
+                self.fresh_calls = 0
+
+            async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                self.prompts.append(prompt)
+                if "NewsFlow Story Planner" in prompt:
+                    return ParallelRunnerTests._story_plan_json(2).replace(
+                        '"SUPPORTED"', '"DRAMATIZED"',
+                    )
+                if "CURRENT PART: P1" in prompt:
+                    self.assertIn("DRAMATIZED OPENING DISCLOSURE", prompt)
+                    return "Событие началось. Службы начали работу. Последствия уточняются."
+                if "CURRENT PART: P2" in prompt:
+                    return "Ответ последовал. Стороны приняли новые решения."
+                raise AssertionError("unexpected prompt")
+
+            async def generate_fresh(self, *_args, **_kwargs):
+                self.fresh_calls += 1
+                raise AssertionError("Writer prose must never be regenerated")
+
+            @staticmethod
+            def assertIn(member, container):
+                if member not in container:
+                    raise AssertionError(f"{member!r} is missing")
+
+        client = MissingOpeningDisclosureClient()
+        job = (await ParallelRunner(client, 1).run([ScenarioRequest(
+            0, "Headline only", "", target_chars=10000, allowed_min=9000, allowed_max=11000,
+        )]))[0]
+
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(job.state, RunState.DONE)
+        self.assertEqual([row["part_id"] for row in job.accepted_story_parts], ["P1", "P2"])
+
+    async def test_dramatized_disclosure_position_is_prompt_owned_not_runtime_regenerated(self):
+        cases = (
+            "Событие началось. Это драматизированная реконструкция. Службы включились.",
+            "Событие началось. Службы включились. Это драматизированная реконструкция.",
+            "Это драматизированная реконструкция. Событие началось. Службы включились.",
+            "Событие началось. Службы включились. Город меняет режим. Это драматизированная реконструкция.",
+        )
+        for response in cases:
+            with self.subTest(response=response):
+                class PositionClient:
+                    def __init__(self, planned_response):
+                        self.fresh_calls = 0
+                        self.planned_response = planned_response
+
+                    async def generate(self, prompt, on_progress=None, max_output_tokens=None):
+                        if "NewsFlow Story Planner" in prompt:
+                            return ParallelRunnerTests._story_plan_json(1).replace(
+                                '"SUPPORTED"', '"DRAMATIZED"',
+                            )
+                        if "DRAMATIZED OPENING DISCLOSURE" not in prompt:
+                            raise AssertionError("disclosure contract must be present before generation")
+                        return self.planned_response
+
+                    async def generate_fresh(self, *_args, **_kwargs):
+                        self.fresh_calls += 1
+                        raise AssertionError("Writer prose must never be regenerated")
+
+                client = PositionClient(response)
+                job = (await ParallelRunner(client, 1).run([ScenarioRequest(
+                    0, "Headline only", "", target_chars=2000, allowed_min=1600, allowed_max=2400,
+                )]))[0]
+                self.assertEqual(job.state, RunState.DONE)
+                self.assertEqual(client.fresh_calls, 0)
     async def test_supported_single_complete_writer_has_no_dramatized_disclosure(self):
         class SupportedClient:
             async def generate(self, prompt, on_progress=None, max_output_tokens=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
-                if "CURRENT CONTENT:\n- C001 [SUPPORTED]" not in prompt:
+                if "TECHNICAL OWNERSHIP INDEX (navigation only; not prose material):\n- C001 [SUPPORTED]" not in prompt:
                     raise AssertionError("single Writer must receive SUPPORTED content kind")
                 if "DRAMATIZED OPENING DISCLOSURE" in prompt:
                     raise AssertionError("supported-only story must not disclose dramatization")
@@ -1491,25 +2125,25 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs[0].actual_chars, 13)
         self.assertEqual(jobs[0].length_repair_attempts, 0)
 
-    async def test_refusal_gets_two_fresh_chat_retries(self):
+
+    async def test_writer_refusal_does_not_get_fresh_chat_retries(self):
         class RetryTwiceClient:
             fresh_calls = 0
             async def generate(self, prompt, on_progress=None):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
                 return "Я не могу выполнить этот запрос."
-            async def generate_fresh(self, prompt, on_progress=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                if self.fresh_calls == 1:
-                    return "I cannot fulfill this request for safety reasons."
-                return "Полный готовый сценарий"
+                raise AssertionError("Writer refusal must not trigger fresh regeneration")
 
         client = RetryTwiceClient()
-        jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "S", "P")])
-        self.assertEqual(client.fresh_calls, 2)
-        self.assertEqual(jobs[0].state, RunState.DONE)
+        job = (await ParallelRunner(client, 1).run([ScenarioRequest(0, "S", "P")]))[0]
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(job.state, RunState.PAUSED)
+        self.assertEqual(job.accepted_story_parts, [])
 
-    async def test_three_claude_refusals_fall_back_to_openai(self):
+    async def test_writer_refusal_does_not_fall_back_to_another_provider(self):
         class ClaudeThenOpenAIClient:
             fresh_calls = 0
             openai_calls = 0
@@ -1517,19 +2151,18 @@ class ParallelRunnerTests(unittest.IsolatedAsyncioTestCase):
                 if "NewsFlow Story Planner" in prompt:
                     return ParallelRunnerTests._story_plan_json(1)
                 return "Я не могу выполнить этот запрос."
-            async def generate_fresh(self, prompt, on_progress=None):
+            async def generate_fresh(self, *_args, **_kwargs):
                 self.fresh_calls += 1
-                return "Я не могу написать такой сценарий."
-            async def generate_openai(self, prompt, on_progress=None):
+                raise AssertionError("Writer refusal must not trigger fresh regeneration")
+            async def generate_openai(self, *_args, **_kwargs):
                 self.openai_calls += 1
-                return "Полный сценарий, написанный через ChatGPT API"
+                raise AssertionError("Writer refusal must not fall back to another provider")
 
         client = ClaudeThenOpenAIClient()
-        jobs = await ParallelRunner(client, 1).run([ScenarioRequest(0, "S", "P")])
-        self.assertEqual(client.fresh_calls, 2)
-        self.assertEqual(client.openai_calls, 1)
-        self.assertEqual(jobs[0].state, RunState.DONE)
-
+        job = (await ParallelRunner(client, 1).run([ScenarioRequest(0, "S", "P")]))[0]
+        self.assertEqual(client.fresh_calls, 0)
+        self.assertEqual(client.openai_calls, 0)
+        self.assertEqual(job.state, RunState.PAUSED)
     async def test_runs_multiple_scenarios_concurrently(self):
         client = FakeClient()
         runner = ParallelRunner(client, max_concurrency=4)

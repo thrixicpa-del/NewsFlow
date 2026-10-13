@@ -1,0 +1,10 @@
+{
+  "captured_responses": 1,
+  "evidence_dir": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-matrix-m0-20260930-200001",
+  "job_state": "MISSING",
+  "logical_calls": 1,
+  "production_write_guard": "PASS",
+  "secret_export_scan": "PASS",
+  "transport_attempts": 1,
+  "zip": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-matrix-m0-20260930-200001.zip"
+}

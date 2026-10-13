@@ -1,0 +1,248 @@
+[
+  {
+    "input_chars": 35700,
+    "input_sha256": "379c7aaec902545e2c08db25e1669e828671b326ae2821f1ff2d07c4dd9974e5",
+    "instructions_chars": 12603,
+    "instructions_sha256": "3a4fd359486e79a5fa9ad16ca1b04a640a2feec36b1a0c7a1cafa06bc66db6a2",
+    "logical_call": 1,
+    "max_output_tokens": 32768,
+    "method": "generate",
+    "model_override": "gpt-5.4-mini",
+    "phase": "PLANNER",
+    "reasoning_effort": "medium",
+    "result": "OK",
+    "text_format": {
+      "name": "newsflow_story_plan",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_atoms": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "changed_subject": {
+                  "type": "string"
+                },
+                "content_kind": {
+                  "enum": [
+                    "DRAMATIZED",
+                    "SUPPORTED"
+                  ],
+                  "type": "string"
+                },
+                "development": {
+                  "type": "string"
+                },
+                "do_not_repeat": {
+                  "type": "string"
+                },
+                "event_steps": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "novelty_payload": {
+                  "type": "string"
+                },
+                "novelty_question": {
+                  "type": "string"
+                },
+                "owner_part_id": {
+                  "type": "string"
+                },
+                "resulting_state": {
+                  "type": "string"
+                },
+                "state_after": {
+                  "type": "string"
+                },
+                "state_before": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "summary",
+                "owner_part_id",
+                "content_kind",
+                "state_before",
+                "changed_subject",
+                "development",
+                "resulting_state",
+                "state_after",
+                "novelty_question",
+                "novelty_payload",
+                "do_not_repeat",
+                "event_steps"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "event_spine": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "macro_blocks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "purpose"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "parts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "closes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "content_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "macro_id": {
+                  "type": "string"
+                },
+                "novelty_payload": {
+                  "type": "string"
+                },
+                "novelty_question": {
+                  "type": "string"
+                },
+                "opens": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "purpose": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "transition_direction": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "role",
+                "purpose",
+                "macro_id",
+                "content_ids",
+                "opens",
+                "closes",
+                "transition_direction",
+                "novelty_question",
+                "novelty_payload"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "state_transition_contract": {
+            "enum": [
+              "BEFORE_DEVELOPMENT_AFTER"
+            ],
+            "type": "string"
+          },
+          "thesis": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state_transition_contract",
+          "thesis",
+          "event_spine",
+          "macro_blocks",
+          "content_atoms",
+          "parts"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "json_schema"
+    },
+    "visible_response_chars": 18721,
+    "visible_response_sha256": "176fc7d6acdf60368672f4e35d3771bbf97c9f0628eaf6de4c8322c174bf5778"
+  },
+  {
+    "input_chars": 41001,
+    "input_sha256": "d7dff4c251f45e9d5ddb6f64e638d9968b0567443546860556dc128d60623e2a",
+    "instructions_chars": 5646,
+    "instructions_sha256": "ff197a160256c307a8a9624bafe9c8fbde2d5383b1b708170381a78ac8ad63e9",
+    "logical_call": 2,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "model_override": "NONE",
+    "phase": "WRITER_P1",
+    "reasoning_effort": "NONE",
+    "result": "OK",
+    "text_format": "NONE",
+    "visible_response_chars": 3913,
+    "visible_response_sha256": "b7e5ee94c32a922c5f85ac190590e16bf05b5465ac5a5c88284d16cb7c3b0618"
+  },
+  {
+    "input_chars": 41267,
+    "input_sha256": "b2406227ff2727385df780193309391408a0c82f3243764ca0eb5ca649dc9e40",
+    "instructions_chars": 5332,
+    "instructions_sha256": "3c08b8817b1d602758a2401805fc78dd5eb2e22f4c196e66e935db4e826d80d8",
+    "logical_call": 3,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "model_override": "NONE",
+    "phase": "WRITER_P2",
+    "reasoning_effort": "NONE",
+    "result": "OK",
+    "text_format": "NONE",
+    "visible_response_chars": 4688,
+    "visible_response_sha256": "99e566bc2ac68347cd855a15284a5c2e1cda9b9abd1ecd79b44e94793bb19037"
+  },
+  {
+    "input_chars": 41080,
+    "input_sha256": "3ec73bf8859a98093dc7c42c6f04207e7eb54ca6f2b065f48e454b49fff31464",
+    "instructions_chars": 5245,
+    "instructions_sha256": "f5dbb1430cc8104616953732f5792744abbbd088aca0e8d429eb86f27231caaa",
+    "logical_call": 4,
+    "max_output_tokens": 5120,
+    "method": "generate",
+    "model_override": "NONE",
+    "phase": "WRITER_P3",
+    "reasoning_effort": "NONE",
+    "result": "OK",
+    "text_format": "NONE",
+    "visible_response_chars": 4541,
+    "visible_response_sha256": "d0bf9dfa9026c81968ee41575cb11df8bc17d88822ad37ff782bd9ae50ce094a"
+  }
+]

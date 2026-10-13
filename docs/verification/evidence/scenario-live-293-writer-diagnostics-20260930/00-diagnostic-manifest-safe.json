@@ -1,0 +1,37 @@
+{
+  "configured_model": "gpt-5.4-mini",
+  "fixture_origin": "MANUAL_DIAGNOSTIC_CONTROL_NOT_LIVE_ACCEPTANCE",
+  "fixture_sha256": "29d4920f8dbab191f22319e8e0a98b8aeb19a456465bebc969c0104e7be6e53c",
+  "full_template_sha256": "3bbd1058e2a7f00613e95680ada44937455f5d7836ad119ae003d49edba3c0e5",
+  "matrix": [
+    {
+      "id": "D1",
+      "part": "P1",
+      "target_chars": 3999,
+      "template_kind": "FULL"
+    },
+    {
+      "id": "D2",
+      "part": "P1",
+      "target_chars": 3999,
+      "template_kind": "SHORT"
+    },
+    {
+      "id": "D3",
+      "part": "P3",
+      "target_chars": 3998,
+      "template_kind": "FULL"
+    },
+    {
+      "id": "D4",
+      "part": "P3",
+      "target_chars": 3998,
+      "template_kind": "SHORT"
+    }
+  ],
+  "max_output_tokens": 5120,
+  "production_context": "NONE: fixture is explicitly fictional",
+  "provider_calls_before_matrix": 0,
+  "short_template_sha256": "bd0311ee18c180b4157b6108a726a150f4cd9c9c1961421f5976fa5e5720ca1a",
+  "source_head": "087d41ee076be7537519f40fa0e31ab2a2ef6f6e"
+}

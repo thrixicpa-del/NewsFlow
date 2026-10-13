@@ -46,12 +46,14 @@ def remove_scenarios(titles: list[str], jobs: list[Job], indices: set[int]) -> t
             job.request.target_chars,
             job.request.allowed_min,
             job.request.allowed_max,
+            job.request.factual_context_available,
+            job.request.dramatized_allowed,
         )
         new_jobs.append(Job(
             request, job.state, job.result, job.error,
             job.actual_chars, job.length_status, job.length_repair_attempts,
             job.story_plan, job.accepted_story_parts, job.story_planner_status,
-            job.story_planner_failure,
+            job.story_planner_failure, job.writer_partial_response,
         ))
     return new_titles, new_jobs
 
@@ -65,13 +67,16 @@ def rename_scenario(titles: list[str], jobs: list[Job], index: int, new_title: s
     updated_jobs = []
     for job in jobs:
         if job.request.index == index:
-            request = ScenarioRequest(index, cleaned, job.request.prompt, job.request.production_item_id,
-                                      job.request.target_chars, job.request.allowed_min, job.request.allowed_max)
+            request = ScenarioRequest(
+                index, cleaned, job.request.prompt, job.request.production_item_id,
+                job.request.target_chars, job.request.allowed_min, job.request.allowed_max,
+                job.request.factual_context_available, job.request.dramatized_allowed,
+            )
             updated_jobs.append(Job(
                 request, job.state, job.result, job.error,
                 job.actual_chars, job.length_status, job.length_repair_attempts,
                 job.story_plan, job.accepted_story_parts, job.story_planner_status,
-                job.story_planner_failure,
+                job.story_planner_failure, job.writer_partial_response,
             ))
         else:
             updated_jobs.append(job)
@@ -91,6 +96,8 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
                 "target_chars": job.request.target_chars,
                 "allowed_min": job.request.allowed_min,
                 "allowed_max": job.request.allowed_max,
+                "factual_context_available": job.request.factual_context_available,
+                "dramatized_allowed": job.request.dramatized_allowed,
                 "state": job.state.value,
                 "result": job.result,
                 "error": job.error,
@@ -101,6 +108,7 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
                 "accepted_story_parts": job.accepted_story_parts,
                 "story_planner_status": job.story_planner_status,
                 "story_planner_failure": job.story_planner_failure,
+                "writer_partial_response": job.writer_partial_response,
             }
             # Keep in-progress jobs too: the Electron UI reads this file from
             # a separate lightweight snapshot process and can therefore show
@@ -113,7 +121,7 @@ def _session_data(titles: list[str], jobs: list[Job]) -> dict:
 _SESSION_REPLACE_TIMEOUT_SECONDS = 3.0
 _SESSION_REPLACE_RETRY_SECONDS = 0.05
 _SESSION_WRITE_LOCK_GUARD = threading.Lock()
-_SESSION_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_SESSION_WRITE_LOCKS: dict[str, threading.RLock] = {}
 _SESSION_OBSERVED_REVISIONS: dict[str, str | None] = {}
 _SESSION_THREAD_STATE = threading.local()
 _TRANSIENT_WINDOWS_REPLACE_ERRORS = frozenset({5, 32})
@@ -162,13 +170,17 @@ def _remember_loaded_session_revision(path: Path, revision: str | None) -> None:
             _SESSION_OBSERVED_REVISIONS[key] = revision
 
 
+def _session_thread_lock(path: Path):
+    """Share a reentrant in-process lock across snapshot binding and publication."""
+    key = str(path.resolve()).casefold()
+    with _SESSION_WRITE_LOCK_GUARD:
+        return _SESSION_WRITE_LOCKS.setdefault(key, threading.RLock())
+
+
 @contextmanager
 def _exclusive_session_write(path: Path, timeout: float = 12.0):
     """Serialize publication across threads and independent Windows bridge processes."""
-    key = str(path.resolve()).casefold()
-    with _SESSION_WRITE_LOCK_GUARD:
-        thread_lock = _SESSION_WRITE_LOCKS.setdefault(key, threading.Lock())
-    with thread_lock:
+    with _session_thread_lock(path):
         lock_path = path.with_name(f".{path.name}.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -314,6 +326,8 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
                 max(0, int(item.get("target_chars", 0) or 0)),
                 max(0, int(item.get("allowed_min", 0) or 0)),
                 max(0, int(item.get("allowed_max", 0) or 0)),
+                bool(item.get("factual_context_available", False)),
+                bool(item.get("dramatized_allowed", True)),
             )
             state = RunState(item.get("state", RunState.WAITING.value))
             story_plan = item.get("story_plan")
@@ -322,10 +336,26 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
             raw_planner_failure = item.get("story_planner_failure")
             planner_failure = {
                 key: str(raw_planner_failure[key])
-                for key in ("phase", "reason", "response_chars", "response_sha256")
+                for key in (
+                    "phase", "reason", "initial_reason", "recovery_route",
+                    "fresh_reason", "structural_repair_reason", "response_chars",
+                    "response_sha256",
+                )
                 if isinstance(raw_planner_failure, dict)
                 and isinstance(raw_planner_failure.get(key), str)
                 and len(raw_planner_failure[key]) <= 128
+            }
+            raw_writer_partial = item.get("writer_partial_response")
+            writer_partial = {
+                key: str(raw_writer_partial[key])
+                for key in (
+                    "part_id", "status", "response_id", "incomplete_reason",
+                    "response_chars", "response_sha256", "text",
+                )
+                if isinstance(raw_writer_partial, dict)
+                and isinstance(raw_writer_partial.get(key), str)
+                and (key != "text" or len(raw_writer_partial[key]) <= 50_000)
+                and (key == "text" or len(raw_writer_partial[key]) <= 256)
             }
             # r27 persisted a Covers-only marker beside scenario progress.
             # It is intentionally discarded when reading a scenario session.
@@ -343,6 +373,7 @@ def _read_session_snapshot(path: Path) -> tuple[list[str], list[Job], str]:
                 accepted_parts if isinstance(accepted_parts, list) and all(isinstance(part, dict) for part in accepted_parts) else [],
                 planner_status,
                 planner_failure,
+                writer_partial,
             ))
     except (ValueError, TypeError, KeyError, UnicodeDecodeError) as error:
         raise _SessionSnapshotReadError(error, revision) from error
@@ -505,6 +536,8 @@ def _recover_legacy_jobs(current_titles: list[str]) -> list[Job]:
                 by_title[_title_key(title)].request.target_chars,
                 by_title[_title_key(title)].request.allowed_min,
                 by_title[_title_key(title)].request.allowed_max,
+                by_title[_title_key(title)].request.factual_context_available,
+                by_title[_title_key(title)].request.dramatized_allowed,
             ),
             by_title[_title_key(title)].state,
             by_title[_title_key(title)].result,
@@ -516,6 +549,7 @@ def _recover_legacy_jobs(current_titles: list[str]) -> list[Job]:
             by_title[_title_key(title)].accepted_story_parts,
             by_title[_title_key(title)].story_planner_status,
             by_title[_title_key(title)].story_planner_failure,
+            by_title[_title_key(title)].writer_partial_response,
         )
         for index, title in enumerate(current_titles)
     ]
@@ -554,6 +588,16 @@ def migrate_legacy_session() -> tuple[list[str], list[Job]]:
 
 def load_session() -> tuple[list[str], list[Job]]:
     path = session_path()
+    # Bind the observed revision before another thread in this process can
+    # publish. Otherwise a delayed reader can replace a newer publication's
+    # revision with its old snapshot and cause a false write conflict.
+    # Only the in-process lock spans parsing/recovery. The OS sidecar lock
+    # stays short, and genuine external changes still fail the revision check.
+    with _session_thread_lock(path):
+        return _load_session_locked(path)
+
+
+def _load_session_locked(path: Path) -> tuple[list[str], list[Job]]:
     # Prefer the NewsFlow file.  If an interrupted write or disk problem ever
     # damages it, recover from the last good NewsFlow backup instead of showing
     # an empty queue.  Legacy Scriptor state is deliberately excluded: it can

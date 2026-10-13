@@ -1,0 +1,25 @@
+{
+  "active_key_count": 7,
+  "configured_model": "gpt-5.4-mini",
+  "created_at_utc": "2026-09-30T11:28:24.375052+00:00",
+  "git_status_short": "",
+  "key_material": "NOT_CAPTURED_MEMORY_ONLY",
+  "manual_prompt_ranges_count": 2,
+  "material_mode": "EDITORIAL/EVENT_FIRST + headline-only DRAMATIZED permitted",
+  "production_context": "NONE: title is not factual evidence",
+  "provider": "openai",
+  "run_id": "scenario-live-293-event-spine-20260930-143000",
+  "source_head": "2894a720b962912240b592a782cb695a231bb7be",
+  "storage": {
+    "mode": "NEWSFLOW_TEST_MODE",
+    "production_settings_written": false,
+    "test_root": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-event-spine-20260930-143000\\runtime-root"
+  },
+  "template_chars": 32913,
+  "template_sha256": "3bbd1058e2a7f00613e95680ada44937455f5d7836ad119ae003d49edba3c0e5",
+  "test_contract_override": {
+    "allowed_max": 12500,
+    "allowed_min": 11500,
+    "target_chars": 12000
+  }
+}

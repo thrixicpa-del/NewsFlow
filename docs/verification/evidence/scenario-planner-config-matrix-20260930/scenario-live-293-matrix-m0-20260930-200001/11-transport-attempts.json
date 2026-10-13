@@ -1,0 +1,36 @@
+{
+  "attempts": [
+    {
+      "headers": "NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_chars": 51785,
+      "payload_sha256": "05e1ea9b666a6a455c0dccd8a7eb7d2928d1ed113c433f6d7655a09cfa1a810c",
+      "transport_attempt": 1
+    }
+  ],
+  "responses": [
+    {
+      "id": "resp_055500d04fc4445a006abd31b60bd087d295ad096bdf2be70d",
+      "incomplete_details": null,
+      "model": "gpt-5.4-mini-2026-03-17",
+      "status": "completed",
+      "transport_attempt": 1,
+      "usage": {
+        "input_tokens": 12642,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 4539,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 17181
+      },
+      "visible_output_chars": 18955,
+      "visible_output_sha256": "48cdaa6ced9c2c3a31733c0444bcabd16705afbd8c75fef76665ef8909e3dfab"
+    }
+  ],
+  "sdk_retries": "UNKNOWN"
+}

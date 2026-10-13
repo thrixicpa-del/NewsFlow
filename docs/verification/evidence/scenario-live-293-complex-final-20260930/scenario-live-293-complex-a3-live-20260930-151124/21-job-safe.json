@@ -1,0 +1,18 @@
+{
+  "accepted_story_parts": [],
+  "actual_chars": 0,
+  "error": "Планировщик не вернул совместимую карту истории после безопасного восстановления. Код диагностики: FRESH_SCHEMA:MISSING_THESIS.",
+  "length_status": "FAILED",
+  "state": "Нужно действие",
+  "story_planner_failure": {
+    "fresh_reason": "MISSING_THESIS",
+    "initial_reason": "NON_JSON",
+    "phase": "FRESH_SCHEMA",
+    "reason": "MISSING_THESIS",
+    "recovery_route": "FRESH_DIRECT",
+    "response_chars": "15129",
+    "response_sha256": "2ae4d5e71c91a127e3a6f53f1cfeee7a5312a4814e3fe8188c365a765ef3131c",
+    "structural_repair_reason": ""
+  },
+  "story_planner_status": "SCHEMA_RECOVERY_EXHAUSTED"
+}

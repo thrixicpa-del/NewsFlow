@@ -1,0 +1,148 @@
+{
+  "run_id": "scenario-live-293-detail-20260930-120111",
+  "source_sha": "bb6b31a44456adf3f55b99008afa3cb85c70dc5f",
+  "topic_sha256": "70f30a52bc0de12960d3c2363f02a3243153820616b9548dd7ee02bba9592b30",
+  "requested_contract": {
+    "target_chars": 12000,
+    "allowed_min": 11500,
+    "allowed_max": 12500
+  },
+  "preflight_contract": {
+    "target_chars": 12000,
+    "allowed_min": 11500,
+    "allowed_max": 12500
+  },
+  "provider_call_total": 4,
+  "provider_calls": {
+    "PLANNER": 1,
+    "WRITER_P1": 1,
+    "WRITER_P2": 1,
+    "WRITER_P3": 1
+  },
+  "provider_transport": [
+    {
+      "kind": "PLANNER",
+      "prompt_chars": 10168,
+      "prompt_sha256": "b7531640d29d78b3115472f8e5370bf0fa34fb784a03c8b59c7c15955ed25387",
+      "max_output_tokens": 6144,
+      "finish_status": "completed",
+      "incomplete_reason": "",
+      "usage": {
+        "input_tokens": 2318,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 2594,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 4912
+      },
+      "response_chars": 13274,
+      "response_sha256": "9c902ccc37e1b64e79c341344a83997b2c7dc4b63eaef1f116ccda17d0d0fd2b",
+      "success": true
+    },
+    {
+      "kind": "WRITER_P1",
+      "prompt_chars": 14391,
+      "prompt_sha256": "0739082f7fc632a577073b8b8eec6ddae1c0fc47312a7eb59a373e875b08cebe",
+      "max_output_tokens": 5120,
+      "finish_status": "completed",
+      "incomplete_reason": "",
+      "usage": {
+        "input_tokens": 3106,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 603,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 3709
+      },
+      "response_chars": 2472,
+      "response_sha256": "e23fda70d706ace2ace2eababe188f1557e29107eec5288d08ba01899e0e5eb0",
+      "success": true
+    },
+    {
+      "kind": "WRITER_P2",
+      "prompt_chars": 14217,
+      "prompt_sha256": "e4b6cd871b5fb73348b5acfe2b01ce435034f90b69720832016e9ef6649829e8",
+      "max_output_tokens": 5120,
+      "finish_status": "completed",
+      "incomplete_reason": "",
+      "usage": {
+        "input_tokens": 3058,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 787,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 3845
+      },
+      "response_chars": 3363,
+      "response_sha256": "cf7a5404eaba76dbe626a8c06cf23a7b80072c64f59dfd0402e8f99c18c7f506",
+      "success": true
+    },
+    {
+      "kind": "WRITER_P3",
+      "prompt_chars": 13931,
+      "prompt_sha256": "e78b3b6130c9eb07ffb81978be7c2c1092e8e773b38aa34be6b5dcb4f359ddbc",
+      "max_output_tokens": 5120,
+      "finish_status": "completed",
+      "incomplete_reason": "",
+      "usage": {
+        "input_tokens": 3012,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        },
+        "output_tokens": 803,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 3815
+      },
+      "response_chars": 3302,
+      "response_sha256": "8b3c930a6534f07ddce6556df5864be5909bf90da9262a8804aefeaf14f34aa9",
+      "success": true
+    }
+  ],
+  "state": "DONE",
+  "actual_chars": 9141,
+  "length_status": "SHORT",
+  "accepted_part_ids": [
+    "P1",
+    "P2",
+    "P3"
+  ],
+  "planned_part_targets": [
+    3999,
+    3999,
+    3998
+  ],
+  "active_part_targets": [
+    3999,
+    3999,
+    3998
+  ],
+  "actual_part_chars": [
+    2472,
+    3363,
+    3302
+  ],
+  "roles": [
+    "OPENING",
+    "MIDDLE",
+    "FINAL"
+  ],
+  "story_planner_status": "READY",
+  "failure": {},
+  "scenario_sha256": "864af5554c49fb75abac961965aed8b52c2a9ca3eb144c8c2edad455360df613",
+  "production_settings_unchanged": true
+}

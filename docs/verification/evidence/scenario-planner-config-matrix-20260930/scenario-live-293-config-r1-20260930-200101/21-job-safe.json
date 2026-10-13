@@ -1,0 +1,9 @@
+{
+  "accepted_story_parts": [],
+  "actual_chars": 0,
+  "error": "chat gpt: OpenAI вернул незавершённый ответ",
+  "length_status": "",
+  "state": "Ошибка",
+  "story_planner_failure": {},
+  "story_planner_status": ""
+}

@@ -1,0 +1,10 @@
+{
+  "captured_responses": 2,
+  "evidence_dir": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-complex-a2-live-20260930-150927",
+  "job_state": "Нужно действие",
+  "logical_calls": 2,
+  "production_write_guard": "PASS",
+  "secret_export_scan": "PASS",
+  "transport_attempts": 2,
+  "zip": "D:\\NewsFlow-RC\\test-profiles\\scenario-live-293-complex-a2-live-20260930-150927.zip"
+}

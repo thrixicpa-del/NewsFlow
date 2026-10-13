@@ -1,0 +1,33 @@
+{
+  "attempts": [
+    {
+      "headers": "NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_sha256": "235614d85ccae9b7a3bd58f29a34f997b24c57180f2c6448dbcb7f969017fb02",
+      "transport_attempt": 1
+    },
+    {
+      "headers": "NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_sha256": "2cd4632494faab59182cfd7679ae0ccbf21f1539d226fcfeea38849733019d08",
+      "transport_attempt": 2
+    },
+    {
+      "headers": "NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_sha256": "05662a124f2889b969598053b0ffecdb2b30fb915940c632ba48c5f758e47c18",
+      "transport_attempt": 3
+    },
+    {
+      "headers": "NOT_CAPTURED",
+      "method": "POST",
+      "path": "/v1/responses",
+      "payload_sha256": "915d8601ef23a5fba339982cbe5aa682ab0c55a49cb96d9ab87569b791e25245",
+      "transport_attempt": 4
+    }
+  ],
+  "sdk_retries": "UNKNOWN"
+}
