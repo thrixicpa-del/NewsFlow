@@ -1,8 +1,13 @@
+import hashlib
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -1948,6 +1953,167 @@ class MontageQueueStateTests(unittest.TestCase):
             self.assertIn("сценарий 1", restored_settings.deleted_scenario_titles)
             self.assertIn("сценарий 2", restored_settings.deleted_scenario_titles)
             self.assertIn("prod-1", restored_settings.deleted_scenario_production_ids)
+
+class MontagePreferencesPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        root = self.enterContext(TemporaryDirectory(prefix="newsflow-montage-preferences-"))
+        self.enterContext(patch.dict(os.environ, {
+            "NEWSFLOW_TEST_MODE": "1", "NEWSFLOW_TEST_ROOT": root,
+            "LOCALAPPDATA": root,
+            "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(Path(root) / "untouched-production"),
+        }))
+        self.enterContext(patch.object(config, "gpu_timeline_available", return_value=False))
+        # Only suppress the unrelated full UI snapshot; settings IO and the
+        # command's validation/normalisation stay real.
+        self.enterContext(patch.object(bridge, "snapshot", return_value={}))
+        config.save_settings(config.Settings(montage_renderer="ffmpeg", montage_renderer_explicit=True))
+
+    def save_preferences(self, percent=50, enabled=True, ranges=None):
+        bridge.save_montage_settings({
+            "fastReuseEnabled": enabled, "uniqueFootagePercent": percent,
+            "fastReuseRanges": [] if ranges is None else ranges,
+        })
+
+    def test_progress_preserves_saved_50_percent_and_manual_pause(self):
+        worker = config.load_settings()
+        self.save_preferences()
+        bridge.save_montage_settings({"queuePaused": True})
+
+        for progress in (43, 44, 45):
+            bridge._montage_task_update(worker, 0, status="Подбор футажей", progress=progress,
+                                        detail=f"Scene {progress}", production_item_id="pi-unique")
+            saved = config.load_settings()
+            self.assertTrue(saved.montage_fast_reuse_enabled)
+            self.assertEqual(saved.montage_unique_footage_percent, 50)
+            self.assertTrue(saved.montage_queue_paused)
+            self.assertEqual(saved.montage_task_statuses["0"]["progress"], progress)
+            self.assertEqual(saved.montage_task_statuses["0"]["production_item_id"], "pi-unique")
+            self.assertEqual(saved.montage_task_statuses["0"]["timeline"][-1]["detail"], f"Scene {progress}")
+        # Persistence must not hot-swap an already preparing worker's inputs.
+        self.assertFalse(worker.montage_fast_reuse_enabled)
+        self.assertEqual(worker.montage_unique_footage_percent, 100)
+
+    def test_project_and_queue_saves_preserve_ranges_and_write_results(self):
+        workers = [config.load_settings(), config.load_settings()]
+        self.save_preferences(ranges=[{"start": 1, "end": 12, "percent": 50}])
+        workers[0].pipeline_montage_outputs = ["synthetic-first.mp4"]
+        workers[1].pipeline_montage_outputs = ["synthetic-second.mp4"]
+
+        for worker in workers * 2:
+            config.save_settings(worker)
+            saved = config.load_settings()
+            self.assertTrue(saved.montage_fast_reuse_enabled)
+            self.assertEqual(saved.montage_unique_footage_percent, 50)
+            self.assertEqual(saved.montage_fast_reuse_ranges, [{"start": 1, "end": 12, "percent": 50}])
+            self.assertEqual(saved.pipeline_montage_outputs, worker.pipeline_montage_outputs)
+
+    def test_in_place_range_edit_is_persisted_without_reverting_newer_percent(self):
+        self.save_preferences(ranges=[{"start": 1, "end": 12, "percent": 50}])
+        editor = config.load_settings()
+        self.save_preferences(percent=75, ranges=[{"start": 1, "end": 12, "percent": 50}])
+        editor.montage_fast_reuse_ranges[0]["percent"] = 25
+        config.save_settings(editor)
+        saved = config.load_settings()
+        self.assertEqual(saved.montage_unique_footage_percent, 75)
+        self.assertEqual(saved.montage_fast_reuse_ranges, [{"start": 1, "end": 12, "percent": 25}])
+
+    def test_saved_instance_cannot_repeat_its_previous_edit_over_a_newer_edit(self):
+        editor = config.load_settings()
+        editor.montage_fast_reuse_enabled = True
+        editor.montage_unique_footage_percent = 50
+        config.save_settings(editor)
+        self.save_preferences(percent=75)
+        config.save_settings(editor)
+        self.assertEqual(config.load_settings().montage_unique_footage_percent, 75)
+
+    def test_explicit_newer_disable_100_and_empty_ranges_survive_old_worker(self):
+        self.save_preferences(ranges=[{"start": 1, "end": 84, "percent": 50}])
+        worker = config.load_settings()
+        self.save_preferences(percent=100, enabled=False)
+        config.save_settings(worker)
+        saved = config.load_settings()
+        self.assertFalse(saved.montage_fast_reuse_enabled)
+        self.assertEqual(saved.montage_unique_footage_percent, 100)
+        self.assertEqual(saved.montage_fast_reuse_ranges, [])
+
+    def test_explicit_command_wins_even_when_value_equals_its_loaded_baseline(self):
+        # A second operator saves after the command read but before its write.
+        # The explicit command still owns the field present in its payload.
+        editor = config.load_settings()
+        self.save_preferences()
+        with patch.object(bridge, "load_settings", return_value=editor):
+            bridge.save_montage_settings({"uniqueFootagePercent": 100})
+        saved = config.load_settings()
+        self.assertEqual(saved.montage_unique_footage_percent, 100)
+        self.assertTrue(saved.montage_fast_reuse_enabled)
+
+    def test_merge_reads_preferences_inside_the_exclusive_write_lock(self):
+        from contextlib import contextmanager
+
+        worker = config.load_settings()
+        lock = config._exclusive_settings_write
+
+        @contextmanager
+        def edit_then_lock(path):
+            self.save_preferences()
+            with lock(path):
+                yield
+
+        def save_operator(settings):
+            # Avoid recursion only for the independent operator write.
+            with patch.object(config, "_exclusive_settings_write", lock):
+                config.save_settings(settings)
+
+        with patch.object(config, "_exclusive_settings_write", side_effect=edit_then_lock), \
+                patch.object(bridge, "save_settings", side_effect=save_operator):
+            config.save_settings(worker)
+        self.assertEqual(config.load_settings().montage_unique_footage_percent, 50)
+
+    def test_independent_operator_process_survives_old_worker_progress(self):
+        worker = config.load_settings()
+        subprocess.run([sys.executable, "-c", """
+from scriptor import config, bridge
+config._GPU_TIMELINE_AVAILABLE = False
+bridge.snapshot = lambda: {}
+bridge.save_montage_settings({'fastReuseEnabled': True, 'uniqueFootagePercent': 50})
+"""], cwd=Path(__file__).resolve().parents[1], check=True, capture_output=True, timeout=30)
+        bridge._montage_task_update(worker, 0, status="Подбор футажей", progress=44)
+        saved = config.load_settings()
+        self.assertTrue(saved.montage_fast_reuse_enabled)
+        self.assertEqual(saved.montage_unique_footage_percent, 50)
+
+    def test_failed_write_does_not_consume_pending_edit(self):
+        editor = config.load_settings()
+        editor.montage_unique_footage_percent = 50
+        with patch.object(config.os, "replace", side_effect=OSError("Synthetic disk failure")), \
+                self.assertRaises(OSError):
+            config.save_settings(editor)
+        self.assertEqual(config.load_settings().montage_unique_footage_percent, 100)
+        config.save_settings(editor)
+        self.assertEqual(config.load_settings().montage_unique_footage_percent, 50)
+        self.assertEqual(list(config.config_path().parent.glob(".settings.json.*.tmp")), [])
+
+    def test_key_edit_on_legacy_profile_does_not_require_reuse_fields(self):
+        bridge.add_api_key({"kind": "openai", "label": "Synthetic", "secret": "synthetic-old"})
+        path = config.config_path()
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        for name in ("montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges"):
+            legacy.pop(name)
+        legacy["unknown_operator_setting"] = "retain"
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        bridge.update_api_key({
+            "kind": "openai", "index": 0, "label": "Synthetic", "secret": "synthetic-new",
+            "fingerprint": bridge._api_key_fingerprint("synthetic-old"),
+            "revision": hashlib.sha256(b"synthetic-old\0Synthetic").hexdigest(),
+        })
+
+        saved = config.load_settings()
+        self.assertEqual(saved.openai_api_keys[0].secret, "synthetic-new")
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["unknown_operator_setting"], "retain")
+        self.assertNotIn("montage_unique_footage_percent", persisted)
+
 
 if __name__ == "__main__":
     unittest.main()

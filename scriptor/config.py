@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1462,6 +1463,7 @@ def load_settings() -> Settings:
         }
         settings._observed_youtube_key = data.get("youtube_api_key_protected", "")
         settings._observed_cover_key_labels = list(settings.cover_selected_key_labels)
+        _remember_montage_reuse_preferences(settings)
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
@@ -1521,6 +1523,18 @@ def _api_key_record_identity(record: dict, position: int) -> str:
 
 _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
                    "lumean_api_keys", "voicegen_api_keys", "wproject_api_keys")
+
+
+_MONTAGE_REUSE_PREFERENCES = (
+    "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
+)
+
+
+def _remember_montage_reuse_preferences(settings: Settings) -> None:
+    # Copy nested ranges: an in-place operator edit must differ from its baseline.
+    settings._observed_montage_reuse = {
+        name: deepcopy(getattr(settings, name)) for name in _MONTAGE_REUSE_PREFERENCES
+    }
 
 
 def _merge_api_key_records(persisted: object, incoming: object, observed: object = None) -> list[dict]:
@@ -2143,6 +2157,17 @@ def save_settings(settings: Settings):
             # save. Start from the current locked disk snapshot so concurrent
             # settings changes and other credential selections survive.
             data = dict(on_disk)
+        observed_reuse = getattr(settings, "_observed_montage_reuse", {})
+        edited_reuse = getattr(settings, "_edited_montage_reuse", set())
+        for name in _MONTAGE_REUSE_PREFERENCES:
+            # A progress/project/queue save does not own unchanged preferences.
+            # Resolve against the latest disk snapshot while holding the lock,
+            # not a pre-lock read that another process can immediately supersede.
+            # Credential replacement already uses only the current disk
+            # snapshot, which may legitimately omit these optional fields.
+            if (not replacement and name in observed_reuse and name not in edited_reuse
+                    and getattr(settings, name) == observed_reuse[name]):
+                data[name] = on_disk.get(name, data[name])
         disk_generation = max(0, int(on_disk.get("production_reset_generation", 0) or 0))
         incoming_generation = max(0, int(data.get("production_reset_generation", 0) or 0))
         stale_release_snapshot = incoming_generation < disk_generation
@@ -2262,6 +2287,11 @@ def save_settings(settings: Settings):
             while True:
                 try:
                     os.replace(temporary, path)
+                    # Remember the object's inputs, not the merged disk values:
+                    # a running preparation must keep its captured parameters,
+                    # and repeated progress saves must still count as unchanged.
+                    _remember_montage_reuse_preferences(settings)
+                    settings._edited_montage_reuse = set()
                     break
                 except PermissionError:
                     if time.monotonic() >= deadline:
