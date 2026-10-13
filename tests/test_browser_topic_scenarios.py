@@ -379,6 +379,30 @@ class BrowserTopicScenarioContractTests(unittest.TestCase):
 
 
 class BrowserTopicScenarioPoolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persistence_failure_waits_for_other_tabs_without_resubmitting(self):
+        from scriptor.session import SessionWriteConflictError
+
+        calls, published = [], []
+
+        class Transport:
+            async def generate(self, *, task, **_kwargs):
+                calls.append(task.production_item_id)
+                if task.production_item_id == "slow":
+                    await asyncio.sleep(0.01)
+                return "Literal TXT"
+
+        def publish(outcome):
+            published.append(outcome.production_item_id)
+            if outcome.production_item_id == "fast":
+                raise SessionWriteConflictError("conflict")
+
+        with self.assertRaisesRegex(SessionWriteConflictError, "conflict"):
+            await run_browser_topic_tasks(BrowserScenarioSettings(project_url="https://chatgpt.com/g/project",
+                companion_prompt="TXT", minimum_chars=1, maximum_chars=2, concurrency=2),
+                [BrowserTopicTask("fast", "Fast"), BrowserTopicTask("slow", "Slow")], Transport(), on_outcome=publish)
+        self.assertCountEqual(calls, ["fast", "slow"])
+        self.assertEqual(published, ["fast", "slow"])
+
     async def test_runs_topics_in_bounded_tabs_with_per_item_urls(self):
         from scriptor.browser_topic_scenarios import (
             BrowserScenarioSettings,
@@ -452,6 +476,183 @@ class BrowserTopicScenarioPoolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserTopicBridgeTests(unittest.TestCase):
+    def test_txt_export_uses_the_topic_name_and_never_overwrites_a_collision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(output_folder=directory)
+            first = bridge._browser_topic_export_path(settings, "Точная тема", "production-1")
+            self.assertEqual(first.name, "Точная тема.txt")
+            first.write_bytes(b"first")
+            second = bridge._browser_topic_export_path(settings, "Точная тема", "production-2")
+            self.assertNotEqual(first, second)
+            second.write_bytes(b"second")
+            self.assertEqual(first.read_bytes(), b"first")
+            self.assertTrue(second.stem.startswith("Точная тема"))
+
+    def test_topic_filename_is_windows_safe_for_long_unicode_and_reserved_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(output_folder=directory)
+            for title in ('CON', 'CON.notes', 'Тема 😀 / вопрос: "что дальше?"', 'Длинная тема ' * 100, '😀' * 120):
+                with self.subTest(title=title[:40]):
+                    target = bridge._browser_topic_export_path(settings, title, "same-id")
+                    with target.open("xb") as stream:
+                        stream.write(b"literal")
+                    self.assertLessEqual(len(target.name), 124)
+                    self.assertNotRegex(target.name, r'[<>:"/\\|?*\x00-\x1f]')
+                    other = bridge._browser_topic_export_path(settings, title, "same-id")
+                    self.assertNotEqual(target, other)
+                    with other.open("xb") as stream:
+                        stream.write(b"second")
+                    self.assertEqual(target.read_bytes(), b"literal")
+
+    def test_late_download_never_overwrites_a_manual_edit_or_recreates_a_deleted_topic(self):
+        from scriptor.config import ChromeSession
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        for deleted in (False, True):
+            with self.subTest(deleted=deleted), tempfile.TemporaryDirectory() as directory:
+                settings = Settings(output_folder=directory,
+                    chrome_sessions=[ChromeSession(label="Offline", profile_id="fixture")],
+                    browser_topic_scenarios={"session_id": "fixture", "project_url": "https://chatgpt.com/g/project",
+                        "companion_prompt": "Only TXT", "minimum_chars": 1, "maximum_chars": 2})
+                initial = Job(ScenarioRequest(0, "Тема", "", "id-exact"))
+                manual = Job(ScenarioRequest(0, "Тема", "", "id-exact"), RunState.DONE, "Manual wins")
+                current = ([], []) if deleted else (["Тема"], [manual])
+
+                class Transport:
+                    async def __aenter__(self):
+                        return self
+                    async def __aexit__(self, *_args):
+                        return None
+                    async def generate(self, **_kwargs):
+                        return "Late downloaded TXT"
+
+                with patch.object(bridge, "load_settings", return_value=settings), \
+                     patch.object(bridge, "load_session", side_effect=[(["Тема"], [initial]), current]), \
+                     patch.object(bridge, "save_session") as save, \
+                     patch.object(bridge, "ensure_idea_production_items", return_value=False), \
+                     patch.object(bridge, "snapshot", return_value={}):
+                    result = bridge.generate_browser_topic_scenarios({}, transport_factory=lambda _session: Transport())
+                self.assertEqual(result["operationResult"]["count"], 0)
+                self.assertEqual(save.call_count, 1)  # initial RUNNING publication only
+                self.assertEqual(manual.result, "Manual wins")
+                self.assertEqual(list(Path(directory).rglob("*.txt")), [])
+
+    def test_completed_topic_is_persisted_before_another_tab_finishes(self):
+        from scriptor.config import ChromeSession
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+        from scriptor.session import load_session, save_session
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {
+                "NEWSFLOW_TEST_MODE": "1", "NEWSFLOW_TEST_ROOT": str(root / "test"),
+                "LOCALAPPDATA": str(root / "test"), "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(root / "production"),
+            }):
+                settings = Settings(output_folder=str(root / "exports"),
+                    chrome_sessions=[ChromeSession(label="Offline", profile_id="fixture")],
+                    browser_topic_scenarios={"session_id": "fixture", "project_url": "https://chatgpt.com/g/project",
+                        "companion_prompt": "Only TXT", "minimum_chars": 1, "maximum_chars": 2, "concurrency": 2})
+                save_settings(settings)
+                save_session(["Fast topic", "Slow topic"], [
+                    Job(ScenarioRequest(0, "Fast topic", "", "id-fast")),
+                    Job(ScenarioRequest(1, "Slow topic", "", "id-slow")),
+                ])
+                observations = []
+
+                class Transport:
+                    async def __aenter__(self):
+                        return self
+                    async def __aexit__(self, *_args):
+                        return None
+                    async def generate(self, *, project_url, message, requirements_file, task):
+                        if task.production_item_id == "id-slow":
+                            for _ in range(10):
+                                await asyncio.sleep(0.01)
+                                _, jobs = load_session()
+                                if jobs[0].state is RunState.DONE:
+                                    observations.append(jobs[0].result)
+                                    break
+                        return f"Literal TXT: {task.production_item_id}"
+
+                result = bridge.generate_browser_topic_scenarios({}, transport_factory=lambda _session: Transport())
+                self.assertEqual(result["operationResult"]["count"], 2)
+                self.assertEqual(observations, ["Literal TXT: id-fast"])
+                export = Path(result["operationResult"]["folder"]) / "Fast topic.txt"
+                self.assertTrue(export.is_relative_to(root))
+                self.assertEqual(export.read_bytes(), b"Literal TXT: id-fast")
+
+    def test_session_conflict_reloads_manual_edits_without_cancelling_sibling_downloads(self):
+        self._assert_session_conflict_recovery(manual_edit=True)
+
+    def test_session_conflict_retries_commit_once_without_exporting_or_counting_twice(self):
+        self._assert_session_conflict_recovery(manual_edit=False)
+
+    def _assert_session_conflict_recovery(self, *, manual_edit):
+        from scriptor.config import ChromeSession
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+        from scriptor.session import (
+            SessionWriteConflictError,
+            load_session,
+            save_session,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {
+                "NEWSFLOW_TEST_MODE": "1", "NEWSFLOW_TEST_ROOT": str(root / "test"),
+                "LOCALAPPDATA": str(root / "test"), "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(root / "production"),
+            }):
+                save_settings(Settings(chrome_sessions=[ChromeSession(label="Offline", profile_id="fixture")],
+                    browser_topic_scenarios={"session_id": "fixture", "project_url": "https://chatgpt.com/g/project",
+                        "companion_prompt": "TXT", "minimum_chars": 1, "maximum_chars": 2, "concurrency": 2}))
+                save_session(["Fast", "Slow"], [Job(ScenarioRequest(0, "Fast", "", "fast")),
+                                               Job(ScenarioRequest(1, "Slow", "", "slow"))])
+                calls = []
+                conflicted = False
+
+                def competing_save(titles, jobs):
+                    nonlocal conflicted
+                    if not conflicted and jobs[0].state is RunState.DONE:
+                        conflicted = True
+                        current_titles, current_jobs = load_session()
+                        if manual_edit:
+                            current_jobs[0].result = "Manual concurrent edit"
+                            current_jobs[0].state = RunState.DONE
+                        else:
+                            current_jobs[0].request = ScenarioRequest(0, "Fast", "Concurrent prompt edit", "fast")
+                        save_session(current_titles, current_jobs)
+                        raise SessionWriteConflictError("concurrent edit")
+                    save_session(titles, jobs)
+
+                class Transport:
+                    async def __aenter__(self):
+                        return self
+                    async def __aexit__(self, *_args):
+                        return None
+                    async def generate(self, *, task, **_kwargs):
+                        calls.append(task.production_item_id)
+                        if task.production_item_id == "slow":
+                            await asyncio.sleep(0.01)
+                        return f"Downloaded {task.production_item_id}"
+
+                with patch.object(bridge, "save_session", side_effect=competing_save):
+                    result = bridge.generate_browser_topic_scenarios({}, transport_factory=lambda _session: Transport())
+                _, jobs = load_session()
+                self.assertTrue(conflicted)
+                self.assertCountEqual(calls, ["fast", "slow"])
+                self.assertEqual(jobs[0].result, "Manual concurrent edit" if manual_edit else "Downloaded fast")
+                self.assertEqual(jobs[1].result, "Downloaded slow")
+                self.assertEqual(jobs[1].state, RunState.DONE)
+                self.assertEqual(result["operationResult"]["count"], 1 if manual_edit else 2)
+                if not manual_edit:
+                    self.assertEqual(jobs[0].request.prompt, "Concurrent prompt edit")
+                    exports = list(Path(result["operationResult"]["folder"]).glob("Fast*.txt"))
+                    self.assertEqual(len(exports), 1)
+                    self.assertEqual(exports[0].read_bytes(), b"Downloaded fast")
+
     def test_browser_topic_queue_rejects_a_second_process_owner_before_transport(self):
         from scriptor import bridge
 

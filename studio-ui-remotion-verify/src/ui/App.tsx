@@ -988,7 +988,7 @@ export function App() {
           />
         ) : null}
         {page === "browserTopics" ? (
-          <BrowserTopicScenarios data={data} command={command} />
+          <BrowserTopicScenarios data={data} command={command} refresh={refresh} />
         ) : null}
         {page === "scripts" ? (
           <FinishedScripts data={data} go={navigate} command={command} />
@@ -3083,7 +3083,9 @@ export function Scenarios({
  * Separate direct-browser route.  It intentionally lists queue *topics* and
  * does not expose any existing scenario text as an input to ChatGPT.
  */
-export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapshot; command: Command }) {
+export function BrowserTopicScenarios({ data, command, refresh }: {
+  data: NewsFlowSnapshot; command: Command; refresh?: () => Promise<void>;
+}) {
   const saved = data.browserTopicScenarios;
   const [projectUrl, setProjectUrl] = useState(saved.projectUrl);
   const [sessionId, setSessionId] = useState(saved.sessionId);
@@ -3108,6 +3110,26 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
   const [additionalPromptOverrides, setAdditionalPromptOverrides] = useState(saved.additionalPromptOverrides || {});
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>(saved.promptOverrides);
   const [urlOverrides, setUrlOverrides] = useState<Record<string, string>>(saved.urlOverrides);
+  const savedRevision = JSON.stringify(saved);
+
+  useEffect(() => {
+    if (!launching || !refresh) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        await refresh();
+      } catch {
+        // App.refresh reports snapshot errors; a failed read is not a reason
+        // to stop observing the still-running browser queue.
+      } finally {
+        // Sequential reads: a slow snapshot cannot accumulate Core processes.
+        if (!stopped) timer = window.setTimeout(() => void poll(), 900);
+      }
+    };
+    timer = window.setTimeout(() => void poll(), 900);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [launching, refresh]);
 
   useEffect(() => {
     setProjectUrl(saved.projectUrl);
@@ -3123,7 +3145,7 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
     setAdditionalPromptOverrides(saved.additionalPromptOverrides || {});
     setPromptOverrides(saved.promptOverrides);
     setUrlOverrides(saved.urlOverrides);
-  }, [saved]);
+  }, [savedRevision]);
 
   const topics = data.scenarios.filter((item) => item.productionItemId);
   const selectedTopics = topics.filter((item) =>

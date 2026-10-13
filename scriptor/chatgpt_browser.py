@@ -7,6 +7,7 @@ uses API keys or an arbitrary URL supplied by a queued topic.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Self
 from urllib.parse import urlparse
@@ -22,6 +23,18 @@ class ChatGPTBrowserError(RuntimeError):
 _DOWNLOAD_BUTTON_SELECTOR = (
     "button[aria-label='Скачать файл'], "
     "button[aria-label='Download file']"
+)
+_ASSISTANT_MARKERS = (
+    "[data-message-author-role='assistant'], "
+    "[data-chatgpt-search-unit-key$=':assistant'], "
+    "[data-content-search-unit-key$=':assistant']"
+)
+# Some layouts nest the legacy message inside the modern response wrapper.
+# Count each response once; retain sibling file cards within the outer boundary.
+_ASSISTANT_SELECTOR = f":is({_ASSISTANT_MARKERS}):not(:is({_ASSISTANT_MARKERS}) :is({_ASSISTANT_MARKERS}))"
+_MESSAGE_SELECTOR = (
+    "[data-message-author-role], [data-chatgpt-search-unit-key], "
+    "[data-content-search-unit-key], [data-chatgpt-selection-message-id]"
 )
 
 
@@ -122,7 +135,7 @@ class ChatGPTBrowserClient:
                     f"Сессия «{self.session.label}» не вошла в ChatGPT. Откройте её в «Сессиях Chrome», "
                     "войдите вручную и закройте окно Chrome."
                 )
-            assistant_count = await page.locator("[data-message-author-role='assistant']").count()
+            assistant_count = await page.locator(_ASSISTANT_SELECTOR).count()
             if requirements_file:
                 await self._attach_requirements_file(page, requirements_file)
             # Bind any later download to a control created after this exact
@@ -134,13 +147,17 @@ class ChatGPTBrowserClient:
             await self._submit_message(page, editor)
             # The contract requires an actual downloadable TXT, not merely a
             # filename or a prose caption in the assistant turn.
+            # Local to this tab: concurrent tasks must never share a response
+            # locator or fall back to another turn's/user's attachment.
+            ready_response = []
             await self._wait_for_answer(
                 page,
                 baseline_count=assistant_count,
                 download_baseline_count=download_count,
+                on_response=ready_response.append,
             )
             return await self._download_txt_attachment(
-                page, baseline_count=download_count,
+                page, response=ready_response[0],
             )
         except ChatGPTBrowserError:
             raise
@@ -155,7 +172,7 @@ class ChatGPTBrowserClient:
     @staticmethod
     async def _start_new_chat(page) -> None:
         """Fail closed unless the tab is demonstrably a fresh conversation."""
-        messages = page.locator("[data-message-author-role]")
+        messages = page.locator(_MESSAGE_SELECTOR)
         try:
             if await messages.count() == 0:
                 return
@@ -264,19 +281,24 @@ class ChatGPTBrowserClient:
             ) from exc
 
     @staticmethod
-    async def _download_txt_attachment(page, *, baseline_count: int = 0, timeout_ms: int = 15_000) -> str:
-        """Download only a TXT control created after this request was sent."""
-        buttons = page.locator(_DOWNLOAD_BUTTON_SELECTOR)
+    async def _download_txt_attachment(page, *, baseline_count: int = 0,
+                                       timeout_ms: int = 15_000, response=None) -> str:
+        """Download the new response's file, never a page-wide user attachment."""
+        buttons = (response if response is not None else page).locator(_DOWNLOAD_BUTTON_SELECTOR)
         deadline = asyncio.get_running_loop().time() + max(1_000, int(timeout_ms)) / 1000.0
         button = None
         while asyncio.get_running_loop().time() < deadline:
             try:
                 count = await buttons.count()
+                if response is not None and count > 1:
+                    raise ChatGPTBrowserError("ChatGPT прикрепил несколько файлов; TXT-вложение неоднозначно")
                 if count > baseline_count:
                     candidate = buttons.nth(count - 1)
                     if await candidate.is_visible():
                         button = candidate
                         break
+            except ChatGPTBrowserError:
+                raise
             except Exception:  # noqa: BLE001,S110 - UI can re-render while the file card appears.
                 pass
             await page.wait_for_timeout(200)
@@ -313,11 +335,12 @@ class ChatGPTBrowserClient:
         *,
         baseline_count: int,
         download_baseline_count: int | None = None,
+        on_response: Callable | None = None,
     ) -> str:
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         previous = ""
         stable_since = 0.0
-        answers = page.locator("[data-message-author-role='assistant']")
+        answers = page.locator(_ASSISTANT_SELECTOR)
         while asyncio.get_running_loop().time() < deadline:
             current = ""
             has_new_turn = False
@@ -326,17 +349,23 @@ class ChatGPTBrowserClient:
                 if count > baseline_count:
                     # Only a newly-created assistant turn can satisfy this task.
                     has_new_turn = True
-                    current = await answers.nth(count - 1).inner_text(timeout=2_000)
+                    response = answers.nth(count - 1)
+                    current = await response.inner_text(timeout=2_000)
             except Exception:  # noqa: BLE001 - no answer is normal while the turn is pending.
                 current = ""
                 has_new_turn = False
             attachment_ready = False
+            turn_complete = False
+            if has_new_turn:
+                try:
+                    turn_complete = await response.locator(
+                        "xpath=ancestor-or-self::*[@data-talvt-turn-state][1]"
+                    ).get_attribute("data-talvt-turn-state", timeout=250) == "complete"
+                except Exception:  # noqa: BLE001,S110 - legacy layouts have no completion marker.
+                    pass
             if has_new_turn and download_baseline_count is not None:
                 try:
-                    attachment_ready = (
-                        await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
-                        > download_baseline_count
-                    )
+                    attachment_ready = await response.locator(_DOWNLOAD_BUTTON_SELECTOR).count() > 0
                 except Exception:  # noqa: BLE001 - attachment is optional while generation runs.
                     attachment_ready = False
             now = asyncio.get_running_loop().time()
@@ -355,9 +384,13 @@ class ChatGPTBrowserClient:
                     stop_visible = stop_visible or await page.locator(selector).is_visible(timeout=250)
                 except Exception:  # noqa: BLE001,S110 - selector is optional across ChatGPT UI versions.
                     pass
-            if attachment_ready and not stop_visible:
+            if (attachment_ready or turn_complete) and not stop_visible:
+                if on_response is not None:
+                    on_response(response)
                 return current
             if current.strip() and not stop_visible and stable_since and now - stable_since >= 4.0:
+                if on_response is not None:
+                    on_response(response)
                 return current.replace("\r\n", "\n").replace("\r", "\n")
             await page.wait_for_timeout(500)
         raise ChatGPTBrowserError("ChatGPT не вернул новый готовый ответ за отведённое время")
