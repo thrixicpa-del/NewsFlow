@@ -8,6 +8,7 @@ into the message and route that a browser adapter may later dispatch.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -159,6 +160,8 @@ async def run_browser_topic_tasks(
     settings: BrowserScenarioSettings,
     tasks: list[BrowserTopicTask],
     transport: BrowserTopicTransport,
+    *,
+    on_outcome: Callable[[BrowserTopicCompletion | BrowserTopicFailure], None] | None = None,
 ) -> list[BrowserTopicCompletion | BrowserTopicFailure]:
     """Run topic-bound browser work with slots, never queue-index routing.
 
@@ -187,12 +190,25 @@ async def run_browser_topic_tasks(
             text=normalize_browser_response(text),
         )
 
-    outcomes = await asyncio.gather(*(run_one(task) for task in tasks), return_exceptions=True)
-    return [
-        outcome if isinstance(outcome, BrowserTopicCompletion) else BrowserTopicFailure(
-            production_item_id=_clean_text(task.production_item_id),
-            title=task.browser_input_title,
-            error=str(outcome) or "ChatGPT не вернул текст сценария",
-        )
-        for task, outcome in zip(tasks, outcomes)
-    ]
+    async def run_and_publish(task: BrowserTopicTask) -> BrowserTopicCompletion | BrowserTopicFailure:
+        try:
+            outcome = await run_one(task)
+        except Exception as exc:  # noqa: BLE001 - one tab must not discard other results.
+            outcome = BrowserTopicFailure(
+                production_item_id=_clean_text(task.production_item_id),
+                title=task.browser_input_title,
+                error=str(exc) or "ChatGPT не вернул текст сценария",
+            )
+        # Persist as soon as this tab completes, not after the slowest tab.
+        # Persistence errors propagate; they must not resubmit the browser task.
+        if on_outcome is not None:
+            on_outcome(outcome)
+        return outcome
+
+    outcomes = await asyncio.gather(*(run_and_publish(task) for task in tasks), return_exceptions=True)
+    # A storage failure must surface, but must not cancel other tabs whose
+    # messages were already sent. External cancellation still propagates.
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            raise outcome
+    return outcomes

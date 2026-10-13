@@ -1,8 +1,47 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { BrowserTopicScenarios, fallback } from "../../App";
 
 describe("browser topic scenarios", () => {
+  it("refreshes completed topics while another tab is pending without resetting draft settings", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const data = { ...fallback, scenarios: [
+      { index: 0, productionItemId: "fast", title: "Fast topic", state: "Ожидает", result: "", error: "" },
+      { index: 1, productionItemId: "slow", title: "Slow topic", state: "Ожидает", result: "", error: "" },
+    ] };
+    const command = vi.fn(async (name: string) => {
+      if (name === "generate-browser-topic-scenarios") await gate;
+      return data;
+    });
+    const refreshed = { ...data, browserTopicScenarios: { ...data.browserTopicScenarios },
+      scenarios: [{ ...data.scenarios[0], state: "Готово", result: "Downloaded TXT" },
+        { ...data.scenarios[1], state: "В обработке" }] };
+    let update!: () => void;
+    const refresh = vi.fn(async () => { update(); });
+    const { rerender, unmount } = render(<BrowserTopicScenarios data={data} command={command} refresh={refresh} />);
+    update = () => rerender(<BrowserTopicScenarios data={refreshed} command={command} refresh={refresh} />);
+    try {
+      fireEvent.click(screen.getByLabelText("Выбрать: Fast topic"));
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" })); });
+      expect(command).toHaveBeenCalledWith("generate-browser-topic-scenarios", {
+        indices: [0], productionItemIds: ["fast"],
+      });
+      fireEvent.change(screen.getByLabelText("Сопроводительное письмо"), { target: { value: "Unsaved draft" } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
+      expect(refresh).toHaveBeenCalled();
+      expect(screen.getByText("Готово")).toBeTruthy();
+      expect((screen.getByLabelText("Сопроводительное письмо") as HTMLTextAreaElement).value).toBe("Unsaved draft");
+      const calls = refresh.mock.calls.length;
+      await act(async () => { release(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(refresh.mock.calls.length).toBe(calls);
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
   it("accepts 84 simultaneous tabs and preserves the value after settings reload", async () => {
     const data = { ...fallback };
     const command = vi.fn(async () => data);

@@ -137,7 +137,13 @@ from .publication_v2 import (
 )
 from .runner import Job, ParallelRunner, RunState, scenario_length_status
 from .seo_prefixes import normalize_prefix_ranges, prepend_description_prefix
-from .session import load_session, remove_scenarios, rename_scenario, save_session
+from .session import (
+    SessionWriteConflictError,
+    load_session,
+    remove_scenarios,
+    rename_scenario,
+    save_session,
+)
 from .thumbnail_prompt_v2 import (
     append_universal_thumbnail_core_v2,
     build_final_provider_prompt,
@@ -7362,11 +7368,25 @@ def _select_browser_topic_tasks(settings: Settings, titles: list[str], jobs: lis
 def _browser_topic_export_path(settings: Settings, title: str, production_item_id: str) -> Path:
     folder = Path(settings.output_folder) / "ChatGPT браузер"
     folder.mkdir(parents=True, exist_ok=True)
-    # The visible name is the topic.  The durable ID suffix prevents two
-    # different current topics that normalize to the same Windows filename
-    # from overwriting one another.
-    suffix = re.sub(r"[^A-Za-z0-9]", "", production_item_id)[-8:] or "topic"
-    return folder / f"{safe_filename(title)} — {suffix}.txt"
+    name = safe_filename(title)
+    # Leave room for collision suffixes on Windows (UTF-16) and portable
+    # filesystems (UTF-8 bytes), without changing the shared filename policy.
+    while len(name.encode("utf-8")) > 200 or len(name.encode("utf-16-le")) > 400:
+        name = name[:-1]
+    if re.fullmatch(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", name.split(".")[0], re.IGNORECASE):
+        name = "_" + name
+    target = folder / f"{name}.txt"
+    if not target.exists():
+        return target
+    # Only collisions need a suffix. Identity routing remains in the session,
+    # never inferred from filenames. Keep every pre-existing export intact.
+    suffix = hashlib.sha256(production_item_id.encode("utf-8")).hexdigest()[:12]
+    target = folder / f"{name} — {suffix}.txt"
+    counter = 2
+    while target.exists():
+        target = folder / f"{name} — {suffix}-{counter}.txt"
+        counter += 1
+    return target
 
 
 def _browser_topic_queue_lock_path() -> Path:
@@ -7525,12 +7545,61 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
         )
     save_session(titles, list(jobs_by_index.values()))
 
+    completed = 0
+
+    def publish_outcome(outcome: BrowserTopicCompletion | BrowserTopicFailure) -> None:
+        nonlocal completed
+        export_attempted = False
+        export_error = ""
+        for attempt in range(3):
+            # Re-resolve on every commit attempt. Only a session conflict is
+            # retryable here; NEVER replay a browser submission/download.
+            current_titles, current_jobs = load_session()
+            matching = [job for job in current_jobs
+                        if str(job.request.production_item_id or "").strip() == outcome.production_item_id]
+            if len(matching) != 1:
+                return
+            job = matching[0]
+            if str(job.result or "").strip():
+                return  # manual/ready result always wins, including after a conflict
+            if isinstance(outcome, BrowserTopicCompletion) and outcome.text:
+                job.result = outcome.text
+                job.actual_chars = len(outcome.text)
+                job.length_status = ""
+                if not export_attempted:
+                    export_attempted = True
+                    try:
+                        target = _browser_topic_export_path(
+                            settings, str(job.request.title or outcome.title), outcome.production_item_id,
+                        )
+                        # Exclusive creation protects a concurrent file creator.
+                        with target.open("xb") as stream:
+                            stream.write(outcome.text.encode("utf-8"))
+                    except OSError as exc:
+                        export_error = f"ChatGPT вернул сценарий, но TXT не удалось сохранить: {exc}"
+                job.state = RunState.ERROR if export_error else RunState.DONE
+                job.error = export_error
+            else:
+                job.state = RunState.ERROR
+                job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
+            try:
+                save_session(current_titles, current_jobs)
+            except SessionWriteConflictError:
+                if attempt == 2:
+                    raise
+                continue
+            if job.state is RunState.DONE:
+                completed += 1
+            return
+
     async def run() -> list[BrowserTopicCompletion | BrowserTopicFailure]:
         async with transport_factory(session) as transport:
-            return await run_browser_topic_tasks(browser_settings, tasks, transport)
+            return await run_browser_topic_tasks(
+                browser_settings, tasks, transport, on_outcome=publish_outcome,
+            )
 
     try:
-        outcomes = asyncio.run(run())
+        asyncio.run(run())
     except _BRIDGE_OPERATION_ERRORS as exc:
         # A browser/context launch failure happens before per-topic outcomes
         # exist. Re-read the current session and clear only this batch's still-
@@ -7551,47 +7620,6 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
         save_session(current_titles, current_jobs)
         raise
 
-    # Browser tabs may run for minutes. Re-read the authoritative session and
-    # commit every outcome by ProductionItem ID, never by stale queue index.
-    current_titles, current_jobs = load_session()
-    current_by_id = {
-        str(job.request.production_item_id or "").strip(): job
-        for job in current_jobs
-        if str(job.request.production_item_id or "").strip()
-    }
-    completed = 0
-    for task, outcome in zip(tasks, outcomes):
-        job = current_by_id.get(task.production_item_id)
-        if job is None:
-            continue
-        # A manual edit/import that appeared while ChatGPT was open wins.
-        if str(job.result or "").strip():
-            continue
-        if isinstance(outcome, BrowserTopicCompletion) and outcome.text:
-            # No content/fact/length gate: ChatGPT's returned prose is saved as
-            # received, with only newline normalization done in the adapter.
-            job.result = outcome.text
-            job.actual_chars = len(outcome.text)
-            job.length_status = ""
-            export_title = str(job.request.title or task.title)
-            try:
-                target = _browser_topic_export_path(
-                    settings, export_title, task.production_item_id,
-                )
-                target.write_bytes(outcome.text.encode("utf-8"))
-            except OSError as exc:
-                # The text remains recoverable in the same ProductionItem even
-                # when its separate TXT export cannot be published.
-                job.state = RunState.ERROR
-                job.error = f"ChatGPT вернул сценарий, но TXT не удалось сохранить: {exc}"
-            else:
-                job.state = RunState.DONE
-                job.error = ""
-                completed += 1
-        else:
-            job.state = RunState.ERROR
-            job.error = str(getattr(outcome, "error", "") or "ChatGPT не вернул текст сценария")
-    save_session(current_titles, current_jobs)
     export_folder = str(Path(settings.output_folder) / "ChatGPT браузер") if completed else ""
     return {**snapshot(), "operationResult": {
         "kind": "browser-topic-scenarios", "count": completed,
