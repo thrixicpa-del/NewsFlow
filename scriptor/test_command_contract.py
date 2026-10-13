@@ -4,6 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+def load_tests(loader, suite, _pattern):
+    """Exercise the manual Covers billing contract in the standard CI job."""
+    from tests import test_cover_manual_no_paid_aux
+
+    suite.addTests(loader.loadTestsFromModule(test_cover_manual_no_paid_aux))
+    return suite
+
+
 class CommandContractTests(unittest.TestCase):
     def test_critical_paths_have_one_registered_canonical_handler(self):
         from scriptor.command_contract import COMMAND_CONTRACT
