@@ -10226,6 +10226,11 @@ export function Footage({
         {data.footageFolders.length ? (
           <>
             <div className="footage-labels">
+              {Number(data.footageIndex.mediaQuarantined || 0) > 0 ? (
+                <span title={data.footageIndex.mediaQuarantine?.map((item) => `${item.path}: ${item.reason}`).join("\n")}>
+                  Карантин повреждённых видео: {Number(data.footageIndex.mediaQuarantined).toLocaleString("ru-RU")}
+                </span>
+              ) : null}
               <span>
                 Исключено английских надписей:{" "}
                 {Number(data.footageIndex.englishBlocked || 0).toLocaleString(

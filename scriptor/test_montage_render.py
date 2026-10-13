@@ -20,6 +20,8 @@ from unittest.mock import patch
 
 import numpy as np
 
+from tests.media_fixtures import write_readable_video
+
 from . import bridge
 from . import config as config_module
 from . import timeline as timeline_module
@@ -68,14 +70,14 @@ class MontageRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="newsflow-source-proxy-") as temporary:
             root = Path(temporary)
             source = root / "source.mp4"
-            source.write_bytes(b"immutable-source" * 256)
+            write_readable_video(source)
             before = source.stat()
             runs = []
 
             def fake_run(command, process_observer=None):
                 del process_observer
                 runs.append(command)
-                Path(command[-1]).write_bytes(b"proxy" * 512)
+                Path(command[-1]).write_bytes(source.read_bytes())
 
             with patch.object(timeline_module, "source_proxy_cache_root", return_value=root / "cache"), \
                  patch.object(timeline_module, "ffmpeg_executable", return_value="ffmpeg"), \
@@ -97,7 +99,7 @@ class MontageRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="newsflow-source-proxy-truncated-") as temporary:
             root = Path(temporary)
             source = root / "source.mp4"
-            source.write_bytes(b"immutable-source" * 256)
+            write_readable_video(source)
             target = root / "cache" / "cached.mp4"
             target.parent.mkdir()
             target.write_bytes(b"broken")
@@ -106,7 +108,7 @@ class MontageRenderTests(unittest.TestCase):
             def fake_run(command, process_observer=None):
                 del process_observer
                 runs.append(command)
-                Path(command[-1]).write_bytes(b"proxy" * 512)
+                Path(command[-1]).write_bytes(source.read_bytes())
 
             with patch.object(timeline_module, "source_proxy_path", return_value=target), \
                  patch.object(timeline_module, "ffmpeg_executable", return_value="ffmpeg"), \
@@ -154,8 +156,8 @@ class MontageRenderTests(unittest.TestCase):
             root = Path(temporary)
             source = root / "source.mp4"
             prepared = root / "prepared.mp4"
-            source.write_bytes(b"source")
-            prepared.write_bytes(b"prepared" * 256)
+            write_readable_video(source)
+            prepared.write_bytes(source.read_bytes())
             with patch.object(timeline_module, "source_proxy_path", return_value=prepared):
                 self.assertEqual(selector(source, 1920, 1080), prepared)
             prepared.unlink()

@@ -22,6 +22,7 @@ const requiredSources = [
   'scriptor/story_planner.py',
   'scriptor/openai_client.py',
   'scriptor/timeline.py',
+  'scriptor/media_health.py',
   'scriptor/thumbnail_prompt_v2.py',
   'scriptor/observability.py',
   'bridge_main.py',

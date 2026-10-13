@@ -1311,5 +1311,312 @@ class ClipIndexTests(unittest.TestCase):
             self.assertTrue(set(index.all_items()[0].tags) & SEMANTIC_TAG_LABELS)
 
 
+class MediaIntegrityTests(unittest.TestCase):
+    """Real tiny media fixtures; original footage is never moved or rewritten."""
+
+    def setUp(self):
+        from scriptor import timeline
+        self.timeline = timeline
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="newsflow-health-")))
+        self.source = self.root / "blue-source.mp4"
+        subprocess.run([
+            ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i",
+            "color=c=blue:s=64x64:r=30:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(self.source),
+        ], check=True, capture_output=True, timeout=30)
+        self.before = self.source.read_bytes()
+        self.proxy = self.root / "cache" / "prepared.mp4"
+        self.proxy.parent.mkdir()
+        self.index = ClipIndex(self.root / "index.sqlite3", embedder_factory=lambda: (
+            FakeImageEmbedding(), FakeTextEmbedding(),
+        ))
+
+    def test_large_malformed_proxy_is_quarantined_and_original_is_used(self):
+        self.proxy.write_bytes(b"not-an-mp4" * 2048)
+        bad_bytes = self.proxy.read_bytes()
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy):
+            selected = self.timeline.render_source_for_proxy(self.source, 64, 64)
+        self.assertEqual(selected, self.source)
+        self.assertFalse(self.proxy.exists())
+        quarantined = list(self.root.rglob("*.invalid-mp4"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_bytes(), bad_bytes)
+        self.assertEqual(self.source.read_bytes(), self.before)
+
+    def test_audio_only_proxy_is_not_accepted_as_video(self):
+        subprocess.run([
+            ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i",
+            "anullsrc=r=48000:cl=mono", "-t", "1", "-c:a", "aac", str(self.proxy),
+        ], check=True, capture_output=True, timeout=30)
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy):
+            self.assertEqual(self.timeline.render_source_for_proxy(self.source, 64, 64), self.source)
+        self.assertEqual(self.source.read_bytes(), self.before)
+
+    def test_warmup_rebuilds_a_large_corrupt_cached_proxy(self):
+        self.proxy.write_bytes(b"broken-mp4" * 2048)
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy), \
+                patch.object(self.timeline, "video_encoder_args", return_value=["-c:v", "libx264"]):
+            target, reused = self.timeline.warm_source_proxy(self.source, 64, 64)
+        self.assertFalse(reused)
+        self.assertGreater(self.timeline.probe_video_duration(target), .9)
+        self.assertEqual(self.source.read_bytes(), self.before)
+
+    def test_invalid_encoder_partial_is_never_published(self):
+        def fake_encoder(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"invalid-output" * 2048)
+
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy), \
+                patch.object(self.timeline, "video_encoder_args", return_value=["-c:v", "libx264"]), \
+                patch.object(self.timeline, "_run", side_effect=fake_encoder), \
+                self.assertRaisesRegex(RuntimeError, "proxy|прокси"):
+            self.timeline.warm_source_proxy(self.source, 64, 64)
+        self.assertFalse(self.proxy.exists())
+        self.assertEqual(list(self.proxy.parent.glob("*.partial.mp4")), [])
+
+    def test_indexing_quarantines_unreadable_source_without_moving_it(self):
+        bad = self.root / "bad.mp4"
+        bad.write_bytes(b"unreadable" * 2048)
+        self.index.add_item(FootageItem(str(bad), bad.name, "local", "", "user-library", []))
+        state = self.index.index_folders([str(self.root)])
+        self.assertEqual(state.indexed, 1)
+        self.assertTrue(bad.exists())
+        self.assertEqual(self.index.media_eligibility(bad), "invalid")
+        self.assertEqual(self.index.media_quarantine_stats()["quarantined"], 1)
+        self.assertNotIn(str(bad), {item.path for item in self.index.all_items()})
+        self.assertIn(str(self.source), {item.path for item in self.index.all_items()})
+
+    def test_montage_without_any_index_run_rejects_bad_source_and_keeps_good_one(self):
+        from scriptor import bridge
+        bad = self.root / "unindexed-bad.mp4"
+        bad.write_bytes(b"not-video" * 2048)
+        self.assertEqual(bridge._cached_or_probed_montage_duration(self.index, bad), 0)
+        self.assertGreater(bridge._cached_or_probed_montage_duration(self.index, self.source), .9)
+        self.assertEqual(self.index.media_quarantine_stats()["quarantined"], 1)
+        self.assertTrue(bad.exists())
+
+    def test_repaired_original_becomes_eligible_under_its_new_identity(self):
+        bad = self.root / "repaired.mp4"
+        bad.write_bytes(b"bad" * 2048)
+        self.assertEqual(self.index.media_eligibility(bad), "invalid")
+        bad.write_bytes(self.before)
+        self.assertEqual(self.index.media_eligibility(bad), "valid")
+        self.assertEqual(self.index.media_quarantine_stats()["quarantined"], 0)
+
+    def test_temporary_probe_access_error_does_not_quarantine_a_source(self):
+        with patch("subprocess.run", side_effect=PermissionError("Synthetic sharing violation")):
+            self.assertEqual(self.index.media_eligibility(self.source), "unavailable")
+        self.assertEqual(self.index.media_quarantine_stats()["quarantined"], 0)
+        self.assertEqual(self.index.media_eligibility(self.source), "valid")
+        self.assertEqual(self.source.read_bytes(), self.before)
+
+    def test_low_fps_video_is_not_falsely_quarantined_by_tail_seek(self):
+        for fps in (1, 2):
+            with self.subTest(fps=fps):
+                path = self.root / f"slow-{fps}.mp4"
+                subprocess.run([
+                    ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i",
+                    f"color=c=blue:s=64x64:r={fps}:d=2", "-c:v", "libx264", str(path),
+                ], check=True, capture_output=True, timeout=30)
+                self.assertEqual(self.index.media_eligibility(path), "valid")
+        self.assertEqual(self.index.media_quarantine_stats()["quarantined"], 0)
+
+    def test_longer_audio_does_not_make_readable_video_corrupt(self):
+        path = self.root / "long-audio.mp4"
+        subprocess.run([
+            ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i",
+            "color=c=blue:s=64x64:r=30:d=1", "-f", "lavfi", "-i",
+            "anullsrc=r=48000:cl=mono:d=2", "-c:v", "libx264", "-c:a", "aac", str(path),
+        ], check=True, capture_output=True, timeout=30)
+        result = self.index.media_health.check(path)
+        self.assertEqual(result.state, "valid")
+        self.assertAlmostEqual(result.duration, 1.0, delta=.05)
+
+    def test_mkv_webm_longer_audio_remains_eligible(self):
+        for extension, codec in (("mkv", "libx264"), ("webm", "libvpx-vp9")):
+            with self.subTest(extension=extension):
+                path = self.root / f"long-audio.{extension}"
+                subprocess.run([
+                    ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i",
+                    "color=c=blue:s=64x64:r=30:d=1", "-f", "lavfi", "-i",
+                    "anullsrc=r=48000:cl=mono:d=2", "-c:v", codec, "-c:a", "libopus", str(path),
+                ], check=True, capture_output=True, timeout=30)
+                result = self.index.media_health.check(path)
+                self.assertEqual(result.state, "valid")
+                self.assertAlmostEqual(result.duration, 1.0, delta=.1)
+
+    def test_missing_optional_video_duration_tag_does_not_reject_healthy_media(self):
+        for extension, codec in (("mkv", "libx264"), ("webm", "libvpx-vp9")):
+            with self.subTest(extension=extension):
+                path = self.root / f"untagged.{extension}"
+                subprocess.run([
+                    ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i",
+                    "color=c=blue:s=64x64:r=30:d=1", "-f", "lavfi", "-i",
+                    "anullsrc=r=48000:cl=mono:d=2", "-c:v", codec, "-c:a", "libopus", str(path),
+                ], check=True, capture_output=True, timeout=30)
+                # Rename only the optional first (video) tag, preserving EBML
+                # lengths and the audio tag. Video data itself is unchanged.
+                path.write_bytes(path.read_bytes().replace(b"DURATION", b"XURATION", 1))
+                subprocess.run([
+                    ffmpeg_executable(), "-v", "error", "-i", str(path),
+                    "-map", "0:v:0", "-f", "null", "-",
+                ], check=True, capture_output=True, timeout=30)
+                result = self.index.media_health.check(path)
+                self.assertEqual(result.state, "valid")
+                self.assertAlmostEqual(result.duration, 1.0, delta=.1)
+
+    def test_stale_corruption_verdict_cannot_move_a_repaired_cache(self):
+        from scriptor.media_health import inspect_video, quarantine_cache
+        self.proxy.write_bytes(b"bad" * 2048)
+        result = inspect_video(self.proxy)
+        self.assertEqual(result.state, "invalid")
+        self.proxy.write_bytes(self.before)
+        self.assertIsNone(quarantine_cache(self.proxy, self.proxy.parent, result, self.source))
+        self.assertEqual(self.proxy.read_bytes(), self.before)
+
+    def test_original_is_never_physically_quarantined_even_with_same_parent(self):
+        from scriptor.media_health import inspect_video, quarantine_cache
+        self.proxy.write_bytes(b"bad" * 2048)
+        result = inspect_video(self.proxy)
+        self.assertIsNone(quarantine_cache(self.proxy, self.proxy.parent, result, self.proxy))
+        self.assertTrue(self.proxy.exists())
+
+    def test_source_change_during_warmup_does_not_publish_old_identity_proxy(self):
+        def changing_encoder(command, **_kwargs):
+            Path(command[-1]).write_bytes(self.before)
+            self.source.write_bytes(self.before + b"changed-identity")
+
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy), \
+                patch.object(self.timeline, "video_encoder_args", return_value=["-c:v", "libx264"]), \
+                patch.object(self.timeline, "_run", side_effect=changing_encoder), \
+                self.assertRaisesRegex(RuntimeError, "измен|changed"):
+            self.timeline.warm_source_proxy(self.source, 64, 64)
+        self.assertFalse(self.proxy.exists())
+        self.assertEqual(list(self.proxy.parent.glob("*.partial.mp4")), [])
+
+    def test_source_change_while_computing_proxy_key_is_not_published(self):
+        def changing_key(*_args):
+            self.source.write_bytes(self.before + b"changed-before-validation")
+            return self.proxy
+
+        def encoder(command, **_kwargs):
+            Path(command[-1]).write_bytes(self.before)
+
+        with patch.object(self.timeline, "source_proxy_path", side_effect=changing_key), \
+                patch.object(self.timeline, "_run", side_effect=encoder), \
+                self.assertRaisesRegex(RuntimeError, "измен|changed"):
+            self.timeline.warm_source_proxy(self.source, 64, 64)
+        self.assertFalse(self.proxy.exists())
+
+    def test_unchanged_library_reads_health_in_batch_without_reprobing(self):
+        clips = self.root / "many"
+        clips.mkdir()
+        for number in range(100):
+            (clips / f"blue-{number}.mp4").write_bytes(self.before)
+        index = FakeClipIndex(self.root / "many.sqlite3", embedder_factory=lambda: (
+            FakeImageEmbedding(), FakeTextEmbedding(),
+        ))
+        index.index_folders([str(clips)])
+        with patch.object(index.media_health, "_connect", wraps=index.media_health._connect) as connections, \
+                patch("scriptor.media_health.inspect_video", side_effect=AssertionError("Unchanged media re-probed")), \
+                patch.object(index, "_sample_frames", side_effect=AssertionError("Unchanged media re-embedded")):
+            state = index.index_folders([str(clips)])
+        self.assertEqual((state.indexed, state.skipped, state.failed), (0, 100, 0))
+        self.assertLessEqual(connections.call_count, 2, "Health reads must be batched, not per clip")
+
+    def test_concurrent_bad_cache_lookup_quarantines_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.proxy.write_bytes(b"broken" * 2048)
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy), \
+                ThreadPoolExecutor(max_workers=4) as pool:
+            selected = list(pool.map(lambda _: self.timeline.render_source_for_proxy(self.source, 64, 64), range(8)))
+        self.assertEqual(selected, [self.source] * 8)
+        self.assertEqual(len(list(self.root.rglob("*.invalid-mp4"))), 1)
+        self.assertEqual(self.source.read_bytes(), self.before)
+
+    def test_valid_cached_proxy_is_reused_without_decode_or_encode(self):
+        self.proxy.write_bytes(self.before)
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy):
+            self.assertEqual(self.timeline.render_source_for_proxy(self.source, 64, 64), self.proxy)
+            with patch("scriptor.media_health.inspect_video", side_effect=AssertionError("Cache re-probed")), \
+                    patch.object(self.timeline, "_run", side_effect=AssertionError("Cache re-encoded")):
+                self.assertEqual(self.timeline.render_source_for_proxy(self.source, 64, 64), self.proxy)
+                target, reused = self.timeline.warm_source_proxy(self.source, 64, 64)
+        self.assertEqual((target, reused), (self.proxy, True))
+
+    def test_short_but_readable_proxy_falls_back_to_full_original(self):
+        subprocess.run([
+            ffmpeg_executable(), "-y", "-v", "error", "-i", str(self.source),
+            "-t", "0.3", "-c:v", "libx264", str(self.proxy),
+        ], check=True, capture_output=True, timeout=30)
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy):
+            self.assertEqual(self.timeline.render_source_for_proxy(self.source, 64, 64), self.source)
+        self.assertFalse(self.proxy.exists())
+        self.assertEqual(len(list(self.root.rglob("*.invalid-mp4"))), 1)
+        self.assertEqual(self.index.media_quarantine_stats()["quarantined"], 0)
+
+    def test_temporarily_unavailable_proxy_uses_original_without_moving_cache(self):
+        from scriptor.media_health import MediaHealth, inspect_video
+        self.proxy.write_bytes(self.before)
+
+        def inspect(path):
+            return MediaHealth("unavailable", "Synthetic sharing violation") if path == self.proxy else inspect_video(path)
+
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy), \
+                patch("scriptor.media_health.inspect_video", side_effect=inspect):
+            self.assertEqual(self.timeline.render_source_for_proxy(self.source, 64, 64), self.source)
+        self.assertEqual(self.proxy.read_bytes(), self.before)
+        self.assertEqual(list(self.root.rglob("*.invalid-mp4")), [])
+
+    def test_quarantine_manifest_preserves_cache_hash_and_source_identity(self):
+        import hashlib
+        import json
+        self.proxy.write_bytes(b"broken" * 2048)
+        bad_hash = hashlib.sha256(self.proxy.read_bytes()).hexdigest()
+        with patch.object(self.timeline, "source_proxy_path", return_value=self.proxy):
+            self.timeline.render_source_for_proxy(self.source, 64, 64)
+        manifest = json.loads(next(self.root.rglob("manifest.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["sha256"], bad_hash)
+        self.assertEqual(manifest["sourcePath"], str(self.source))
+        self.assertEqual(manifest["sourceIdentity"], {
+            "size": len(self.before), "mtimeNs": self.source.stat().st_mtime_ns,
+        })
+
+    def test_quarantine_excludes_stale_search_corpus_and_repair_restores_original_path(self):
+        clips = self.root / "search"
+        clips.mkdir()
+        bad = clips / "red.mp4"
+        good = clips / "blue.mp4"
+        bad.write_bytes(self.before)
+        good.write_bytes(self.before)
+        index = FakeClipIndex(self.root / "search.sqlite3", embedder_factory=lambda: (
+            FakeImageEmbedding(), FakeTextEmbedding(),
+        ))
+        index.index_folders([str(clips)])
+        self.assertEqual(Path(index.search("red")[0].item.path), bad)
+        bad.write_bytes(b"corrupt" * 2048)
+        self.assertEqual(index.media_eligibility(bad), "invalid")
+        self.assertEqual(Path(index.search("red")[0].item.path), good)
+        self.assertTrue(bad.exists())
+        bad.write_bytes(self.before)
+        state = index.index_folders([str(clips)])
+        self.assertEqual((state.indexed, state.skipped), (1, 1))
+        self.assertEqual(Path(index.search("red")[0].item.path), bad)
+        self.assertEqual(index.media_quarantine_stats()["quarantined"], 0)
+
+    def test_snapshot_exposes_persistent_quarantine_separately_from_screen_text(self):
+        from scriptor import bridge
+        bad = self.root / "snapshot-bad.mp4"
+        bad.write_bytes(b"bad" * 2048)
+        self.assertEqual(self.index.media_eligibility(bad), "invalid")
+        with patch.object(bridge, "app_data_root", return_value=self.root):
+            snapshot = bridge.snapshot()
+        status = snapshot["footageIndex"]
+        self.assertEqual(status["mediaQuarantined"], 1)
+        self.assertEqual(Path(status["mediaQuarantine"][0]["path"]), bad)
+        self.assertTrue(status["mediaQuarantine"][0]["reason"])
+        self.assertEqual(status["englishBlocked"], 0)
+        self.assertTrue(bad.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

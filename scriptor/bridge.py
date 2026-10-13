@@ -2875,11 +2875,15 @@ def snapshot() -> dict:
     footage_indexed = 0
     footage_text_stats = {"blocked": 0, "safe": 0, "unchecked": 0}
     footage_semantic_status = {"version": 0, "current": 0, "outdated": 0}
+    footage_quarantine = []
     if footage_index:
         try:
             footage_total = footage_index.count()
             footage_indexed = footage_index.count(True)
             footage_text_stats = footage_index.screen_text_stats()
+            quarantine_records = getattr(footage_index, "media_quarantine_records", None)
+            if callable(quarantine_records):
+                footage_quarantine = quarantine_records()
             semantic_status = getattr(footage_index, "semantic_status", None)
             if callable(semantic_status):
                 footage_semantic_status = semantic_status()
@@ -2984,6 +2988,8 @@ def snapshot() -> dict:
             "englishBlocked": footage_text_stats["blocked"],
             "englishSafe": footage_text_stats["safe"],
             "englishUnchecked": footage_text_stats["unchecked"],
+            "mediaQuarantined": len(footage_quarantine),
+            "mediaQuarantine": footage_quarantine[:10],
             "semanticCurrent": footage_semantic_status["current"],
             "semanticOutdated": footage_semantic_status["outdated"],
             "semanticVersion": footage_semantic_status["version"],
@@ -15120,6 +15126,7 @@ def index_footage(payload: dict) -> dict:
             "skipped": state.skipped,
             "failed": state.failed,
             "removed": state.removed,
+            "quarantined": state.quarantined,
             "current": state.current,
             "ownerPid": os.getpid(),
             "startedAt": started_at,

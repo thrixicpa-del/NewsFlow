@@ -171,6 +171,7 @@ class IndexProgress:
     current: str = ""
     stage: str = "scan"
     removed: int = 0
+    quarantined: int = 0
 
 
 @dataclass(frozen=True)
@@ -283,6 +284,17 @@ class ClipIndex:
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
+        from .media_health import MediaHealthStore
+        self.media_health = MediaHealthStore(self.db_path.with_name("media-health.sqlite3"))
+
+    def media_eligibility(self, path: str | Path) -> str:
+        return self.media_health.check(Path(path)).state
+
+    def media_quarantine_stats(self) -> dict[str, int]:
+        return {"quarantined": len(self.media_health.quarantined_paths())}
+
+    def media_quarantine_records(self) -> list[dict[str, str]]:
+        return self.media_health.quarantined_entries()
 
     @contextmanager
     def _connect(self):
@@ -646,16 +658,46 @@ class ClipIndex:
                               removed=self.remove_missing())
         if progress:
             progress(state)
+        pending = []
+        known_health = self.media_health.cached_many(paths)
         with self._connect() as connection:
-            pending = [path for path in paths if self._needs_index(connection, path)]
-        state.skipped = len(paths) - len(pending)
-        state.processed = state.skipped
+            for path in paths:
+                if cancel and cancel.is_set():
+                    state.stage = "cancelled"
+                    break
+                try:
+                    needs_index = self._needs_index(connection, path)
+                    cached = known_health.get(path)
+                    if cached is not None and cached.state == "invalid":
+                        state.quarantined += 1
+                        state.failed += 1
+                        state.processed += 1
+                    elif needs_index:
+                        pending.append(path)
+                    else:
+                        # Upgrade old indexes once; unchanged healthy files do
+                        # not need embeddings or another probe on later runs.
+                        health = cached or self.media_health.check(path)
+                        state.skipped += int(health.state == "valid")
+                        state.failed += int(health.state != "valid")
+                        state.quarantined += int(health.state == "invalid")
+                        state.processed += 1
+                except OSError:
+                    state.failed += 1
+                    state.processed += 1
+                if progress and state.processed % 100 == 0:
+                    progress(state)
+        if cancel and cancel.is_set():
+            state.stage = "cancelled"
+            if progress:
+                progress(state)
+            return state
         if not pending:
             state.stage = "complete"
             if progress:
                 progress(state)
             return state
-        image_model, _ = self._models()
+        image_model = None
         screen_query_vectors = None
         if self.embedder_factory is None and self._text_model_is_cached():
             try:
@@ -673,17 +715,26 @@ class ClipIndex:
             for path in batch_paths:
                 state.current = path.name
                 try:
+                    before = self._signature(path)
                     sampled = self._sample_frames(path)
                     images, duration, width, height = sampled[:4]
                     fps = float(sampled[4]) if len(sampled) > 4 else 0.0
+                    from .media_health import MediaHealth
+                    if not images or duration <= .05 or width <= 0 or height <= 0:
+                        raise ValueError("Непригодные медиаданные")
+                    self.media_health.record(path, MediaHealth("valid", duration=duration), before)
                     start = len(flat_images)
                     flat_images.extend(images)
                     groups.append((path, start, len(images)))
                     metadata.append((duration, width, height, fps))
                 except Exception:  # noqa: BLE001 - one unreadable codec must not abort the batch
+                    health = self.media_health.check(path)
+                    state.quarantined += int(health.state == "invalid")
                     state.failed += 1
                     state.processed += 1
             if flat_images:
+                if image_model is None:
+                    image_model, _ = self._models()
                 embeddings = list(image_model.embed(flat_images, batch_size=min(32, len(flat_images))))
                 rows = []
                 for group_index, (path, start, length) in enumerate(groups):
@@ -892,9 +943,10 @@ class ClipIndex:
         params = (SCREEN_TEXT_CLASSIFIER_VERSION,) if exclude_english_text else ()
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
+        quarantined = self.media_health.quarantined_paths()
         current = [FootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
                                json.loads(row["tags"] or "[]"))
-                   for row in rows if Path(row["path"]).is_file()]
+                   for row in rows if Path(row["path"]).is_file() and str(Path(row["path"]).resolve()).casefold() not in quarantined]
         return current[:limit] if limit is not None else current
 
     def metadata(self, path: str | Path) -> ClipMetadata | None:
@@ -935,6 +987,8 @@ class ClipIndex:
             size, mtime_ns = self._signature(candidate)
         except OSError:
             return None
+        if self.media_health.check(candidate).state != "valid":
+            return 0.0
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT size, mtime_ns, duration, embedding FROM clips WHERE path = ?", (str(candidate),)
@@ -967,6 +1021,7 @@ class ClipIndex:
         # and ranking each distinct prompt only once.
         unique_queries = list(dict.fromkeys(queries))
         excluded = {value.casefold() for value in (exclude or set())}
+        excluded.update(self.media_health.quarantined_paths())
         corpus = self._search_corpus()
         if not corpus.items:
             return [[] for _ in queries]
