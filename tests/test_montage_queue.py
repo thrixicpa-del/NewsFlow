@@ -19,6 +19,7 @@ from scriptor.core import ScenarioRequest
 from scriptor.footage import FootageItem
 from scriptor.runner import Job, RunState
 from scriptor.timeline import TimelineClip, TimelineProject
+from tests.media_fixtures import write_readable_video
 
 
 class MontageQueueStateTests(unittest.TestCase):
@@ -777,7 +778,7 @@ class MontageQueueStateTests(unittest.TestCase):
             root = Path(directory)
             footage = root / "footage"
             footage.mkdir()
-            (footage / "Iran oil tanker Hormuz shipping.mp4").write_bytes(b"source")
+            write_readable_video(footage / "Iran oil tanker Hormuz shipping.mp4")
             voice = root / "voice.mp3"
             voice.write_bytes(b"voice")
             settings = Settings(
@@ -807,7 +808,7 @@ class MontageQueueStateTests(unittest.TestCase):
             root = Path(directory)
             footage = root / "footage"
             footage.mkdir()
-            (footage / "NATO cyber security.mp4").write_bytes(b"source")
+            write_readable_video(footage / "NATO cyber security.mp4")
             voice = root / "voice.mp3"
             voice.write_bytes(b"voice")
             settings = Settings(

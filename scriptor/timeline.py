@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+from .media_health import default_health_store, quarantine_cache, signature
+
 _ENCODER_CACHE: dict[str, list[str]] = {}
 _GPU_TIMELINE_CAPABILITY_CACHE: dict[str, dict[str, object]] = {}
 _PROXY_LOCK_GUARD = threading.RLock()
@@ -494,21 +496,10 @@ def probe_media_duration(path: Path) -> float:
 
 def probe_video_duration(path: Path) -> float:
     """Return duration only when the file is readable and contains video."""
-    ffmpeg = ffmpeg_executable()
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    result = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", creationflags=flags, check=False)
-    details = result.stderr or ""
-    if not re.search(r"\bVideo:\s", details):
-        raise ValueError("В файле нет читаемого видеопотока")
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", details)
-    if not match:
-        raise ValueError("Не удалось определить длительность видео")
-    hours, minutes, seconds = match.groups()
-    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    if duration <= 0.05:
-        raise ValueError("Видео имеет нулевую длительность")
-    return duration
+    result = default_health_store().check(path)
+    if result.state != "valid":
+        raise ValueError(f"Видео {result.state}: {path}: {result.reason}")
+    return result.duration
 
 
 def validate_rendered_montage(path: Path, *, expected_duration: float) -> float:
@@ -701,9 +692,20 @@ def source_proxy_path(source: Path, width: int, height: int) -> Path:
 
 def render_source_for_proxy(source: Path, width: int, height: int) -> Path:
     """Use a valid pre-warmed source proxy when one matches the original."""
+    health = default_health_store()
+    source_health = health.check(source)
+    if source_health.state != "valid":
+        raise ValueError(f"Футаж не пригоден для монтажа ({source_health.state}): {source}: {source_health.reason}")
     prepared = source_proxy_path(source, width, height)
-    if prepared.is_file() and prepared.stat().st_size >= 1024:
-        return prepared
+    with _proxy_lock(prepared):
+        if prepared.is_file():
+            result = health.check(prepared)
+            if result.state == "valid" and result.duration + .1 >= source_health.duration:
+                return prepared
+            if result.state == "valid":
+                result = replace(result, state="invalid", reason="Прокси короче оригинала")
+            if result.state == "invalid":
+                quarantine_cache(prepared, prepared.parent, result, source)
     return source
 
 
@@ -723,14 +725,26 @@ def warm_source_proxy(
     source = Path(source).resolve()
     if not source.is_file():
         raise FileNotFoundError(f"Футаж не найден: {source}")
+    health = default_health_store()
+    source_health = health.check(source)
+    if source_health.state != "valid":
+        raise RuntimeError(f"Нельзя подготовить proxy: {source}: {source_health.reason}")
     target = source_proxy_path(source, width, height)
-    if target.is_file() and target.stat().st_size >= 1024:
-        return target, True
+    if signature(source) != source_health.identity:
+        raise RuntimeError("Исходный футаж изменился при вычислении proxy key")
     ffmpeg = ffmpeg_executable()
     target.parent.mkdir(parents=True, exist_ok=True)
     with _proxy_lock(target):
-        if target.is_file() and target.stat().st_size >= 1024:
-            return target, True
+        if target.is_file():
+            result = health.check(target)
+            if result.state == "valid" and result.duration + .1 >= source_health.duration:
+                return target, True
+            if result.state == "valid":
+                result = replace(result, state="invalid", reason="Прокси короче оригинала")
+            if result.state == "unavailable":
+                raise RuntimeError(f"Временно недоступен proxy: {target}: {result.reason}")
+            if quarantine_cache(target, target.parent, result, source) is None:
+                raise RuntimeError(f"Не удалось изолировать повреждённый proxy: {target}")
         partial = target.with_name(
             f"{target.stem}.{os.getpid()}.{threading.get_ident()}.partial{target.suffix}"
         )
@@ -759,6 +773,11 @@ def warm_source_proxy(
                 ], process_observer=heartbeat)
             if not partial.is_file() or partial.stat().st_size < 1024:
                 raise RuntimeError("FFmpeg не создал пригодный source proxy")
+            result = health.check(partial)
+            if result.state != "valid" or result.duration + .1 < source_health.duration:
+                raise RuntimeError(f"FFmpeg создал непригодный proxy: {result.reason or 'неполная длительность'}")
+            if signature(source) != source_health.identity:
+                raise RuntimeError("Исходный футаж изменился во время подготовки proxy")
             _replace_with_retry(partial, target)
         finally:
             try:
@@ -1154,6 +1173,15 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             # footage.  Serialize only that exact proxy, not the entire render
             # queue, so two workers never write/rename the same partial MP4.
             with _proxy_lock(target):
+                if target.is_file():
+                    result = default_health_store().check(target)
+                    if result.state == "valid" and result.duration + .05 < clip.duration:
+                        result = replace(result, state="invalid", reason="Прокси короче требуемой сцены")
+                    if result.state == "invalid":
+                        if quarantine_cache(target, target.parent, result, source) is None:
+                            raise RuntimeError(f"Не удалось изолировать повреждённый proxy: {target}")
+                    elif result.state != "valid":
+                        raise RuntimeError(f"Временно недоступен proxy: {target}: {result.reason}")
                 if not target.exists() or target.stat().st_size < 1024:
                     partial = target.with_name(
                         f"{target.stem}.{os.getpid()}.{threading.get_ident()}.partial.mp4"
@@ -1182,6 +1210,9 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                                        "-vf", filter_value, "-an", *_ENCODER_CACHE[ffmpeg],
                                        "-movflags", "+faststart", str(partial)]
                             run_ffmpeg(command)
+                        result = default_health_store().check(partial)
+                        if result.state != "valid" or result.duration + .05 < clip.duration:
+                            raise RuntimeError(f"FFmpeg создал непригодный proxy: {result.reason}")
                         _replace_with_retry(partial, target, timeout=12.0)
                     finally:
                         try:

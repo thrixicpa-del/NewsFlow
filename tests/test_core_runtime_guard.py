@@ -24,6 +24,7 @@ REQUIRED_SOURCES = (
     "scriptor/story_planner.py",
     "scriptor/openai_client.py",
     "scriptor/timeline.py",
+    "scriptor/media_health.py",
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
     "bridge_main.py",
@@ -220,6 +221,22 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("scriptor/ai_index.py", result.stderr)
             self.assertIn("Пересоберите core-bin", result.stderr)
+
+    def test_guard_rejects_changed_media_health_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _ = self._fixture(temporary)
+            relative = "scriptor/media_health.py"
+            source = fixture_root / relative
+            original = b"# built media validator\n"
+            source.write_bytes(original)
+            lock_path = fixture_app / "core-runtime-lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["sourceGitBlobs"][relative] = _git_blob_sha(original)
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            source.write_bytes(b"# changed quarantine policy\n")
+            result = self._run(fixture_app)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(relative, result.stderr)
 
     def test_guard_rejects_changed_montage_timeline_content(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:

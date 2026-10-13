@@ -3,6 +3,20 @@ import { Cutter, fallback, Footage } from "../../App";
 import { describe, expect, it, vi } from "vitest";
 
 describe("Media ingest workspaces", () => {
+  it("shows media quarantine separately from screen-text exclusions", () => {
+    const data = {
+      ...fallback, footageFolders: ["D:/isolated-footage"],
+      footageIndex: {
+        ...fallback.footageIndex, mediaQuarantined: 3, englishBlocked: 82,
+        mediaQuarantine: [{ path: "D:/isolated-footage/bad.mp4", reason: "moov atom not found" }],
+      },
+    };
+    render(<Footage data={data} command={vi.fn()} refresh={async () => undefined} />);
+    expect(screen.getByText(/Карантин повреждённых видео: 3/)).toBeTruthy();
+    expect(screen.getByText(/Исключено английских надписей: 82/)).toBeTruthy();
+    expect(screen.getByText(/Карантин повреждённых видео: 3/).getAttribute("title")).toContain("moov atom not found");
+  });
+
   it("keeps the current footage library inside a named ingest workspace", () => {
     render(<Footage data={{ ...fallback, footageFolders: ["D:/footage"] }} command={vi.fn()} refresh={async () => undefined} />);
 
