@@ -15404,6 +15404,15 @@ def save_montage_settings(payload: dict) -> dict:
             setattr(settings, setting_key, max(1, int(payload.get(payload_key, 1))))
     if "queuePaused" in payload:
         settings.montage_queue_paused = bool(payload.get("queuePaused"))
+    # Explicit operator commands own only the reuse fields actually submitted,
+    # even when the requested value equals this process's loaded baseline.
+    settings._edited_montage_reuse = {
+        setting for key, setting in (
+            ("fastReuseEnabled", "montage_fast_reuse_enabled"),
+            ("uniqueFootagePercent", "montage_unique_footage_percent"),
+            ("fastReuseRanges", "montage_fast_reuse_ranges"),
+        ) if key in payload
+    }
     save_settings(settings)
     return snapshot()
 
