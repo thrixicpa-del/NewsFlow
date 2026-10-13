@@ -3,6 +3,39 @@ import { describe, expect, it, vi } from "vitest";
 import { BrowserTopicScenarios, fallback } from "../../App";
 
 describe("browser topic scenarios", () => {
+  it("accepts 84 simultaneous tabs and preserves the value after settings reload", async () => {
+    const data = { ...fallback };
+    const command = vi.fn(async () => data);
+    const { rerender } = render(<BrowserTopicScenarios data={data} command={command} />);
+    const input = screen.getByLabelText(/Одновременно вкладок/) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "84" } });
+    expect(input.checkValidity()).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith(
+      "save-browser-topic-scenario-settings", expect.objectContaining({ concurrency: 84 }),
+    ));
+    fireEvent.change(input, { target: { value: "2" } });
+    rerender(<BrowserTopicScenarios data={{ ...data, browserTopicScenarios: {
+      ...data.browserTopicScenarios, concurrency: 84,
+    } }} command={command} />);
+    expect((screen.getByLabelText(/Одновременно вкладок/) as HTMLInputElement).value).toBe("84");
+  });
+
+  it.each(["0", "-1", "1.5", ""])("does not save or launch with invalid concurrency %s", async (value) => {
+    const data = { ...fallback, scenarios: [{
+      index: 0, productionItemId: "invalid-count-topic", title: "New topic",
+      state: "Ожидает", result: "", error: "",
+    }] };
+    const command = vi.fn(async () => data);
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    fireEvent.click(screen.getByLabelText("Выбрать: New topic"));
+    fireEvent.change(screen.getByLabelText(/Одновременно вкладок/), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки" }));
+    fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/вкладок/));
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("resolves numbered range assignments to durable IDs before saving", async () => {
     const data = {
       ...fallback,

@@ -5,6 +5,143 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from scriptor import bridge
+from scriptor.browser_topic_scenarios import (
+    BrowserScenarioSettings,
+    BrowserTopicFailure,
+    BrowserTopicTask,
+    run_browser_topic_tasks,
+)
+from scriptor.config import Settings, load_settings, save_settings
+
+
+class BrowserTabSettingsTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="browser-concurrency-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        environment = patch.dict(os.environ, {
+            "NEWSFLOW_TEST_MODE": "1", "NEWSFLOW_TEST_ROOT": str(self.root / "test"),
+            "LOCALAPPDATA": str(self.root / "test"),
+            "NEWSFLOW_PRODUCTION_LOCALAPPDATA": str(self.root / "production"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_save_reload_and_runtime_keep_the_requested_concurrency(self):
+        for requested in (1, 10, 84, 137):
+            with self.subTest(requested=requested):
+                response = bridge.save_browser_topic_scenario_settings({"concurrency": requested})
+                self.assertEqual(response["browserTopicScenarios"]["concurrency"], requested)
+                restored = load_settings()
+                self.assertEqual(restored.browser_topic_scenarios["concurrency"], requested)
+                self.assertEqual(bridge._browser_topic_settings(restored).concurrency, requested)
+
+    def test_invalid_tab_counts_do_not_overwrite_the_saved_settings(self):
+        save_settings(Settings(browser_topic_scenarios={"concurrency": 84}))
+        settings_file = self.root / "test" / "NewsFlow" / "settings.json"
+        before = settings_file.read_bytes()
+        for invalid in (0, -1, 1.5, True, None, "", "invalid", float("nan"), float("inf")):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "вкладок"):
+                    bridge.save_browser_topic_scenario_settings({"concurrency": invalid})
+                self.assertEqual(settings_file.read_bytes(), before)
+
+
+class BrowserTabSchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_84_tasks_can_enter_the_transport_before_any_task_finishes(self):
+        started = []
+        all_started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Transport:
+            async def generate(self, *, project_url, message, requirements_file, task):
+                started.append(task.production_item_id)
+                if len(started) == 84:
+                    all_started.set()
+                await release.wait()
+                return f"TXT {task.production_item_id}"
+
+        tasks = [BrowserTopicTask(f"id-{index}", f"Topic {index}", 1000 - index) for index in range(84)]
+        queue = asyncio.create_task(run_browser_topic_tasks(BrowserScenarioSettings(
+            project_url="https://chatgpt.com/g/project", companion_prompt="Only TXT.",
+            minimum_chars=1, maximum_chars=2, concurrency=84,
+        ), tasks, Transport()))
+        try:
+            try:
+                await asyncio.wait_for(all_started.wait(), timeout=1)
+            except TimeoutError:
+                pass
+            self.assertEqual(len(started), 84, "Requested 84 tabs must not be silently clamped")
+        finally:
+            release.set()
+            outcomes = await queue
+        self.assertCountEqual(started, [task.production_item_id for task in tasks])
+        self.assertEqual([(item.production_item_id, item.text) for item in outcomes],
+                         [(task.production_item_id, f"TXT {task.production_item_id}") for task in tasks])
+
+    async def test_smaller_pool_refills_on_completion_and_failure_without_misrouting(self):
+        entered = [asyncio.Event() for _ in range(84)]
+        releases = [asyncio.Event() for _ in range(84)]
+        active = 0
+        peak = 0
+        calls = []
+
+        class Transport:
+            async def generate(self, *, project_url, message, requirements_file, task):
+                nonlocal active, peak
+                index = int(task.production_item_id.split("-")[1])
+                active += 1
+                peak = max(peak, active)
+                calls.append(task.production_item_id)
+                entered[index].set()
+                try:
+                    await releases[index].wait()
+                    if index == 2:
+                        raise RuntimeError("fixture failure")
+                    return f"TXT {task.production_item_id}"
+                finally:
+                    active -= 1
+
+        tasks = [BrowserTopicTask(f"id-{index}", f"Topic {index}", 1000 - index) for index in range(84)]
+        queue = asyncio.create_task(run_browser_topic_tasks(BrowserScenarioSettings(
+            project_url="https://chatgpt.com/g/project", companion_prompt="Only TXT.",
+            minimum_chars=1, maximum_chars=2, concurrency=3,
+        ), tasks, Transport()))
+        try:
+            await asyncio.wait_for(entered[2].wait(), 1)
+            self.assertEqual(len(calls), 3)
+            releases[2].set()
+            await asyncio.wait_for(entered[3].wait(), 1)
+            self.assertEqual(len(calls), 4)
+            releases[1].set()
+            await asyncio.wait_for(entered[4].wait(), 1)
+            self.assertEqual(len(calls), 5)
+        finally:
+            for release in releases:
+                release.set()
+            outcomes = await queue
+        self.assertEqual(peak, 3)
+        self.assertEqual(len(calls), 84)
+        self.assertEqual(len(set(calls)), 84)
+        self.assertIsInstance(outcomes[2], BrowserTopicFailure)
+        self.assertEqual(outcomes[2].production_item_id, "id-2")
+        for index, outcome in enumerate(outcomes):
+            if index != 2:
+                self.assertEqual((outcome.production_item_id, outcome.text), (f"id-{index}", f"TXT id-{index}"))
+
+    async def test_invalid_concurrency_is_rejected_before_transport_entry(self):
+        class Transport:
+            async def generate(self, **kwargs):
+                raise AssertionError("Invalid settings must not enter the browser")
+
+        for invalid in (0, -1, 1.5, True, None, "", float("nan")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "вкладок"):
+                await run_browser_topic_tasks(BrowserScenarioSettings(
+                    project_url="https://chatgpt.com/g/project", companion_prompt="Only TXT.",
+                    minimum_chars=1, maximum_chars=2, concurrency=invalid,
+                ), [BrowserTopicTask("id-one", "Topic")], Transport())
+
 
 class BrowserTopicScenarioContractTests(unittest.TestCase):
     def test_message_uses_only_operator_text_plus_dynamic_topic_and_length(self):

@@ -25,6 +25,18 @@ def normalize_browser_response(value: object) -> str:
     return str(value or "")
 
 
+def browser_tab_concurrency(value: object) -> int:
+    """Validate the operator's tab count without an arbitrary upper ceiling."""
+    message = "Количество одновременно открытых вкладок должно быть целым числом не меньше 1"
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(message) from None
+    if isinstance(value, bool) or count < 1 or (isinstance(value, float) and value != count):
+        raise ValueError(message)
+    return count
+
+
 @dataclass(frozen=True)
 class BrowserScenarioSettings:
     project_url: str = ""
@@ -154,7 +166,7 @@ async def run_browser_topic_tasks(
     scheduling seam pure makes the identity and concurrency contract testable
     without an authenticated browser or a provider call.
     """
-    concurrency = max(1, min(10, int(settings.concurrency or 1)))
+    concurrency = browser_tab_concurrency(settings.concurrency)
     slots = asyncio.Semaphore(concurrency)
 
     async def run_one(task: BrowserTopicTask) -> BrowserTopicCompletion:

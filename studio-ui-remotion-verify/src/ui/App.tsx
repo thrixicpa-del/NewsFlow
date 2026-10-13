@@ -3094,6 +3094,7 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
   const [minimumChars, setMinimumChars] = useState(String(saved.minimumChars || 12000));
   const [maximumChars, setMaximumChars] = useState(String(saved.maximumChars || 18000));
   const [concurrency, setConcurrency] = useState(String(saved.concurrency || 1));
+  const [concurrencyError, setConcurrencyError] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [overridePrompt, setOverridePrompt] = useState("");
   const [overrideUrl, setOverrideUrl] = useState("");
@@ -3215,11 +3216,20 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
       promptOverrides,
       urlOverrides,
     });
+  const validateConcurrency = () => {
+    if (!Number.isSafeInteger(Number(concurrency)) || Number(concurrency) < 1) {
+      setConcurrencyError("Количество одновременно открытых вкладок должно быть целым числом не меньше 1");
+      return false;
+    }
+    setConcurrencyError("");
+    return true;
+  };
   const save = async () => {
+    if (!validateConcurrency()) return;
     await command("save-browser-topic-scenario-settings", settingsPayload());
   };
   const runSelected = async () => {
-    if (launching) return;
+    if (launching || !validateConcurrency()) return;
     setLaunching(true);
     try {
       const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
@@ -3248,8 +3258,9 @@ export function BrowserTopicScenarios({ data, command }: { data: NewsFlowSnapsho
         <div className="form-row">
           <Input label="Минимум символов" type="number" min="1" value={minimumChars} onChange={(event) => setMinimumChars(event.target.value)} />
           <Input label="Максимум символов" type="number" min="1" value={maximumChars} onChange={(event) => setMaximumChars(event.target.value)} />
-          <Input label="Одновременно вкладок" type="number" min="1" max="10" value={concurrency} onChange={(event) => setConcurrency(event.target.value)} description="Один отдельный чат в каждой вкладке." />
+          <Input label="Одновременно вкладок" type="number" min="1" step="1" required value={concurrency} onChange={(event) => { setConcurrency(event.target.value); setConcurrencyError(""); }} description="Число параллельных чатов, не общее число тем. Остальные ждут свободного слота. Большие значения увеличивают нагрузку на Chrome; лимиты ChatGPT сохраняются." />
         </div>
+        {concurrencyError ? <div role="alert">{concurrencyError}</div> : null}
       </section>
       <section className="panel scenario-add">
         <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённый файл или текст. NewsFlow добавляет только точные строки «ТЕМА» и «ОБЪЁМ» из текущей темы и таблицы.</small></div></div>
