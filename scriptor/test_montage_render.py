@@ -228,7 +228,8 @@ class MontageRenderTests(unittest.TestCase):
                 clips.append(TimelineClip(str(source), color, color, duration=1.0))
             output = root / "gpu-timeline.mp4"
             project = TimelineProject("GPU fixture", clips=clips)
-            render_project(project, output, renderer="gpu-timeline")
+            # Force two real subprocess/chunks rather than the default single block.
+            render_project(project, output, renderer="gpu-timeline", gpu_chunk_size=1)
             self.assertTrue(output.is_file())
             inspected = subprocess.run(
                 [ffmpeg, "-hide_banner", "-i", str(output)],
@@ -291,6 +292,14 @@ class MontageRenderTests(unittest.TestCase):
             self.assertLess(filter_script.rfind("setsar=1"), filter_script.index("concat="))
 
     def test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache(self):
+        self._assert_gpu_chunks(None, [12, 12, 1])
+
+    def test_gpu_renderer_uses_manual_block_size_and_preserves_remainder_order(self):
+        for size, expected in ((24, [24, 1]), (7, [7, 7, 7, 4]), (100, [25])):
+            with self.subTest(size=size):
+                self._assert_gpu_chunks(size, expected)
+
+    def _assert_gpu_chunks(self, size, expected):
         """Long GPU timelines stay bounded and do not materialise legacy proxies."""
         with tempfile.TemporaryDirectory(prefix="newsflow-gpu-bounded-") as temporary:
             root = Path(temporary)
@@ -303,9 +312,11 @@ class MontageRenderTests(unittest.TestCase):
             )
             output = root / "result.mp4"
             chunk_sizes: list[int] = []
+            clip_order: list[str] = []
 
             def fake_chunk_command(_ffmpeg, clips, chunk_output, _script, _width, _height):
                 chunk_sizes.append(len(clips))
+                clip_order.extend(clip.path for clip in clips)
                 return ["ffmpeg", "-y", str(chunk_output)]
 
             def fake_run(command, process_observer=None):
@@ -323,9 +334,14 @@ class MontageRenderTests(unittest.TestCase):
                  patch.object(timeline_module, "render_workspace_root", return_value=root), \
                  patch.object(timeline_module, "proxy_cache_root",
                               side_effect=AssertionError("GPU timeline must not use proxy cache")):
-                rendered = timeline_module._render_project_gpu_timeline(project, output)
+                if size is None:
+                    rendered = timeline_module._render_project_gpu_timeline(project, output)
+                else:
+                    with patch.object(timeline_module, "gpu_timeline_capability", return_value={"available": True}):
+                        rendered = render_project(project, output, renderer="gpu-timeline", gpu_chunk_size=size)
 
-            self.assertEqual(chunk_sizes, [12, 12, 1])
+            self.assertEqual(chunk_sizes, expected)
+            self.assertEqual(clip_order, [str(root / f"clip-{index}.mp4") for index in range(25)])
             self.assertTrue(rendered.is_file())
             self.assertEqual(rendered, output)
 
