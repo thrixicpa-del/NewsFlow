@@ -15,6 +15,7 @@ from scriptor.config import Settings, load_settings, save_settings
 from scriptor.core import ScenarioRequest
 from scriptor.runner import Job, RunState
 from scriptor.session import load_session, save_session, session_path
+from tests.media_fixtures import write_readable_video
 
 
 class ProductionResetTests(unittest.TestCase):
@@ -254,7 +255,9 @@ class ProductionResetTests(unittest.TestCase):
             settings = self._settings(root)
             footage = root / "source-footage"
             footage.mkdir()
-            (footage / "Iran oil tanker Hormuz shipping.mp4").write_bytes(b"source")
+            # Quarantine preflight must stay real: this reset race needs a
+            # readable source to reach the held project-publication boundary.
+            write_readable_video(footage / "Iran oil tanker Hormuz shipping.mp4")
             voice = root / "voice-input.mp3"
             voice.write_bytes(b"voice")
             settings.footage_folders = [str(footage)]

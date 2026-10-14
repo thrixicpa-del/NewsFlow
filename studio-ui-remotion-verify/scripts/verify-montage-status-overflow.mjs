@@ -101,6 +101,14 @@ async function run() {
       await delay(200);
       await click('Настроить монтаж');
       assert(await win.webContents.executeJavaScript(`Boolean(document.querySelector('[role="dialog"]'))`), 'Settings must remain reachable');
+      const configuration = await win.webContents.executeJavaScript(`(() => {
+        const dialog=document.querySelector('[role="dialog"]');
+        const body=dialog.querySelector('.nf-sheet-body');
+        return {client:body.clientWidth,scroll:body.scrollWidth,
+          offenders:[...body.querySelectorAll('*')].filter(e=>e.getBoundingClientRect().right>body.getBoundingClientRect().right+1).slice(0,12).map(e=>({className:e.className,text:e.textContent.slice(0,80),right:e.getBoundingClientRect().right}))};
+      })()`);
+      results.push({width,configuration});
+      assert(configuration.scroll <= configuration.client + 1, 'Montage configuration overflows: '+JSON.stringify(configuration));
       await click('Закрыть');
       await delay(200);
     }
