@@ -3,8 +3,21 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { App, Editor, fallback, Outputs } from "../../App";
+import { diagnostic, makeSnapshot } from "../../../../scripts/fixtures/montage-overflow";
 
 describe("Montage Light view", () => {
+  it("keeps the full plan and diagnostics when render refreshes into concatenation", async () => {
+    const command = vi.fn();
+    const { rerender } = render(<Editor data={makeSnapshot("Рендеринг")} command={command} refresh={async () => undefined} />);
+    expect(screen.getByText("Реплика 160 о событиях темы")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Инспектор MP4" })[0]);
+    expect(screen.getByLabelText("Происхождение MP4").textContent).toContain(`Рендеринг: ${diagnostic}`);
+    rerender(<Editor data={makeSnapshot("Склейка")} command={command} refresh={async () => undefined} />);
+    await waitFor(() => expect(screen.getByLabelText("Происхождение MP4").textContent).toContain(`Склейка: ${diagnostic}`));
+    expect(screen.getByText("Реплика 160 о событиях темы")).toBeTruthy();
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("saves a custom GPU block size without refresh erasing the draft", async () => {
     const command = vi.fn().mockResolvedValue(fallback);
     const { rerender } = render(<Editor data={fallback} command={command} refresh={async () => undefined} />);

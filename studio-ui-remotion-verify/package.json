@@ -26,6 +26,7 @@
     "verify:custom-direction-ui": "node scripts/verify-custom-direction-ui.mjs",
     "verify:portable": "node scripts/verify-portable.mjs",
     "verify:montage-ui": "node scripts/verify-montage-ui-contract.mjs",
+    "verify:montage-status-layout": "electron scripts/verify-montage-status-overflow.mjs",
     "verify:remotion-runtime": "node scripts/verify-remotion-runtime-contract.mjs",
     "verify:workstation-visuals": "set \"NEWSFLOW_TEST_MODE=1\" && electron scripts/capture-workstation-baselines.mjs",
     "test:ui": "vitest run",

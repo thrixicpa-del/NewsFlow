@@ -1,5 +1,8 @@
 /* Task diagnostics are untrusted-length runtime text.  They may never make
    the montage list or its surrounding desktop document wider than the view. */
+/* A scrollable project timeline must not size the workspace's implicit track. */
+.nf-montage{min-width:0;grid-template-columns:minmax(0,1fr)}
+.nf-montage>.panel{min-width:0}
 .montage-task-cards{max-width:100%}
 .montage-task{max-width:100%;overflow:hidden}
 .task-timeline{max-width:100%;overflow:hidden}

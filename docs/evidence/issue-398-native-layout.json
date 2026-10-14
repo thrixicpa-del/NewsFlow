@@ -1,0 +1,196 @@
+{
+  "test": "Montage status overflow",
+  "base": "b3eb665298fa5f372687e1a86d5710a942786cd3",
+  "red": {
+    "stages": [
+      "Рендеринг",
+      "Склейка"
+    ],
+    "gridTrack": 19100,
+    "card": 19062,
+    "viewport": 1440,
+    "document": 19392
+  },
+  "green": [
+    {
+      "viewport": 1440,
+      "stage": "Ожидает",
+      "document": 1425,
+      "workspace": 741,
+      "card": 703,
+      "clipCount": null,
+      "timelineScroll": null
+    },
+    {
+      "viewport": 1440,
+      "stage": "Рендеринг",
+      "document": 1425,
+      "workspace": 741,
+      "card": 703,
+      "clipCount": 160,
+      "timelineScroll": 18359
+    },
+    {
+      "viewport": 1440,
+      "stage": "Склейка",
+      "document": 1425,
+      "workspace": 741,
+      "card": 703,
+      "clipCount": 160,
+      "timelineScroll": 18359
+    },
+    {
+      "viewport": 1440,
+      "stage": "Ошибка",
+      "document": 1425,
+      "workspace": 741,
+      "card": 703,
+      "clipCount": 160,
+      "timelineScroll": 18359
+    },
+    {
+      "viewport": 1440,
+      "stage": "Готово",
+      "document": 1425,
+      "workspace": 741,
+      "card": 703,
+      "clipCount": 160,
+      "timelineScroll": 18359
+    },
+    {
+      "viewport": 1000,
+      "stage": "Ожидает",
+      "document": 985,
+      "workspace": 705,
+      "card": 667,
+      "clipCount": null,
+      "timelineScroll": null
+    },
+    {
+      "viewport": 1000,
+      "stage": "Рендеринг",
+      "document": 985,
+      "workspace": 705,
+      "card": 667,
+      "clipCount": 160,
+      "timelineScroll": 18395
+    },
+    {
+      "viewport": 1000,
+      "stage": "Склейка",
+      "document": 985,
+      "workspace": 705,
+      "card": 667,
+      "clipCount": 160,
+      "timelineScroll": 18395
+    },
+    {
+      "viewport": 1000,
+      "stage": "Ошибка",
+      "document": 985,
+      "workspace": 705,
+      "card": 667,
+      "clipCount": 160,
+      "timelineScroll": 18395
+    },
+    {
+      "viewport": 1000,
+      "stage": "Готово",
+      "document": 985,
+      "workspace": 705,
+      "card": 667,
+      "clipCount": 160,
+      "timelineScroll": 18395
+    },
+    {
+      "viewport": 600,
+      "stage": "Ожидает",
+      "document": 585,
+      "workspace": 549,
+      "card": 511,
+      "clipCount": null,
+      "timelineScroll": null
+    },
+    {
+      "viewport": 600,
+      "stage": "Рендеринг",
+      "document": 585,
+      "workspace": 549,
+      "card": 511,
+      "clipCount": 160,
+      "timelineScroll": 18551
+    },
+    {
+      "viewport": 600,
+      "stage": "Склейка",
+      "document": 585,
+      "workspace": 549,
+      "card": 511,
+      "clipCount": 160,
+      "timelineScroll": 18551
+    },
+    {
+      "viewport": 600,
+      "stage": "Ошибка",
+      "document": 585,
+      "workspace": 549,
+      "card": 511,
+      "clipCount": 160,
+      "timelineScroll": 18551
+    },
+    {
+      "viewport": 600,
+      "stage": "Готово",
+      "document": 585,
+      "workspace": 549,
+      "card": 511,
+      "clipCount": 160,
+      "timelineScroll": 18551
+    },
+    {
+      "viewport": 390,
+      "stage": "Ожидает",
+      "document": 375,
+      "workspace": 339,
+      "card": 301,
+      "clipCount": null,
+      "timelineScroll": null
+    },
+    {
+      "viewport": 390,
+      "stage": "Рендеринг",
+      "document": 375,
+      "workspace": 339,
+      "card": 301,
+      "clipCount": 160,
+      "timelineScroll": 18761
+    },
+    {
+      "viewport": 390,
+      "stage": "Склейка",
+      "document": 375,
+      "workspace": 339,
+      "card": 301,
+      "clipCount": 160,
+      "timelineScroll": 18761
+    },
+    {
+      "viewport": 390,
+      "stage": "Ошибка",
+      "document": 375,
+      "workspace": 339,
+      "card": 301,
+      "clipCount": 160,
+      "timelineScroll": 18761
+    },
+    {
+      "viewport": 390,
+      "stage": "Готово",
+      "document": 375,
+      "workspace": 339,
+      "card": 301,
+      "clipCount": 160,
+      "timelineScroll": 18761
+    }
+  ]
+}
