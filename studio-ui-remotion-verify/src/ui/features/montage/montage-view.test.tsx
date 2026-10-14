@@ -18,6 +18,67 @@ describe("Montage Light view", () => {
     expect(command).not.toHaveBeenCalled();
   });
 
+  it("saves a custom GPU block size without refresh erasing the draft", async () => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    const { rerender } = render(<Editor data={fallback} command={command} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    fireEvent.click(screen.getByRole("button", { name: /Быстрый GPU-таймлайн/ }));
+    const input = screen.getByLabelText("Футажей в блоке") as HTMLInputElement;
+    expect(input.value).toBe("12");
+    fireEvent.click(screen.getByRole("button", { name: "24 футажа в блоке" }));
+    expect(input.value).toBe("24");
+    fireEvent.change(input, { target: { value: "37" } });
+    rerender(<Editor data={{ ...fallback, montageSettings: { ...fallback.montageSettings } }} command={command} refresh={async () => undefined} />);
+    expect(input.value).toBe("37");
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ renderer: "gpu-timeline", gpuChunkSize: 37 })));
+    rerender(<Editor data={{ ...fallback, montageSettings: { ...fallback.montageSettings, renderer: "gpu-timeline", gpuChunkSize: 37 } }} command={command} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    expect((screen.getByLabelText("Футажей в блоке") as HTMLInputElement).value).toBe("37");
+  });
+
+  it("keeps the saved custom GPU block size when starting the montage queue", async () => {
+    const data = {
+      ...fallback,
+      montageSettings: { ...fallback.montageSettings, renderer: "gpu-timeline" as const, gpuChunkSize: 24 },
+      scenarios: [{ index: 1, title: "Custom block", state: "Готово", result: "Text", error: "" }],
+      voiceItems: [{ index: 1, title: "Custom block", state: "Готово", path: "D:/synthetic.mp3" }],
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ gpuChunkSize: 24, renderer: "gpu-timeline" })));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("run-montage-queue", { indices: [1], replaceOutput: false }));
+  });
+
+  it.each(["", "0", "-1", "2.5", "9007199254740992"])("rejects invalid GPU block size %s before sending settings", (value) => {
+    const command = vi.fn();
+    render(<Editor data={fallback} command={command} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    fireEvent.click(screen.getByRole("button", { name: /Быстрый GPU-таймлайн/ }));
+    fireEvent.change(screen.getByLabelText("Футажей в блоке"), { target: { value } });
+    const save = screen.getByRole("button", { name: "Сохранить выбор" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(save);
+    expect(command).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toContain("целое число");
+  });
+
+  it.each(["Только FFmpeg", "Remotion — композиция"])("does not block %s on a hidden invalid GPU draft", async (mode) => {
+    const command = vi.fn().mockResolvedValue(fallback);
+    render(<Editor data={fallback} command={command} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    fireEvent.click(screen.getByRole("button", { name: /Быстрый GPU-таймлайн/ }));
+    fireEvent.change(screen.getByLabelText("Футажей в блоке"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(mode) }));
+    const save = screen.getByRole("button", { name: "Сохранить выбор" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(command).toHaveBeenCalled());
+    expect(command.mock.calls[0][1]).not.toHaveProperty("gpuChunkSize");
+  });
+
   it("keeps the current montage controls in the Fast Editing workspace", () => {
     render(<Editor data={fallback} command={vi.fn()} refresh={async () => undefined} />);
 

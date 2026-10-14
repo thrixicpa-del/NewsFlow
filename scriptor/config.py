@@ -47,6 +47,15 @@ def default_montage_renderer() -> str:
     return "gpu-timeline" if gpu_timeline_available() else "ffmpeg"
 
 
+def validate_gpu_chunk_size(value: object) -> int:
+    """Reject invalid block sizes instead of silently clamping operator input."""
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9007199254740991:
+        raise ValueError("Футажей в блоке: укажите положительное целое число")
+    return value
+
+
 class TestStorageIsolationError(RuntimeError):
     """A test attempted to use persistent NewsFlow storage without a sandbox."""
 
@@ -508,6 +517,7 @@ class Settings:
     montage_planning_workers: int = 4
     montage_download_workers: int = 2
     montage_render_workers: int = 2
+    montage_gpu_chunk_size: int = 12
     montage_queue_paused: bool = False
     montage_task_statuses: dict[str, dict] = field(default_factory=dict)
     # Keep recent selections between runs. A re-render first tries unused
@@ -1227,6 +1237,7 @@ def load_settings() -> Settings:
             montage_planning_workers=max(1, int(data.get("montage_planning_workers", 4))),
             montage_download_workers=max(1, int(data.get("montage_download_workers", 2))),
             montage_render_workers=max(1, int(data.get("montage_render_workers", 2))),
+            montage_gpu_chunk_size=validate_gpu_chunk_size(data.get("montage_gpu_chunk_size", 12)),
             montage_queue_paused=bool(data.get("montage_queue_paused", False)),
             montage_task_statuses=data.get("montage_task_statuses", {}),
             montage_recent_clip_paths=data.get("montage_recent_clip_paths", []),
@@ -1527,6 +1538,8 @@ _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
 
 _MONTAGE_REUSE_PREFERENCES = (
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
+    # Render preferences also belong to the operator, not stale progress writers.
+    "montage_gpu_chunk_size",
 )
 
 
@@ -1926,6 +1939,7 @@ def save_settings(settings: Settings):
         "montage_planning_workers": settings.montage_planning_workers,
         "montage_download_workers": settings.montage_download_workers,
         "montage_render_workers": settings.montage_render_workers,
+        "montage_gpu_chunk_size": validate_gpu_chunk_size(settings.montage_gpu_chunk_size),
         "montage_queue_paused": settings.montage_queue_paused,
         "montage_task_statuses": settings.montage_task_statuses,
         "montage_recent_clip_paths": settings.montage_recent_clip_paths[-3000:],

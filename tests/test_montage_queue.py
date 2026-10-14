@@ -46,7 +46,7 @@ class MontageQueueStateTests(unittest.TestCase):
 
     def _queue_runtime_patches(self, root: Path, settings: Settings, titles: list[str], jobs: list[Job],
                                *, render_side_effect=None, force_needs_render: bool | None = True,
-                               plan_probe=None, render_probe=None):
+                               plan_probe=None, render_probe=None, render_options=None):
         plan_calls: list[int] = []
         render_calls: list[str] = []
 
@@ -68,6 +68,8 @@ class MontageQueueStateTests(unittest.TestCase):
 
         def render(project, output, **_kwargs):
             render_calls.append(project.title)
+            if render_options is not None:
+                render_options.append(_kwargs)
             if render_probe:
                 render_probe("enter")
             try:
@@ -178,6 +180,25 @@ class MontageQueueStateTests(unittest.TestCase):
                               side_effect=RuntimeError("stop after ready-index gate")), \
                  self.assertRaisesRegex(RuntimeError, "stop after ready-index gate"):
                 bridge.prepare_montage({"scenarioIndex": 0})
+
+    def test_queue_render_passes_custom_gpu_block_size_without_changing_workers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Custom GPU block"])
+            settings.montage_renderer = "gpu-timeline"
+            settings.montage_gpu_chunk_size = 24
+            options = []
+            patches, plan_calls, render_calls = self._queue_runtime_patches(
+                root, settings, ["Custom GPU block"], jobs, render_options=options,
+            )
+            for context in patches:
+                self.enterContext(context)
+            bridge.run_montage_queue({"indices": [0]})
+            self.assertEqual(plan_calls, [0])
+            self.assertEqual(render_calls, ["Custom GPU block"])
+            self.assertEqual(options[0].get("gpu_chunk_size"), 24)
+            self.assertEqual(options[0]["renderer"], "gpu-timeline")
+            self.assertEqual(settings.montage_render_workers, 2)
 
     def test_empty_selected_scope_is_not_implicit_missing_only(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1968,6 +1989,50 @@ class MontagePreferencesPersistenceTests(unittest.TestCase):
         # command's validation/normalisation stay real.
         self.enterContext(patch.object(bridge, "snapshot", return_value={}))
         config.save_settings(config.Settings(montage_renderer="ffmpeg", montage_renderer_explicit=True))
+
+    def test_gpu_chunk_size_round_trip_and_stale_progress_preservation(self):
+        self.assertEqual(getattr(config.load_settings(), "montage_gpu_chunk_size", None), 12)
+        worker = config.load_settings()
+        for size in (24, 37, 12, 1):
+            bridge.save_montage_settings({"gpuChunkSize": size})
+            self.assertEqual(config.load_settings().montage_gpu_chunk_size, size)
+            bridge._montage_task_update(worker, 0, status="Рендер", progress=65)
+            self.assertEqual(config.load_settings().montage_gpu_chunk_size, size)
+        # Running workers keep their original configuration; only future renders change.
+        self.assertEqual(worker.montage_gpu_chunk_size, 12)
+
+    def test_old_profile_without_gpu_block_setting_defaults_to_12(self):
+        path = config.config_path()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("montage_gpu_chunk_size", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+        loaded = config.load_settings()
+        self.assertEqual(loaded.montage_gpu_chunk_size, 12)
+        bridge.save_montage_settings({"renderWorkers": 3})
+        self.assertEqual(config.load_settings().montage_gpu_chunk_size, 12)
+
+    def test_invalid_gpu_chunk_size_rejects_entire_settings_save(self):
+        original = config.config_path().read_bytes()
+        for value in (0, -1, 2.5, True, None, "", "oops", "12.5", 9007199254740992):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "Футажей в блоке"):
+                    bridge.save_montage_settings({"gpuChunkSize": value, "renderWorkers": 17})
+                self.assertEqual(config.config_path().read_bytes(), original)
+
+    def test_saved_project_render_receives_current_gpu_block_size(self):
+        root = config.app_data_root()
+        project_path = root / "saved.newsflow"
+        TimelineProject("Saved plan", clips=[TimelineClip("unused.mp4", "n", "q")]).save(project_path)
+        bridge.save_montage_settings({"gpuChunkSize": 37, "renderer": "gpu-timeline"})
+
+        def stop_at_render(_project, _output, **options):
+            self.assertEqual(options.get("gpu_chunk_size"), 37)
+            self.assertEqual(options["renderer"], "gpu-timeline")
+            raise RuntimeError("render boundary checked")
+
+        with patch.object(bridge, "render_project", side_effect=stop_at_render), \
+             self.assertRaisesRegex(RuntimeError, "render boundary checked"):
+            bridge.render_montage({"projectPath": str(project_path)})
 
     def save_preferences(self, percent=50, enabled=True, ranges=None):
         bridge.save_montage_settings({
