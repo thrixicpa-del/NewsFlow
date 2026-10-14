@@ -18239,6 +18239,7 @@ def _claim_montage_queue_lock() -> Path | None:
     # whole read/reclaim/publish transaction must exclude other claimants.
     with _exclusive_settings_write(lock_path.with_name("montage-queue-owner.json")):
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        reclaimed = False
         if lock_path.exists():
             try:
                 existing = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -18246,6 +18247,7 @@ def _claim_montage_queue_lock() -> Path | None:
                 existing = {}
             if _montage_process_is_running(existing.get("pid")):
                 return None
+            reclaimed = True
             try:
                 lock_path.unlink()
             except FileNotFoundError:
@@ -18254,7 +18256,11 @@ def _claim_montage_queue_lock() -> Path | None:
                 return None
         try:
             with lock_path.open("x", encoding="utf-8") as stream:
-                json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
+                json.dump({
+                    "pid": os.getpid(),
+                    "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "reclaimed": reclaimed,
+                }, stream)
         except FileExistsError:
             return None
         return lock_path
@@ -18298,11 +18304,20 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     jobs when the desktop app is updated.
     """
     settings = load_settings()
-    # A newly acquired owner proves any persisted pause belongs to a dead
-    # previous worker. Never let a stale pause from an old session freeze a
-    # fresh queue before it can report progress.
-    if settings.montage_queue_paused:
+    # Auto-clear a persisted pause only when this exact owner reclaimed a
+    # dead PID record. A brand-new owner may race with a fresh operator Pause,
+    # which must win and remain visible.
+    try:
+        owner_record = json.loads(_montage_queue_lock_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        owner_record = {}
+    reclaimed_dead_owner = (
+        int(owner_record.get("pid") or 0) == os.getpid()
+        and bool(owner_record.get("reclaimed"))
+    )
+    if settings.montage_queue_paused and reclaimed_dead_owner:
         settings.montage_queue_paused = False
+        settings._edited_montage_reuse = {"montage_queue_paused"}
         save_settings(settings)
     _reconcile_montage_outputs(settings)
     if _recover_interrupted_montage_tasks(settings):
