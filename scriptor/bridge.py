@@ -15429,14 +15429,16 @@ def save_montage_settings(payload: dict) -> dict:
             setattr(settings, setting_key, max(1, int(payload.get(payload_key, 1))))
     if "queuePaused" in payload:
         settings.montage_queue_paused = bool(payload.get("queuePaused"))
-    # Explicit operator commands own only the reuse fields actually submitted,
-    # even when the requested value equals this process's loaded baseline.
+    # Explicit operator commands own only the Montage controls actually
+    # submitted, even when the requested value equals this process's loaded
+    # baseline. Background workers must never claim an unchanged pause flag.
     settings._edited_montage_reuse = {
         setting for key, setting in (
             ("fastReuseEnabled", "montage_fast_reuse_enabled"),
             ("uniqueFootagePercent", "montage_unique_footage_percent"),
             ("fastReuseRanges", "montage_fast_reuse_ranges"),
             ("gpuChunkSize", "montage_gpu_chunk_size"),
+            ("queuePaused", "montage_queue_paused"),
         ) if key in payload
     }
     save_settings(settings)
@@ -18383,6 +18385,9 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         _montage_task_update(settings, index, status="Планирование", phase="Планирование сцен", progress=8)
         last_progress = {"value": 8}
         def progress(stage: str, detail: str):
+            # Scene selection can be the longest non-render stage. Pause only
+            # between completed updates, never in the middle of a file write.
+            _montage_wait_if_paused(settings, index)
             ranges = {"Планирование сцен": 16, "Подбор футажей": 42,
                       "Внешний поиск": 30, "Нарезка внешнего футажа": 38}
             value = max(last_progress["value"], ranges.get(stage, 42))
@@ -18424,6 +18429,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             )
             replaced = 0
             for attempt in range(1, 4):
+                _montage_wait_if_paused(settings, index)
                 def candidates_for(clip: TimelineClip, _excluded: dict) -> list[FootageItem]:
                     return _replacement_candidates_for_clip(project_index, clip, settings, download_semaphore)
                 changed = _repair_missing_project_clips(project, candidates_for)
@@ -18450,6 +18456,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         # A clip may be technically valid but have a shorter real duration
         # than old index metadata claimed.  Validate the complete project
         # immediately before rendering and append normal footage for any tail.
+        _montage_wait_if_paused(settings, index)
         try:
             tail_added = _complete_project_visual_tail(
                 project, project_index, settings, download_semaphore,
