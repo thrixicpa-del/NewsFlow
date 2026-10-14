@@ -298,9 +298,14 @@ class MontageQueueStateTests(unittest.TestCase):
             root = Path(folder)
             settings, jobs = self._queue_settings(root, ["Only row"])
             settings.montage_queue_paused = True
+            with patch.object(bridge, "app_data_root", return_value=root):
+                bridge._montage_queue_lock_path().write_text(
+                    '{"pid": 999999, "startedAt": "old"}', encoding="utf-8",
+                )
             patches, plan_calls, render_calls = self._queue_runtime_patches(
                 root, settings, ["Only row"], jobs,
             )
+            patches.append(patch.object(bridge, "_montage_process_is_running", return_value=False))
             for context in patches:
                 context.start()
             try:
@@ -313,6 +318,31 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(result["operationResult"]["count"], 1)
         self.assertEqual(plan_calls, [0])
         self.assertEqual(render_calls, ["Only row"])
+
+    def test_fresh_queue_owner_does_not_clear_a_new_operator_pause(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, _jobs = self._queue_settings(root, ["Only row"])
+            with patch.object(bridge, "app_data_root", return_value=root):
+                lock_path = bridge._claim_montage_queue_lock()
+                self.assertIsNotNone(lock_path)
+                owner = json.loads(lock_path.read_text(encoding="utf-8"))
+                self.assertFalse(owner["reclaimed"])
+                settings.montage_queue_paused = True
+                try:
+                    with patch.object(bridge, "load_settings", return_value=settings), \
+                         patch.object(bridge, "_reconcile_montage_outputs"), \
+                         patch.object(bridge, "_recover_interrupted_montage_tasks", return_value=False), \
+                         patch.object(bridge, "montage_queue_is_active", return_value=False), \
+                         patch.object(bridge, "save_settings") as save, \
+                         patch.object(bridge, "load_session", side_effect=RuntimeError("stop after pause check")), \
+                         self.assertRaisesRegex(RuntimeError, "stop after pause check"):
+                        bridge._run_montage_queue_unlocked({"indices": [0]})
+                finally:
+                    bridge._release_montage_queue_lock(lock_path)
+
+        self.assertTrue(settings.montage_queue_paused)
+        save.assert_not_called()
 
     def test_render_heartbeat_waits_for_pause_only_after_ffmpeg_subprocess_finishes(self):
         settings = Settings()
