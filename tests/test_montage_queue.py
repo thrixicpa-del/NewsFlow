@@ -46,7 +46,8 @@ class MontageQueueStateTests(unittest.TestCase):
 
     def _queue_runtime_patches(self, root: Path, settings: Settings, titles: list[str], jobs: list[Job],
                                *, render_side_effect=None, force_needs_render: bool | None = True,
-                               plan_probe=None, render_probe=None, render_options=None):
+                               plan_probe=None, render_probe=None, render_options=None,
+                               emit_plan_progress: bool = False):
         plan_calls: list[int] = []
         render_calls: list[str] = []
 
@@ -56,6 +57,10 @@ class MontageQueueStateTests(unittest.TestCase):
             if plan_probe:
                 plan_probe("enter")
             try:
+                if emit_plan_progress:
+                    progress = payload.get("_progress")
+                    if callable(progress):
+                        progress("Подбор футажей", "Сцена 1/2: synthetic.mp4")
                 project_path = Path(settings.montage_project_folder) / f"{index}.newsflow"
                 TimelineProject(
                     title=titles[index],
@@ -322,6 +327,35 @@ class MontageQueueStateTests(unittest.TestCase):
         self.assertEqual(update.call_count, 2)
         self.assertEqual(update.call_args_list[0].kwargs["ffmpegPid"], 12345)
         self.assertEqual(update.call_args_list[1].kwargs["ffmpegPid"], 0)
+
+    def test_planning_progress_checks_pause_between_scene_updates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ["Only row"])
+            events = []
+            patches, plan_calls, render_calls = self._queue_runtime_patches(
+                root, settings, ["Only row"], jobs,
+                plan_probe=lambda stage: events.append(stage),
+                emit_plan_progress=True,
+            )
+            for context in patches:
+                context.start()
+            try:
+                with patch.object(
+                    bridge, "_montage_wait_if_paused",
+                    side_effect=lambda *_args: events.append("checkpoint"),
+                ):
+                    result = bridge.run_montage_queue({"indices": [0]})
+            finally:
+                for context in reversed(patches):
+                    context.stop()
+
+        enter = events.index("enter")
+        exit_at = events.index("exit")
+        self.assertIn("checkpoint", events[enter + 1:exit_at])
+        self.assertEqual(result["operationResult"]["count"], 1)
+        self.assertEqual(plan_calls, [0])
+        self.assertEqual(render_calls, ["Only row"])
 
     def test_paused_queue_owner_rejects_a_second_start_before_planning(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -2058,6 +2092,27 @@ class MontagePreferencesPersistenceTests(unittest.TestCase):
         # Persistence must not hot-swap an already preparing worker's inputs.
         self.assertFalse(worker.montage_fast_reuse_enabled)
         self.assertEqual(worker.montage_unique_footage_percent, 100)
+
+    def test_stale_full_profile_saves_preserve_pause_and_explicit_continue_wins(self):
+        workers = [config.load_settings(), config.load_settings()]
+        bridge.save_montage_settings({"queuePaused": True})
+
+        workers[0].montage_recent_clip_paths.append("synthetic-stale-clip.mp4")
+        workers[1].pipeline_montage_outputs = ["synthetic-stale-output.mp4"]
+        for worker in workers:
+            config.save_settings(worker)
+            self.assertTrue(config.load_settings().montage_queue_paused)
+
+        bridge.save_montage_settings({"queuePaused": False})
+        self.assertFalse(config.load_settings().montage_queue_paused)
+        for worker in workers:
+            config.save_settings(worker)
+            self.assertFalse(config.load_settings().montage_queue_paused)
+
+    def test_repeated_operator_pause_and_continue_remain_explicitly_writable(self):
+        for paused in (True, True, False, False, True, False):
+            bridge.save_montage_settings({"queuePaused": paused})
+            self.assertEqual(config.load_settings().montage_queue_paused, paused)
 
     def test_project_and_queue_saves_preserve_ranges_and_write_results(self):
         workers = [config.load_settings(), config.load_settings()]
