@@ -15429,14 +15429,16 @@ def save_montage_settings(payload: dict) -> dict:
             setattr(settings, setting_key, max(1, int(payload.get(payload_key, 1))))
     if "queuePaused" in payload:
         settings.montage_queue_paused = bool(payload.get("queuePaused"))
-    # Explicit operator commands own only the reuse fields actually submitted,
-    # even when the requested value equals this process's loaded baseline.
+    # Explicit operator commands own only the Montage controls actually
+    # submitted, even when the requested value equals this process's loaded
+    # baseline. Background workers must never claim an unchanged pause flag.
     settings._edited_montage_reuse = {
         setting for key, setting in (
             ("fastReuseEnabled", "montage_fast_reuse_enabled"),
             ("uniqueFootagePercent", "montage_unique_footage_percent"),
             ("fastReuseRanges", "montage_fast_reuse_ranges"),
             ("gpuChunkSize", "montage_gpu_chunk_size"),
+            ("queuePaused", "montage_queue_paused"),
         ) if key in payload
     }
     save_settings(settings)
@@ -18237,6 +18239,7 @@ def _claim_montage_queue_lock() -> Path | None:
     # whole read/reclaim/publish transaction must exclude other claimants.
     with _exclusive_settings_write(lock_path.with_name("montage-queue-owner.json")):
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        reclaimed = False
         if lock_path.exists():
             try:
                 existing = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -18244,6 +18247,7 @@ def _claim_montage_queue_lock() -> Path | None:
                 existing = {}
             if _montage_process_is_running(existing.get("pid")):
                 return None
+            reclaimed = True
             try:
                 lock_path.unlink()
             except FileNotFoundError:
@@ -18252,7 +18256,11 @@ def _claim_montage_queue_lock() -> Path | None:
                 return None
         try:
             with lock_path.open("x", encoding="utf-8") as stream:
-                json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
+                json.dump({
+                    "pid": os.getpid(),
+                    "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "reclaimed": reclaimed,
+                }, stream)
         except FileExistsError:
             return None
         return lock_path
@@ -18296,11 +18304,20 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     jobs when the desktop app is updated.
     """
     settings = load_settings()
-    # A newly acquired owner proves any persisted pause belongs to a dead
-    # previous worker. Never let a stale pause from an old session freeze a
-    # fresh queue before it can report progress.
-    if settings.montage_queue_paused:
+    # Auto-clear a persisted pause only when this exact owner reclaimed a
+    # dead PID record. A brand-new owner may race with a fresh operator Pause,
+    # which must win and remain visible.
+    try:
+        owner_record = json.loads(_montage_queue_lock_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        owner_record = {}
+    reclaimed_dead_owner = (
+        int(owner_record.get("pid") or 0) == os.getpid()
+        and bool(owner_record.get("reclaimed"))
+    )
+    if settings.montage_queue_paused and reclaimed_dead_owner:
         settings.montage_queue_paused = False
+        settings._edited_montage_reuse = {"montage_queue_paused"}
         save_settings(settings)
     _reconcile_montage_outputs(settings)
     if _recover_interrupted_montage_tasks(settings):
@@ -18383,6 +18400,9 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         _montage_task_update(settings, index, status="Планирование", phase="Планирование сцен", progress=8)
         last_progress = {"value": 8}
         def progress(stage: str, detail: str):
+            # Scene selection can be the longest non-render stage. Pause only
+            # between completed updates, never in the middle of a file write.
+            _montage_wait_if_paused(settings, index)
             ranges = {"Планирование сцен": 16, "Подбор футажей": 42,
                       "Внешний поиск": 30, "Нарезка внешнего футажа": 38}
             value = max(last_progress["value"], ranges.get(stage, 42))
@@ -18424,6 +18444,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             )
             replaced = 0
             for attempt in range(1, 4):
+                _montage_wait_if_paused(settings, index)
                 def candidates_for(clip: TimelineClip, _excluded: dict) -> list[FootageItem]:
                     return _replacement_candidates_for_clip(project_index, clip, settings, download_semaphore)
                 changed = _repair_missing_project_clips(project, candidates_for)
@@ -18450,6 +18471,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         # A clip may be technically valid but have a shorter real duration
         # than old index metadata claimed.  Validate the complete project
         # immediately before rendering and append normal footage for any tail.
+        _montage_wait_if_paused(settings, index)
         try:
             tail_added = _complete_project_visual_tail(
                 project, project_index, settings, download_semaphore,
