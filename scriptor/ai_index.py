@@ -7,9 +7,10 @@ import re
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .footage import VIDEO_EXTENSIONS, FootageItem, tokenize
@@ -148,7 +149,7 @@ _SEARCH_CORPORA_LOCK = threading.RLock()
 class _SearchCorpus:
     """Decoded, read-only representation of the active rows in an index."""
 
-    fingerprint: tuple[tuple[int, int], ...]
+    fingerprint: tuple[tuple[int, ...], ...]
     items: tuple[FootageItem, ...]
     vectors: object
     path_keys: tuple[str, ...]
@@ -159,6 +160,12 @@ class _SearchCorpus:
     source_families: tuple[str, ...]
     used_counts: object
     ratings: object
+    content_revision: int = -1
+    stats_revision: int = -1
+    metadata_tokens: tuple[frozenset[str], ...] = ()
+    token_positions: dict = field(default_factory=dict)
+    person_positions: dict = field(default_factory=dict)
+    file_signatures: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass
@@ -186,6 +193,13 @@ class ClipMetadata:
     source_family: str
     english_text: int
     semantic_scores: dict[str, float]
+
+
+@dataclass
+class IndexedFootageItem(FootageItem):
+    """Index-owned annotations; provider items and legacy JSON stay unchanged."""
+
+    person_evidence: dict | None = None
 
 
 @dataclass
@@ -280,6 +294,8 @@ class ClipIndex:
         self.screen_text_progress = screen_text_progress
         self._image_embedder = None
         self._text_embedder = None
+        self._query_cache = OrderedDict()
+        self.allowed_roots: list[str] | None = None
         self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -361,6 +377,27 @@ class ClipIndex:
                 connection.execute("ALTER TABLE clips ADD COLUMN source_family TEXT NOT NULL DEFAULT ''")
             if "semantic_scores" not in columns:
                 connection.execute("ALTER TABLE clips ADD COLUMN semantic_scores TEXT NOT NULL DEFAULT '{}'")
+            if "person_evidence" not in columns:
+                connection.execute("ALTER TABLE clips ADD COLUMN person_evidence TEXT NOT NULL DEFAULT '{}'")
+            # Separate vector/metadata changes from usage-only commits. Triggers
+            # also cover writes from other bridge processes and maintenance SQL.
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS search_revision(id INTEGER PRIMARY KEY, value INTEGER NOT NULL);
+                INSERT OR IGNORE INTO search_revision VALUES(1, 0);
+                INSERT OR IGNORE INTO search_revision VALUES(2, 0);
+                CREATE TRIGGER IF NOT EXISTS search_insert AFTER INSERT ON clips
+                BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
+                CREATE TRIGGER IF NOT EXISTS search_delete AFTER DELETE ON clips
+                BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
+                CREATE TRIGGER IF NOT EXISTS search_content_update AFTER UPDATE OF
+                    path,name,size,mtime_ns,source,source_url,license,tags,embedding,duration,width,height,
+                    source_family,semantic_scores,disabled,english_text,english_text_version ON clips
+                BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
+                CREATE TRIGGER IF NOT EXISTS search_person_update AFTER UPDATE OF person_evidence ON clips
+                BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
+                CREATE TRIGGER IF NOT EXISTS search_stats_update AFTER UPDATE OF used_count,rating ON clips
+                BEGIN UPDATE search_revision SET value=value+1 WHERE id=2; END;
+            """)
 
     def count(self, embedded_only: bool = False) -> int:
         where = " WHERE embedding IS NOT NULL" if embedded_only else ""
@@ -398,16 +435,16 @@ class ClipIndex:
     def _cache_key(self) -> str:
         return str(self.db_path.resolve()).casefold()
 
-    def _database_fingerprint(self) -> tuple[tuple[int, int], ...]:
+    def _database_fingerprint(self) -> tuple[tuple[int, ...], ...]:
         """Changes whenever SQLite commits data, including WAL transactions."""
         parts = (self.db_path, self.db_path.with_name(self.db_path.name + "-wal"))
         fingerprint = []
         for path in parts:
             try:
                 stat = path.stat()
-                fingerprint.append((stat.st_mtime_ns, stat.st_size))
+                fingerprint.append((stat.st_mtime_ns, stat.st_size, stat.st_ino))
             except FileNotFoundError:
-                fingerprint.append((0, 0))
+                fingerprint.append((0, 0, 0))
         return tuple(fingerprint)
 
     def _invalidate_search_cache(self) -> None:
@@ -423,16 +460,30 @@ class ClipIndex:
         fingerprint = self._database_fingerprint()
         with _SEARCH_CORPORA_LOCK:
             cached = _SEARCH_CORPORA.get(key)
-            if cached and cached.fingerprint == fingerprint:
-                return cached
             # Hold the lock while loading.  This intentionally lets the first
             # montage worker prepare the shared data, while the remaining
             # workers reuse it instead of issuing the same 15k-row query.
             with self._connect() as connection:
+                connection.execute("BEGIN")
+                revisions = dict(connection.execute("SELECT id,value FROM search_revision"))
+                revision, stats_revision = int(revisions[1]), int(revisions[2])
+                if (cached and cached.content_revision == revision and cached.stats_revision == stats_revision
+                        and cached.fingerprint == fingerprint):
+                    return cached
+                if cached and cached.content_revision == revision and cached.stats_revision != stats_revision:
+                    statistics = {row["path"].casefold(): (row["used_count"], row["rating"])
+                                  for row in connection.execute("SELECT path,used_count,rating FROM clips")}
+                    corpus = replace(
+                        cached, fingerprint=fingerprint, stats_revision=stats_revision,
+                        used_counts=np.asarray([statistics[key][0] for key in cached.path_keys], dtype=np.float32),
+                        ratings=np.asarray([statistics[key][1] for key in cached.path_keys], dtype=np.float32),
+                    )
+                    _SEARCH_CORPORA[key] = corpus
+                    return corpus
                 rows = connection.execute(
-                    """SELECT path,name,source,source_url,license,tags,embedding,duration,width,height,source_family,
+                    """SELECT path,name,size,mtime_ns,source,source_url,license,tags,embedding,duration,width,height,source_family,
                               semantic_scores,
-                              used_count,rating FROM clips
+                              used_count,rating,person_evidence FROM clips
                        WHERE embedding IS NOT NULL AND disabled=0
                          AND NOT (english_text=1 AND english_text_version>=?)"""
                     + " ORDER BY path",
@@ -448,6 +499,7 @@ class ClipIndex:
             source_families: list[str] = []
             used_counts: list[int] = []
             ratings: list[int] = []
+            file_signatures = []
             vector_size = 0
             for row in rows:
                 vector = np.frombuffer(row["embedding"], dtype=np.float32)
@@ -457,8 +509,9 @@ class ClipIndex:
                     vector_size = vector.size
                 if vector.size != vector_size:
                     continue
-                items.append(FootageItem(row["path"], row["name"], row["source"], row["source_url"],
-                                         row["license"], json.loads(row["tags"] or "[]")))
+                items.append(IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"],
+                                         row["license"], json.loads(row["tags"] or "[]"),
+                                         json.loads(row["person_evidence"] or "{}")))
                 source_families.append(
                     row["source_family"] or source_family_identity(row["path"], row["source_url"])
                 )
@@ -474,7 +527,18 @@ class ClipIndex:
                     semantic_confidences.append(0.0)
                 used_counts.append(int(row["used_count"] or 0))
                 ratings.append(int(row["rating"] or 0))
+                file_signatures.append((int(row["size"]), int(row["mtime_ns"])))
             matrix = np.vstack(vectors).astype(np.float32, copy=False) if vectors else np.empty((0, 0), dtype=np.float32)
+            metadata_tokens = tuple(frozenset(self._metadata_tokens(item)) for item in items)
+            postings: dict[str, list[int]] = {}
+            people: dict[str, list[int]] = {}
+            for position, tokens in enumerate(metadata_tokens):
+                for token in tokens:
+                    postings.setdefault(token, []).append(position)
+                for observation in (items[position].person_evidence or {}).get("observations", []):
+                    if (observation.get("source") in {"manual", "curated"}
+                            and float(observation.get("end", 0)) - float(observation.get("start", 0)) >= 6):
+                        people.setdefault(observation["person_id"], []).append(position)
             corpus = _SearchCorpus(
                 fingerprint=fingerprint,
                 items=tuple(items), vectors=matrix, path_keys=tuple(path_keys),
@@ -483,7 +547,14 @@ class ClipIndex:
                 source_families=tuple(source_families),
                 used_counts=np.asarray(used_counts, dtype=np.float32),
                 ratings=np.asarray(ratings, dtype=np.float32),
+                content_revision=revision, stats_revision=stats_revision, metadata_tokens=metadata_tokens,
+                token_positions={token: np.asarray(positions, dtype=np.intp) for token, positions in postings.items()},
+                person_positions={person: np.asarray(positions, dtype=np.intp) for person, positions in people.items()},
+                file_signatures=tuple(file_signatures),
             )
+            # Retain at most four database snapshots in long-lived workers.
+            if key not in _SEARCH_CORPORA and len(_SEARCH_CORPORA) >= 4:
+                _SEARCH_CORPORA.pop(next(iter(_SEARCH_CORPORA)))
             _SEARCH_CORPORA[key] = corpus
             return corpus
 
@@ -492,22 +563,26 @@ class ClipIndex:
         import numpy as np
 
         _, text_model = self._models()
-        if len(queries) == 1:
-            with _TEXT_EMBED_LOCK:
-                value = next(iter(text_model.query_embed(queries[0])))
-            return np.asarray([self._normalize(value)], dtype=np.float32)
-        try:
-            with _TEXT_EMBED_LOCK:
-                values = list(text_model.query_embed(queries))
-            if len(values) == len(queries):
-                return np.asarray([self._normalize(value) for value in values], dtype=np.float32)
-        except (TypeError, ValueError):
-            pass
-        # Compatibility fallback for older FastEmbed adapters and test doubles.
         with _TEXT_EMBED_LOCK:
-            return np.asarray([
-                self._normalize(next(iter(text_model.query_embed(query)))) for query in queries
-            ], dtype=np.float32)
+            missing = list(dict.fromkeys(query for query in queries if (TEXT_MODEL, query) not in self._query_cache))
+            values = []
+            if missing:
+                try:
+                    values = list(text_model.query_embed(missing if len(missing) > 1 else missing[0]))
+                except (TypeError, ValueError):
+                    pass
+                if len(values) != len(missing):
+                    values = [next(iter(text_model.query_embed(query))) for query in missing]
+            # Keep a local result map even when one batch exceeds the LRU limit.
+            resolved = {query: self._query_cache[(TEXT_MODEL, query)]
+                        for query in queries if (TEXT_MODEL, query) in self._query_cache}
+            resolved.update({query: self._normalize(value) for query, value in zip(missing, values)})
+            for query in queries:
+                self._query_cache[(TEXT_MODEL, query)] = resolved[query]
+                self._query_cache.move_to_end((TEXT_MODEL, query))
+            while len(self._query_cache) > 512:
+                self._query_cache.popitem(last=False)
+            return np.asarray([resolved[query] for query in queries], dtype=np.float32)
 
     def _text_model_is_cached(self) -> bool:
         """Whether semantic search can start without a network download.
@@ -531,17 +606,20 @@ class ClipIndex:
 
     @staticmethod
     def _metadata_tokens(item: FootageItem) -> set[str]:
+        from .scene_intent import person_name
         return set(tokenize(" ".join((
-            item.name,
-            *(tag.replace("-", " ") for tag in item.tags),
-            *Path(item.path).parts[-4:],
+            re.sub(r"[_-]+", " ", item.name),
+            *(tag.replace("-", " ") for tag in (item.tags or [])),
+            *(person_name(value["person_id"]) for value in
+              (getattr(item, "person_evidence", None) or {}).get("observations", [])
+              if value.get("source") in {"manual", "curated"}),
         ))))
 
     def _search_many_metadata(self, queries: list[str], corpus: _SearchCorpus,
                               limit: int, excluded: set[str],
                               existence_cache: dict[str, bool]) -> list[list[SearchHit]]:
         """Fast local fallback used only until the text model is available."""
-        item_tokens = [self._metadata_tokens(item) for item in corpus.items]
+        item_tokens = corpus.metadata_tokens or tuple(self._metadata_tokens(item) for item in corpus.items)
         result: list[list[SearchHit]] = []
         take = max(1, int(limit))
         for query in queries:
@@ -589,7 +667,14 @@ class ClipIndex:
             if path_key in excluded:
                 continue
             if path_key not in existence_cache:
-                existence_cache[path_key] = Path(corpus.items[position].path).is_file()
+                candidate = Path(corpus.items[position].path)
+                available = candidate.is_file()
+                if available and corpus.file_signatures:
+                    try:
+                        available = ClipIndex._signature(candidate) == corpus.file_signatures[position]
+                    except OSError:
+                        available = False
+                existence_cache[path_key] = available
             if not existence_cache[path_key]:
                 continue
             valid.append(position)
@@ -936,18 +1021,48 @@ class ClipIndex:
     def all_items(self, limit: int | None = None, exclude_english_text: bool = False) -> list[FootageItem]:
         # 2.1.136 semantics: exclude only a current positive block. Stale and
         # UNCERTAIN rows remain searchable and can be verified lazily.
-        text_filter = (" WHERE NOT (english_text=1 AND english_text_version>=?)"
+        text_filter = (" AND NOT (english_text=1 AND english_text_version>=?)"
                        if exclude_english_text else "")
-        query = ("SELECT path,name,source,source_url,license,tags,source_family FROM clips"
+        query = ("SELECT path,name,size,mtime_ns,embedding IS NOT NULL AS embedded,source,source_url,license,tags,"
+                 "source_family,person_evidence FROM clips WHERE disabled=0"
                  + text_filter + " ORDER BY name")
         params = (SCREEN_TEXT_CLASSIFIER_VERSION,) if exclude_english_text else ()
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         quarantined = self.media_health.quarantined_paths()
-        current = [FootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
-                               json.loads(row["tags"] or "[]"))
-                   for row in rows if Path(row["path"]).is_file() and str(Path(row["path"]).resolve()).casefold() not in quarantined]
+        def fresh(row):
+            try:
+                return not row["embedded"] or self._signature(Path(row["path"])) == (row["size"], row["mtime_ns"])
+            except OSError:
+                return False
+        current = [IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
+                               json.loads(row["tags"] or "[]"), json.loads(row["person_evidence"] or "{}"))
+                   for row in rows if self.path_allowed(row["path"]) and Path(row["path"]).is_file()
+                   and fresh(row)
+                   and str(Path(row["path"]).resolve()).casefold() not in quarantined]
         return current[:limit] if limit is not None else current
+
+    def set_person_evidence(self, path: str, observations: list[dict]) -> None:
+        """Persist explicit local annotations; this method does not recognize faces."""
+        import math
+        candidate = Path(path).resolve()
+        stat = candidate.stat()
+        cleaned = []
+        for value in observations:
+            start, end = float(value["start"]), float(value["end"])
+            identity = str(value["person_id"]).strip().casefold()
+            if (value.get("source") not in {"manual", "curated"} or not identity
+                    or not math.isfinite(start) or not math.isfinite(end) or not 0 <= start < end):
+                raise ValueError("Invalid curated person interval")
+            cleaned.append({"person_id": identity, "start": start, "end": end,
+                            "source": value["source"], "complete": bool(value.get("complete", False))})
+        evidence = {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "observations": cleaned}
+        with self._connect() as connection:
+            changed = connection.execute("UPDATE clips SET person_evidence=? WHERE path=?",
+                                         (json.dumps(evidence), str(candidate))).rowcount
+        if not changed:
+            raise ValueError("Person evidence requires an indexed file")
+        self._invalidate_search_cache()
 
     def metadata(self, path: str | Path) -> ClipMetadata | None:
         """Expose persisted media/freshness identity for retrieval and QA."""
@@ -1023,6 +1138,11 @@ class ClipIndex:
         excluded = {value.casefold() for value in (exclude or set())}
         excluded.update(self.media_health.quarantined_paths())
         corpus = self._search_corpus()
+        if self.allowed_roots is not None:
+            roots = [str(Path(root).expanduser().resolve()).replace("\\", "/").casefold().rstrip("/")
+                     for root in self.allowed_roots]
+            excluded.update(key for key, item in zip(corpus.path_keys, corpus.items)
+                            if not any(key.replace("\\", "/").startswith(root + "/") for root in roots))
         if not corpus.items:
             return [[] for _ in queries]
         existence_cache: dict[str, bool] = {}
@@ -1036,25 +1156,43 @@ class ClipIndex:
         # Keep vector similarity primary, then add a small bounded fusion
         # bonus from versioned semantic tags and path metadata. This improves
         # broad fallback without turning retrieval into brittle keywords.
-        item_tokens = [self._metadata_tokens(item) for item in corpus.items]
+        postings = corpus.token_positions
+        if not corpus.metadata_tokens:
+            postings = {}
+            for item_index, item in enumerate(corpus.items):
+                for token in self._metadata_tokens(item):
+                    postings.setdefault(token, []).append(item_index)
         for query_index, query in enumerate(unique_queries):
             query_tokens = set(tokenize(query.replace("-", " ")))
             if not query_tokens:
                 continue
-            for item_index, tokens in enumerate(item_tokens):
-                overlap = len(query_tokens & tokens)
-                if overlap:
-                    scores[query_index, item_index] += min(0.08, 0.025 * overlap)
+            bonus = np.zeros(len(corpus.items), dtype=np.float32)
+            for token in query_tokens:
+                positions = postings.get(token)
+                if positions is not None:
+                    bonus[positions] += .025
+            scores[query_index] += np.minimum(.08, bonus)
         take = min(len(corpus.items), max(1, int(limit)))
         by_query: dict[str, list[SearchHit]] = {}
         for query, row_scores in zip(unique_queries, scores):
+            from .scene_intent import named_people
+            ranking_scores = row_scores
+            identities = named_people(query)
+            if identities:
+                # Expand the initial pool using indexed interval annotations,
+                # without altering the similarity score or decoding the library.
+                ranking_scores = row_scores.copy()
+                for identity in identities:
+                    positions = corpus.person_positions.get(identity)
+                    if positions is not None:
+                        ranking_scores[positions] += 2
             candidate_count = min(len(corpus.items), max(32, take * 4))
             while True:
                 if candidate_count >= len(corpus.items):
-                    ordered = np.argsort(row_scores, kind="stable")[::-1]
+                    ordered = np.argsort(ranking_scores, kind="stable")[::-1]
                 else:
-                    partition = np.argpartition(row_scores, -candidate_count)[-candidate_count:]
-                    ordered = partition[np.argsort(row_scores[partition], kind="stable")[::-1]]
+                    partition = np.argpartition(ranking_scores, -candidate_count)[-candidate_count:]
+                    ordered = partition[np.argsort(ranking_scores[partition], kind="stable")[::-1]]
                 valid_positions = self._valid_ranked_positions(
                     (int(position) for position in ordered), corpus, take, excluded, existence_cache,
                 )
@@ -1090,7 +1228,12 @@ class ClipIndex:
                 "UPDATE clips SET used_count=used_count+1,last_used=? WHERE path=?",
                 [(now, path) for path in paths],
             )
-        self._invalidate_search_cache()
+
+    def path_allowed(self, path: str | Path) -> bool:
+        if self.allowed_roots is None:
+            return True
+        candidate = Path(path).resolve()
+        return any(candidate.is_relative_to(Path(root).expanduser().resolve()) for root in self.allowed_roots)
 
     @staticmethod
     def _screen_text_scores(frame, query_vectors) -> tuple[float, float]:
@@ -1458,7 +1601,8 @@ class ClipIndex:
                             if vector.size == reference.size and float(np.dot(reference, vector)) >= 0.92:
                                 connection.execute(
                                     "UPDATE clips SET rating=MIN(5,rating+1) WHERE path=?", (candidate["path"],))
-        self._invalidate_search_cache()
+        if value <= -10:
+            self._invalidate_search_cache()
 
     def remove_missing(self) -> int:
         with self._connect() as connection:
@@ -1468,6 +1612,9 @@ class ClipIndex:
                 try:
                     Path(row["path"]).stat()
                 except FileNotFoundError:
+                    # A disconnected library is not evidence of deletion.
+                    if not Path(row["path"]).parent.is_dir():
+                        continue
                     missing.append((row["path"],))
                 except OSError:
                     # A temporarily unreadable drive/file is not proof that

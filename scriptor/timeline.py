@@ -19,6 +19,7 @@ from xml.sax.saxutils import quoteattr
 
 from .config import validate_gpu_chunk_size
 from .media_health import default_health_store, quarantine_cache, signature
+from .scene_intent import visual_intent
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
 _GPU_TIMELINE_CAPABILITY_CACHE: dict[str, dict[str, object]] = {}
@@ -135,6 +136,7 @@ class TimelineClip:
     # Appended at the end to preserve the positional TimelineClip contract
     # used by legacy/manual project constructors.
     voice_segment_ids: list[int] = field(default_factory=list)
+    selection_diagnostics: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -235,6 +237,8 @@ VISUAL_TERMS = {
     "картош": "potato harvest farm tractor agricultural field", "урож": "harvest farming combine wheat field",
     "сельхоз": "agriculture farm tractor combine field workers", "пшениц": "wheat harvest grain field combine",
     "зерн": "grain harvest agricultural storage wheat field", "комбайн": "farm combine harvester agricultural field",
+    "нпз": "oil refinery industrial oil infrastructure",
+    "пожар": "fire emergency response industrial safety",
 }
 
 
@@ -242,31 +246,22 @@ GENERIC_VISUAL_QUERY = "international news, documentary footage"
 
 
 def fallback_visual_query(text: str) -> str:
-    lowered = text.casefold()
-    terms = [english for stem, english in VISUAL_TERMS.items() if stem in lowered]
-    return ", ".join(dict.fromkeys(terms)) or GENERIC_VISUAL_QUERY
+    return visual_intent(text, VISUAL_TERMS)["visual_query"] or GENERIC_VISUAL_QUERY
 
 
 def fallback_scene_plan(narration: str, topic: str = "") -> list[dict]:
-    """Build deterministic scenes while retaining the overall news topic.
-
-    Later sentences often use pronouns such as "это" or "он" and contain no
-    country, subject or location on their own.  Searching only those words
-    used to let an unrelated war clip outrank footage from the actual story.
-    The title is therefore appended as stable visual context to every local
-    scene query; it does not change the narration or invent an event.
-    """
+    """Use the local action first; inherit only unambiguous nearby context."""
     plan = []
     topic_query = fallback_visual_query(topic) if topic else ""
+    previous = None
     for sentence in split_narration(narration):
         word_count = len(sentence.split())
         duration = min(6.0, max(2.5, word_count / 2.7))
-        sentence_query = fallback_visual_query(sentence)
-        if sentence_query == GENERIC_VISUAL_QUERY and topic_query != GENERIC_VISUAL_QUERY:
-            sentence_query = ""
-        query = ", ".join(dict.fromkeys(filter(None, (topic_query, sentence_query))))
+        intent = visual_intent(sentence, VISUAL_TERMS, previous=previous)
+        query = intent["visual_query"] or (previous or {}).get("visual_query") or topic_query or GENERIC_VISUAL_QUERY
         plan.append({"narration": sentence, "visual_query_en": query,
-                     "duration": round(duration, 2)})
+                     "duration": round(duration, 2), "scene_intent": intent})
+        previous = intent
     return plan
 
 
@@ -552,6 +547,7 @@ def align_timeline_to_audio(
     duration_probe: Callable[[Path], float] = probe_media_duration,
     tolerance: float = 0.05,
     allow_terminal_reuse: bool = False,
+    preserve_clip_windows: bool = False,
 ) -> list[TimelineClip]:
     """Make the visual timeline cover the narration without looping footage.
 
@@ -577,6 +573,8 @@ def align_timeline_to_audio(
         if total >= target - tolerance:
             break
         available = _remaining_source_duration(source_duration(clip), clip.source_start)
+        if preserve_clip_windows:
+            available = min(available, float(clip.duration))
         remaining = max(0.0, target - total)
         contribution = min(available, remaining)
         normalized.append(replace(clip, duration=contribution))
@@ -602,6 +600,8 @@ def align_timeline_to_audio(
             terminal_reuse_used = True
         try:
             available = _remaining_source_duration(source_duration(candidate), candidate.source_start)
+            if preserve_clip_windows:
+                available = min(available, float(candidate.duration))
         except (OSError, ValueError):
             continue
         remaining = max(0.0, target - total)

@@ -48,6 +48,7 @@ def main(arguments: list[str]) -> int:
         environment.update({
             "NEWSFLOW_TEST_MODE": "1",
             "NEWSFLOW_TEST_ROOT": str(root),
+            "NEWSFLOW_RENDER_TEMP_ROOT": str(root / "render-workspace"),
             "NEWSFLOW_PRODUCTION_LOCALAPPDATA": production_local_appdata,
             "LOCALAPPDATA": str(root),
             "TEMP": str(root),

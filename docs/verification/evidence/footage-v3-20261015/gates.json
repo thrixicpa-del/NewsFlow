@@ -1,0 +1,29 @@
+{
+  "base_sha": "43dd0709d7341eb79b308303031b5f3a47fd3ebc",
+  "branch": "codex/footage-semantic-person-fallback-v3",
+  "release_ready": false,
+  "merge_authorized": false,
+  "checks": [
+    {"name": "baseline_related_pytest", "tests": "PASS", "passed": 275, "production_hash_guard": "FAIL"},
+    {"name": "expanded_backend_contract_security", "tests": "PASS", "passed": 351, "production_hash_guard": "FAIL"},
+    {"name": "related_targeted", "tests": "PASS", "passed": 224, "production_hash_guard": "FAIL"},
+    {"name": "final_targeted_v3_diversity_voice_map", "command": "python tests/run_isolated.py --pytest tests/test_footage_v3.py tests/test_montage_semantic_diversity.py tests/test_voice_map.py -q --tb=short", "tests": "PASS", "passed": 110, "production_hash_guard": "FAIL"},
+    {"name": "source_electron", "command": "NEWSFLOW_RUN_ELECTRON_E2E=1 NEWSFLOW_PYTHON=python python tests/run_isolated.py --pytest tests/test_electron_e2e.py -q", "tests": "PASS", "passed": 10, "production_hash_guard": "FAIL", "limits": "synthetic prepared roots/media; no native dialogs or real providers"},
+    {"name": "frontend_vitest", "tests": "PASS", "files": 47, "passed": 381},
+    {"name": "typecheck_web_desktop_build_security_montage_contract", "status": "PASS"},
+    {"name": "changed_python_ruff_secret_scan_diff_check", "status": "PASS"},
+    {"name": "dependency_audits_python_node_production", "status": "PASS"},
+    {"name": "frozen_runtime_guard", "status": "FAIL", "passed": 10, "failed": 1, "reason": "Core-owned source differs from existing Frozen lock; rebuild prohibited for this task"},
+    {"name": "independent_ci", "status": "PENDING_PR", "limits": "existing PR workflows only; additional V3/Electron workflow patch blocked by missing OAuth workflow scope and preserved in tests/footage-v3/independent-ci.patch"},
+    {"name": "docker", "status": "NOT_RUN", "reason": "Docker Desktop daemon pipe unavailable"},
+    {"name": "real_person_visual_semantics", "status": "NOT_VERIFIED", "reason": "no permitted independently labelled real-person/video dataset"},
+    {"name": "full_user_pipeline_speed", "status": "NOT_ACHIEVED", "reason": "retrieval improved; small source prepare/render engineering workload became slower"},
+    {"name": "gpu_clean_windows_release_acceptance", "status": "NOT_RUN", "reason": "source review branch; no Frozen/EXE release authorized"}
+  ],
+  "safety_notes": [
+    "Production application was running and settings hash changed during many test runs; writer not established. These FAIL outcomes remain unresolved.",
+    "Renderer workspace isolation gap discovered and fixed in tests/run_isolated.py. Subsequent smoke uses separate disposable render/proxy caches.",
+    "No provider calls, external video downloads, original-media moves/transcodes, main merge or Frozen lock changes were performed.",
+    "Public evidence contains aggregate synthetic fixture data; local media and full project paths are not published."
+  ]
+}
