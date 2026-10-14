@@ -80,6 +80,7 @@ from .config import (
     load_settings,
     reconcile_voice_outputs,
     save_settings,
+    validate_gpu_chunk_size,
 )
 from .core import (
     PromptRange,
@@ -3031,6 +3032,7 @@ def snapshot() -> dict:
                             "planningWorkers": settings.montage_planning_workers,
                             "downloadWorkers": settings.montage_download_workers,
                             "renderWorkers": settings.montage_render_workers,
+                            "gpuChunkSize": settings.montage_gpu_chunk_size,
                             "queuePaused": settings.montage_queue_paused,
                             "queueRunning": _montage_queue_owner_running()},
         "montageTasks": [
@@ -15350,6 +15352,8 @@ def set_proxy_cache_paused(payload: dict) -> dict:
 
 def save_montage_settings(payload: dict) -> dict:
     settings = load_settings()
+    if "gpuChunkSize" in payload:
+        settings.montage_gpu_chunk_size = validate_gpu_chunk_size(payload["gpuChunkSize"])
     ratio = str(payload.get("aspectRatio", settings.montage_aspect_ratio)).strip()
     if ratio not in {"16:9", "9:16", "1:1"}:
         raise ValueError("Неподдерживаемое соотношение сторон")
@@ -15432,6 +15436,7 @@ def save_montage_settings(payload: dict) -> dict:
             ("fastReuseEnabled", "montage_fast_reuse_enabled"),
             ("uniqueFootagePercent", "montage_unique_footage_percent"),
             ("fastReuseRanges", "montage_fast_reuse_ranges"),
+            ("gpuChunkSize", "montage_gpu_chunk_size"),
         ) if key in payload
     }
     save_settings(settings)
@@ -17428,6 +17433,7 @@ def render_montage(payload: dict) -> dict:
     )
     staged_output = output_staging / output.name
     rendered = render_project(project, staged_output, renderer=settings.montage_renderer,
+                              gpu_chunk_size=settings.montage_gpu_chunk_size,
                               remotion_concurrency=settings.montage_remotion_frame_concurrency)
     voiceover = Path(project.voiceover_path)
     if voiceover.is_file():
@@ -18474,6 +18480,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 phase = "Склейка" if label == "Склейка" else ("Готовим MP4" if label == "Готово" else "Рендер футажей")
             _montage_task_update(settings, index, status="Рендер", phase=phase, progress=value, detail=label)
         rendered = render_project(project, staged_output, progress=progress, renderer=settings.montage_renderer,
+                                  gpu_chunk_size=settings.montage_gpu_chunk_size,
                                   remotion_concurrency=settings.montage_remotion_frame_concurrency,
                                   remotion_parallel_jobs=rendering_workers, heartbeat=heartbeat)
         voiceover = Path(project.voiceover_path)

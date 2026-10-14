@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+from .config import validate_gpu_chunk_size
 from .media_health import default_health_store, quarantine_cache, signature
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
@@ -973,6 +974,7 @@ def _render_project_gpu_timeline(
     output: Path,
     progress: Callable[[int, int, str], None] | None = None,
     heartbeat: Callable[[int | None], None] | None = None,
+    chunk_size: int = GPU_TIMELINE_CHUNK_SIZE,
 ) -> Path:
     """Render a long project through bounded direct-source NVENC chunks.
 
@@ -981,6 +983,7 @@ def _render_project_gpu_timeline(
     output contract remain identical; only the physical render strategy is
     different.
     """
+    chunk_size = validate_gpu_chunk_size(chunk_size)
     ffmpeg = ffmpeg_executable()
     gpu_timeline_encoder_args(ffmpeg)
     width, height = (1080, 1920) if project.aspect_ratio == "9:16" else (1920, 1080)
@@ -990,7 +993,7 @@ def _render_project_gpu_timeline(
         f"{published_output.stem}.{os.getpid()}.{threading.get_ident()}.partial{published_output.suffix}"
     )
     render_clips = _gpu_timeline_render_clips(project)
-    total_chunks = max(1, math.ceil(len(render_clips) / GPU_TIMELINE_CHUNK_SIZE))
+    total_chunks = max(1, (len(render_clips) + chunk_size - 1) // chunk_size)
     total_steps = total_chunks + 2
 
     def run_ffmpeg(command: list[str]) -> None:
@@ -999,8 +1002,8 @@ def _render_project_gpu_timeline(
     with tempfile.TemporaryDirectory(prefix="newsflow-gpu-timeline-", dir=render_workspace_root()) as temporary:
         work = Path(temporary)
         chunks: list[Path] = []
-        for chunk_number, start in enumerate(range(0, len(render_clips), GPU_TIMELINE_CHUNK_SIZE), start=1):
-            clip_chunk = render_clips[start:start + GPU_TIMELINE_CHUNK_SIZE]
+        for chunk_number, start in enumerate(range(0, len(render_clips), chunk_size), start=1):
+            clip_chunk = render_clips[start:start + chunk_size]
             chunk = work / f"chunk-{chunk_number:04d}.mp4"
             script = work / f"chunk-{chunk_number:04d}.ffscript"
             run_ffmpeg(_gpu_timeline_chunk_command(
@@ -1080,7 +1083,8 @@ def _render_project_gpu_timeline(
 def render_project(project: TimelineProject, output: Path, progress: Callable[[int, int, str], None] | None = None,
                    renderer: str = "ffmpeg", remotion_concurrency: int | None = None,
                    remotion_parallel_jobs: int = 1,
-                   heartbeat: Callable[[int | None], None] | None = None):
+                   heartbeat: Callable[[int | None], None] | None = None,
+                   gpu_chunk_size: int = GPU_TIMELINE_CHUNK_SIZE):
     if not project.clips:
         raise ValueError("Таймлайн пуст")
     # FAST NEWS uses the direct, cached FFmpeg pipeline by default.  Remotion
@@ -1103,6 +1107,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             output,
             progress=progress,
             heartbeat=heartbeat,
+            chunk_size=gpu_chunk_size,
         )
     if renderer != "ffmpeg":
         raise ValueError(f"Неподдерживаемый рендерер монтажа: {renderer}")

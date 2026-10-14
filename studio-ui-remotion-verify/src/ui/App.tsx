@@ -374,6 +374,7 @@ export const fallback: NewsFlowSnapshot = {
     planningWorkers: 4,
     downloadWorkers: 2,
     renderWorkers: 2,
+    gpuChunkSize: 12,
     queuePaused: false,
   },
   montageProjects: [],
@@ -10790,6 +10791,11 @@ export function Editor({
   );
   const [ratio, setRatio] = useState(data.montageSettings.aspectRatio);
   const [renderer, setRenderer] = useState(data.montageSettings.renderer);
+  const [gpuChunkSize, setGpuChunkSize] = useState(
+    String(data.montageSettings.gpuChunkSize ?? 12),
+  );
+  const gpuChunkSizeValid = gpuChunkSize.trim() !== "" &&
+    Number.isSafeInteger(Number(gpuChunkSize)) && Number(gpuChunkSize) > 0;
   const [remotionFrameConcurrency, setRemotionFrameConcurrency] = useState(
     String(data.montageSettings.remotionFrameConcurrency),
   );
@@ -10855,6 +10861,7 @@ export function Editor({
     if (configurationOpen) return;
     setRatio(data.montageSettings.aspectRatio);
     setRenderer(data.montageSettings.renderer);
+    setGpuChunkSize(String(data.montageSettings.gpuChunkSize ?? 12));
     setRemotionFrameConcurrency(
       String(data.montageSettings.remotionFrameConcurrency),
     );
@@ -10928,10 +10935,12 @@ export function Editor({
     const folder = await window.newsflowDesktop?.chooseFolder();
     if (folder) setOutputFolder(folder);
   };
-  const saveSettings = () =>
+  const saveSettings = () => {
+    if (renderer === "gpu-timeline" && !gpuChunkSizeValid) return;
     void command("save-montage-settings", {
       aspectRatio: ratio,
       renderer,
+      ...(gpuChunkSizeValid ? { gpuChunkSize: Number(gpuChunkSize) } : {}),
       remotionFrameConcurrency: Number(remotionFrameConcurrency),
       exportDaVinciXml,
       davinciAutoImport,
@@ -10950,13 +10959,15 @@ export function Editor({
       uniqueFootagePercent: Number(uniqueFootagePercent),
       fastReuseRanges,
     });
+  };
   const launch = async (indices: number[], replaceOutput = false) => {
-    if (!indices.length || queueActive) return;
+    if (!indices.length || queueActive || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
     setQueueLaunching(true);
     try {
       const saved = await command("save-montage-settings", {
         aspectRatio: ratio,
         renderer,
+        ...(gpuChunkSizeValid ? { gpuChunkSize: Number(gpuChunkSize) } : {}),
         remotionFrameConcurrency: Number(remotionFrameConcurrency),
         exportDaVinciXml,
         davinciAutoImport,
@@ -11134,7 +11145,7 @@ export function Editor({
               редактируемый план этой же дорожки, без второго рендера.
             </small>
           </div>
-          <Button onClick={() => void saveSettings()}>
+          <Button disabled={renderer === "gpu-timeline" && !gpuChunkSizeValid} onClick={() => void saveSettings()}>
             <Check size={16} />
             Сохранить выбор
           </Button>
@@ -11193,6 +11204,31 @@ export function Editor({
             <em>{exportDaVinciXml ? "включён" : "выключен"}</em>
           </button>
         </div>
+        {renderer === "gpu-timeline" && (
+          <div className="remotion-controls gpu-chunk-controls">
+            <label>
+              Футажей в блоке
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={gpuChunkSize}
+                aria-invalid={!gpuChunkSizeValid}
+                aria-describedby="gpu-chunk-size-hint"
+                onChange={(event) => setGpuChunkSize(event.target.value)}
+              />
+            </label>
+            <div className="toolbar compact">
+              <button type="button" className="nf-button nf-button-secondary" aria-label="12 футажей в блоке" onClick={() => setGpuChunkSize("12")}>12</button>
+              <button type="button" className="nf-button nf-button-secondary" aria-label="24 футажа в блоке" onClick={() => setGpuChunkSize("24")}>24</button>
+            </div>
+            <small id="gpu-chunk-size-hint">
+              Количество футажей на один GPU-блок. Больше — выше расход памяти,
+              не обязательно быстрее. Применяется при следующем запуске рендера.
+            </small>
+            {!gpuChunkSizeValid && <p role="alert">Укажите положительное целое число футажей в блоке.</p>}
+          </div>
+        )}
         {renderer === "remotion" ? (
           <div className="remotion-controls">
             <label>
