@@ -1538,8 +1538,8 @@ _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
 
 _MONTAGE_REUSE_PREFERENCES = (
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
-    # Render preferences also belong to the operator, not stale progress writers.
-    "montage_gpu_chunk_size",
+    # Render/pause controls also belong to the operator, not stale progress writers.
+    "montage_gpu_chunk_size", "montage_queue_paused",
 )
 
 
