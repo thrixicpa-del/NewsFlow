@@ -12,7 +12,7 @@ export function makeSnapshot(stage: string): NewsFlowSnapshot {
     scenarios: Array.from({ length: 4 }, (_, index) => ({ index, title: `Тестовая тема ${index + 1}`, state: "Готово", result: "Ручной сценарий", error: "" })),
     voiceItems: Array.from({ length: 4 }, (_, index) => ({ index, title: `Тестовая тема ${index + 1}`, state: "Готово", path: `D:/test/Озвучка ${index + 1}.mp3` })),
     montageProjects: stage === "Ожидает" ? [] : [{
-      title: "Тестовая тема 1", path: "D:/test/Тестовая тема 1.newsflow", duration: 960,
+      title: "Тестовая тема 1", path: `D:/test/${"длинная папка проекта/".repeat(8)}Тестовая тема 1.newsflow`, duration: 960,
       selectionSummaryText: "160 сцен · strict 156 · reuse 4",
       clips: Array.from({ length: 160 }, (_, index) => ({
         path: `D:/test/footage-${index + 1}.mp4`, duration: 6,
