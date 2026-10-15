@@ -16224,43 +16224,130 @@ def _montage_query_variants(value: str) -> list[str]:
 
 def _montage_query_ladder(value: str) -> dict[str, list[str]]:
     """Build bounded strict/relaxed/category/context queries for one scene."""
+    from .visual_evidence import query_topic
+
     normalized = _normalized_montage_visual_query(value)
     parts = [part.strip() for part in normalized.split(",") if part.strip()]
     joined = normalized.casefold()
+    topic = query_topic(normalized)
+    role = topic[0] if topic else ""
     categories: list[str] = []
     contexts: list[str] = []
-    protest_query = bool(re.search(r"\b(?:protest|rally|picket|labor strike)\b", joined))
-    if protest_query:
-        conflict = bool(re.search(r"dispersal|clashes|street unrest", joined))
+    analogs: list[str] = []
+    # Preserve explicit catalog entity words in the first analog. The second
+    # remains broad enough to find neutral footage; final validation still uses
+    # the original scene query for identity and location safety.
+    anchor_matches: list[tuple[int, int, str]] = []
+    for _, terms in _MONTAGE_ENTITY_GROUPS:
+        for term in terms:
+            match = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized, re.IGNORECASE)
+            if match:
+                anchor_matches.append((match.start(), match.end(), match.group()))
+    anchors: list[str] = []
+    covered: list[tuple[int, int]] = []
+    for start, end, original in sorted(anchor_matches, key=lambda row: (row[0], -(row[1] - row[0]))):
+        if not any(start < previous_end and end > previous_start for previous_start, previous_end in covered):
+            anchors.append(original)
+            covered.append((start, end))
+        if len(anchors) == 2:
+            break
+    anchor = " ".join(anchors)
+    cancelled = bool(re.search(
+        r"\b(?:cancelled|canceled|called off|not held|did not happen|did not take place)\b"
+        r"|\bno (?:\w+\s+){0,3}(?:meeting|protest|rally|loading|harvest)\b"
+        r"|отмен\w*|не состоял\w*", joined,
+    ))
+    peaceful_march = bool(re.search(r"\b(?:peaceful|civilian|street)\b.{0,24}\bmarch\b", joined))
+    protest_query = bool(re.search(r"\b(?:protest|rally|picket|placard|labor strike)\b", joined)
+                         or peaceful_march)
+    if protest_query and not cancelled:
+        conflict = bool(re.search(r"dispersal|clashes|street unrest", joined)
+                        and not re.search(r"peaceful|without clashes|no clashes|мирн|без столкнов", joined))
         categories.append("civilian protest police dispersal street unrest" if conflict
                           else "peaceful civilian protest rally placards march")
         contexts.append("peaceful union picket factory exterior labor protest" if "labor strike" in joined
                         else "peaceful civilian protest placards street march")
-    if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
+        if role == "labor_protest":
+            analogs.append("striking workers union picket outside factory")
+        elif role == "farmers_protest":
+            analogs.append("farmers tractors peaceful protest road placards")
+        elif role == "protest" or peaceful_march:
+            analogs.append("civilians peaceful street march holding banners")
+    if role == "port":
+        if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "нефт", "танкер")):
+            categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
+            contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
+            if not cancelled:
+                analogs.extend(["oil tanker loading at marine terminal", "commercial ships docked at oil port"])
+        else:
+            categories.append("cargo port cranes ships")
+            contexts.extend(["cargo warehouse dock logistics", "commercial seaport documentary"])
+            if not cancelled:
+                analogs.extend(["cargo loading container cranes at seaport",
+                                "freight ships unloading at port terminal"])
+    elif role == "energy":
+        categories.append("oil refinery industrial infrastructure")
+        contexts.append("energy infrastructure documentary")
+    elif not role and not cancelled and _has_any(joined, (
+            "tanker", "refinery", "oil terminal", "oil", "energy")):
         categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
         contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
-    if _montage_has_war_action(joined):
+    if role in {"combat", ""} and not cancelled and _montage_has_war_action(joined):
         categories.extend(["military equipment smoke city aerial", "emergency aftermath damaged buildings"])
         contexts.extend(["civilian evacuation emergency services", "damaged city documentary aerial"])
-    if _has_any(joined, ("negotiation", "diplomatic", "summit", "government", "parliament",
-                         "переговор", "дипломат", "саммит")):
+    legacy_meeting = not role and _has_any(joined, (
+        "negotiation", "diplomatic", "summit", "government", "parliament",
+        "переговор", "дипломат", "саммит",
+    ))
+    if (role == "meeting" or legacy_meeting) and not cancelled:
         categories.extend(["government building parliament flags diplomatic meeting"])
         contexts.extend(["city government exterior", "journalists cameras diplomatic venue"])
-    if not protest_query and _has_any(joined, _AGRICULTURE_QUERY_TERMS):
+        if _has_any(joined, ("military", "headquarters", "officers", "command", "штаб", "офицер")):
+            analogs.extend(["military officers meeting at headquarters planning table",
+                            "military command council discussion indoors"])
+        else:
+            analogs.extend(["government council meeting around conference table",
+                            "diplomatic delegations discussion around table"])
+    elif role == "institutional_context":
+        categories.append("government building parliament flags exterior")
+        contexts.append("city government exterior")
+        analogs.append("parliament institution exterior with flags")
+    farm_query = role == "farm" or (not role and _has_any(joined, _AGRICULTURE_QUERY_TERMS))
+    if (farm_query and not cancelled
+            and not _has_any(joined, ("cargo", "freight", "export", "shipping", "transport", "loading"))):
         categories.extend(["agriculture farming harvest machinery"])
         contexts.extend(["rural fields food production documentary"])
-    if _has_any(joined, ("cyber", "server", "data center", "network")):
+        if _has_any(joined, ("harvest", "combine", "farming", "crops", "уборк", "комбайн")):
+            analogs.extend(["combine harvester cutting crops in fields", "farmers harvesting wheat fields"])
+    if role == "digital" or (not role and _has_any(joined, ("cyber", "server", "data center", "network"))):
         categories.extend(["data center servers computer network infrastructure"])
         contexts.extend(["technology network equipment technical infrastructure"])
-    if _has_any(joined, ("sanction", "economy", "finance", "banking", "trade", "markets")):
+    if role == "finance" or (not role and _has_any(joined, (
+            "sanction", "economy", "finance", "banking", "trade", "markets"))):
         categories.extend(["economy finance trade factory industry"])
         contexts.extend(["industrial production cargo warehouse commerce"])
-    if _has_any(joined, ("rail", "train", "freight")):
+    if role == "rail" or (not role and _has_any(joined, ("rail", "train", "freight"))):
         categories.extend(["rail freight train cargo logistics"])
         contexts.extend(["cargo warehouse transport logistics"])
-    if _has_any(joined, ("press conference", "statement", "putin", "zelensk", "trump", "pashinyan", "tokayev")):
+        if not cancelled:
+            analogs.extend(["freight railway wagons carrying cargo", "rail cargo loading at warehouse terminal"])
+    if role == "warehouse":
+        categories.append("cargo warehouse storage forklifts")
+        contexts.append("freight logistics warehouse exterior")
+        if not cancelled:
+            analogs.extend(["workers loading cargo inside warehouse", "freight storage pallets and forklifts"])
+    legacy_official = not role and _has_any(joined, (
+        "press conference", "statement", "putin", "zelensk", "trump", "pashinyan", "tokayev",
+    ))
+    if (role == "official" or legacy_official) and not cancelled:
         categories.extend(["press conference journalists government statement"])
         contexts.extend(["government building exterior press venue cameras"])
+        if role == "official":
+            analogs.extend(["government official giving formal address at podium",
+                            "official statement to journalists with microphones"])
+    if analogs:
+        analogs[0] = f"{anchor} {analogs[0]}".strip() if anchor else analogs[0]
+        categories.extend(analogs[:2])
     if not contexts:
         contexts.append("contextual news documentary city infrastructure")
 

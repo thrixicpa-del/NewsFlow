@@ -254,6 +254,196 @@ class MontageSemanticDiversityTests(unittest.TestCase):
         self.assertEqual(selection.item.path, workers.path)
         self.assertEqual(selection.fallback_level, "CATEGORY_MATCH")
 
+    def test_meeting_queries_reach_council_and_headquarters_discussions(self):
+        civic = bridge._montage_query_ladder("government council meeting")
+        military = bridge._montage_query_ladder("military headquarters meeting with officers")
+
+        self.assertEqual(civic["STRICT_MATCH"], ["government council meeting"])
+        self.assertTrue(any("council" in query and "conference table" in query
+                            for query in civic["CATEGORY_MATCH"]))
+        self.assertTrue(any("headquarters" in query and "officers" in query
+                            for query in military["CATEGORY_MATCH"]))
+        self.assertFalse(any("frontline" in query or "battlefield" in query
+                             for query in military["CATEGORY_MATCH"] + military["SAFE_CONTEXT"]))
+
+    def test_generic_cargo_port_expands_to_loading_without_oil_or_harvest(self):
+        ladder = bridge._montage_query_ladder("grain cargo loading at seaport cranes")
+        fallbacks = ladder["CATEGORY_MATCH"] + ladder["SAFE_CONTEXT"]
+
+        self.assertTrue(any("cargo" in query and "loading" in query for query in fallbacks))
+        self.assertFalse(any("oil" in query or "refinery" in query or "harvest" in query
+                             for query in fallbacks))
+
+    def test_warehouse_and_harvest_get_separate_cargo_and_field_analogs(self):
+        warehouse = bridge._montage_query_ladder("grain cargo warehouse storage")
+        harvest = bridge._montage_query_ladder("combine harvester harvesting wheat field")
+
+        self.assertTrue(any("warehouse" in query and "cargo" in query
+                            for query in warehouse["CATEGORY_MATCH"]))
+        self.assertFalse(any("harvest" in query for query in warehouse["CATEGORY_MATCH"]))
+        self.assertTrue(any("combine" in query and "crops" in query
+                            for query in harvest["CATEGORY_MATCH"]))
+
+    def test_peaceful_march_expands_to_civilian_protest_not_combat(self):
+        ladder = bridge._montage_query_ladder("peaceful street march with placards")
+        fallbacks = ladder["CATEGORY_MATCH"] + ladder["SAFE_CONTEXT"]
+
+        self.assertTrue(any("civilian protest" in query for query in fallbacks))
+        self.assertFalse(any("military" in query or "frontline" in query for query in fallbacks))
+
+    def test_protest_analogs_preserve_worker_and_farmer_roles(self):
+        workers = bridge._montage_query_ladder("workers labor strike at factory gate picket line")
+        farmers = bridge._montage_query_ladder("farmers peaceful protest with tractors")
+
+        self.assertTrue(any("union" in query and "picket" in query
+                            for query in workers["CATEGORY_MATCH"]))
+        self.assertTrue(any("farmers" in query and "tractors" in query
+                            for query in farmers["CATEGORY_MATCH"]))
+        self.assertFalse(any("harvest" in query for query in farmers["CATEGORY_MATCH"]))
+
+    def test_peaceful_rally_without_clashes_never_requests_police_dispersal(self):
+        ladder = bridge._montage_query_ladder("peaceful rally without clashes")
+        generated = ladder["CATEGORY_MATCH"] + ladder["SAFE_CONTEXT"]
+
+        self.assertFalse(any("dispersal" in query or "street unrest" in query
+                             for query in generated))
+
+    def test_official_statement_and_institutional_exterior_get_distinct_analogs(self):
+        speech = bridge._montage_query_ladder("official government statement at podium")
+        exterior = bridge._montage_query_ladder("government building institutional exterior")
+
+        self.assertTrue(any("official address" in query or "podium" in query
+                            for query in speech["CATEGORY_MATCH"]))
+        self.assertFalse(any("official address" in query or "podium" in query
+                             for query in exterior["CATEGORY_MATCH"]))
+
+    def test_named_meeting_analogs_retain_person_and_place_without_unbounded_growth(self):
+        ladder = bridge._montage_query_ladder("Putin and officers meeting at Moscow headquarters")
+        analogs = ladder["CATEGORY_MATCH"]
+
+        self.assertTrue(any("Putin" in query and "Moscow" in query for query in analogs))
+        self.assertLessEqual(len(analogs), 4)
+
+    def test_cancelled_government_meeting_does_not_generate_positive_event_analogs(self):
+        for scene in ("cancelled government meeting at headquarters",
+                      "government meeting did not take place",
+                      "government meeting not held", "no government meeting"):
+            with self.subTest(scene=scene):
+                ladder = bridge._montage_query_ladder(scene)
+                generated = ladder["CATEGORY_MATCH"] + ladder["SAFE_CONTEXT"]
+                self.assertFalse(any("meeting" in query or "delegation" in query
+                                     for query in generated))
+
+    def test_cancelled_port_loading_does_not_generate_positive_loading_analogs(self):
+        ladder = bridge._montage_query_ladder("cancelled cargo loading at seaport")
+        generated = ladder["CATEGORY_MATCH"] + ladder["SAFE_CONTEXT"]
+
+        self.assertFalse(any("loading" in query or "unloading" in query
+                             for query in generated))
+
+    def test_analog_only_search_reaches_safe_person_match_at_category_level(self):
+        query = "Putin and officers meeting at Moscow headquarters"
+        ladder = bridge._montage_query_ladder(query)
+        wrong = FootageItem("D:/wrong/trump.mp4", "Donald Trump Washington officers meeting.mp4",
+                            tags=["diplomatic-negotiations"])
+        right = FootageItem("D:/right/putin.mp4", "Vladimir Putin Moscow officers meeting.mp4",
+                            tags=["diplomatic-negotiations"])
+
+        class AnalogOnlyIndex:
+            def __init__(self):
+                self.calls = []
+
+            def search_many(self, queries, limit=20):
+                self.calls.append((list(queries), limit))
+                return {
+                    item: ([SearchHit(wrong, .90, 30.0), SearchHit(right, .40, 30.0)]
+                           if "officers meeting at headquarters" in item else [])
+                    for item in queries
+                }
+
+        index = AnalogOnlyIndex()
+        levels = bridge._montage_search_ladders(index, [ladder], limit=256)[0]
+        selection = self._select(query=query, strict=levels["STRICT_MATCH"],
+                                 relaxed=levels["RELAXED_SEMANTIC"],
+                                 category=levels["CATEGORY_MATCH"],
+                                 context=levels["SAFE_CONTEXT"])
+
+        self.assertEqual(len(index.calls), 1)
+        self.assertEqual(levels["STRICT_MATCH"], [])
+        self.assertEqual(levels["RELAXED_SEMANTIC"], [])
+        self.assertEqual(selection.item.path, right.path)
+        self.assertEqual(selection.fallback_level, "CATEGORY_MATCH")
+
+    def test_unknown_network_role_retains_existing_digital_category(self):
+        ladder = bridge._montage_query_ladder("computer network infrastructure")
+
+        self.assertIn("data center servers computer network infrastructure", ladder["CATEGORY_MATCH"])
+        self.assertIn("technology network equipment technical infrastructure", ladder["SAFE_CONTEXT"])
+
+    def test_unknown_oil_roles_retain_existing_energy_categories(self):
+        for query in ("oil production", "oil prices"):
+            with self.subTest(query=query):
+                ladder = bridge._montage_query_ladder(query)
+                self.assertIn("oil tanker port", ladder["CATEGORY_MATCH"])
+                self.assertIn("oil refinery industrial infrastructure", ladder["CATEGORY_MATCH"])
+                self.assertIn("cargo port cranes ships", ladder["SAFE_CONTEXT"])
+                self.assertIn("energy infrastructure documentary", ladder["SAFE_CONTEXT"])
+
+    def test_cancelled_unknown_oil_event_does_not_expand_to_positive_energy_event(self):
+        ladder = bridge._montage_query_ladder("cancelled oil production")
+
+        self.assertFalse(any("oil tanker" in query or "oil refinery" in query
+                             for query in ladder["CATEGORY_MATCH"]))
+
+    def test_unknown_trade_role_retains_existing_finance_category(self):
+        ladder = bridge._montage_query_ladder("international trade markets")
+
+        self.assertIn("economy finance trade factory industry", ladder["CATEGORY_MATCH"])
+        self.assertIn("industrial production cargo warehouse commerce", ladder["SAFE_CONTEXT"])
+
+    def test_generic_agricultural_fields_retain_farm_category_without_claiming_harvest(self):
+        ladder = bridge._montage_query_ladder("agriculture wheat fields")
+
+        self.assertIn("agriculture farming harvest machinery", ladder["CATEGORY_MATCH"])
+        self.assertIn("rural fields food production documentary", ladder["SAFE_CONTEXT"])
+        self.assertFalse(any("combine harvester cutting crops" in query
+                             for query in ladder["CATEGORY_MATCH"]))
+
+    def test_bare_known_person_retains_existing_press_category(self):
+        ladder = bridge._montage_query_ladder("Putin")
+
+        self.assertIn("press conference journalists government statement", ladder["CATEGORY_MATCH"])
+        self.assertIn("government building exterior press venue cameras", ladder["SAFE_CONTEXT"])
+
+    def test_legacy_network_category_only_hit_still_completes_selection(self):
+        query = "computer network infrastructure"
+        ladder = bridge._montage_query_ladder(query)
+        clip = FootageItem("D:/network/server-room.mp4", "computer network server room.mp4",
+                           tags=["technology-datacenter"])
+        legacy_category = "data center servers computer network infrastructure"
+
+        class CategoryOnlyIndex:
+            def __init__(self):
+                self.calls = []
+
+            def search_many(self, queries, limit=20):
+                self.calls.append((list(queries), limit))
+                return {item: ([SearchHit(clip, .35, 30.0)] if item == legacy_category else [])
+                        for item in queries}
+
+        index = CategoryOnlyIndex()
+        levels = bridge._montage_search_ladders(index, [ladder], limit=256)[0]
+        selection = self._select(query=query, strict=levels["STRICT_MATCH"],
+                                 relaxed=levels["RELAXED_SEMANTIC"],
+                                 category=levels["CATEGORY_MATCH"],
+                                 context=levels["SAFE_CONTEXT"])
+
+        self.assertEqual(len(index.calls), 1)
+        self.assertEqual(levels["STRICT_MATCH"], [])
+        self.assertEqual(levels["RELAXED_SEMANTIC"], [])
+        self.assertEqual(selection.item.path, clip.path)
+        self.assertEqual(selection.fallback_level, "CATEGORY_MATCH")
+
     def test_specific_semantic_tag_mismatch_cannot_beat_safe_reuse(self):
         safe = FootageItem("D:/safe/tanker.mp4", "oil tanker port.mp4", tags=["oil-tanker-port"])
         wrong = FootageItem(
