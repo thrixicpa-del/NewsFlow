@@ -16393,6 +16393,16 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
         (category, floor("CATEGORY_MATCH"), False, False, False, True, "CATEGORY_MATCH"),
         (context, floor("SAFE_CONTEXT"), False, False, False, True, "SAFE_CONTEXT"),
     ]
+    # Retrieval specificity and action specificity are different axes. A
+    # generic rally in strict retrieval must not hide a valid workers' picket
+    # found through a relaxed/category query. Keep the same floors and
+    # diversity checks while exhausting direct protest actions first.
+    direct_ladder = [
+        ([hit for hit in pool if _protest_suitability(scene_query, hit.item) == "direct"],
+         minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level)
+        for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level in ladder
+    ]
+    ladder = [row for row in direct_ladder if row[0]] + ladder
     for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level in ladder:
         selected = choose(pool, minimum_score=minimum, allow_historical=old_allowed,
                           allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
@@ -16409,6 +16419,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             (category, floor("CATEGORY_MATCH")),
             (context, floor("SAFE_CONTEXT")),
         ]
+        direct_reuse = [([hit for hit in pool if _protest_suitability(scene_query, hit.item) == "direct"], minimum)
+                        for pool, minimum in reuse_ladder]
+        reuse_ladder = [row for row in direct_reuse if row[0]] + reuse_ladder
         # Preserve uniqueness inside the current video before preserving
         # uniqueness across older/batch videos.  A family already used by a
         # different video is still a better fallback than repeating a family

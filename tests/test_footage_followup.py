@@ -280,3 +280,13 @@ class FootageFollowupTests(unittest.TestCase):
                                                lambda _: 6, scene_query=query)
         self.assertEqual(context.path, fallback['STRICT_MATCH'][0].item.path)
 
+    def test_direct_labor_action_in_relaxed_pool_precedes_strict_context(self):
+        context = FootageItem('rally.mp4', 'peaceful civilian rally placards', tags=['protest-crowd'])
+        direct = FootageItem('labor.mp4', 'workers labor strike picket line', tags=['workers-strike'])
+        result = bridge._select_montage_candidate(
+            'workers labor strike picket line', strict_hits=[SearchHit(context,.99,6)],
+            relaxed_hits=[SearchHit(direct,.4,6)], fallback_hits=[], required_duration=6,match_threshold=.22,
+            used_paths=set(),used_families=set(),project_used_paths=set(),project_used_families=set(),
+            reserved_paths=set(),reserved_families=set(),source_exists=lambda _:True,source_duration=lambda _:6)
+        self.assertEqual(direct.path,result.item.path)
+
