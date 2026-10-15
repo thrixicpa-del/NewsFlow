@@ -11,6 +11,61 @@ from scriptor.ai_index import ClipIndex
 
 
 class VisualWindowTests(unittest.TestCase):
+    def test_vessel_water_display_is_not_cargo_navigation_evidence(self):
+        from scriptor.visual_evidence import TAXONOMY
+        with tempfile.TemporaryDirectory(prefix="newsflow-water-display-") as temporary:
+            root = Path(temporary)
+            clip = root / "vessel.mp4"
+            clip.write_bytes(b"disposable-window")
+            index = self.make_index(root)
+            original_queries = index._query_vectors
+
+            def queries(texts):
+                vectors = original_queries(texts)
+                for i, text in enumerate(texts):
+                    if "fireboat" in text and "water jets" in text:
+                        vectors[i] = 0
+                        vectors[i, -2] = 1
+                return vectors
+
+            image = np.zeros(512, dtype=np.float32)
+            image[list(TAXONOMY).index("port")] = .257
+            image[-2] = .371
+            image[-1] = np.sqrt(1 - float(image @ image))
+            index._query_vectors = queries
+            index._sample_visual_window = lambda *_: ([image] * 3, [.5, 3., 5.5])
+            result = index.assess_visual_window("cargo ship maritime navigation shipping sea freight", clip, 0, 6)
+            self.assertEqual("contradiction", result["relation"])
+            self.assertEqual("maritime_display", result["dominant_kind"])
+
+    def test_foreground_swimming_is_not_cargo_port_evidence(self):
+        """A distant ship must not outweigh the visible beach activity."""
+        from scriptor.visual_evidence import TAXONOMY
+        with tempfile.TemporaryDirectory(prefix="newsflow-beach-") as temporary:
+            root = Path(temporary)
+            clip = root / "harbor-background.mp4"
+            clip.write_bytes(b"disposable-window")
+            index = self.make_index(root)
+            original_queries = index._query_vectors
+
+            def queries(texts):
+                vectors = original_queries(texts)
+                for i, text in enumerate(texts):
+                    if "swimming" in text and "beach" in text:
+                        vectors[i] = 0
+                        vectors[i, -2] = 1
+                return vectors
+
+            image = np.zeros(512, dtype=np.float32)
+            image[list(TAXONOMY).index("port")] = .232
+            image[-2] = .297
+            image[-1] = np.sqrt(1 - float(image @ image))
+            index._query_vectors = queries
+            index._sample_visual_window = lambda *_: ([image] * 3, [.5, 3., 5.5])
+            result = index.assess_visual_window("seaport cargo ship logistics", clip, 0, 6)
+            self.assertEqual("contradiction", result["relation"])
+            self.assertEqual("leisure", result["dominant_kind"])
+
     def test_industrial_workshop_near_tie_is_not_cargo_warehouse_evidence(self):
         from scriptor.visual_evidence import classify_window
         scores = [{"warehouse": .298, "factory": .295, "port": .217}] * 3
@@ -655,7 +710,7 @@ class VisualWindowTests(unittest.TestCase):
             result = index.assess_visual_window("cargo seaport cranes ships", clip, 0, 6)
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
-            self.assertEqual(TAXONOMY_VERSION, 3)
+            self.assertEqual(TAXONOMY_VERSION, 4)
             self.assertEqual(RULES_VERSION, 8)
             self.assertFalse(result["event_confirmed"])
 
@@ -694,7 +749,7 @@ class VisualWindowTests(unittest.TestCase):
                 self.assertEqual(current["relation"], "unknown")
                 self.assertEqual(current["feature_cache"], "memory")
                 self.assertEqual(current["rules_version"], 4)
-                self.assertEqual(current["taxonomy_version"], 3)
+                self.assertEqual(current["taxonomy_version"], 4)
                 index._visual_memory_clear()
                 persisted = index.assess_visual_window("cargo seaport", clip, 0, 6)
                 self.assertEqual(persisted["relation"], "unknown")

@@ -6,6 +6,73 @@ from scriptor.timeline import VISUAL_TERMS
 
 
 class LocalActionQualityTests(unittest.TestCase):
+    def test_parallel_export_actions_keep_their_local_physical_subject_place(self):
+        from scriptor import bridge
+        from scriptor.footage import FootageItem
+
+        previous = visual_intent("Украина отправляет зерно через морские порты.", VISUAL_TERMS)
+        previous = visual_intent("Наращивают железнодорожную перевозку грузов,", VISUAL_TERMS, previous=previous)
+        current = visual_intent(
+            "используют дунайские причалы и ищут дополнительные мощности в странах Европейского союза.",
+            VISUAL_TERMS, previous=previous,
+        )
+        query = current["visual_query"]
+        self.assertIn("Ukraine", query)
+        self.assertIn("European Union", query)
+        self.assertIn("Danube", query)
+        visual = {"relation": "direct", "dominant_kind": "port", "event_confirmed": False}
+        for country, allowed in (("Ukraine", True), ("European Union Romania", True),
+                                 ("Russia", False), ("Iran", False)):
+            with self.subTest(country=country):
+                item = FootageItem(f"D:/test/{country}/cargo.mp4", f"{country} river cargo port.mp4")
+                self.assertEqual(allowed, bridge._semantic_clip_ok(query, item, visual_assessment=visual))
+        self.assertTrue(current["illustrative_only"])
+
+    def test_explicit_capacity_place_is_not_replaced_by_prior_export_country(self):
+        previous = visual_intent("Украина отправляет груз через речные порты.", VISUAL_TERMS)
+        for text in ("Ищут дополнительные мощности в странах Европейского союза.",
+                     "Используют речные порты Европейского союза."):
+            with self.subTest(text=text):
+                current = visual_intent(text, VISUAL_TERMS, previous=previous)
+                self.assertIn("European Union", current["visual_query"])
+                self.assertNotIn("Ukraine", current["visual_query"])
+
+    def test_physical_subject_place_resets_at_new_topic_and_expires(self):
+        subject = visual_intent("Украина отправляет зерно через порт.", VISUAL_TERMS)
+        target = "Используют дунайские порты и ищут мощности в странах Европейского союза."
+        for text in ("Банк открыл кредитную программу.", "Делегации начали переговоры.",
+                     "Рабочие устроили забастовку.", "Комбайны начали уборку урожая.",
+                     "В школе открыли новый класс."):
+            with self.subTest(reset=text):
+                reset = visual_intent(text, VISUAL_TERMS, previous=subject)
+                current = visual_intent(target, VISUAL_TERMS, previous=reset)
+                self.assertNotIn("Ukraine", current["visual_query"])
+        previous = subject
+        for _ in range(7):
+            previous = visual_intent("Наращивают перевозку грузов по железной дороге,", VISUAL_TERMS, previous=previous)
+        self.assertNotIn("Ukraine", visual_intent(target, VISUAL_TERMS, previous=previous)["visual_query"])
+        verbose = visual_intent(" ".join(["грузов"] * 65) + " по железной дороге,", VISUAL_TERMS, previous=subject)
+        self.assertNotIn("Ukraine", visual_intent(target, VISUAL_TERMS, previous=verbose)["visual_query"])
+
+    def test_voice_grid_parallel_transport_keeps_bounded_country_context(self):
+        from scriptor import bridge
+        from scriptor.voice_map import VoiceMapStatus
+
+        texts = ["Через морские порты отправляют зерно.", "Украина выбирает другой путь.",
+                 "Наращивают железнодорожную перевозку зерна,",
+                 "используют дунайские порты и ищут мощности в странах Европейского союза."]
+        payload = {"audioDuration": 24, "timingMode": "approximate", "schemaVersion": 1,
+                   "productionItemId": "disposable", "scriptSha256": "test", "audioSha256": "test",
+                   "alignmentEngine": "test", "segments": [
+            {"id": i + 1, "start": i * 6, "end": (i + 1) * 6, "duration": 6,
+             "text": text, "visualQuery": ""} for i, text in enumerate(texts)
+        ]}
+        scenes, _ = bridge._voice_map_scenes(VoiceMapStatus("approximate", "approximate", data=payload))
+        self.assertEqual(texts, [scene["narration"] for scene in scenes])
+        self.assertEqual([6] * 4, [scene["duration"] for scene in scenes])
+        self.assertIn("Ukraine", scenes[-1]["visual_query_en"])
+        self.assertIn("European Union", scenes[-1]["visual_query_en"])
+
     def test_european_transport_does_not_invent_parliament_or_brussels(self):
         text = "используют дунайские порты и ищут дополнительные мощности в странах Европейского союза."
         intent = visual_intent(text, VISUAL_TERMS)

@@ -140,7 +140,7 @@ _SCREEN_TEXT_FULL_RESULTS: dict[tuple[str, str, int, int], int] = {}
 # actual footage vectors, however, are the same SQLite rows for every worker.
 # Keeping that immutable snapshot in process memory avoids reading and
 # decoding tens of thousands of vectors once *per scene* and once *per job*.
-_SHARED_MODELS: dict[tuple[str, str], tuple[object, object]] = {}
+_SHARED_MODELS: dict[tuple[str, str], tuple[object | None, object]] = {}
 _SHARED_MODELS_LOCK = threading.RLock()
 _TEXT_EMBED_LOCK = threading.RLock()
 _SEARCH_CORPORA: dict[str, _SearchCorpus] = {}
@@ -510,6 +510,8 @@ class ClipIndex:
             feature_columns = {row[1] for row in connection.execute("PRAGMA table_info(visual_window_features)")}
             if "model_revision" not in feature_columns:
                 connection.execute("ALTER TABLE visual_window_features ADD COLUMN model_revision TEXT NOT NULL DEFAULT '{}'")
+            connection.execute("CREATE INDEX IF NOT EXISTS visual_window_lookup "
+                               "ON visual_window_features(path COLLATE NOCASE,source_start,duration)")
 
     def count(self, embedded_only: bool = False) -> int:
         where = " WHERE embedding IS NOT NULL" if embedded_only else ""
@@ -564,9 +566,13 @@ class ClipIndex:
                 cache = str(self.model_cache.resolve())
                 with _SHARED_MODELS_LOCK:
                     revision = self._local_model_revision()
+                    if self._loaded_model_revision is not None and revision != self._loaded_model_revision:
+                        # A text-only rescore already captured its revision.
+                        # Never combine those text vectors with newer vision weights.
+                        raise RuntimeError("model-cache-changed-after-text-load")
                     model_key = (cache, json.dumps(revision, sort_keys=True))
                     shared = _SHARED_MODELS.get(model_key)
-                    if shared is None:
+                    if shared is None or shared[0] is None:
                         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
                         os.environ.setdefault("TQDM_DISABLE", "1")
                         from fastembed import ImageEmbedding, TextEmbedding
@@ -574,8 +580,9 @@ class ClipIndex:
                         shared = (
                             ImageEmbedding(IMAGE_MODEL, cache_dir=cache, threads=threads, cuda="auto",
                                            local_files_only=local_files_only),
-                            TextEmbedding(TEXT_MODEL, cache_dir=cache, threads=threads, cuda="auto",
-                                          local_files_only=local_files_only),
+                            self._text_embedder or (shared[1] if shared is not None else
+                                TextEmbedding(TEXT_MODEL, cache_dir=cache, threads=threads, cuda="auto",
+                                              local_files_only=local_files_only)),
                         )
                         loaded_revision = self._local_model_revision()
                         changed_existing_refs = any(value["revision"] != "unavailable"
@@ -595,6 +602,35 @@ class ClipIndex:
                 self._image_embedder, self._text_embedder = shared
                 self._loaded_model_revision = revision
         return self._image_embedder, self._text_embedder
+
+    def _cached_text_model(self):
+        """Load only local text weights when cached image vectors suffice."""
+        if self._text_embedder is not None:
+            return self._text_embedder
+        if self.embedder_factory is not None:
+            return self._models(local_files_only=True)[1]
+        cache = str(self.model_cache.resolve())
+        with _SHARED_MODELS_LOCK:
+            revision = self._local_model_revision()
+            model_key = (cache, json.dumps(revision, sort_keys=True))
+            shared = _SHARED_MODELS.get(model_key)
+            if shared is None:
+                from fastembed import TextEmbedding
+                os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+                os.environ.setdefault("TQDM_DISABLE", "1")
+                text_model = TextEmbedding(TEXT_MODEL, cache_dir=cache,
+                                           threads=max(4, min(16, (os.cpu_count() or 8) // 2)),
+                                           cuda="auto", local_files_only=True)
+                if self._local_model_revision() != revision:
+                    raise RuntimeError("model-cache-changed-during-load")
+                shared = (None, text_model)
+                for previous_key in tuple(_SHARED_MODELS):
+                    if previous_key[0] == cache and previous_key != model_key:
+                        _SHARED_MODELS.pop(previous_key, None)
+                _SHARED_MODELS[model_key] = shared
+            self._text_embedder = shared[1]
+            self._loaded_model_revision = revision
+        return self._text_embedder
 
     def _cache_key(self) -> str:
         return str(self.db_path.resolve()).casefold()
@@ -744,11 +780,12 @@ class ClipIndex:
             _SEARCH_CORPORA[key] = corpus
             return corpus
 
-    def _query_vectors(self, queries: list[str]):
+    def _query_vectors(self, queries: list[str], *, text_model=None):
         """Embed several text queries together when the backend supports it."""
         import numpy as np
 
-        _, text_model = self._models()
+        if text_model is None:
+            _, text_model = self._models()
         with _TEXT_EMBED_LOCK:
             missing = list(dict.fromkeys(query for query in queries if (TEXT_MODEL, query) not in self._query_cache))
             values = []
@@ -904,6 +941,14 @@ class ClipIndex:
             with self._connect() as connection:
                 row = connection.execute("SELECT scores,sample_times,model_revision FROM visual_window_features WHERE cache_key=?",
                                          (cache_key,)).fetchone()
+                reusable = None if row is not None else connection.execute(
+                    "SELECT vectors,sample_times,rules_version FROM visual_window_features "
+                    "WHERE path=? COLLATE NOCASE AND size=? AND mtime_ns=? AND source_start=? AND duration=? "
+                    "AND image_model=? AND text_model=? AND model_revision=? AND model_revision<>'{}' "
+                    "AND rules_version<? ORDER BY rules_version DESC LIMIT 1",
+                    (str(path.resolve()), size, mtime_ns, start, duration, IMAGE_MODEL, TEXT_MODEL,
+                     revision_key, TAXONOMY_VERSION),
+                ).fetchone()
             if row is not None:
                 value = {"per_frame_scores": json.loads(row["scores"]), "sample_times": json.loads(row["sample_times"]),
                          "source_signature": {"size": size, "mtime_ns": mtime_ns},
@@ -912,22 +957,39 @@ class ClipIndex:
                     return None, "source-changed-during-assessment"
                 cache_state = "sqlite"
             else:
-                with self._lock:
-                    if self._visual_cold_windows >= self.visual_window_budget:
-                        return None, "cold-window-budget-exhausted"
-                    self._visual_cold_windows += 1
-                image_model, _ = self._models(local_files_only=True)
-                if self._loaded_model_revision != model_revision:
-                    return None, "model-cache-changed-during-assessment"
-                images, sample_times = self._sample_visual_window(path, start, duration)
-                if len(images) != 3 or len(sample_times) != 3 or any(
+                if reusable is not None:
+                    # Taxonomy text changes invalidate scores, not the exact
+                    # frame vectors. Model/signature/window identities above
+                    # must all match; unversioned legacy evidence cannot qualify.
+                    vectors = np.frombuffer(reusable["vectors"], dtype=np.float32).reshape(3, EMBEDDING_DIM)
+                    sample_times = json.loads(reusable["sample_times"])
+                    text_model = self._cached_text_model()
+                    if self._loaded_model_revision != model_revision:
+                        return None, "model-cache-changed-during-assessment"
+                    cache_state = "sqlite-vectors-rescored"
+                else:
+                    with self._lock:
+                        if self._visual_cold_windows >= self.visual_window_budget:
+                            return None, "cold-window-budget-exhausted"
+                        self._visual_cold_windows += 1
+                    image_model, _ = self._models(local_files_only=True)
+                    if self._loaded_model_revision != model_revision:
+                        return None, "model-cache-changed-during-assessment"
+                    images, sample_times = self._sample_visual_window(path, start, duration)
+                    if len(images) != 3:
+                        return None, "incomplete-three-frame-window"
+                    vectors = np.asarray([self._normalize(vector) for vector in image_model.embed(images, batch_size=3)], dtype=np.float32)
+                    text_model = None
+                    cache_state = "cold"
+                if len(sample_times) != 3 or any(
                         not start <= timestamp < start + duration for timestamp in sample_times):
                     return None, "incomplete-three-frame-window"
-                vectors = np.asarray([self._normalize(vector) for vector in image_model.embed(images, batch_size=3)], dtype=np.float32)
                 if vectors.shape != (3, EMBEDDING_DIM) or not np.isfinite(vectors).all():
                     return None, "invalid-image-features"
                 pairs = [(kind, query) for kind, queries in TAXONOMY.items() for query in queries]
-                text_vectors = self._query_vectors([query for _kind, query in pairs])
+                queries = [query for _kind, query in pairs]
+                text_vectors = (self._query_vectors(queries, text_model=text_model) if reusable is not None
+                                else self._query_vectors(queries))
                 if text_vectors.shape != (len(pairs), EMBEDDING_DIM):
                     return None, "invalid-text-features"
                 similarities = vectors @ text_vectors.T
@@ -959,7 +1021,6 @@ class ClipIndex:
                     if (corpus is not None and corpus.content_revision == int(revisions[1])
                             and corpus.stats_revision == int(revisions[2])):
                         _SEARCH_CORPORA[self._cache_key()] = replace(corpus, fingerprint=self._database_fingerprint())
-                cache_state = "cold"
             with _VISUAL_FEATURES_LOCK:
                 _VISUAL_FEATURES[key] = value
                 while len(_VISUAL_FEATURES) > 512:

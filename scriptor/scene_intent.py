@@ -176,6 +176,17 @@ def _protest_intent(text: str, protest_context: bool = False) -> str:
     return "peaceful"
 
 
+def _physical_places(text: str, associations: dict[str, str]) -> list[str]:
+    """Country hints already expressed by the local vocabulary, never proof."""
+    matched = ", ".join(english for stem, english in associations.items()
+                        if stem not in {"европ", "евросоюз"} and term_matches(stem, text))
+    places = [place for place in ("Ukraine", "Russia", "Iran", "Armenia", "Azerbaijan", "Israel", "Lebanon")
+              if re.search(rf"\b{place}\b", matched)]
+    if re.search(r"\b(?:евросоюз\w*|европейск\w*\s+союз\w*)", text, re.IGNORECASE):
+        places.append("European Union")
+    return places
+
+
 def visual_intent(text: str, associations: dict[str, str], *, previous: dict | None = None) -> dict:
     sequence = re.split(r"\b(?:затем|после этого)\b", text, flags=re.IGNORECASE)
     if len(sequence) > 1 and sequence[-1].strip():
@@ -457,6 +468,42 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         commodity_subject = prior_commodity
         inherited_subject_depth = prior_depth + 1
         inherited_subject_words = prior_words + len(text.split())
+    # A transport subject can continue through a short enumeration. A place
+    # on its second action (use river ports AND seek capacity in another
+    # country) must not relocate the first action. Keep both places visible
+    # to existing country guards, without carrying every country in a story.
+    physical_subject_places = []
+    subject_place_depth = subject_place_words = 0
+    current_topics = visual_topics(", ".join(terms))
+    prior_places = list((previous or {}).get("physical_subject_places", []))
+    prior_place_depth = int((previous or {}).get("subject_place_depth", 0))
+    prior_place_words = int((previous or {}).get("subject_place_words", 0))
+    transport_topics = {"shipping", "rail", "logistics"}
+    explicit_places = _physical_places(lowered, associations)
+    place_scope = (not primary and not speech and not joint and not protest
+                   and not military_naval and not harvesting and not reported_kinetic_claim
+                   and not current_topics - (transport_topics | {"agriculture"})
+                   and (bool(current_topics & transport_topics)
+                        or not current_topics and (explicit_places or abstract_logistics)
+                        and (prior_places or prior_topics & transport_topics)))
+    if place_scope:
+        continuing_place = (prior_places and prior_place_depth < 6
+                            and prior_place_words + len(text.split()) <= 64)
+        capacity_action = re.search(r"\b(?:и|а)\s+(?:ищ\w*|иск\w*|подбира\w*|аренду\w*)\b", lowered)
+        secondary_place = bool(
+            capacity_action and explicit_places
+            and not _physical_places(lowered[:capacity_action.start()], associations)
+            and any(term_matches(stem, lowered[:capacity_action.start()])
+                    for stem in ("порт", "дуна", "причал", "терминал", "перевоз", "железнодорож", "судоход"))
+        )
+        if continuing_place and (not explicit_places or secondary_place):
+            physical_subject_places = prior_places
+            subject_place_depth = prior_place_depth + 1
+            subject_place_words = prior_place_words + len(text.split())
+            if secondary_place:
+                terms.extend(f"{place} regional context" for place in prior_places)
+        elif explicit_places:
+            physical_subject_places = explicit_places
     terms = [person_name(identity) for identity in primary] + terms
     query = ", ".join(dict.fromkeys(terms))
     return {
@@ -468,6 +515,9 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         "inherited_subject_depth": inherited_subject_depth,
         "inherited_subject_words": inherited_subject_words,
         "commodity_subject": commodity_subject if not protest else "",
+        "physical_subject_places": physical_subject_places,
+        "subject_place_depth": subject_place_depth,
+        "subject_place_words": subject_place_words,
         "reported_context_query": reported_context_query,
         "reported_context_remaining": reported_context_remaining,
         "reported_action_claim": reported_kinetic_claim,

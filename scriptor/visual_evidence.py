@@ -10,7 +10,7 @@ import math
 import re
 from statistics import median
 
-TAXONOMY_VERSION = 3
+TAXONOMY_VERSION = 4
 RULES_VERSION = 8
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
@@ -40,7 +40,8 @@ TAXONOMY = {
     "interview": ("close up of an ordinary person being interviewed on the street by a reporter with a microphone",
                   "television studio presenter talking to camera or a close up news interview"),
     "leisure": ("people talking and drinking in a pub bar restaurant with bottles and tables",
-                "music entertainment party in a bar cafe nightclub"),
+                "music entertainment party in a bar cafe nightclub",
+                "people swimming bathing in the sea at a beach with sunbathers on the shore"),
     "concert": ("crowd at a music concert with a singer band stage lights",),
     "sports_fans": ("football supporters cheering in a sports stadium",),
     "religious": ("religious procession with priests and people carrying icons",),
@@ -58,6 +59,9 @@ TAXONOMY = {
     "military_naval": (
         "military naval warship deck with large naval guns turrets missiles sailors at sea",
         "navy destroyer frigate battleship military vessel with naval gun turrets on deck",
+    ),
+    "maritime_display": (
+        "fireboat ship spraying powerful water jets in a maritime parade display",
     ),
 }
 

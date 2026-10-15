@@ -775,11 +775,13 @@ def load_tests(loader, standard_tests, pattern):
     from tests.test_footage_quality_voice import BeatLocalVoiceQualityTests
     from tests.test_footage_ready_voice import ReadyVoiceEvidenceTests
     from tests.test_visual_evidence import VisualWindowTests
+    from tests.test_visual_feature_reuse import VisualFeatureReuseTests
     standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(ReadyVoiceEvidenceTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(BeatLocalVoiceQualityTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(WindowVisualQualityTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(VisualWindowTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualFeatureReuseTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(FootageQualityTimingTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(LocalActionQualityTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(RecoveryVisualQualityTests))
