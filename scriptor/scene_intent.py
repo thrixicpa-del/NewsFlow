@@ -187,7 +187,11 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     lowered = text.casefold().replace("ё", "е")
     people = named_people(text)
     industrial = bool(re.search(r"\b(?:завод\w*|производств\w*|мост\w*|ремонт\w*|урожа\w*|порт\w*)", lowered))
-    speech = bool(re.search(rf"\b(?:{_SPEECH_VERBS}|заяв\w*|обращени\w*|журналист\w*)", lowered))
+    reporting_reference = not people and bool(re.search(
+        r"\b(?:таки\w*|эти\w*|официальн\w*)\s+заявлен\w*|\bпо\s+заявлен\w*", lowered,
+    ))
+    speech = (not reporting_reference
+              and bool(re.search(rf"\b(?:{_SPEECH_VERBS}|заяв\w*|обращени\w*|журналист\w*)", lowered)))
     joint = bool(re.search(r"\b(?:обсуд\w*|обсужден\w*|переговор\w*|встреч\w*|встрет\w*|консультаци\w*)", lowered))
     indirect = bool(re.search(r"\b(?:по\s+решени\w*|по\s+указ\w*|поручени\w*)", lowered))
     primary = [] if industrial and (indirect or not speech) else people[:1]
@@ -221,13 +225,83 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     ceasefire = bool(re.search(r"прекращени\w*\s+огня|перемири\w*", lowered))
     actual_kinetic = bool(re.search(r"(?:обстрел\w*|артилл\w*|удар\w*)", lowered)
                           and re.search(r"несмотря|продолж\w*|начал\w*|произош\w*", lowered))
-    rail = term_matches("поезд", lowered) or term_matches("железнодорож", lowered)
-    kinetic = {"удар", "обстрел", "артилл", "наступлен", "ракет", "танк", "арм", "войск", "солдат", "фронт"}
+    rail = (term_matches("поезд", lowered) or term_matches("железнодорож", lowered)
+            or bool(re.search(r"\bжелезн\w*\s+дорог\w*|\bвагон(?:ы|а|ов|ами|ах|е|у|ом)?\b", lowered)))
+    military_naval = bool(re.search(
+        r"\bвоенн\w*\s+(?:корабл\w*|судн\w*|флот\w*)|\bпатрульн\w*\s+(?:катер\w*|корабл\w*)"
+        r"|\bвм[сф]\b|\bвоенно[-\s]морск\w*", lowered,
+    ))
+    # Plural court/vessel forms are ambiguous. Require local maritime words
+    # and exclude a local judicial predicate, rather than matching by suffix.
+    ambiguous_vessel = any(
+        re.search(r"\bсуд(?:а|ов|ами|ах)\b", clause)
+        and re.search(r"морск\w*|судоход\w*|канал\w*|терминал\w*|порт\w*|грузов\w*|товар\w*|достав\w*|загруж\w*|загруз\w*", clause)
+        and not re.search(
+            r"\b(?:апелляц\w*|постановлен\w*|судебн\w*|иск(?:а|и|ов|ами)?|дел[аоу])\b"
+            r"|\bрешени\w*(?:\s+\w+){0,2}\s+суд(?:а|ов|ами|ах)\b"
+            r"|\bвынес\w*(?:\s+\w+){0,3}\s+судами\b", clause,
+        )
+        for clause in re.split(r"[,;.!?]", lowered)
+    )
+    shipping = bool(re.search(r"\bсудоходств\w*|\bсуд(?:но|на|ну|ном|не)\b", lowered)
+                    or ambiguous_vessel
+                    or (re.search(r"\bзерновоз\w*", lowered)
+                        and re.search(r"\b(?:заход\w*|порт\w*|морск\w*|канал\w*|судоход\w*)", lowered))
+                    or re.search(r"морск\w*\s+логист\w*", lowered)
+                    or (re.search(r"\bрек(?:а|е|у|ой|и)\b", lowered)
+                        and re.search(r"\b(?:груз\w*|товар\w*|продукци\w*)", lowered)))
+    logistics_routes = bool(re.search(r"\bмаршрут\w*", lowered)
+                            and re.search(r"логист\w*|альтернатив\w*|перевоз\w*|достав\w*", lowered))
+    grain = bool(re.search(r"\b(?:зерн\w*|пшениц\w*|кукуруз\w*)", lowered))
+    agricultural = bool(re.search(r"\bаграр\w*", lowered))
+    oil = term_matches("нефт", lowered)
+    export = bool(re.search(r"\bэкспорт\w*|внешн\w*\s+рын\w*", lowered))
+    commodity_subject = "oil" if oil else ("grain" if grain else ("agricultural" if agricultural else ""))
+    physical_export = export and bool(commodity_subject) and not protest and not primary
+    crop = grain or term_matches("урож", lowered)
+    harvesting = bool(re.search(r"\b(?:уборк\w*|сбор\w*|собир\w*|собрал\w*|комбайн\w*|жатв\w*)", lowered))
+    logistics_routes = logistics_routes or bool(re.search(r"\bмаршрут\w*", lowered) and crop)
+    loading = term_matches("погрузк", lowered) or bool(
+        re.search(r"\b(?:загруж\w*|загруз\w*|погруз\w*)", lowered)
+        and (shipping or crop or re.search(r"\b(?:груз\w*|товар\w*|контейнер\w*|терминал\w*)", lowered))
+    )
+    cargo_crop = (crop and not harvesting and not protest and not primary
+                  and (shipping or rail or logistics_routes or loading
+                       or term_matches("порт", lowered) or term_matches("склад", lowered)
+                       or re.search(r"\bзерновоз\w*", lowered)
+                       or re.search(r"\b(?:груз\w*|проход\w*|парти\w*|покупател\w*|перевоз\w*|достав\w*)", lowered)))
+    kinetic = {"удар", "обстрел", "артилл", "наступлен", "ракет", "танк", "арм", "войск", "солдат", "фронт", "военн"}
+    reported_kinetic_claim = (not primary
+                              and bool(re.search(r"\b(?:заяв(?:ля|и)\w*|сообщ\w*|утвержд\w*|по\s+версии)\b", lowered))
+                              and any(term_matches(stem, lowered) for stem in kinetic))
     terms = []
+    report_context_terms = []
     for stem, english in associations.items():
         if not term_matches(stem, lowered):
             continue
         if named_people(stem):
+            continue
+        if military_naval and stem in {"кораб", "военн"}:
+            continue
+        if stem == "кораб":
+            english = "commercial cargo ship maritime navigation shipping vessel"
+        if stem == "склад":
+            if not re.search(r"\bсклад(?:ы|а|е|у|ом|ов|ам|ами|ах)?\b", lowered):
+                continue
+            # Storage is a physical object; fire/emergency requires its own
+            # narrated event rather than the legacy dictionary's association.
+            english = ("warehouse fire emergency workers"
+                       if re.search(r"\b(?:пожар\w*|возгорани\w*|загорел\w*|горит|горят)\b", lowered)
+                       else "warehouse cargo storage logistics")
+        if physical_export and stem in {"эконом", "рынк", "торгов", "зерн", "пшениц"}:
+            continue
+        if cargo_crop and stem in {"зерн", "пшениц", "урож"}:
+            continue
+        # A continent/union mention supplies geographic context, not evidence
+        # of a parliament, a Brussels venue, or an institutional event.
+        if stem in {"европ", "евросоюз"}:
+            european_union = stem == "евросоюз" or re.search(r"европейск\w*\s+союз\w*", lowered)
+            terms.append("European Union regional context" if european_union else "Europe regional context")
             continue
         # Contextual event rules replace ambiguous dictionary associations.
         if re.search(_PROTEST_WORDS, stem) or stem in {"демонстр", "беспоряд", "фермер"}:
@@ -252,6 +326,13 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         if rail and stem in {"зерн", "пшениц"}:
             continue
         terms.append(english)
+        if stem not in kinetic:
+            report_context_terms.append(english)
+    if reported_kinetic_claim:
+        # The narration attributes this action to a claim. Keep its explicit
+        # place/physical context without presenting an observed attack or
+        # turning an unnamed report into a speaking politician's portrait.
+        terms = [*report_context_terms, "government building exterior illustrative context"]
     if protest:
         terms.append({
             "peaceful": "peaceful civilian protest crowd placards street rally march",
@@ -272,12 +353,108 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         terms.append("diplomatic negotiations delegations statements ceasefire")
     if rail:
         terms.append("rail freight train grain transport cargo logistics")
+    if military_naval:
+        terms.append("military naval warship patrol vessel navy")
+    elif shipping:
+        terms.append("cargo ship maritime navigation shipping sea freight")
+    if logistics_routes:
+        terms.append("cargo transport logistics warehouse alternative freight routes")
+    if re.search(r"\bсухопутн\w*\s+(?:разворот\w*|маршрут\w*|перевоз\w*|логист\w*|пут\w*)", lowered):
+        terms.append("overland rail road freight cargo transport warehouse logistics")
+    if physical_export:
+        terms.append({
+            "grain": "grain cargo export warehouse storage logistics",
+            "oil": "oil tanker export terminal refinery logistics",
+            "agricultural": "agricultural products cargo export warehouse logistics",
+        }[commodity_subject])
+    elif agricultural and not protest:
+        terms.append("agriculture farming fields agricultural products")
+    if cargo_crop:
+        terms.append("grain cargo warehouse storage logistics" if grain else "crop cargo warehouse storage logistics")
+        commodity_subject = commodity_subject or "agricultural"
+    if loading:
+        terms.append("cargo loading freight terminal warehouse")
+    if term_matches("выгрузк", lowered):
+        terms.append("cargo unloading freight terminal warehouse")
+    if re.search(r"\bгрузовик\w*", lowered):
+        terms.append("cargo trucks road freight transport logistics")
+    if re.search(r"\bдуна(?:й\w*|[яюе])\b", lowered):
+        terms.append("Danube river cargo ship shipping navigation logistics")
+    if re.search(r"черн\w*\s+мор\w*", lowered):
+        terms.append("Black Sea maritime cargo ship shipping navigation")
+    if re.search(r"\bевропейск\w*\s+парламент\w*", lowered):
+        terms.append("European Parliament institutions")
     if term_matches("сервер", lowered) or re.search(r"дата[-\s]?центр\w*", lowered):
         terms.append("data center servers computer network infrastructure")
     if speech and primary:
         terms.append("press conference statement journalists cameras")
     if not terms and (speech or _negated_attack(lowered)):
         terms.append("official statement government briefing illustrative context")
+    inherited_subject_depth = 0
+    carrier_reference = bool(re.search(r"\bперевозчик\w*", lowered)
+                             and re.search(r"\b(?:заход\w*|маршрут\w*|услов\w*)", lowered))
+    abstract_logistics = bool(re.search(r"\bтонн\w*", lowered) or (
+        re.search(r"\b(?:стоимост\w*|цен[аыуе]\w*|прибыл[ьи]|срок\w*|длительност\w*)", lowered)
+        and re.search(r"\b(?:достав\w*|перевоз\w*|это|этого|где)\b", lowered)
+    ) or (re.search(r"\b(?:его|их|этого)\b", lowered)
+          and re.search(r"\b(?:предел\w*|ограничени\w*|возможност\w*)", lowered)))
+    grain_intro = bool(re.fullmatch(r"\s*для\s+(?:зерн\w*|пшениц\w*|кукуруз\w*)\s*[,;:]?\s*", lowered))
+    economic_evaluation = bool(re.search(r"экономическ\w*\s+смысл", lowered))
+    duration_unit = bool(re.search(r"\b(?:недел\w*|месяц\w*|сут\w*|дн\w*|час\w*)", lowered))
+    delivery_duration = duration_unit and bool(re.search(r"\bдостав\w*", lowered))
+    duration_continuation = duration_unit and bool(re.search(r"\b(?:растянул\w*|занимал\w*|длил\w*)", lowered))
+    prior_depth = int((previous or {}).get("inherited_subject_depth", 0))
+    prior_words = int((previous or {}).get("inherited_subject_words", 0))
+    prior_open_clause = not re.search(r"[.!?][\"'»”)]*\s*$", str((previous or {}).get("text", "")))
+    # The ordinary rule remains one hop. Explicitly linked logistics clauses
+    # may continue within a finite paragraph budget; a completed abstract
+    # sentence alone cannot renew that context indefinitely.
+    linked_continuation = prior_depth > 0 and (prior_open_clause or delivery_duration or reporting_reference)
+    abstract_logistics = (abstract_logistics or grain_intro or economic_evaluation or duration_continuation
+                          or carrier_reference or reporting_reference)
+    prior_topics = visual_topics(str((previous or {}).get("visual_query", "")))
+    inherited_subject_words = 0
+    abstract_economic_only = (economic_evaluation and linked_continuation
+                              and not industrial and not speech and not joint
+                              and protest_mode == "none" and not term_matches("банк", lowered)
+                              and not visual_topics(", ".join(terms)) - {"economy"})
+    if ((not terms or grain_intro or abstract_economic_only)
+            and not primary and not people and abstract_logistics
+            and prior_topics & {"shipping", "rail", "logistics"}
+            and not prior_topics - {"shipping", "rail", "logistics", "agriculture"}
+            and (not prior_depth or linked_continuation) and prior_depth < 6
+            and prior_words + len(text.split()) <= 64):
+        terms = [str(previous["visual_query"])]
+        inherited_subject_depth = prior_depth + 1
+        inherited_subject_words = prior_words + len(text.split())
+        commodity_subject = commodity_subject or str((previous or {}).get("commodity_subject", ""))
+    prior_report_remaining = int((previous or {}).get("reported_context_remaining", 0))
+    prior_report_query = str((previous or {}).get("reported_context_query", ""))
+    if reporting_reference and not terms and prior_report_remaining and prior_report_query:
+        terms = [prior_report_query, "government building exterior illustrative context"]
+    reported_context_query = ""
+    reported_context_remaining = 0
+    if speech and re.search(rf"\b(?:{_SPEECH_VERBS}|заяв(?:ля|и)\w*)", lowered) and report_context_terms:
+        reported_context_query = ", ".join(dict.fromkeys(report_context_terms))
+        reported_context_remaining = 2
+    elif (prior_report_remaining > 1 and not industrial and protest_mode == "none"
+          and not visual_topics(", ".join(terms)) - {"combat"}):
+        reported_context_query = prior_report_query
+        reported_context_remaining = prior_report_remaining - 1
+    volume_continuation = bool(re.search(r"\bобъем\w*|эт\w*\s+продукци\w*", lowered))
+    export_outlet = bool(re.search(r"\bвыход\w*.*внешн\w*\s+рын\w*", lowered))
+    prior_commodity = str((previous or {}).get("commodity_subject", ""))
+    # An explicitly named physical product keeps its identity through a short
+    # anaphoric export summary. A financial institution/new action resets it.
+    if (not physical_export and prior_commodity and (volume_continuation or export_outlet)
+            and not primary and not people and not industrial and not speech and not joint
+            and protest_mode == "none" and not term_matches("банк", lowered)
+            and not visual_topics(", ".join(terms)) - {"economy"}
+            and prior_depth < 6 and prior_words + len(text.split()) <= 64):
+        terms = [str(previous["visual_query"])]
+        commodity_subject = prior_commodity
+        inherited_subject_depth = prior_depth + 1
+        inherited_subject_words = prior_words + len(text.split())
     terms = [person_name(identity) for identity in primary] + terms
     query = ", ".join(dict.fromkeys(terms))
     return {
@@ -286,20 +463,27 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         "person_role": "speaker" if primary and speech else ("participant" if primary else "none"),
         "provenance": "local-lexical-context", "confidence": "rule-based",
         "illustrative_only": True,
+        "inherited_subject_depth": inherited_subject_depth,
+        "inherited_subject_words": inherited_subject_words,
+        "commodity_subject": commodity_subject if not protest else "",
+        "reported_context_query": reported_context_query,
+        "reported_context_remaining": reported_context_remaining,
+        "reported_action_claim": reported_kinetic_claim,
         "protest_mode": protest_mode if not (speech and primary) else "mentioned-by-speaker",
     }
 
 
 def visual_topics(query: str) -> set[str]:
     vocabularies = {
-        "agriculture": r"harvest|agriculture|farming|wheat",
+        "agriculture": r"harvest|agricultur\w*|farming|wheat|grain",
         "protest": r"protest|rally|picket|labor strike",
         "diplomacy": r"diplomatic|negotiations|summit",
         "combat": r"artillery|shelling|battlefield|frontline|tanks|explosion",
         "digital": r"cyber|servers|computer network|data center",
         "economy": r"economy|economic|finance|banking|markets",
-        "shipping": r"tanker|seaport|port|refinery",
+        "shipping": r"tanker|seaport|port|refinery|cargo ship|shipping|maritime",
         "rail": r"rail|train",
+        "logistics": r"warehouse|cargo loading|cargo unloading",
     }
     return {topic for topic, expression in vocabularies.items()
             if re.search(rf"\b(?:{expression})\b", query, re.IGNORECASE)}

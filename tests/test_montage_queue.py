@@ -1281,8 +1281,10 @@ class MontageQueueStateTests(unittest.TestCase):
                 title="Тема", voiceover_path=str(voice),
                 clips=[TimelineClip(str(footage), "narration", "news footage", duration=6.0)],
             )
-            # target = 7.53 seconds: one six-second clip leaves exactly 1.53.
-            with patch.object(bridge, "probe_media_duration", return_value=7.4466666667), \
+            # Exact narration target: one six-second clip leaves 1.53 seconds.
+            # The renderer's cumulative frame grid no longer needs an extra
+            # per-clip safety margin borrowed from an unverified interval.
+            with patch.object(bridge, "probe_media_duration", return_value=7.53), \
                  patch.object(bridge, "_cached_or_probed_montage_duration", return_value=6.0), \
                  patch.object(bridge, "_replacement_candidates_for_clip", return_value=[
                      FootageItem(str(footage), footage.name, "local"),

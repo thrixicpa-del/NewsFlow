@@ -792,12 +792,36 @@ def warm_source_proxy(
     return target, False
 
 
-def _proxy_key(clip: TimelineClip, width: int, height: int) -> str:
+def _proxy_key(clip: TimelineClip, width: int, height: int, frame_count: int | None = None) -> str:
     source = Path(clip.path)
     stat = source.stat()
-    value = (f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{clip.source_start:.3f}|"
-             f"{clip.duration:.3f}|{width}x{height}|30fps|crf20|proxy-v3-loop-short-source")
+    value = (f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{clip.source_start:.9f}|"
+             f"{clip.duration:.9f}|{width}x{height}|30fps|crf20|proxy-v3-loop-short-source|"
+             f"bounded-frame-grid-v2|{frame_count}")
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _clip_proxy_health(path: Path, frame_count: int):
+    result = default_health_store().check(path)
+    if frame_count != 1 or result.state != "invalid":
+        return result
+    # The general source-health policy rejects <=50ms media. A selected
+    # fractional tail may legitimately contain exactly one 30fps frame.
+    # Validate that tiny renderer-owned proxy locally without weakening the
+    # source-library policy or borrowing more frames from the source.
+    import cv2
+    before = signature(path)
+    capture = cv2.VideoCapture(str(path))
+    try:
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        count = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        first, _ = capture.read()
+        second, _ = capture.read()
+    finally:
+        capture.release()
+    if first and not second and count == 1 and abs(fps - 30) < .001 and signature(path) == before:
+        return replace(result, state="valid", reason="", duration=1 / 30)
+    return result
 
 
 def _remotion_runner() -> tuple[str, str] | None:
@@ -1130,29 +1154,6 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
     render_clips = list(project.clips)
     if project.intro_path and Path(project.intro_path).exists() and project.intro_duration > 0:
         render_clips.insert(0, TimelineClip(project.intro_path, "Заставка", "intro", project.intro_duration, source="intro"))
-    # Encoders can round a 30fps proxy down by a few frames.  Borrow that
-    # tiny technical margin from the *real final source* before rendering,
-    # rather than cloning its final frame after concat.  ``-shortest`` then
-    # ends exactly on the narration without frozen visual padding.
-    voice_for_margin = Path(project.voiceover_path) if project.voiceover_path else None
-    if voice_for_margin and voice_for_margin.is_file() and project.clips:
-        try:
-            target = required_video_duration(probe_media_duration(voice_for_margin), project.intro_duration)
-            margin = 0.15
-            current = sum(max(0.0, float(clip.duration)) for clip in render_clips)
-            needed = target + margin - current
-            tail_index = len(render_clips) - 1
-            tail = render_clips[tail_index]
-            available = _remaining_source_duration(
-                probe_video_duration(Path(tail.path)), tail.source_start,
-            )
-            if needed > 0.0 and available + 0.01 >= tail.duration + needed:
-                render_clips[tail_index] = replace(tail, duration=tail.duration + needed)
-        except (OSError, RuntimeError, ValueError):
-            # The strict source preflight in the queue will surface a real
-            # problem.  Legacy manual FFmpeg rendering retains its clear
-            # timeline-length validation below.
-            pass
     total = len(render_clips) + 2
     temp_root = render_workspace_root()
     with tempfile.TemporaryDirectory(prefix="newsflow-render-", dir=temp_root) as temporary:
@@ -1163,29 +1164,57 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
         # a directory that does not exist yet.  Creating it here also makes
         # proxy rendering resilient after a cleanup of AppData.
         cache_root.mkdir(parents=True, exist_ok=True)
+        elapsed = 0.0
+        frame_cursor = 0
         for index, clip in enumerate(render_clips, 1):
+            # Quantize cumulative cut positions, so fractional scenes cannot
+            # accumulate an independent rounding error. A frame belongs to
+            # the scene active at its PTS; ceil also covers the narration tail.
+            elapsed += max(0.0, float(clip.duration))
+            frame_end = math.ceil(elapsed * 30 - 1e-8)
+            frame_count = frame_end - frame_cursor
+            frame_cursor = frame_end
+            if frame_count <= 0:
+                continue
             source = Path(clip.path)
             if not source.exists():
                 raise FileNotFoundError(f"Футаж не найден: {source}")
             render_source = render_source_for_proxy(source, width, height)
-            target = cache_root / f"{_proxy_key(clip, width, height)}.mp4"
-            # FFmpeg's ``-t 6.000`` at 30fps can encode only 179 frames
-            # (5.97s). Across 44 ordinary clips that silently removed 1.3s
-            # from a real NewsFlow video. Ask for one extra frame from the
-            # source; the final audio mux still ends at the exact MP3 length.
-            proxy_duration = max(0.1, clip.duration + (1.0 / 30.0) + 0.002)
+            if render_source != source:
+                prepared_available = _remaining_source_duration(
+                    probe_video_duration(render_source), clip.source_start,
+                )
+                # Old full-source proxies may omit a frame at EOF. A bounded
+                # source window still available in the original must use it;
+                # looping that short proxy could expose frames before start.
+                if prepared_available + 1e-6 < clip.duration:
+                    original_available = _remaining_source_duration(
+                        probe_video_duration(source), clip.source_start,
+                    )
+                    if clip.duration <= original_available + 1e-6:
+                        render_source = source
+            target = cache_root / f"{_proxy_key(clip, width, height, frame_count)}.mp4"
+            # Never read beyond the selected/verified source interval. EOF
+            # handling retains its last actual frame on the 30fps grid; the
+            # explicit frame budget prevents both 179-frame underflow and
+            # 181-frame overshoot for an ordinary six-second scene.
+            proxy_duration = float(clip.duration)
+            expected_proxy_duration = frame_count / 30
+            # Normalize timestamps before spatial filters: bundled FFmpeg 7.1
+            # can lose the last frame at exact input EOF with scale-before-fps.
             filter_value = (
+                f"fps=30:start_time=0:eof_action=pass,trim=end_frame={frame_count},"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height},fps=30,format=yuv420p"
+                f"crop={width}:{height},format=yuv420p"
             )
             # Several videos can legitimately use the same 6-second local
             # footage.  Serialize only that exact proxy, not the entire render
             # queue, so two workers never write/rename the same partial MP4.
             with _proxy_lock(target):
                 if target.is_file():
-                    result = default_health_store().check(target)
-                    if result.state == "valid" and result.duration + .05 < clip.duration:
-                        result = replace(result, state="invalid", reason="Прокси короче требуемой сцены")
+                    result = _clip_proxy_health(target, frame_count)
+                    if result.state == "valid" and abs(result.duration - expected_proxy_duration) > .01:
+                        result = replace(result, state="invalid", reason="Прокси не совпадает с кадровой сеткой сцены")
                     if result.state == "invalid":
                         if quarantine_cache(target, target.parent, result, source) is None:
                             raise RuntimeError(f"Не удалось изолировать повреждённый proxy: {target}")
@@ -1204,9 +1233,9 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                         # fallback for an explicit clip already in a project.
                         available = _remaining_source_duration(probe_video_duration(render_source), clip.source_start)
                         loop_args = ["-stream_loop", "-1"] if available + 0.01 < proxy_duration else []
-                        command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
-                                   "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
-                                   "-vf", filter_value, "-an", *video_encoder_args(ffmpeg),
+                        command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.9f}",
+                                   "-t", f"{proxy_duration:.9f}", "-i", str(render_source),
+                                   "-vf", filter_value, "-frames:v", str(frame_count), "-an", *video_encoder_args(ffmpeg),
                                    "-movflags", "+faststart", str(partial)]
                         try:
                             run_ffmpeg(command)
@@ -1214,14 +1243,17 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                             if "h264_nvenc" not in command:
                                 raise
                             _ENCODER_CACHE[ffmpeg] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
-                            command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
-                                       "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
-                                       "-vf", filter_value, "-an", *_ENCODER_CACHE[ffmpeg],
+                            command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.9f}",
+                                       "-t", f"{proxy_duration:.9f}", "-i", str(render_source),
+                                       "-vf", filter_value, "-frames:v", str(frame_count), "-an", *_ENCODER_CACHE[ffmpeg],
                                        "-movflags", "+faststart", str(partial)]
                             run_ffmpeg(command)
-                        result = default_health_store().check(partial)
-                        if result.state != "valid" or result.duration + .05 < clip.duration:
-                            raise RuntimeError(f"FFmpeg создал непригодный proxy: {result.reason}")
+                        result = _clip_proxy_health(partial, frame_count)
+                        if result.state != "valid" or abs(result.duration - expected_proxy_duration) > .01:
+                            raise RuntimeError(
+                                f"FFmpeg создал непригодный proxy: {result.reason}; "
+                                f"длительность {result.duration:.6f}, ожидается {expected_proxy_duration:.6f}"
+                            )
                         _replace_with_retry(partial, target, timeout=12.0)
                     finally:
                         try:
@@ -1272,6 +1304,9 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             # Keep the real sound of the initial news insert.  The narration
             # starts only after it; this avoids the old silent/truncated intro.
             intro = Path(project.intro_path) if project.intro_path else None
+            # -shortest can discard the packet spanning the final fractional
+            # audio endpoint. The measured narration endpoint keeps that frame
+            # and the complete audio without extending any selected source.
             if intro and intro.exists() and project.intro_duration > 0:
                 delay = int(project.intro_duration * 1000)
                 mix = (
@@ -1281,12 +1316,13 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                 )
                 run_ffmpeg([ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-i", str(intro),
                       "-filter_complex", mix, "-map", "0:v:0", "-map", "[audio]", "-c:v", "copy",
-                      "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(output)])
+                      "-c:a", "aac", "-b:a", "192k", "-t", f"{required_duration:.9f}",
+                      "-movflags", "+faststart", str(output)])
             else:
                 audio_filter = ["-af", f"adelay={int(project.intro_duration * 1000)}:all=1"] if project.intro_duration > 0 else []
                 run_ffmpeg([ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-map", "0:v:0",
                       "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                      *audio_filter, "-shortest", "-movflags", "+faststart", str(output)])
+                      *audio_filter, "-t", f"{required_duration:.9f}", "-movflags", "+faststart", str(output)])
         else:
             shutil.copy2(video_source, output)
         if progress:

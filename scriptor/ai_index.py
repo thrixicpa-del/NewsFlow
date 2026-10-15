@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
+import math
 import os
 import re
 import sqlite3
@@ -138,11 +140,14 @@ _SCREEN_TEXT_FULL_RESULTS: dict[tuple[str, str, int, int], int] = {}
 # actual footage vectors, however, are the same SQLite rows for every worker.
 # Keeping that immutable snapshot in process memory avoids reading and
 # decoding tens of thousands of vectors once *per scene* and once *per job*.
-_SHARED_MODELS: dict[str, tuple[object, object]] = {}
+_SHARED_MODELS: dict[tuple[str, str], tuple[object, object]] = {}
 _SHARED_MODELS_LOCK = threading.RLock()
 _TEXT_EMBED_LOCK = threading.RLock()
 _SEARCH_CORPORA: dict[str, _SearchCorpus] = {}
 _SEARCH_CORPORA_LOCK = threading.RLock()
+_VISUAL_FEATURES: OrderedDict = OrderedDict()
+_VISUAL_FEATURES_LOCK = threading.RLock()
+_VISUAL_INFLIGHT: dict[tuple, threading.Event] = {}
 
 
 @dataclass(frozen=True)
@@ -294,10 +299,24 @@ class ClipIndex:
         self.screen_text_progress = screen_text_progress
         self._image_embedder = None
         self._text_embedder = None
+        self._loaded_model_revision = None
         self._query_cache = OrderedDict()
         self.allowed_roots: list[str] | None = None
+        # Cheap, per-story metadata predicate. Never persist it or apply it to
+        # the shared corpus: another montage can use the same index differently.
+        self.candidate_filter: Callable[[FootageItem], bool] | None = None
+        self._allowed_roots_snapshot = None
+        self._resolved_allowed_roots = ()
         self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
         self._lock = threading.RLock()
+        self.visual_window_budget = 96
+        self._visual_cold_windows = 0
+        self._visual_annotation_cache = OrderedDict()
+        self._catalog_rows = OrderedDict()
+        self._catalog_revision = None
+        self._read_session_connection = None
+        self._read_session_depth = 0
+        self._read_session_data_version = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
         from .media_health import MediaHealthStore
@@ -323,6 +342,85 @@ class ClipIndex:
             connection.commit()
         finally:
             connection.close()
+
+    def _open_catalog_reader(self):
+        connection = sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True,
+                                     timeout=30, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @contextmanager
+    def read_session(self):
+        """Reuse a reader during preparation; close deterministically on exit.
+
+        The default API keeps no handle open, which permits Windows temporary
+        index cleanup. A session checks SQLite data_version on each read, so
+        other indices/processes remain visible even with identical file mtimes.
+        """
+        with self._lock:
+            if self._read_session_depth == 0:
+                self._read_session_connection = self._open_catalog_reader()
+                self._read_session_data_version = None
+            self._read_session_depth += 1
+        try:
+            yield self
+        finally:
+            with self._lock:
+                self._read_session_depth -= 1
+                if self._read_session_depth == 0:
+                    self._read_session_connection.close()
+                    self._read_session_connection = None
+                    self._read_session_data_version = None
+
+    def _catalog_row(self, path: str | Path):
+        """Bounded unfiltered row memo with SQLite revision invalidation."""
+        key = str(Path(path).resolve())
+        with self._lock:
+            connection = self._read_session_connection or self._open_catalog_reader()
+            owned = self._read_session_connection is None
+            try:
+                revision = self._catalog_revision
+                if owned:
+                    # A short reader has no stable PRAGMA data_version across
+                    # connections. Read the actual revision, never file mtimes.
+                    revision = int(connection.execute("SELECT value FROM search_revision WHERE id=1").fetchone()[0])
+                else:
+                    data_version = int(connection.execute("PRAGMA data_version").fetchone()[0])
+                    if self._read_session_data_version != data_version or revision is None:
+                        revision = int(connection.execute("SELECT value FROM search_revision WHERE id=1").fetchone()[0])
+                        self._read_session_data_version = data_version
+                if revision != self._catalog_revision:
+                    self._catalog_rows.clear()
+                    self._visual_annotation_cache.clear()
+                    self._catalog_revision = revision
+                if key not in self._catalog_rows:
+                    self._catalog_rows[key] = connection.execute(
+                        """SELECT path,name,size,mtime_ns,duration,width,height,fps,source_family,source,
+                                  source_url,license,tags,english_text,semantic_scores,person_evidence,
+                                  visual_evidence,length(embedding) AS embedding_bytes FROM clips WHERE path=?""",
+                        (key,),
+                    ).fetchone()
+                    while len(self._catalog_rows) > 512:
+                        self._catalog_rows.popitem(last=False)
+                else:
+                    self._catalog_rows.move_to_end(key)
+                return self._catalog_rows[key], revision
+            finally:
+                if owned:
+                    connection.close()
+
+    def catalog_item(self, path: str | Path) -> FootageItem | None:
+        """Read one retained path unfiltered; never use this as candidate search."""
+        row, _revision = self._catalog_row(path)
+        if row is None:
+            return None
+        item = IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
+                                  json.loads(row["tags"] or "[]"), self._row_person_evidence(row))
+        item.visual_evidence = self._row_visual_evidence(row)
+        item.metadata_provenance = {"path_hints": [row["name"]], "legacy_tags": list(item.tags),
+                                    "semantic_scores": json.loads(row["semantic_scores"] or "{}"),
+                                    "person_annotations": item.person_evidence}
+        return self._with_visual_assessor(item, int(row["embedding_bytes"] or 0) // 4)
 
     def _create_schema(self):
         with self._connect() as connection:
@@ -379,6 +477,8 @@ class ClipIndex:
                 connection.execute("ALTER TABLE clips ADD COLUMN semantic_scores TEXT NOT NULL DEFAULT '{}'")
             if "person_evidence" not in columns:
                 connection.execute("ALTER TABLE clips ADD COLUMN person_evidence TEXT NOT NULL DEFAULT '{}'")
+            if "visual_evidence" not in columns:
+                connection.execute("ALTER TABLE clips ADD COLUMN visual_evidence TEXT NOT NULL DEFAULT '{}'")
             # Separate vector/metadata changes from usage-only commits. Triggers
             # also cover writes from other bridge processes and maintenance SQL.
             connection.executescript("""
@@ -395,22 +495,67 @@ class ClipIndex:
                 BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
                 CREATE TRIGGER IF NOT EXISTS search_person_update AFTER UPDATE OF person_evidence ON clips
                 BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
+                CREATE TRIGGER IF NOT EXISTS search_visual_update AFTER UPDATE OF visual_evidence ON clips
+                BEGIN UPDATE search_revision SET value=random() WHERE id=1; END;
+                CREATE TABLE IF NOT EXISTS visual_window_features (
+                    cache_key TEXT PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL,
+                    mtime_ns INTEGER NOT NULL, source_start REAL NOT NULL, duration REAL NOT NULL,
+                    image_model TEXT NOT NULL, text_model TEXT NOT NULL, rules_version INTEGER NOT NULL,
+                    vectors BLOB NOT NULL, scores TEXT NOT NULL, sample_times TEXT NOT NULL,
+                    model_revision TEXT NOT NULL DEFAULT '{}'
+                );
                 CREATE TRIGGER IF NOT EXISTS search_stats_update AFTER UPDATE OF used_count,rating ON clips
                 BEGIN UPDATE search_revision SET value=value+1 WHERE id=2; END;
             """)
+            feature_columns = {row[1] for row in connection.execute("PRAGMA table_info(visual_window_features)")}
+            if "model_revision" not in feature_columns:
+                connection.execute("ALTER TABLE visual_window_features ADD COLUMN model_revision TEXT NOT NULL DEFAULT '{}'")
 
     def count(self, embedded_only: bool = False) -> int:
         where = " WHERE embedding IS NOT NULL" if embedded_only else ""
+        candidate_filter = self.candidate_filter
         with self._connect() as connection:
-            return int(connection.execute(f"SELECT COUNT(*) FROM clips{where}").fetchone()[0])
+            if candidate_filter is None:
+                return int(connection.execute(f"SELECT COUNT(*) FROM clips{where}").fetchone()[0])
+            rows = connection.execute("SELECT path,name,source,source_url,license,tags FROM clips" + where).fetchall()
+        return sum(bool(candidate_filter(FootageItem(row["path"], row["name"], row["source"], row["source_url"],
+                                                    row["license"], json.loads(row["tags"] or "[]")))) for row in rows)
 
     def model_ready(self) -> bool:
         return self._image_embedder is not None and self._text_embedder is not None
 
-    def _models(self):
+    def _local_model_revision(self) -> dict:
+        """Fingerprint local HF revisions and content-addressed blob identities.
+
+        Only the tiny refs file is read. Weight blobs are identified by their
+        HF cache names plus size/mtime; hundreds of MB of weights are never
+        hashed for a frame or window assessment.
+        """
+        revisions = {}
+        for model in (IMAGE_MODEL, TEXT_MODEL):
+            root = self.model_cache / ("models--" + model.replace("/", "--"))
+            try:
+                with (root / "refs" / "main").open("rb") as reference:
+                    revision = reference.read(4096).decode("utf-8").strip()
+            except (OSError, UnicodeError):
+                revision = "unavailable"
+            blobs = []
+            try:
+                for path in sorted((root / "blobs").glob("*")):
+                    if path.is_file():
+                        stat = path.stat()
+                        blobs.append((path.name, stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                blobs = []
+            revisions[model] = {"revision": revision,
+                                "blob_signature": hashlib.sha256(json.dumps(blobs).encode("utf-8")).hexdigest()}
+        return revisions
+
+    def _models(self, *, local_files_only: bool = False):
         if self._image_embedder is None or self._text_embedder is None:
             if self.embedder_factory:
                 self._image_embedder, self._text_embedder = self.embedder_factory()
+                self._loaded_model_revision = self._local_model_revision()
             else:
                 # Windowed PyInstaller builds have no stderr; tqdm would crash while models download.
                 # The same CLIP model is used by the indexer and all montage
@@ -418,18 +563,37 @@ class ClipIndex:
                 # can exhaust RAM/VRAM, so it is shared per model-cache path.
                 cache = str(self.model_cache.resolve())
                 with _SHARED_MODELS_LOCK:
-                    shared = _SHARED_MODELS.get(cache)
+                    revision = self._local_model_revision()
+                    model_key = (cache, json.dumps(revision, sort_keys=True))
+                    shared = _SHARED_MODELS.get(model_key)
                     if shared is None:
                         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
                         os.environ.setdefault("TQDM_DISABLE", "1")
                         from fastembed import ImageEmbedding, TextEmbedding
                         threads = max(4, min(16, (os.cpu_count() or 8) // 2))
                         shared = (
-                            ImageEmbedding(IMAGE_MODEL, cache_dir=cache, threads=threads, cuda="auto"),
-                            TextEmbedding(TEXT_MODEL, cache_dir=cache, threads=threads, cuda="auto"),
+                            ImageEmbedding(IMAGE_MODEL, cache_dir=cache, threads=threads, cuda="auto",
+                                           local_files_only=local_files_only),
+                            TextEmbedding(TEXT_MODEL, cache_dir=cache, threads=threads, cuda="auto",
+                                          local_files_only=local_files_only),
                         )
-                        _SHARED_MODELS[cache] = shared
+                        loaded_revision = self._local_model_revision()
+                        changed_existing_refs = any(value["revision"] != "unavailable"
+                                                    and value["revision"] != loaded_revision[model]["revision"]
+                                                    for model, value in revision.items())
+                        if (local_files_only and loaded_revision != revision) or changed_existing_refs:
+                            raise RuntimeError("model-cache-changed-during-load")
+                        revision = loaded_revision
+                        model_key = (cache, json.dumps(revision, sort_keys=True))
+                        # Existing indices retain references to their loaded
+                        # objects; the global cache only needs the newest
+                        # revision at this cache path.
+                        for previous_key in tuple(_SHARED_MODELS):
+                            if previous_key[0] == cache and previous_key != model_key:
+                                _SHARED_MODELS.pop(previous_key, None)
+                        _SHARED_MODELS[model_key] = shared
                 self._image_embedder, self._text_embedder = shared
+                self._loaded_model_revision = revision
         return self._image_embedder, self._text_embedder
 
     def _cache_key(self) -> str:
@@ -449,6 +613,10 @@ class ClipIndex:
 
     def _invalidate_search_cache(self) -> None:
         self._screen_text_state_cache.clear()
+        self._visual_annotation_cache.clear()
+        self._catalog_rows.clear()
+        self._catalog_revision = None
+        self._read_session_data_version = None
         with _SEARCH_CORPORA_LOCK:
             _SEARCH_CORPORA.pop(self._cache_key(), None)
 
@@ -495,7 +663,7 @@ class ClipIndex:
                 rows = connection.execute(
                     """SELECT path,name,size,mtime_ns,source,source_url,license,tags,embedding,duration,width,height,source_family,
                               semantic_scores,
-                              used_count,rating,person_evidence FROM clips
+                              used_count,rating,person_evidence,visual_evidence FROM clips
                        WHERE embedding IS NOT NULL AND disabled=0
                          AND NOT (english_text=1 AND english_text_version>=?)"""
                     + " ORDER BY path",
@@ -524,6 +692,12 @@ class ClipIndex:
                 items.append(IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"],
                                          row["license"], json.loads(row["tags"] or "[]"),
                                          self._row_person_evidence(row)))
+                items[-1].visual_evidence = self._row_visual_evidence(row)
+                items[-1].metadata_provenance = {
+                    "path_hints": [row["name"]], "legacy_tags": json.loads(row["tags"] or "[]"),
+                    "semantic_scores": json.loads(row["semantic_scores"] or "{}"),
+                    "person_annotations": self._row_person_evidence(row),
+                }
                 source_families.append(
                     row["source_family"] or source_family_identity(row["path"], row["source_url"])
                 )
@@ -616,6 +790,249 @@ class ClipIndex:
         except OSError:
             return False
 
+    def _visual_models_available(self) -> bool:
+        # Synthetic embedders used by legacy fixtures must not introduce an
+        # image-model call into retrieval. Real window checks only use locally
+        # cached models and construct FastEmbed with local_files_only=True.
+        if self.embedder_factory is not None:
+            return False
+        if self.model_ready():
+            return True
+        for model in (IMAGE_MODEL, TEXT_MODEL):
+            root = self.model_cache / ("models--" + model.replace("/", "--"))
+            try:
+                if not ((root / "refs" / "main").is_file() and any(
+                    path.is_file() and path.stat().st_size > 1_000_000 for path in (root / "blobs").glob("*")
+                )):
+                    return False
+            except OSError:
+                return False
+        return True
+
+    @staticmethod
+    def _row_visual_evidence(row) -> dict:
+        try:
+            evidence = json.loads(row["visual_evidence"] or "{}")
+            if evidence.get("size") == row["size"] and evidence.get("mtime_ns") == row["mtime_ns"]:
+                return evidence
+        except (KeyError, TypeError, ValueError):
+            pass
+        return {}
+
+    def _with_visual_assessor(self, item: FootageItem, vector_dim: int = EMBEDDING_DIM) -> FootageItem:
+        # The shared corpus is immutable and can outlive a montage job. Bind
+        # only returned copies to this index's budget, never the first worker.
+        copied = replace(item)
+        for attribute in ("visual_evidence", "metadata_provenance"):
+            if hasattr(item, attribute):
+                setattr(copied, attribute, getattr(item, attribute))
+        if ((vector_dim == EMBEDDING_DIM and (self.embedder_factory is None or self._visual_models_available()))
+                or getattr(item, "visual_evidence", None)):
+            path = item.path
+            copied._visual_assessor = lambda query, start, duration, **kwargs: self.assess_visual_window(
+                query, path, start, duration, **kwargs)
+        return copied
+
+    @staticmethod
+    def _sample_visual_window(path: Path, start: float, duration: float):
+        """Decode three frames within the requested window, never whole-file samples."""
+        import cv2
+        from PIL import Image
+        capture = cv2.VideoCapture(str(path))
+        try:
+            if not capture.isOpened():
+                raise ValueError("window-video-unreadable")
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 25)
+            total = float(capture.get(cv2.CAP_PROP_FRAME_COUNT)) / max(.001, fps)
+            if start < 0 or duration <= 0 or start + duration > total + .001:
+                raise ValueError("window-outside-source")
+            inset = min(.5, duration / 12)
+            requested = (start + inset, start + duration / 2, start + duration - inset)
+            images, times = [], []
+            for timestamp in requested:
+                capture.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+                ok, frame = capture.read()
+                if not ok:
+                    raise ValueError("incomplete-three-frame-window")
+                actual = float(capture.get(cv2.CAP_PROP_POS_MSEC)) / 1000
+                if not start - .001 <= actual < start + duration:
+                    raise ValueError("decoded-frame-outside-window")
+                images.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                times.append(actual)
+            return images, times
+        finally:
+            capture.release()
+
+    @staticmethod
+    def _visual_memory_clear():
+        """Clear bounded feature memory (persisted SQLite evidence remains)."""
+        with _VISUAL_FEATURES_LOCK:
+            _VISUAL_FEATURES.clear()
+
+    def _visual_window_features(self, path: Path, start: float, duration: float) -> tuple[dict | None, str]:
+        import numpy as np
+
+        from .visual_evidence import TAXONOMY, TAXONOMY_VERSION
+        try:
+            size, mtime_ns = self._signature(path)
+        except OSError:
+            return None, "source-unavailable"
+        model_revision = self._loaded_model_revision or self._local_model_revision()
+        revision_key = json.dumps(model_revision, sort_keys=True)
+        key = (str(path.resolve()).casefold(), size, mtime_ns, start.hex(), duration.hex(),
+               IMAGE_MODEL, TEXT_MODEL, revision_key, TAXONOMY_VERSION)
+        cache_key = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
+        while True:
+            with _VISUAL_FEATURES_LOCK:
+                cached = _VISUAL_FEATURES.get(key)
+                if cached is not None:
+                    _VISUAL_FEATURES.move_to_end(key)
+                    try:
+                        unchanged = self._signature(path) == (size, mtime_ns)
+                    except OSError:
+                        unchanged = False
+                    if not unchanged:
+                        return None, "source-changed-during-assessment"
+                    return cached, "memory"
+                pending = _VISUAL_INFLIGHT.get(key)
+                if pending is None:
+                    pending = threading.Event()
+                    _VISUAL_INFLIGHT[key] = pending
+                    break
+            pending.wait()
+        try:
+            with self._connect() as connection:
+                row = connection.execute("SELECT scores,sample_times,model_revision FROM visual_window_features WHERE cache_key=?",
+                                         (cache_key,)).fetchone()
+            if row is not None:
+                value = {"per_frame_scores": json.loads(row["scores"]), "sample_times": json.loads(row["sample_times"]),
+                         "source_signature": {"size": size, "mtime_ns": mtime_ns},
+                         "model_revision": json.loads(row["model_revision"])}
+                if self._signature(path) != (size, mtime_ns):
+                    return None, "source-changed-during-assessment"
+                cache_state = "sqlite"
+            else:
+                with self._lock:
+                    if self._visual_cold_windows >= self.visual_window_budget:
+                        return None, "cold-window-budget-exhausted"
+                    self._visual_cold_windows += 1
+                image_model, _ = self._models(local_files_only=True)
+                if self._loaded_model_revision != model_revision:
+                    return None, "model-cache-changed-during-assessment"
+                images, sample_times = self._sample_visual_window(path, start, duration)
+                if len(images) != 3 or len(sample_times) != 3 or any(
+                        not start <= timestamp < start + duration for timestamp in sample_times):
+                    return None, "incomplete-three-frame-window"
+                vectors = np.asarray([self._normalize(vector) for vector in image_model.embed(images, batch_size=3)], dtype=np.float32)
+                if vectors.shape != (3, EMBEDDING_DIM) or not np.isfinite(vectors).all():
+                    return None, "invalid-image-features"
+                pairs = [(kind, query) for kind, queries in TAXONOMY.items() for query in queries]
+                text_vectors = self._query_vectors([query for _kind, query in pairs])
+                if text_vectors.shape != (len(pairs), EMBEDDING_DIM):
+                    return None, "invalid-text-features"
+                similarities = vectors @ text_vectors.T
+                scores = [{kind: float(max(similarities[frame, i] for i, (label, _) in enumerate(pairs) if label == kind))
+                           for kind in TAXONOMY} for frame in range(3)]
+                if self._signature(path) != (size, mtime_ns):
+                    return None, "source-changed-during-assessment"
+                value = {"per_frame_scores": scores, "sample_times": sample_times,
+                         "source_signature": {"size": size, "mtime_ns": mtime_ns},
+                         "model_revision": model_revision}
+                with self._connect() as connection:
+                    # The legacy SQL rules_version column identifies feature
+                    # taxonomy. Classifier-only changes never cache verdicts
+                    # or invalidate unchanged, model-versioned vectors/scores.
+                    connection.execute("INSERT OR REPLACE INTO visual_window_features "
+                                       "(cache_key,path,size,mtime_ns,source_start,duration,image_model,text_model,rules_version,"
+                                       "vectors,scores,sample_times,model_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                       (cache_key, str(path.resolve()), size, mtime_ns, start, duration, IMAGE_MODEL,
+                                        TEXT_MODEL, TAXONOMY_VERSION, vectors.tobytes(), json.dumps(scores), json.dumps(sample_times), revision_key))
+                    # Older signatures for this exact path have no reusable evidence.
+                    connection.execute("DELETE FROM visual_window_features WHERE path=? AND (size<>? OR mtime_ns<>?)",
+                                       (str(path.resolve()), size, mtime_ns))
+                    revisions = dict(connection.execute("SELECT id,value FROM search_revision"))
+                # Feature-table commits do not change clips. Preserve the
+                # decoded corpus instead of rereading all library vectors on
+                # the next scene merely because WAL's fingerprint changed.
+                with _SEARCH_CORPORA_LOCK:
+                    corpus = _SEARCH_CORPORA.get(self._cache_key())
+                    if (corpus is not None and corpus.content_revision == int(revisions[1])
+                            and corpus.stats_revision == int(revisions[2])):
+                        _SEARCH_CORPORA[self._cache_key()] = replace(corpus, fingerprint=self._database_fingerprint())
+                cache_state = "cold"
+            with _VISUAL_FEATURES_LOCK:
+                _VISUAL_FEATURES[key] = value
+                while len(_VISUAL_FEATURES) > 512:
+                    _VISUAL_FEATURES.popitem(last=False)
+            return value, cache_state
+        except (OSError, ValueError, RuntimeError) as error:
+            return None, "window-assessment-unavailable:" + type(error).__name__
+        finally:
+            with _VISUAL_FEATURES_LOCK:
+                _VISUAL_INFLIGHT.pop(key, None)
+                pending.set()
+
+    def assess_visual_window(self, query: str, path: str | Path, start: float, duration: float,
+                             *, allow_alternatives: bool = False) -> dict | None:
+        from .visual_evidence import (
+            RULES_VERSION,
+            TAXONOMY_VERSION,
+            classify_window,
+            query_topic,
+        )
+        topic = query_topic(query)
+        if topic is None:
+            return None
+        path, start, duration = Path(path), float(start), float(duration)
+        base = {"relation": "unknown", "source": "automatic-window-clip", "source_start": start,
+                "duration": duration, "event_confirmed": False, "motion_verified": False,
+                "rules_version": RULES_VERSION, "taxonomy_version": TAXONOMY_VERSION,
+                "image_model": IMAGE_MODEL, "text_model": TEXT_MODEL}
+        if self._loaded_model_revision is not None:
+            base["model_revision"] = self._loaded_model_revision
+        if not math.isfinite(start) or not math.isfinite(duration) or start < 0 or duration <= 0:
+            return {**base, "reason": "invalid-window"}
+        curated = self._curated_visual_window(query, path, start, duration, allow_alternatives=allow_alternatives)
+        if curated is not None:
+            return {**base, **curated}
+        if not self._visual_models_available():
+            row, _revision = self._catalog_row(path)
+            if row is not None:
+                evidence = self._row_visual_evidence(row)
+                try:
+                    signature = self._signature(path)
+                except OSError:
+                    signature = None
+                if (evidence.get("observations") and signature == (evidence.get("size"), evidence.get("mtime_ns"))):
+                    return {**base, "reason": "curated-window-not-covered"}
+            if (self.embedder_factory is None and row is not None
+                    and int(row["embedding_bytes"] or 0) == EMBEDDING_DIM * 4):
+                # A real CLIP-index item keeps its visual gate offline.
+                # Returning None would silently reactivate path-only
+                # legacy acceptance of portraits, bars or maps.
+                return {**base, "reason": "existing-model-unavailable"}
+            return None
+        features, state = self._visual_window_features(path, start, duration)
+        result = ({**base, **features, **classify_window(query, features["per_frame_scores"]), "feature_cache": state}
+                  if features is not None else {**base, "reason": state})
+        if not allow_alternatives or result["relation"] == "direct":
+            return result
+        metadata = self.metadata(path)
+        if metadata is None:
+            return result
+        last = max(0., metadata.duration - duration)
+        # At most three windows per source including the caller's interval.
+        alternatives = list(dict.fromkeys([0., last / 2, last]))
+        alternatives = [value for value in alternatives if abs(value - start) > .001][:2]
+        ranking = {"direct": 3, "context": 2, "unknown": 1, "contradiction": 0}
+        for alternative in alternatives:
+            candidate = self.assess_visual_window(query, path, alternative, duration)
+            if candidate is not None and ranking[candidate["relation"]] > ranking[result["relation"]]:
+                result = candidate
+            if result["relation"] == "direct":
+                break
+        return result
+
     @staticmethod
     def _metadata_tokens(item: FootageItem) -> set[str]:
         from .scene_intent import person_name
@@ -662,7 +1079,7 @@ class ClipIndex:
             score_by_position = {position: -negative_score
                                  for negative_score, _path_key, position in ranked}
             result.append([
-                SearchHit(corpus.items[position], score_by_position[position], corpus.durations[position],
+                SearchHit(self._with_visual_assessor(corpus.items[position], corpus.vectors.shape[1]), score_by_position[position], corpus.durations[position],
                           corpus.widths[position], corpus.heights[position],
                           corpus.semantic_confidences[position], corpus.source_families[position])
                 for position in positions
@@ -1035,8 +1452,8 @@ class ClipIndex:
         # UNCERTAIN rows remain searchable and can be verified lazily.
         text_filter = (" AND NOT (english_text=1 AND english_text_version>=?)"
                        if exclude_english_text else "")
-        query = ("SELECT path,name,size,mtime_ns,embedding IS NOT NULL AS embedded,source,source_url,license,tags,"
-                 "source_family,person_evidence FROM clips WHERE disabled=0"
+        query = ("SELECT path,name,size,mtime_ns,embedding IS NOT NULL AS embedded,length(embedding) AS embedding_bytes,source,source_url,license,tags,"
+                 "source_family,person_evidence,visual_evidence,semantic_scores FROM clips WHERE disabled=0"
                  + text_filter + " ORDER BY name")
         params = (SCREEN_TEXT_CLASSIFIER_VERSION,) if exclude_english_text else ()
         with self._connect() as connection:
@@ -1047,12 +1464,96 @@ class ClipIndex:
                 return not row["embedded"] or self._signature(Path(row["path"])) == (row["size"], row["mtime_ns"])
             except OSError:
                 return False
-        current = [IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
-                               json.loads(row["tags"] or "[]"), self._row_person_evidence(row))
-                   for row in rows if self.path_allowed(row["path"]) and Path(row["path"]).is_file()
-                   and fresh(row)
-                   and str(Path(row["path"]).resolve()).casefold() not in quarantined]
+        current = []
+        candidate_filter = self.candidate_filter
+        for row in rows:
+            if not (self.path_allowed(row["path"]) and Path(row["path"]).is_file() and fresh(row)
+                    and str(Path(row["path"]).resolve()).casefold() not in quarantined):
+                continue
+            item = IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
+                                      json.loads(row["tags"] or "[]"), self._row_person_evidence(row))
+            if candidate_filter is not None and not candidate_filter(item):
+                continue
+            item.visual_evidence = self._row_visual_evidence(row)
+            item.metadata_provenance = {"path_hints": [row["name"]], "legacy_tags": list(item.tags),
+                                        "semantic_scores": json.loads(row["semantic_scores"] or "{}"),
+                                        "person_annotations": item.person_evidence}
+            current.append(self._with_visual_assessor(item, int(row["embedding_bytes"] or 0) // 4))
         return current[:limit] if limit is not None else current
+
+    def set_visual_evidence(self, path: str, observations: list[dict]) -> None:
+        """Store explicit, local visual-kind intervals independently of path tags."""
+        from .visual_evidence import TAXONOMY
+        candidate = Path(path).resolve()
+        stat = candidate.stat()
+        cleaned = []
+        for value in observations:
+            start, end = float(value["start"]), float(value["end"])
+            kind = str(value["kind"])
+            if (kind not in TAXONOMY or value.get("source") not in {"manual", "curated"}
+                    or not math.isfinite(start) or not math.isfinite(end) or not 0 <= start < end):
+                raise ValueError("Invalid curated visual interval")
+            cleaned.append({"kind": kind, "start": start, "end": end, "source": value["source"]})
+        evidence = {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "observations": cleaned}
+        with self._connect() as connection:
+            changed = connection.execute("UPDATE clips SET visual_evidence=? WHERE path=?",
+                                         (json.dumps(evidence), str(candidate))).rowcount
+        if not changed:
+            raise ValueError("Visual evidence requires an indexed file")
+        self._invalidate_search_cache()
+
+    def _curated_visual_window(self, query: str, path: Path, start: float, duration: float,
+                               *, allow_alternatives: bool = False) -> dict | None:
+        from .visual_evidence import query_topic
+        try:
+            signature = self._signature(path)
+        except OSError:
+            return None
+        row, revision = self._catalog_row(path)
+        if row is None:
+            return None
+        with self._lock:
+            key = (row["path"], *signature, revision)
+            if key not in self._visual_annotation_cache:
+                self._visual_annotation_cache[key] = self._row_visual_evidence(row)
+                while len(self._visual_annotation_cache) > 512:
+                    self._visual_annotation_cache.popitem(last=False)
+            evidence = self._visual_annotation_cache[key]
+        if evidence.get("size") != signature[0] or evidence.get("mtime_ns") != signature[1]:
+            return None
+        fresh_observations = [value for value in evidence.get("observations", [])
+                        if value.get("source") in {"manual", "curated"}
+                        and float(value.get("end", 0)) - float(value.get("start", 0)) >= duration - .001]
+        try:
+            unchanged = self._signature(path) == signature
+        except OSError:
+            unchanged = False
+        if not fresh_observations or not unchanged:
+            return None
+        _, direct, context = query_topic(query)
+        def describe(observations, window_start):
+            kinds = {value["kind"] for value in observations}
+            relation = "direct" if kinds & direct else "context" if kinds & context else "contradiction"
+            return {"relation": relation, "source": "curated-interval", "source_start": window_start,
+                    "dominant_kind": observations[0]["kind"], "supported_kinds": sorted(kinds),
+                    "reason": "signature-bound-curated-visual-interval",
+                    "source_signature": {"size": signature[0], "mtime_ns": signature[1]}}
+        exact = [value for value in fresh_observations if float(value["start"]) <= start + .001
+                 and float(value["end"]) >= start + duration - .001]
+        result = describe(exact, start) if exact else None
+        if not allow_alternatives or (result is not None and result["relation"] == "direct"):
+            return result
+        # Curated intervals are cheap local metadata, so discover their exact
+        # starts even when no model exists. This does not decode extra windows
+        # and exact-only callers never inherit a different interval.
+        compatible = [value for value in fresh_observations if value["kind"] in direct | context]
+        compatible.sort(key=lambda value: (value["kind"] not in direct, float(value["start"])))
+        if compatible:
+            alternative = describe([compatible[0]], float(compatible[0]["start"]))
+            priority = {"direct": 2, "context": 1, "contradiction": 0}
+            if result is None or priority[alternative["relation"]] > priority[result["relation"]]:
+                return alternative
+        return result
 
     def set_person_evidence(self, path: str, observations: list[dict]) -> None:
         """Persist explicit local annotations; this method does not recognize faces."""
@@ -1078,14 +1579,12 @@ class ClipIndex:
 
     def metadata(self, path: str | Path) -> ClipMetadata | None:
         """Expose persisted media/freshness identity for retrieval and QA."""
-        with self._connect() as connection:
-            row = connection.execute(
-                """SELECT path,size,mtime_ns,duration,width,height,fps,source_family,english_text,
-                            source_url,semantic_scores
-                     FROM clips WHERE path=?""",
-                (str(Path(path).resolve()),),
-            ).fetchone()
+        candidate_filter = self.candidate_filter
+        row, _revision = self._catalog_row(path)
         if row is None:
+            return None
+        if candidate_filter is not None and not candidate_filter(FootageItem(
+                row["path"], row["name"], row["source"], row["source_url"], row["license"], json.loads(row["tags"] or "[]"))):
             return None
         try:
             semantic_scores = {str(key): float(value)
@@ -1155,6 +1654,9 @@ class ClipIndex:
                      for root in self.allowed_roots]
             excluded.update(key for key, item in zip(corpus.path_keys, corpus.items)
                             if not any(key.replace("\\", "/").startswith(root + "/") for root in roots))
+        candidate_filter = self.candidate_filter
+        if candidate_filter is not None:
+            excluded.update(key for key, item in zip(corpus.path_keys, corpus.items) if not candidate_filter(item))
         if not corpus.items:
             return [[] for _ in queries]
         existence_cache: dict[str, bool] = {}
@@ -1213,7 +1715,7 @@ class ClipIndex:
                 candidate_count = min(len(corpus.items), candidate_count * 2)
             hits = []
             for index in valid_positions:
-                hits.append(SearchHit(corpus.items[index], float(row_scores[index]), corpus.durations[index],
+                hits.append(SearchHit(self._with_visual_assessor(corpus.items[index], corpus.vectors.shape[1]), float(row_scores[index]), corpus.durations[index],
                                       corpus.widths[index], corpus.heights[index],
                                       corpus.semantic_confidences[index], corpus.source_families[index]))
             by_query[query] = hits
@@ -1244,8 +1746,16 @@ class ClipIndex:
     def path_allowed(self, path: str | Path) -> bool:
         if self.allowed_roots is None:
             return True
+        snapshot = tuple(self.allowed_roots)
+        with self._lock:
+            if self._allowed_roots_snapshot != snapshot:
+                self._resolved_allowed_roots = tuple(Path(root).expanduser().resolve() for root in snapshot)
+                self._allowed_roots_snapshot = snapshot
+            roots = self._resolved_allowed_roots
+        # Always resolve the candidate itself: a changed symlink must not
+        # inherit an earlier path-eligibility result.
         candidate = Path(path).resolve()
-        return any(candidate.is_relative_to(Path(root).expanduser().resolve()) for root in self.allowed_roots)
+        return any(candidate.is_relative_to(root) for root in roots)
 
     @staticmethod
     def _screen_text_scores(frame, query_vectors) -> tuple[float, float]:

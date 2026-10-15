@@ -1,0 +1,161 @@
+"""Beat-local narration semantics using real imports and disposable storage."""
+import unittest
+
+from scriptor import bridge
+from scriptor.voice_map import VoiceMapStatus
+
+
+def status_for(segments, duration):
+    return VoiceMapStatus("approximate", "approximate", path="fixture-map.json",
+                          reason="Word alignment unavailable", data={
+        "audioDuration": duration, "timingMode": "approximate", "schemaVersion": 1,
+        "productionItemId": "test-quality-voice", "scriptSha256": "fixture-script",
+        "audioSha256": "fixture-audio", "alignmentEngine": "newsflow-fallback",
+        "alignmentConfidence": 0.0, "segments": segments,
+    })
+
+
+def segment(text, duration=12, query="", identity=1, start=0):
+    return {"id": identity, "start": start, "end": start + duration,
+            "duration": duration, "text": text, "visualQuery": query}
+
+
+class BeatLocalVoiceQualityTests(unittest.TestCase):
+    def test_later_explicit_action_does_not_replace_earlier_beat(self):
+        text = "Делегации провели встречу в столице сегодня. Затем порт возобновил погрузку судов ночью."
+        scenes, provenance = bridge._voice_map_scenes(status_for([segment(text)], 12))
+        self.assertIn("diplomatic", scenes[0]["visual_query_en"])
+        self.assertNotIn("port", scenes[0]["visual_query_en"])
+        self.assertIn("port", scenes[1]["visual_query_en"])
+        self.assertNotIn("diplomatic", scenes[1]["visual_query_en"])
+        self.assertEqual(text.split(), " ".join(row["narration"] for row in scenes).split())
+        self.assertEqual([(0, 6, 6), (6, 12, 6)], [
+            (row["narration_start"], row["narration_end"], row["duration"]) for row in scenes])
+        self.assertEqual("approximate", provenance["alignmentMode"])
+        self.assertEqual("newsflow-fallback", provenance["alignmentEngine"])
+        self.assertEqual(0.0, provenance["alignmentConfidence"])
+        self.assertEqual("Word alignment unavailable", provenance["alignmentUnavailableReason"])
+
+    def test_authored_union_does_not_leak_later_topic_into_early_beat(self):
+        text = "Делегации провели встречу в столице сегодня. Порт возобновил погрузку судов поздно ночью."
+        raw = "diplomatic negotiations meeting, seaport cargo ships"
+        scenes, _ = bridge._voice_map_scenes(status_for([segment(text, query=raw)], 12))
+        self.assertIn("diplomatic", scenes[0]["visual_query_en"])
+        self.assertNotIn("seaport", scenes[0]["visual_query_en"])
+        self.assertIn("port", scenes[1]["visual_query_en"])
+        self.assertNotIn("diplomatic", scenes[1]["visual_query_en"])
+
+    def test_pronoun_context_survives_cut_then_resets_at_concrete_object(self):
+        text = "Путин выступил перед журналистами в столице. Он прокомментировал решение правительства утром сегодня."
+        objects = segment("Порт возобновил погрузку судов.", duration=6, identity=2, start=12)
+        scenes, _ = bridge._voice_map_scenes(status_for([segment(text), objects], 18))
+        self.assertEqual(["putin"], scenes[0]["scene_intent"]["target_people"])
+        self.assertEqual(["putin"], scenes[1]["scene_intent"]["target_people"])
+        self.assertIn("Putin", scenes[1]["visual_query_en"])
+        self.assertEqual([], scenes[2]["scene_intent"]["target_people"])
+        self.assertNotIn("Putin", scenes[2]["visual_query_en"])
+
+    def test_compatible_authored_query_keeps_editorial_location(self):
+        text = "Делегации провели встречу в столице сегодня. Делегации продолжили переговоры в здании вечером."
+        query = "Geneva diplomatic negotiations delegation meeting"
+        scenes, _ = bridge._voice_map_scenes(status_for([segment(text, query=query)], 12))
+        self.assertEqual([query, query], [row["visual_query_en"] for row in scenes])
+
+    def test_repeated_generic_fragments_use_their_own_nearest_context(self):
+        segments = [
+            segment("Вашингтон меняет правила.", duration=6,
+                    query="Washington White House US government"),
+            segment("И вот вопрос. И вот вопрос. И вот вопрос.", duration=18,
+                    query=bridge.GENERIC_VISUAL_QUERY, identity=2, start=6),
+            segment("Киев меняет правила.", duration=6,
+                    query="Kyiv Ukraine government", identity=3, start=24),
+        ]
+        scenes, _ = bridge._voice_map_scenes(status_for(segments, 30))
+        self.assertIn("Washington", scenes[1]["visual_query_en"])
+        self.assertIn("Kyiv", scenes[3]["visual_query_en"])
+
+    def test_official_and_port_union_is_local_even_without_official_topic_tag(self):
+        text = "Власти прокомментировали новое решение правительства сегодня. Порт возобновил погрузку судов поздно ночью."
+        raw = "official statement government briefing, seaport cargo ships"
+        scenes, _ = bridge._voice_map_scenes(status_for([segment(text, query=raw)], 12))
+        self.assertIn("statement", scenes[0]["visual_query_en"])
+        self.assertNotIn("seaport", scenes[0]["visual_query_en"])
+        self.assertIn("port", scenes[1]["visual_query_en"])
+        self.assertNotIn("briefing", scenes[1]["visual_query_en"])
+
+    def test_negative_clause_crossing_cut_does_not_create_shelling(self):
+        text = "Власти подтвердили сегодня что военные не начали обстрел города прошлой ночью вновь."
+        scenes, _ = bridge._voice_map_scenes(status_for([segment(text)], 12))
+        self.assertEqual("не", scenes[0]["narration"].split()[-1])
+        self.assertEqual("начали", scenes[1]["narration"].split()[0])
+        for scene in scenes:
+            self.assertNotIn("shelling", scene["visual_query_en"])
+            self.assertNotIn("artillery", scene["visual_query_en"])
+
+    def test_pronoun_before_cut_keeps_person_for_predicate_after_cut(self):
+        text = "Путин прибыл утром. Позже он прокомментировал решение правительства перед журналистами."
+        scenes, _ = bridge._voice_map_scenes(status_for([segment(text)], 12))
+        self.assertEqual("он", scenes[0]["narration"].split()[-1])
+        self.assertEqual("прокомментировал", scenes[1]["narration"].split()[0])
+        self.assertEqual(["putin"], scenes[1]["scene_intent"]["target_people"])
+        self.assertIn("Putin", scenes[1]["visual_query_en"])
+
+    def test_contrasting_action_clauses_do_not_share_visuals_across_cuts(self):
+        cases = [
+            ("Делегации провели встречу в столице сегодня, а порт возобновил погрузку судов ночью.",
+             "diplomatic", "port"),
+            ("Власти отменили митинг в столице сегодня, но рабочие устроили забастовку у завода.",
+             "statement", "labor strike"),
+        ]
+        for text, earlier, later in cases:
+            with self.subTest(text=text):
+                scenes, _ = bridge._voice_map_scenes(status_for([segment(text)], 12))
+                self.assertIn(earlier, scenes[0]["visual_query_en"])
+                self.assertNotIn(later, scenes[0]["visual_query_en"])
+                self.assertIn(later, scenes[1]["visual_query_en"])
+                self.assertNotIn(earlier, scenes[1]["visual_query_en"])
+                self.assertEqual(text.split(), " ".join(row["narration"] for row in scenes).split())
+
+    def test_compatible_authored_diplomatic_details_do_not_erase_location(self):
+        text = "Делегации провели встречу в столице сегодня. Делегации продолжили переговоры в здании вечером."
+        for details in ("journalists", "cameras", "journalists cameras"):
+            query = f"Geneva diplomatic negotiations delegation meeting {details}"
+            with self.subTest(details=details):
+                scenes, _ = bridge._voice_map_scenes(status_for([segment(text, query=query)], 12))
+                self.assertEqual([query, query], [row["visual_query_en"] for row in scenes])
+
+    def test_linked_transport_clauses_do_not_borrow_finance_or_future_protest(self):
+        clauses = [
+            ("Глубоководные порты работали стабильнее.", 6, "seaport cargo cranes ships"),
+            ("Для зерна,", 2, "grain harvest agricultural storage wheat field"),
+            ("где прибыль на тонне может быть небольшой,", 6, ""),
+            ("а вопрос того, имеет ли экспортная сделка экономический смысл.", 6, "economy finance business markets"),
+            ("На одном из направлений доставка раньше занимала две недели,", 6, ""),
+            ("а теперь растянулась более чем на месяц.", 4, ""),
+            ("Рабочие устроили забастовку у завода.", 6, "peaceful workers labor strike picket line"),
+        ]
+        segments, cursor = [], 0
+        for identity, (text, duration, query) in enumerate(clauses, 1):
+            segments.append(segment(text, duration, query, identity, cursor))
+            cursor += duration
+        scenes, _ = bridge._voice_map_scenes(status_for(segments, cursor))
+        for row in scenes[:-1]:
+            self.assertIn("port", row["visual_query_en"])
+            self.assertNotIn("finance", row["visual_query_en"])
+            self.assertNotIn("labor strike", row["visual_query_en"])
+        self.assertIn("labor strike", scenes[-1]["visual_query_en"])
+        self.assertNotIn("seaport", scenes[-1]["visual_query_en"])
+
+    def test_stored_grain_harvest_cannot_replace_explicit_loading_or_freight(self):
+        for text in ("Терминалы загружают большие суда и отправляют партии зерна покупателям.",
+                     "Маршрут должен принимать большие объёмы нового урожая.",
+                     "Зерно конкурирует за проход с топливом и другими грузами."):
+            raw = "grain harvest farming combine wheat field"
+            scenes, _ = bridge._voice_map_scenes(status_for([segment(text, 6, raw)], 6))
+            with self.subTest(text=text):
+                self.assertIn("cargo", scenes[0]["visual_query_en"])
+                self.assertNotIn("harvest", scenes[0]["visual_query_en"])
+
+
+if __name__ == "__main__":
+    unittest.main()
