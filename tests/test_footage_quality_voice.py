@@ -21,6 +21,25 @@ def segment(text, duration=12, query="", identity=1, start=0):
 
 
 class BeatLocalVoiceQualityTests(unittest.TestCase):
+    def test_continuing_grain_condition_and_sale_reject_stale_authored_harvest(self):
+        texts = ["Но эти меры ограниченно помогают,", "если пшеницу невозможно выгодно вывезти за границу,",
+                 "либо продают её с логистическим дисконтом,", "либо ищут субсидию на её хранение."]
+        raw = "grain harvest agricultural storage wheat field"
+        segments = [segment(text, 6, raw, i + 1, i * 6) for i, text in enumerate(texts)]
+        scenes, _ = bridge._voice_map_scenes(status_for(segments, 24))
+        for scene in scenes:
+            self.assertIn("warehouse", scene["visual_query_en"])
+            self.assertNotIn("harvest", scene["visual_query_en"])
+        self.assertEqual(texts, [scene["narration"] for scene in scenes])
+        self.assertEqual([6] * 4, [scene["duration"] for scene in scenes])
+
+    def test_explicit_crops_and_harvesting_keep_compatible_authored_query(self):
+        raw = "grain harvest agricultural storage wheat field"
+        for text in ("Комбайны начали уборку урожая.", "Пшеница созревает в поле.",
+                     "Жатва началась.", "На полях идёт жатва."):
+            scenes, _ = bridge._voice_map_scenes(status_for([segment(text, 6, raw)], 6))
+            self.assertEqual(raw, scenes[0]["visual_query_en"])
+
     def test_later_explicit_action_does_not_replace_earlier_beat(self):
         text = "Делегации провели встречу в столице сегодня. Затем порт возобновил погрузку судов ночью."
         scenes, provenance = bridge._voice_map_scenes(status_for([segment(text)], 12))

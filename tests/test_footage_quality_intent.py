@@ -6,6 +6,47 @@ from scriptor.timeline import VISUAL_TERMS
 
 
 class LocalActionQualityTests(unittest.TestCase):
+    def test_grain_export_verbs_and_storage_describe_cargo_not_harvesting(self):
+        for text in ("Пшеницу невозможно выгодно вывезти за границу.",
+                     "Зерно оставляют на хранение перед продажей."):
+            with self.subTest(text=text):
+                query = visual_intent(text, VISUAL_TERMS)["visual_query"]
+                self.assertIn("cargo", query)
+                self.assertIn("warehouse", query)
+                self.assertNotIn("harvest", query)
+        for text in ("Комбайны начали уборку зерна.", "Жатва началась.", "На полях идёт жатва."):
+            self.assertIn("harvest", visual_intent(text, VISUAL_TERMS)["visual_query"])
+        self.assertNotIn("harvest", visual_intent("Делегации собираются в столице.", VISUAL_TERMS)["visual_query"])
+        self.assertNotIn("cargo", visual_intent("Зерно растёт в поле.", VISUAL_TERMS)["visual_query"])
+
+    def test_intention_to_export_is_not_an_asserted_harvesting_action(self):
+        for text in ("Зерно собираются вывезти за границу.", "Аграрии собираются увеличить экспорт.",
+                     "Аграрии собирались увеличить экспорт.", "Мы собираемся вывезти зерно.",
+                     "Аграрии собирают деньги на вывоз зерна.",
+                     "Аграрное ведомство собирает данные об экспорте зерна."):
+            with self.subTest(text=text):
+                query = visual_intent(text, VISUAL_TERMS)["visual_query"]
+                self.assertIn("warehouse", query)
+                self.assertNotIn("harvest", query)
+                self.assertNotIn("combine", query)
+        self.assertIn("harvest", visual_intent("Зерно собирают, началась жатва.", VISUAL_TERMS)["visual_query"])
+
+    def test_stored_commodity_sale_references_keep_only_bounded_physical_subject(self):
+        previous = visual_intent("Зерно оставляют на хранение перед продажей,", VISUAL_TERMS)
+        for text in ("либо продают его с транспортным дисконтом,",
+                     "либо ищут субсидию на его хранение и вывоз."):
+            previous = visual_intent(text, VISUAL_TERMS, previous=previous)
+            self.assertIn("warehouse", previous["visual_query"])
+            self.assertNotIn("harvest", previous["visual_query"])
+        for text in ("Банк открыл кредитную программу.", "Комбайны начали уборку урожая."):
+            current = visual_intent(text, VISUAL_TERMS, previous=previous)
+            self.assertNotIn("warehouse", current["visual_query"])
+        self.assertEqual("", visual_intent("Продают его с логистическим дисконтом,", VISUAL_TERMS)["visual_query"])
+        previous = visual_intent("Зерно оставляют на хранение,", VISUAL_TERMS)
+        for _ in range(7):
+            previous = visual_intent("Продают его с логистическим дисконтом,", VISUAL_TERMS, previous=previous)
+        self.assertNotIn("warehouse", previous["visual_query"])
+
     def test_parallel_export_actions_keep_their_local_physical_subject_place(self):
         from scriptor import bridge
         from scriptor.footage import FootageItem

@@ -268,11 +268,14 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     grain = bool(re.search(r"\b(?:зерн\w*|пшениц\w*|кукуруз\w*)", lowered))
     agricultural = bool(re.search(r"\bаграр\w*", lowered))
     oil = term_matches("нефт", lowered)
-    export = bool(re.search(r"\bэкспорт\w*|внешн\w*\s+рын\w*", lowered))
+    export = bool(re.search(r"\b(?:экспорт\w*|выв(?:ез|оз)\w*)|внешн\w*\s+рын\w*", lowered))
     commodity_subject = "oil" if oil else ("grain" if grain else ("agricultural" if agricultural else ""))
     physical_export = export and bool(commodity_subject) and not protest and not primary
     crop = grain or term_matches("урож", lowered)
-    harvesting = bool(re.search(r"\b(?:уборк\w*|сбор\w*|собир\w*|собрал\w*|комбайн\w*|жатв\w*)", lowered))
+    harvesting = bool(re.search(
+        r"\b(?:уборк\w*|сбор\w*|собир(?!\w*с[яь]\b)\w*|собрал(?!\w*с[яь]\b)\w*|комбайн\w*|жатв\w*)",
+        lowered,
+    ))
     logistics_routes = logistics_routes or bool(re.search(r"\bмаршрут\w*", lowered) and crop)
     loading = term_matches("погрузк", lowered) or bool(
         re.search(r"\b(?:загруж\w*|загруз\w*|погруз\w*)", lowered)
@@ -280,6 +283,7 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     )
     cargo_crop = (crop and not harvesting and not protest and not primary
                   and (shipping or rail or logistics_routes or loading
+                       or (not physical_export and re.search(r"\bхран\w*", lowered))
                        or term_matches("порт", lowered) or term_matches("склад", lowered)
                        or re.search(r"\bзерновоз\w*", lowered)
                        or re.search(r"\b(?:груз\w*|проход\w*|парти\w*|покупател\w*|перевоз\w*|достав\w*)", lowered)))
@@ -374,6 +378,10 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         terms.append("cargo transport logistics warehouse alternative freight routes")
     if re.search(r"\bсухопутн\w*\s+(?:разворот\w*|маршрут\w*|перевоз\w*|логист\w*|пут\w*)", lowered):
         terms.append("overland rail road freight cargo transport warehouse logistics")
+    if (harvesting and not protest
+            and re.search(r"\bжатв\w*", lowered)
+            and not re.search(r"\b(?:harvest|harvesting|combine)\b", ", ".join(terms), re.IGNORECASE)):
+        terms.append("agriculture grain harvest combine farming fields")
     if physical_export:
         terms.append({
             "grain": "grain cargo export warehouse storage logistics",
@@ -416,15 +424,23 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     duration_unit = bool(re.search(r"\b(?:недел\w*|месяц\w*|сут\w*|дн\w*|час\w*)", lowered))
     delivery_duration = duration_unit and bool(re.search(r"\bдостав\w*", lowered))
     duration_continuation = duration_unit and bool(re.search(r"\b(?:растянул\w*|занимал\w*|длил\w*)", lowered))
+    commodity_reference = bool((previous or {}).get("commodity_subject") and (
+        re.search(r"\b(?:прода\w*|продаж\w*)", lowered)
+        and re.search(r"\b(?:его|ее|их|дисконт\w*)\b", lowered)
+        or re.search(r"\b(?:логистическ\w*|транспортн\w*)\s+дисконт\w*", lowered)
+        or re.search(r"\b(?:хран\w*|выв(?:ез|оз)\w*)", lowered)
+        and re.search(r"\b(?:его|ее|их|субсиди\w*)\b", lowered)
+    ))
     prior_depth = int((previous or {}).get("inherited_subject_depth", 0))
     prior_words = int((previous or {}).get("inherited_subject_words", 0))
     prior_open_clause = not re.search(r"[.!?][\"'»”)]*\s*$", str((previous or {}).get("text", "")))
     # The ordinary rule remains one hop. Explicitly linked logistics clauses
     # may continue within a finite paragraph budget; a completed abstract
     # sentence alone cannot renew that context indefinitely.
-    linked_continuation = prior_depth > 0 and (prior_open_clause or delivery_duration or reporting_reference)
+    linked_continuation = prior_depth > 0 and (prior_open_clause or delivery_duration or reporting_reference
+                                              or commodity_reference)
     abstract_logistics = (abstract_logistics or grain_intro or economic_evaluation or duration_continuation
-                          or carrier_reference or reporting_reference)
+                          or carrier_reference or reporting_reference or commodity_reference)
     prior_topics = visual_topics(str((previous or {}).get("visual_query", "")))
     inherited_subject_words = 0
     abstract_economic_only = (economic_evaluation and linked_continuation

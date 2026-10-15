@@ -5836,6 +5836,11 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
             # A generated farmer/cost association is not a narrated protest.
             # Empty local intent can inherit actual neighbouring context.
             return intent_query
+        if (not intent_query
+                and re.search(r"\b(?:harvest|farming|combine)\b", raw, re.IGNORECASE)):
+            # An empty local intent does not establish a harvesting event.
+            # Resolve its nearby explicit context instead of a stale crop tag.
+            return ""
         for query, topics in ((intent_query, actual_topics), (raw, stored_topics)):
             if re.search(r"\b(?:press conference|statement|briefing)\b", query, re.IGNORECASE):
                 topics.add("official-speech")
@@ -16011,6 +16016,22 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
             for _identity, _name, expression in PERSON_ALIASES:
                 haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
             haystack += " " + " ".join(person_name(identity).casefold() for identity in evidence["visible"])
+        if visual.get("dominant_kind") in {"official", "meeting", "government_building"}:
+            # A government discussing another country is not that country's
+            # institution. Prefer fresh curated identity over catalog names;
+            # incidental country words in a title cannot erase this conflict.
+            identities = person_evidence(" ".join(name for _, name, _ in PERSON_ALIASES),
+                                         item, start, duration)
+            people = (identities["visible"] if identities["status"] == "confirmed"
+                      else named_people(haystack))
+            if identities["status"] == "confirmed" and evidence["status"] != "confirmed":
+                for _identity, _name, expression in PERSON_ALIASES:
+                    haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
+                haystack += " " + " ".join(person_name(identity).casefold() for identity in people)
+            government_places = _montage_entity_groups(" ".join(person_name(person) for person in people))
+            requested_places = _montage_entity_groups(query)
+            if government_places and requested_places and government_places.isdisjoint(requested_places):
+                return False
         # Folder/model topic labels are weak. A checked actual window may
         # correct them; existing explicit entity/location contradictions stay.
         return not (_montage_entity_conflict(query, haystack)
@@ -16875,6 +16896,12 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
     return None
 
 
+def _montage_external_retained_safe(index, item: FootageItem, story_context: str) -> bool:
+    """A cached external cut must pass the current story and screen gates."""
+    return (_montage_recovery_candidate_allowed(index, item, story_context)
+            and _montage_screen_text_safe(index, item))
+
+
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                              semaphore: threading.BoundedSemaphore | None = None,
                              progress=None, excluded: set[str] | None = None,
@@ -16923,6 +16950,8 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
             if cached and not _montage_recovery_candidate_allowed(index, cached, story_context):
                 continue
             if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
+                if not _montage_external_retained_safe(index, cached, story_context):
+                    continue
                 if progress:
                     progress("Подбор футажей", f"Кэш внешнего футажа: {Path(cached.path).name}")
                 return cached
@@ -16938,6 +16967,8 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 if cached and not _montage_recovery_candidate_allowed(index, cached, story_context):
                     continue
                 if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
+                    if not _montage_external_retained_safe(index, cached, story_context):
+                        continue
                     return cached
                 with lock:
                     operation_id = hashlib.sha256(cache_key.encode()).hexdigest()[:20]
@@ -16985,11 +17016,11 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 if (not _montage_recovery_candidate_allowed(index, normalized, story_context)
                         or _montage_item_is_excluded(normalized, excluded, excluded_families)):
                     continue
+                index.add_item(normalized)
+                if not _montage_external_retained_safe(index, normalized, story_context):
+                    continue
                 with _EXTERNAL_FOOTAGE_CACHE_LOCK:
                     _EXTERNAL_FOOTAGE_CACHE[cache_key] = normalized
-            index.add_item(normalized)
-            if not _montage_screen_text_safe(index, normalized):
-                continue
             return normalized
         except _BRIDGE_OPERATION_ERRORS:
             # A weak or restricted external source must never prevent the
@@ -17482,11 +17513,10 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                 person = primary.diagnostics.get("person", {})
                 visual = primary.diagnostics.get("visual", {})
                 if person.get("status") in {"confirmed", "probable"} or visual.get("relation") == "direct":
-                    claimed = claim_batch_source(primary.item, primary.source_family, position_bucket)
-                    if claimed:
-                        selection = primary
-                    elif primary.reused:
-                        selection = replace(primary, reused_reserved_candidate=True, reused=True)
+                    selection = _safe_reuse_after_reservation_race(
+                        primary, lambda item, family=primary.source_family, bucket=position_bucket:
+                        claim_batch_source(item, family, bucket),
+                    )
             except MontageSelectionFailure as failure:
                 last_selection_failure = failure.diagnostics
 
@@ -18727,14 +18757,17 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
         reverse=True,
     )
     minimum = _montage_level_score_floor("SAFE_CONTEXT", settings.montage_match_threshold)
+    def acceptable_window(item):
+        duration = _montage_recovery_window_limit(query, item, required) if allow_shorter else required
+        start = _montage_recovery_window_start(query, item, duration)
+        return (duration > 1e-6 and start is not None
+                and _semantic_clip_ok(query, item, source_start=start, duration=duration))
+
     candidates = []
     for hit in ranked:
         if float(hit.score) < minimum or not _montage_recovery_candidate_allowed(index, hit.item, story_context):
             continue
-        duration = _montage_recovery_window_limit(query, hit.item, required) if allow_shorter else required
-        start = _montage_recovery_window_start(query, hit.item, duration)
-        if (duration <= 1e-6 or start is None
-                or not _semantic_clip_ok(query, hit.item, source_start=start, duration=duration)):
+        if not acceptable_window(hit.item):
             continue
         if (any(Path(hit.item.path).resolve().is_relative_to(Path(root).expanduser().resolve())
                 for root in settings.footage_folders)
@@ -18749,7 +18782,9 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
         settings, index, download_semaphore,
         created_paths=created_paths,
     )
-    return [downloaded] if downloaded and _montage_recovery_candidate_allowed(index, downloaded, story_context) else []
+    return ([downloaded] if downloaded
+            and _montage_external_retained_safe(index, downloaded, story_context)
+            and acceptable_window(downloaded) else [])
 
 
 def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, settings: Settings,

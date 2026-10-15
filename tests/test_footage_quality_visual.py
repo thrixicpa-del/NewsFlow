@@ -1,6 +1,7 @@
 """Visual-assessor contracts, not real model accuracy assertions."""
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -49,6 +50,21 @@ class WindowVisualQualityTests(unittest.TestCase):
         item._visual_assessor = lambda *args, **kwargs: {'relation':'context','dominant_kind':'meeting'}
         self.assertFalse(bridge._semantic_clip_ok('Volodymyr Zelensky official statement', item))
         self.assertTrue(bridge._semantic_clip_ok('delegations diplomatic meeting', item))
+
+    def test_foreign_government_does_not_become_ukrainian_from_a_reported_topic(self):
+        item = self.item('Лукашенко о фотографиях украинского беспилотника.mp4', [], 'context')
+        item._visual_assessor = lambda *args, **kwargs: {'relation': 'context', 'dominant_kind': 'meeting'}
+        self.assertFalse(bridge._semantic_clip_ok('Kyiv Ukraine government city', item))
+        self.assertTrue(bridge._semantic_clip_ok('Belarus government meeting', item))
+        self.assertTrue(bridge._semantic_clip_ok('delegations diplomatic meeting', item))
+
+    def test_curated_government_person_overrides_reported_topic_catalog_hint(self):
+        item = self.item('Лукашенко о фотографиях украинского беспилотника.mp4', [], 'context')
+        item._visual_assessor = lambda *args, **kwargs: {'relation': 'context', 'dominant_kind': 'meeting'}
+        stat = Path(item.path).stat()
+        item.person_evidence = {'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns,
+            'observations': [{'person_id': 'zelensky', 'source': 'curated', 'start': 0, 'end': 6}]}
+        self.assertTrue(bridge._semantic_clip_ok('Kyiv Ukraine government city', item))
 
     def test_protest_against_lukashenko_is_not_a_wrong_portrait(self):
         item = self.item('Протест против Лукашенко.mp4', ['protest-crowd'], 'direct')
@@ -294,6 +310,29 @@ class WindowVisualQualityTests(unittest.TestCase):
         project, direct = self.prepare_two_scene_project()
         self.assertEqual([direct.path, direct.path], [clip.path for clip in project.clips])
         self.assertEqual('SAFE_REUSE', project.clips[1].fallback_level)
+
+    def test_prepare_reservation_race_keeps_direct_material_before_context(self):
+        usage = {'lock': threading.RLock(), 'claims': {}, 'placements': {}, 'windows': {}}
+        prepare, claim = bridge.prepare_montage, bridge._claim_batch_family
+        collided = []
+
+        def racing_claim(current_usage, family, bucket, *args, **kwargs):
+            if family == 'direct-family' and not collided:
+                collided.append(family)
+                current_usage['claims'][(bucket, family)] = 99
+                return False
+            return claim(current_usage, family, bucket, *args, **kwargs)
+
+        with (patch.object(bridge, 'prepare_montage', side_effect=lambda payload: prepare(
+                    {**payload, '_batchFootageUsage': usage})),
+              patch.object(bridge, '_claim_batch_family', side_effect=racing_claim),
+              patch('tests.media_fixtures.write_readable_video', side_effect=lambda path, **_: Path(path).write_bytes(b'disposable-source')),
+              patch.object(bridge, '_cached_or_probed_montage_duration', return_value=7)):
+            project, direct = self.prepare_two_scene_project()
+        self.assertEqual(['direct-family'], collided)
+        self.assertEqual([direct.path, direct.path], [clip.path for clip in project.clips])
+        self.assertEqual('SAFE_REUSE', project.clips[0].fallback_level)
+        self.assertEqual('direct', project.clips[0].selection_diagnostics['visual']['relation'])
 
     def test_prepare_reuses_confirmed_speaker_before_fresh_institution_context(self):
         project, direct = self.prepare_two_scene_project(named_person=True)
