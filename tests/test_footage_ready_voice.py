@@ -39,9 +39,13 @@ def _validate_ready_probe(probe, duration):
     for kind in ('audio', 'video'):
         stream = next(s for s in probe['streams'] if s['codec_type'] == kind)
         try:
-            endpoint = float(stream.get('start_time', 0)) + float(stream['duration'])
+            start = float(stream.get('start_time', 0))
+            length = float(stream['duration'])
+            endpoint = start + length
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f'{kind} duration is unverified') from error
+        if not abs(start) <= .25 or not duration - .25 <= length <= duration + .25:
+            raise ValueError(f'{kind} start/duration does not preserve ready speech: {start}/{length}')
         if not duration - .25 <= endpoint <= duration + .25:
             raise ValueError(f'{kind} endpoint does not preserve ready speech: {endpoint}')
         endpoints[kind] = endpoint
@@ -73,6 +77,13 @@ def _controlled_ready_shortage(error, stage, projects):
 
 
 class ReadyVoiceEvidenceTests(unittest.TestCase):
+    def test_short_delayed_audio_cannot_pass_by_matching_endpoint(self):
+        with self.assertRaises(ValueError):
+            _validate_ready_probe({'format': {'duration': '300'}, 'streams': [
+                {'codec_type': 'video', 'start_time': '0', 'duration': '300'},
+                {'codec_type': 'audio', 'start_time': '294', 'duration': '6'},
+            ]}, 300)
+
     def test_only_prepare_shortage_with_matching_saved_draft_is_controlled(self):
         import tempfile
         with tempfile.TemporaryDirectory(dir=os.environ['NEWSFLOW_TEST_ROOT']) as folder:
