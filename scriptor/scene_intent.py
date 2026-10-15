@@ -16,6 +16,7 @@ PERSON_ALIASES = (
     ("tokayev", "Kassym-Jomart Tokayev", r"токаев\w*|(?:kassym.jomart\s+)?to(?:k|q)ayev"),
     ("aliyev", "Ilham Aliyev", r"алиев\w*|(?:ilham\s+)?aliyev"),
     ("macron", "Emmanuel Macron", r"макрон\w*|(?:emmanuel\s+)?macron"),
+    ("lukashenko", "Alexander Lukashenko", r"лукашенко|(?:alexander\s+)?lukashenk[oa]"),
 )
 
 # Exact subject forms for the bounded Russian speaker rule. Broad aliases
@@ -23,6 +24,7 @@ PERSON_ALIASES = (
 PERSON_SUBJECT_FORMS = {
     "putin": "путин", "zelensky": "зеленский", "trump": "трамп",
     "pashinyan": "пашинян", "tokayev": "токаев", "aliyev": "алиев", "macron": "макрон",
+    "lukashenko": "лукашенко",
 }
 
 

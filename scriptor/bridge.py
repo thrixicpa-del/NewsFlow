@@ -15782,6 +15782,7 @@ _MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("azerbaijan", ("azerbaijan", "baku", "aliyev", "азербайдж", "баку", "алиев",
                     "azerbaijan-government-baku")),
     ("kazakhstan", ("kazakhstan", "astana", "tokayev", "tokaev", "казахстан", "астана", "токаев")),
+    ("belarus", ("belarus", "minsk", "lukashenko", "беларус", "минск", "лукашенко")),
 )
 
 # Country-level identity is not enough for an explicitly named government

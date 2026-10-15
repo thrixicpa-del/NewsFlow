@@ -44,6 +44,16 @@ class WindowVisualQualityTests(unittest.TestCase):
         self.assertFalse(bridge._semantic_clip_ok('Moscow Russia government building exterior illustrative context', item))
         self.assertTrue(bridge._semantic_clip_ok('Kazakhstan government building exterior illustrative context', item))
 
+    def test_lukashenko_meeting_cannot_replace_a_named_zelensky_statement(self):
+        item = self.item('Лукашенко заседание.mp4', [], 'context')
+        item._visual_assessor = lambda *args, **kwargs: {'relation':'context','dominant_kind':'meeting'}
+        self.assertFalse(bridge._semantic_clip_ok('Volodymyr Zelensky official statement', item))
+        self.assertTrue(bridge._semantic_clip_ok('delegations diplomatic meeting', item))
+
+    def test_protest_against_lukashenko_is_not_a_wrong_portrait(self):
+        item = self.item('Протест против Лукашенко.mp4', ['protest-crowd'], 'direct')
+        self.assertTrue(bridge._semantic_clip_ok('peaceful civilian protest rally placards', item))
+
     def test_joint_russian_kazakh_meeting_remains_valid_context(self):
         item = self.item('Putin Tokayev Russia Kazakhstan delegations.mp4', [], 'context')
         item._visual_assessor = lambda *args, **kwargs: {'relation':'context','dominant_kind':'meeting'}
