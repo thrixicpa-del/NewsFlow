@@ -10,7 +10,16 @@ docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges -
 
 Python dependencies use the repository hash-locked requirements. The Python base tag is versioned; Debian FFmpeg/Tk packages depend on the build-time Debian repository. Record the resulting image digest and installed package versions for an actual reproducible acceptance run. The configuration has not been built or run while Docker Desktop's engine pipe is unavailable. A future clean build may expose platform-specific dependency issues; this is NOT a Docker PASS.
 
-Local source checks always use `python tests/run_isolated.py --pytest ...`. Opt-in runs:
+Local source checks always use `python tests/run_isolated.py --pytest ...`.
+
+The existing native CI entry point `python tests/run_isolated.py tests.test_voice_map -q`
+also loads the PR403 follow-up, local-action, VoiceMap, exact-window evidence,
+recovery/timing, visual-feature reuse and external-cache regressions through
+`test_voice_map.load_tests`. These execute without the optional workflow patch.
+The patch-only independent Windows montage E2E remains a separate, unexecuted
+gate; a Windows source build is not evidence of that E2E.
+
+Opt-in runs:
 
 - `NEWSFLOW_FOOTAGE_BENCHMARK=<local-json-path>` with `tests/test_footage_v3_benchmark.py`: five repeats at 1k/10k/20k and 12/72 queries. Synthetic vectors and mocked file existence; no real visual semantics or disk/decode timing.
 - `NEWSFLOW_FOOTAGE_DIVERSITY=<local-json-path>` with `tests/test_footage_v3_diversity.py`: suitable candidate pools, normal/fast, serial/parallel, sufficient/scarce cases. The fast setting remains a duration target for preparing the reuse pool, not a new definition of uniqueness.
