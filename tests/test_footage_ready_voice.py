@@ -6,6 +6,7 @@ import cProfile
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -54,7 +55,35 @@ def _validate_ready_results(results):
         raise ValueError('unexpected ready speech outcome')
 
 
+def _controlled_ready_shortage(error, stage, projects):
+    if stage != 'prepare':
+        return False
+    if isinstance(error, bridge.MontageSelectionFailure):
+        return True
+    match = re.fullmatch(
+        r'Нет допустимого тематического футажа для сцены (\d+)\. '
+        r'Неполный черновик сохранён: ([^\r\n]+\.newsflow\.partial)', str(error))
+    if not match or Path(match[2]).name != match[2]:
+        return False
+    draft = projects / match[2]
+    if not draft.is_file():
+        return False
+    payload = json.loads(draft.read_text(encoding='utf-8'))
+    return len(payload.get('clips', [])) == int(match[1]) - 1
+
+
 class ReadyVoiceEvidenceTests(unittest.TestCase):
+    def test_only_prepare_shortage_with_matching_saved_draft_is_controlled(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(dir=os.environ['NEWSFLOW_TEST_ROOT']) as folder:
+            projects = Path(folder)
+            expected = RuntimeError('Нет допустимого тематического футажа для сцены 2. '
+                                    'Неполный черновик сохранён: test.newsflow.partial')
+            self.assertFalse(_controlled_ready_shortage(expected, 'prepare', projects))
+            (projects/'test.newsflow.partial').write_text(json.dumps({'clips': [{}]}), encoding='utf-8')
+            self.assertTrue(_controlled_ready_shortage(expected, 'prepare', projects))
+            self.assertFalse(_controlled_ready_shortage(expected, 'render', projects))
+            self.assertFalse(_controlled_ready_shortage(RuntimeError('unexpected render failure'), 'prepare', projects))
     def test_short_audio_cannot_pass_with_long_video(self):
         with self.assertRaises(ValueError):
             _validate_ready_probe({'format': {'duration': '300'}, 'streams': [
@@ -148,6 +177,7 @@ class ReadyVoiceMontage(unittest.TestCase):
         results = []
         for number,title in enumerate(titles):
             started=time.perf_counter()
+            stage = 'prepare'
             try:
                 profile=cProfile.Profile()
                 try:
@@ -159,6 +189,7 @@ class ReadyVoiceMontage(unittest.TestCase):
                 plan=TimelineProject.load(path)
                 frozen=[(clip.path,clip.source_start,clip.duration) for clip in plan.clips]
                 started=time.perf_counter()
+                stage = 'render'
                 profile=cProfile.Profile()
                 try:
                     profile.runcall(bridge.render_montage,{'projectPath':str(path)})
@@ -186,7 +217,9 @@ class ReadyVoiceMontage(unittest.TestCase):
                                 'preparation_seconds':preparation,'render_seconds':elapsed,
                                 'timing':plan.voice_map_provenance,'metrics':plan.preparation_metrics_ms,
                                 'stream_endpoints':endpoints})
-            except bridge.MontageSelectionFailure as error:
+            except (ValueError, RuntimeError) as error:
+                if not _controlled_ready_shortage(error, stage, output/'projects'):
+                    raise
                 results.append({'status':'INCOMPLETE','reason':str(error),'elapsed':time.perf_counter()-started})
             (output/'manifest.json').write_text(json.dumps({'scope':'real owner speech trimmed to 300s test copies and real CLIP footage',
                 'timing_limit':'source maps approximate; cropped last segment proportional; no measured speech alignment',
