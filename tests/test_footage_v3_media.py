@@ -6,6 +6,7 @@ semantics, recognition, speech alignment, or a provider. Outputs stay local.
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import time
@@ -50,6 +51,14 @@ class FootageV3MediaSmoke(unittest.TestCase):
         library = output / "synthetic-library"
         library.mkdir(exist_ok=True)
         ffmpeg = ffmpeg_executable()
+        # Archive checkouts can resolve a different binary from PATH. Persist
+        # identity so equal-source comparisons cannot hide that confounder.
+        runtime = {
+            "python": platform.python_version(), "platform": platform.platform(),
+            "ffmpeg_version": run_media([ffmpeg, "-version"]).splitlines()[0],
+            "ffmpeg_sha256": hashlib.sha256(Path(ffmpeg).read_bytes()).hexdigest(),
+            "ffprobe_version": run_media([shutil.which("ffprobe"), "-version"]).splitlines()[0],
+        }
         categories = [
             ("parliament-government", "government building exterior"),
             ("diplomatic-negotiations", "diplomatic negotiations delegations"),
@@ -145,6 +154,7 @@ class FootageV3MediaSmoke(unittest.TestCase):
                                         for path in library.glob("*.mp4")})
         (output / "manifest.json").write_text(json.dumps({
             "scope": "source prepare/persist/render/decode engineering only",
+            "runtime": runtime,
             "limitations": ["synthetic motion patterns, metadata, embeddings and tone audio",
                              "no actual person imagery, speech alignment or semantic visual acceptance"],
             "PERSON_MATCH": "NOT VERIFIED", "VISUAL_SEMANTICS": "NOT VERIFIED", "outputs": records,

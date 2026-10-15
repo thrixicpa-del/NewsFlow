@@ -18,6 +18,13 @@ PERSON_ALIASES = (
     ("macron", "Emmanuel Macron", r"макрон\w*|(?:emmanuel\s+)?macron"),
 )
 
+# Exact subject forms for the bounded Russian speaker rule. Broad aliases
+# deliberately also match indirect cases, which cannot establish a speaker.
+PERSON_SUBJECT_FORMS = {
+    "putin": "путин", "zelensky": "зеленский", "trump": "трамп",
+    "pashinyan": "пашинян", "tokayev": "токаев", "aliyev": "алиев", "macron": "макрон",
+}
+
 
 def named_people(text: str) -> list[str]:
     positions = []
@@ -109,9 +116,9 @@ def _negated_attack(text: str) -> bool:
     # refused proposal. This deliberately stops short of a linguistic parser.
     text = re.sub(r"\bне\s+(?:отмен\w*|предотврат\w*)", "", text, flags=re.IGNORECASE)
     return bool(re.search(
-        r"(?:отказ\w*|отмен\w*|предотврат\w*|не\s+(?:было|будет|нанес\w*|нанос\w*|атак\w*|обстрел\w*))"
-        r"(?:\s+\w+){0,5}\s+(?:удар\w*|обстрел\w*|атак\w*)"
-        r"|(?:удар\w*|обстрел\w*|атак\w*)(?:\s+\w+){0,5}\s+(?:отмен\w*|предотврат\w*|не\s+состоя\w*)",
+        r"(?:отказ\w*|отмен\w*|предотврат\w*|не\s+(?:было|будет|начал\w*|начн\w*|нанес\w*|нанос\w*|атак\w*|обстрел\w*))"
+        r"(?:\s+\w+){0,5}\s+(?:удар\w*|обстрел\w*|атак\w*|наступлен\w*)"
+        r"|(?:удар\w*|обстрел\w*|атак\w*|наступлен\w*)(?:\s+\w+){0,5}\s+(?:отмен\w*|предотврат\w*|не\s+состоя\w*)",
         text, re.IGNORECASE,
     ))
 
@@ -124,6 +131,11 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     joint = bool(re.search(r"\b(?:обсуд\w*|переговор\w*|встрет\w*)", lowered))
     indirect = bool(re.search(r"\b(?:по\s+решени\w*|по\s+указ\w*|поручени\w*)", lowered))
     primary = [] if industrial and (indirect or not speech) else people[:1]
+    if primary and len(people) > 1 and re.search(r"\b(?:ответил\w*|выступил\w*|заявил\w*|сказал\w*)", lowered):
+        subjects = [identity for identity in people
+                    if re.search(rf"\b{PERSON_SUBJECT_FORMS[identity]}\b", lowered)]
+        if len(subjects) == 1:
+            primary = subjects
     if joint and not speech and not indirect:
         primary = people
     if not people and not industrial and re.search(r"\b(?:он|его|президент)\b", lowered):

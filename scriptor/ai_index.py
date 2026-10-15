@@ -452,6 +452,18 @@ class ClipIndex:
         with _SEARCH_CORPORA_LOCK:
             _SEARCH_CORPORA.pop(self._cache_key(), None)
 
+    @staticmethod
+    def _row_person_evidence(row) -> dict:
+        """Do not transfer annotations when reindexing new bytes at a path.
+
+        The row already carries the indexed identity; compare it without a
+        filesystem scan. Final interval validation still stats selected files.
+        """
+        evidence = json.loads(row["person_evidence"] or "{}")
+        if evidence.get("size") != row["size"] or evidence.get("mtime_ns") != row["mtime_ns"]:
+            return {}
+        return evidence
+
     def _search_corpus(self) -> _SearchCorpus:
         """Load active vectors once, then reuse them for all scene queries."""
         import numpy as np
@@ -511,7 +523,7 @@ class ClipIndex:
                     continue
                 items.append(IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"],
                                          row["license"], json.loads(row["tags"] or "[]"),
-                                         json.loads(row["person_evidence"] or "{}")))
+                                         self._row_person_evidence(row)))
                 source_families.append(
                     row["source_family"] or source_family_identity(row["path"], row["source_url"])
                 )
@@ -1036,7 +1048,7 @@ class ClipIndex:
             except OSError:
                 return False
         current = [IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"], row["license"],
-                               json.loads(row["tags"] or "[]"), json.loads(row["person_evidence"] or "{}"))
+                               json.loads(row["tags"] or "[]"), self._row_person_evidence(row))
                    for row in rows if self.path_allowed(row["path"]) and Path(row["path"]).is_file()
                    and fresh(row)
                    and str(Path(row["path"]).resolve()).casefold() not in quarantined]

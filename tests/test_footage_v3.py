@@ -69,6 +69,61 @@ def test_primary_speaker_and_pronoun_context_reset_at_object_change():
     assert "Zelensky" not in scenes[3]["visual_query_en"]
 
 
+@pytest.mark.parametrize("text,wanted,other", [
+    ("На заявление Путина ответил Зеленский.", "Zelensky", "Putin"),
+    ("В ответ Путину Зеленский выступил перед журналистами.", "Zelensky", "Putin"),
+    ("На слова Зеленского ответил Путин.", "Putin", "Zelensky"),
+    ("Макрону ответил Трамп.", "Trump", "Macron"),
+    ("Трампу ответил Макрон.", "Macron", "Trump"),
+    ("Зеленский ответил Путину.", "Zelensky", "Putin"),
+    ("Путин ответил Зеленскому.", "Putin", "Zelensky"),
+    ("Путин заявил о встрече с Трампом.", "Putin", "Trump"),
+    ("В заявлении Путина говорится, что Зеленский прибыл в город.", "Putin", "Zelensky"),
+])
+def test_speaker_is_subject_rather_than_first_indirect_person(text, wanted, other):
+    query = fallback_visual_query(text)
+    assert wanted in query
+    assert other not in query
+
+
+@pytest.mark.parametrize("text", [
+    "Армия не начала наступление.",
+    "Армия не начнёт наступление.",
+    "Наступление не состоялось.",
+])
+def test_explicitly_denied_offensive_keeps_army_context_without_advancing_event(text):
+    query = fallback_visual_query(text)
+    if "Армия" in text:
+        assert "army soldiers" in query
+    assert "advancing" not in query
+
+
+def test_denied_proposal_does_not_erase_a_later_actual_offensive():
+    query = fallback_visual_query("Армия не начала переговоры, затем началось наступление.")
+    assert "advancing" in query
+
+
+def test_denied_end_of_offensive_is_not_a_denied_offensive():
+    assert "advancing" in fallback_visual_query("Армия не прекратила наступление.")
+
+
+def test_voice_map_keeps_authored_speaker_after_indirect_person_mention():
+    from scriptor.voice_map import VoiceMapStatus
+    authored = "Volodymyr Zelensky press conference journalists Kyiv"
+    status = VoiceMapStatus("ready", "ready", path="test-map.json", data={
+        "audioDuration": 6, "timingMode": "aligned", "schemaVersion": 1,
+        "productionItemId": "test", "scriptSha256": "test", "audioSha256": "test",
+        "alignmentEngine": "test", "segments": [{
+            "id": 1, "start": 0, "end": 6, "duration": 6,
+            "text": "На заявление Путина ответил Зеленский.", "visualQuery": authored,
+        }],
+    })
+    scenes, _ = bridge._voice_map_scenes(status)
+    assert scenes[0]["visual_query_en"] == authored
+    assert scenes[0]["scene_intent"]["target_people"] == ["zelensky"]
+    assert scenes[0]["duration"] == 6
+
+
 def test_continuity_cannot_fill_diplomacy_with_known_combat():
     tank = FootageItem("/test/tank.mp4", "tank.mp4", tags=["military-vehicles"])
     result = bridge._select_visual_continuity_candidate(
@@ -207,6 +262,26 @@ def test_person_evidence_is_signature_and_interval_bound(tmp_path):
     assert person_evidence("Donald Trump", item, 0, 3)["status"] == "contradiction"
     path.write_bytes(b"changed file bytes")
     assert person_evidence("Vladimir Putin", item, 0, 3)["status"] == "unknown"
+
+
+@pytest.mark.parametrize("semantic", [True, False])
+def test_reindexed_replacement_does_not_keep_old_person_retrieval_priority(tmp_path, semantic):
+    a, b = tmp_path / "a.mp4", tmp_path / "b.mp4"
+    index, _ = seeded_index(tmp_path, [a, b])
+    for path in (a, b):
+        index.set_person_evidence(str(path), [{
+            "person_id": "putin", "start": 0, "end": 6, "source": "curated", "complete": True,
+        }])
+    a.write_bytes(b"replacement with no person annotation")
+    # Reindexing refreshes the media identity/vector but must not transfer a
+    # previous file's independent annotation to the new bytes at this path.
+    with index._connect() as connection:
+        connection.execute("UPDATE clips SET size=?,mtime_ns=? WHERE path=?",
+                           (a.stat().st_size, a.stat().st_mtime_ns, str(a)))
+        connection.execute("UPDATE clips SET embedding=? WHERE path=?",
+                           (np.array([.8, .6], dtype=np.float32).tobytes(), str(b)))
+    with patch.object(index, "_text_model_is_cached", return_value=semantic):
+        assert index.search("Vladimir Putin press conference", limit=1)[0].item.path == str(b)
 
 
 def test_wrong_confirmed_person_overrides_misleading_filename(tmp_path):
