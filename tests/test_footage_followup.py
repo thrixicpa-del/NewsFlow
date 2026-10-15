@@ -267,3 +267,16 @@ class FootageFollowupTests(unittest.TestCase):
                      'На митинге не было столкновений, затем полиция начала разгон'):
             self.assertIn('police dispersal', fallback_visual_query(text))
 
+    def test_fast_context_does_not_hide_available_direct_labor_action(self):
+        query = fallback_visual_query('Рабочие объявили забастовку')
+        context = FootageItem('rally.mp4', 'peaceful civilian rally placards', tags=['protest-crowd'])
+        direct = FootageItem('labor.mp4', 'workers labor strike picket line', tags=['workers-strike'])
+        levels = {'STRICT_MATCH': [SearchHit(context, .99, 6), SearchHit(direct, .4, 6)]}
+        pool = {bridge._montage_clip_key(context.path): TimelineClip(context.path, '', '', duration=6)}
+        self.assertEqual([], bridge._fast_reuse_pool_hits(levels, pool, 6, lambda _: 6, scene_query=query)['STRICT_MATCH'])
+        self.assertEqual(direct.path, select(query, [context, direct]).item.path)
+        # No direct action in the library: reuse of suitable context still works.
+        fallback = bridge._fast_reuse_pool_hits({'STRICT_MATCH': levels['STRICT_MATCH'][:1]}, pool, 6,
+                                               lambda _: 6, scene_query=query)
+        self.assertEqual(context.path, fallback['STRICT_MATCH'][0].item.path)
+

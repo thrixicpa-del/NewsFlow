@@ -15514,6 +15514,12 @@ def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
     later only when this safe cached set cannot illustrate the scene.
     """
     result: dict[str, list[SearchHit]] = {}
+    direct_protest_available = bool(scene_query and any(
+        _protest_suitability(scene_query, hit.item) == "direct"
+        and float(hit.duration or 0) + .05 >= required_duration
+        and _semantic_clip_ok(scene_query, hit.item, duration=required_duration)
+        for hits in hits_by_level.values() for hit in hits
+    ))
     for level in _MONTAGE_FALLBACK_LEVELS:
         filtered: list[SearchHit] = []
         for hit in hits_by_level.get(level, []):
@@ -15522,6 +15528,8 @@ def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
             if origin is None:
                 continue
             if scene_query:
+                if direct_protest_available and _protest_suitability(scene_query, hit.item) == "context":
+                    continue
                 from .scene_intent import person_evidence, person_window
                 cached_evidence = person_evidence(scene_query, hit.item, origin.source_start, required_duration)
                 best_start = person_window(scene_query, hit.item, required_duration)
@@ -16260,7 +16268,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                level: str, skip_previous: bool = False):
         seen: set[str] = set()
 
-        def rank_value(value: SearchHit) -> tuple[int, float, str]:
+        def rank_value(value: SearchHit) -> tuple[int, int, float, str]:
             family = _montage_hit_family(value)
             placements = list(family_buckets.get(family, []))
             rotation_penalty = _montage_rotation_penalty(placements, position_bucket)
@@ -16275,7 +16283,8 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             )
             _start, evidence = evidence_for(value.item)
             priority = {"confirmed": 0, "probable": 1}.get(evidence["status"], 2)
-            return priority, -(quality - rotation_penalty - reuse_penalty + variation), _montage_clip_key(value.item.path)
+            contextual = int(_protest_suitability(scene_query, value.item) == "context")
+            return priority, contextual, -(quality - rotation_penalty - reuse_penalty + variation), _montage_clip_key(value.item.path)
 
         ranked = sorted(
             pool,
