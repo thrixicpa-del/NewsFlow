@@ -8,10 +8,93 @@ from unittest.mock import patch
 import numpy as np
 
 from scriptor.ai_index import IMAGE_MODEL, TEXT_MODEL, ClipIndex
+from scriptor.footage import FootageItem
 from scriptor.visual_evidence import TAXONOMY, TAXONOMY_VERSION
 
 
 class VisualFeatureReuseTests(unittest.TestCase):
+    def test_fresh_add_item_placeholder_duration_cannot_reject_valid_later_window(self):
+        import cv2
+        with tempfile.TemporaryDirectory(prefix='newsflow-placeholder-duration-') as temporary:
+            root = Path(temporary)
+            clip = root / 'twenty-seconds.avi'
+            writer = cv2.VideoWriter(str(clip), cv2.VideoWriter_fourcc(*'MJPG'), 5, (32, 24))
+            self.assertTrue(writer.isOpened())
+            try:
+                for _ in range(100):
+                    writer.write(np.zeros((24, 32, 3), dtype=np.uint8))
+            finally:
+                writer.release()
+            index = ClipIndex(root / 'index.sqlite3')
+            index.add_item(FootageItem(str(clip), clip.name))
+            index._visual_models_available = lambda: True
+            vector = np.zeros(512, dtype=np.float32)
+            vector[:3] = [.35, .10, .05]
+            vector[-1] = np.sqrt(1 - float(vector @ vector))
+
+            class Image:
+                def embed(self, images, **_kwargs):
+                    yield from [vector] * len(images)
+
+            index._image_embedder, index._text_embedder = Image(), self.text_model()
+            index._loaded_model_revision = index._local_model_revision()
+            with patch.object(index, '_sample_visual_window', wraps=index._sample_visual_window) as decode:
+                result = index.assess_visual_window('seaport cargo cranes ships', clip, 6, 6)
+            self.assertEqual('direct', result['relation'])
+            self.assertEqual(1, decode.call_count)
+            self.assertEqual(3, len(result['sample_times']))
+            self.assertTrue(all(6 <= time < 12 for time in result['sample_times']))
+
+    def test_repeated_outside_source_window_spends_no_cold_budget_or_model_work(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-short-window-") as temporary:
+            index, clip = self.fixture(Path(temporary))
+            index.visual_window_budget = 96
+            index._loaded_model_revision = index._local_model_revision()
+            signature = clip.stat()
+            with index._connect() as connection:
+                connection.execute('INSERT INTO clips(path,name,size,mtime_ns,duration,width,height,fps,embedding,model,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                   (str(clip.resolve()), clip.name, signature.st_size, signature.st_mtime_ns, 3., 32, 24, 0., bytes(2048), IMAGE_MODEL, 1.))
+            with (patch.object(index, '_models', return_value=(object(), object())) as models,
+                  patch.object(index, '_sample_visual_window', side_effect=ValueError('window-outside-source')) as decode,
+                  index.read_session()):
+                for _ in range(2):
+                    value, state = index._visual_window_features(clip, 0., 6.)
+                    self.assertIsNone(value)
+                    self.assertEqual('window-outside-source', state)
+            self.assertEqual(0, index._visual_cold_windows)
+            self.assertEqual(0, models.call_count)
+            self.assertEqual(0, decode.call_count)
+
+    def test_valid_shorter_window_stays_exact_and_changed_source_ignores_stale_duration(self):
+        for changed_source in (False, True):
+            with self.subTest(changed_source=changed_source), tempfile.TemporaryDirectory(prefix="newsflow-short-window-") as temporary:
+                index, clip = self.fixture(Path(temporary))
+                index.visual_window_budget = 96
+                signature = clip.stat()
+                with index._connect() as connection:
+                    connection.execute('INSERT INTO clips(path,name,size,mtime_ns,duration,width,height,fps,embedding,model,indexed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                       (str(clip.resolve()), clip.name, signature.st_size, signature.st_mtime_ns, 3., 32, 24, 0., bytes(2048), IMAGE_MODEL, 1.))
+                if changed_source:
+                    clip.write_bytes(b'changed source with a different signature and fresh native bounds')
+                requested = 6. if changed_source else 3.
+                vector = np.zeros(512, dtype=np.float32)
+                vector[:3] = [.35, .10, .05]
+                vector[-1] = np.sqrt(1 - float(vector @ vector))
+
+                class Image:
+                    def embed(self, images, **_kwargs):
+                        yield from images
+
+                index._image_embedder, index._text_embedder = Image(), self.text_model()
+                index._loaded_model_revision = index._local_model_revision()
+                with patch.object(index, '_sample_visual_window', return_value=([vector] * 3, [.25, requested / 2, requested - .25])) as decode:
+                    result = index.assess_visual_window('seaport cargo cranes ships', clip, 0, requested)
+                self.assertEqual('direct', result['relation'])
+                self.assertEqual(requested, result['duration'])
+                self.assertEqual(0, result['source_start'])
+                self.assertEqual(1, decode.call_count)
+                self.assertEqual(1, index._visual_cold_windows)
+
     def fixture(self, root):
         clip = root / "disposable.mp4"
         clip.write_bytes(b"synthetic-media-no-decoding")

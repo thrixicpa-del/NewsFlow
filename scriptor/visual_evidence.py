@@ -10,7 +10,7 @@ import math
 import re
 from statistics import median
 
-TAXONOMY_VERSION = 4
+TAXONOMY_VERSION = 5
 RULES_VERSION = 8
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
@@ -21,7 +21,8 @@ TAXONOMY = {
     "rail": ("freight train carrying cargo on railway tracks",
              "grain cargo railway wagons at a railway freight terminal"),
     "farm": ("harvesting wheat crops in agricultural fields with a combine harvester",
-             "farm grain storage silos agriculture tractor and crops"),
+             "farm grain storage silos agriculture tractor and crops",
+             "vegetable seedlings growing in trays at a greenhouse plant nursery"),
     "factory": ("workers manufacturing products in an industrial factory with machinery",),
     "official": ("government official giving a formal statement behind a podium with microphones and flags",
                  "president in a formal government office with national flags giving an official address"),

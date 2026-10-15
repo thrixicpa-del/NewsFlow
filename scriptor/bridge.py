@@ -5749,7 +5749,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     """
     from itertools import pairwise
 
-    from .scene_intent import visual_intent
+    from .scene_intent import person_name, visual_intent
     from .timeline import VISUAL_TERMS
     payload = status.data
     if status.state not in {"ready", "approximate"} or not payload:
@@ -5761,27 +5761,81 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
 
     visual_beat_count = _voice_map_visual_beat_count(audio_duration)
     previous_intent = None
-    segment_clauses = {}
-    for segment in segments:
+    segment_clauses = {int(segment["id"]): [] for segment in segments}
+    pending_clause = []
+    previous_end = None
+
+    def finish_clause(*, context_limited=False):
+        nonlocal previous_intent
+        if not pending_clause:
+            return
+        text = " ".join(word for _identity, _first, _last, words in pending_clause for word in words)
+        intent = visual_intent(text, VISUAL_TERMS, previous=previous_intent)
+        stitched = len(pending_clause) > 1
+        for identity, first, last, _words in pending_clause:
+            segment_clauses[identity].append((first, last, intent, stitched, context_limited))
+        previous_intent = intent
+        pending_clause.clear()
+
+    for segment_index, segment in enumerate(segments):
         words = str(segment.get("text", "")).split()
+        if previous_end is not None and abs(float(segment["start"]) - previous_end) > .02:
+            finish_clause(context_limited=True)
+        previous_end = float(segment["end"])
         boundaries = {0, len(words)}
+        starts_action = False
+        following_words = []
+        if (segment_index + 1 < len(segments)
+                and abs(float(segments[segment_index + 1]["start"]) - previous_end) <= .02):
+            following_words = str(segments[segment_index + 1].get("text", "")).split()
         for index, word in enumerate(words):
+            marker = word.casefold().strip(",;:.!?\"'»”()")
+            next_word = (words[index + 1] if index + 1 < len(words)
+                         else following_words[0] if following_words else "")
             if re.search(r"[.!?;][\"'»”)]*$", word):
                 boundaries.add(index + 1)
-            if word.casefold() == "затем" or (
-                word.casefold() == "после" and index + 1 < len(words)
-                and words[index + 1].casefold() == "этого"
+            if marker == "затем" or (
+                marker == "после" and next_word.casefold().strip(",;:.!?\"'»”()") == "этого"
             ) or (
                 word.casefold() in {"а", "но"} and index > 0 and words[index - 1].endswith(",")
             ):
                 boundaries.add(index)
+                starts_action = starts_action or index == 0
         ordered = sorted(boundaries)
-        clauses = []
         for first, last in pairwise(ordered):
-            intent = visual_intent(" ".join(words[first:last]), VISUAL_TERMS, previous=previous_intent)
-            clauses.append((first, last, intent))
-            previous_intent = intent
-        segment_clauses[int(segment["id"])] = clauses
+            # A VoiceMap segment can end in the middle of a subject, object
+            # or negated predicate. Join only its contiguous unfinished clause;
+            # keep completed comma clauses and explicit action cuts separate.
+            budget_exhausted = bool(pending_clause) and (
+                len(pending_clause) >= 6
+                or sum(end - start for _id, start, end, _words in pending_clause) + last - first > 64)
+            independent_action = False
+            if pending_clause:
+                pending_text = " ".join(word for _id, _start, _end, part in pending_clause for word in part)
+                local = visual_intent(pending_text, VISUAL_TERMS, previous=previous_intent)
+                following = visual_intent(" ".join(words[first:last]), VISUAL_TERMS, previous=local)
+                dangling = re.search(
+                    r"\b(?:не|ни|на|в|во|к|ко|у|с|со|из|по|о|об|для|от|без|через|перед|при|под|над|за"
+                    r"|начал[аи]?|начали|провел[аи]?|объявил[аи]?|возобновил[аи]?|увеличил[аи]?)\s*$",
+                    pending_text.casefold().replace("ё", "е"),
+                )
+                speech_continuation = re.search(r"\b(?:press conference|official statement|government briefing)\b",
+                                                following["visual_query"], re.IGNORECASE)
+                subject_only = (local["person_role"] == "participant" and local["target_people"]
+                                and local["visual_query"] == ", ".join(
+                                    person_name(identity) for identity in local["target_people"]))
+                statement_author = re.fullmatch(
+                    r"(?:на\s+)?(?:заявлен\w*|выступлен\w*|слов\w*|реч\w*)\s+\S+(?:\s+\S+)?",
+                    pending_text.casefold(),
+                )
+                independent_action = bool(local["visual_query"] and not dangling
+                                          and not (speech_continuation and (subject_only or statement_author)))
+            if first > 0 or starts_action or budget_exhausted or independent_action:
+                finish_clause(context_limited=budget_exhausted)
+            pending_clause.append((int(segment["id"]), first, last, words[first:last]))
+            if last < len(words) or re.search(r"[,;:.!?][\"'»”)]*$", words[last - 1]):
+                finish_clause()
+    finish_clause()
     beat_segments = []
     fragments = []
     for beat_index in range(visual_beat_count):
@@ -5808,7 +5862,9 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
                 intent = visual_intent("", VISUAL_TERMS)
             fragment = {**segment, "_intent": intent,
                         "_clipped": float(segment["start"]) < beat_start
-                        or float(segment["end"]) > beat_end}
+                        or float(segment["end"]) > beat_end
+                        or bool(clauses and clause[3]),
+                        "_context_limited": bool(clauses and clause[4])}
             overlapping.append(fragment)
             fragments.append(fragment)
         beat_segments.append(overlapping)
@@ -5816,14 +5872,22 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     def concrete_query(segment: dict) -> str:
         intent = segment["_intent"]
         intent_query = intent["visual_query"]
+        if segment["_context_limited"] and not intent_query:
+            return ""
         raw = str(segment.get("visualQuery", "")).strip()
         normalized = _normalized_montage_visual_query(raw)
         # Preserve concrete authored queries when they express the same intent.
         # Correct stale generated lexical collisions/role inheritance locally.
-        from .scene_intent import named_people, visual_topics
+        from .scene_intent import _negated_attack, named_people, visual_topics
         people_differ = set(named_people(raw)) != set(intent["target_people"])
         kinetic_differs = _montage_has_war_action(raw) != _montage_has_war_action(intent_query)
         actual_topics, stored_topics = visual_topics(intent_query), visual_topics(raw)
+        if (_negated_attack(intent["text"])
+                and re.search(r"\b(?:artillery|shelling)\b", raw, re.IGNORECASE)
+                and not re.search(r"\b(?:artillery|shelling)\b", intent_query, re.IGNORECASE)):
+            # A military subject is context, not evidence of a denied shelling.
+            # A separately affirmed shelling still appears in the local query.
+            return intent_query
         if (_montage_has_naval_hint(raw) and not _montage_has_naval_hint(intent_query)):
             return intent_query
         emergency = r"\b(?:fire|firefighters?|emergency|explosion|blast)\b|пожар\w*|взрыв\w*"
@@ -5871,6 +5935,10 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         query = concrete_query(segment)
         if query:
             return query
+        if segment["_context_limited"]:
+            # An unresolved partial clause outside the context bounds cannot
+            # borrow a future event merely because it is the next known topic.
+            return GENERIC_VISUAL_QUERY
         segment_index = next(index for index, fragment in enumerate(fragments) if fragment is segment)
         for distance in range(1, len(fragments)):
             for candidate_index in (segment_index - distance, segment_index + distance):

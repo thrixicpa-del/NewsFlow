@@ -11,6 +11,41 @@ from scriptor.ai_index import ClipIndex
 
 
 class VisualWindowTests(unittest.TestCase):
+    def test_vegetable_nursery_trays_cannot_supply_battlefield_evidence(self):
+        """A crop close-up must compete with more than grain/harvest prompts."""
+        from scriptor.visual_evidence import TAXONOMY
+        with tempfile.TemporaryDirectory(prefix="newsflow-seedlings-") as temporary:
+            root = Path(temporary)
+            clip = root / "unlabelled.mp4"
+            clip.write_bytes(b"disposable-window")
+            index = self.make_index(root)
+            original_queries = index._query_vectors
+
+            def queries(texts):
+                vectors = original_queries(texts)
+                for i, text in enumerate(texts):
+                    if "seedlings" in text and "trays" in text:
+                        vectors[i] = 0
+                        vectors[i, -2] = 1
+                return vectors
+
+            # Measured development case: old farm descriptions lose to combat,
+            # while the visible nursery-tray description wins clearly.
+            image = np.zeros(512, dtype=np.float32)
+            image[list(TAXONOMY).index("combat")] = .240
+            image[list(TAXONOMY).index("farm")] = .188
+            image[-2] = .280
+            image[-1] = np.sqrt(1 - float(image @ image))
+            index._query_vectors = queries
+            index._sample_visual_window = lambda *_: ([image] * 3, [.5, 3., 5.5])
+            battle = index.assess_visual_window("frontline trenches soldiers battlefield military action", clip, 0, 6)
+            self.assertEqual("contradiction", battle["relation"])
+            self.assertEqual("farm", battle["dominant_kind"])
+            farm = index.assess_visual_window("farm agriculture crops", clip, 0, 6)
+            self.assertEqual("direct", farm["relation"])
+            self.assertFalse(farm["event_confirmed"])
+            self.assertFalse(farm["motion_verified"])
+
     def test_vessel_water_display_is_not_cargo_navigation_evidence(self):
         from scriptor.visual_evidence import TAXONOMY
         with tempfile.TemporaryDirectory(prefix="newsflow-water-display-") as temporary:
@@ -710,7 +745,7 @@ class VisualWindowTests(unittest.TestCase):
             result = index.assess_visual_window("cargo seaport cranes ships", clip, 0, 6)
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
-            self.assertEqual(TAXONOMY_VERSION, 4)
+            self.assertEqual(TAXONOMY_VERSION, 5)
             self.assertEqual(RULES_VERSION, 8)
             self.assertFalse(result["event_confirmed"])
 
@@ -749,7 +784,7 @@ class VisualWindowTests(unittest.TestCase):
                 self.assertEqual(current["relation"], "unknown")
                 self.assertEqual(current["feature_cache"], "memory")
                 self.assertEqual(current["rules_version"], 4)
-                self.assertEqual(current["taxonomy_version"], 4)
+                self.assertEqual(current["taxonomy_version"], 5)
                 index._visual_memory_clear()
                 persisted = index.assess_visual_window("cargo seaport", clip, 0, 6)
                 self.assertEqual(persisted["relation"], "unknown")

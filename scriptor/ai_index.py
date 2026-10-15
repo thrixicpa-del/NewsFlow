@@ -397,7 +397,7 @@ class ClipIndex:
                     self._catalog_rows[key] = connection.execute(
                         """SELECT path,name,size,mtime_ns,duration,width,height,fps,source_family,source,
                                   source_url,license,tags,english_text,semantic_scores,person_evidence,
-                                  visual_evidence,length(embedding) AS embedding_bytes FROM clips WHERE path=?""",
+                                  visual_evidence,model,indexed_at,length(embedding) AS embedding_bytes FROM clips WHERE path=?""",
                         (key,),
                     ).fetchone()
                     while len(self._catalog_rows) > 512:
@@ -968,6 +968,21 @@ class ClipIndex:
                         return None, "model-cache-changed-during-assessment"
                     cache_state = "sqlite-vectors-rescored"
                 else:
+                    catalog_row, _revision = self._catalog_row(path)
+                    if (catalog_row is not None
+                            and (catalog_row['size'], catalog_row['mtime_ns']) == (size, mtime_ns)
+                            and int(catalog_row['embedding_bytes'] or 0) == EMBEDDING_DIM * 4
+                            and int(catalog_row['width'] or 0) > 0 and int(catalog_row['height'] or 0) > 0
+                            and catalog_row['model'] == IMAGE_MODEL
+                            and math.isfinite(float(catalog_row['indexed_at'] or 0)) and float(catalog_row['indexed_at'] or 0) > 0):
+                        source_duration = float(catalog_row['duration'] or 0)
+                        if (math.isfinite(source_duration) and source_duration > 0
+                                and start + duration > source_duration + .001):
+                            # Measured CLIP-index metadata can reject impossible
+                            # intervals before models/decode. add_item's default
+                            # six seconds and changed signatures are not bounds.
+                            # Historical measured indexes can have unknown fps.
+                            return None, 'window-outside-source'
                     with self._lock:
                         if self._visual_cold_windows >= self.visual_window_budget:
                             return None, "cold-window-budget-exhausted"
