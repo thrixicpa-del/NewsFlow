@@ -1,0 +1,180 @@
+{
+  "kind": "synthetic-retrieval-only",
+  "dimensions": 512,
+  "selected_roots": "one allowed root containing all records",
+  "memory": "tracemalloc corpus allocation peak; disabled during timed search",
+  "filesystem": "mocked existence; no video decode",
+  "rows": [
+    {
+      "records": 1000,
+      "queries": 12,
+      "repeats": 5,
+      "python_peak_mib": 6.56,
+      "ms": {
+        "cold": {
+          "median": 14.07,
+          "min": 8.99,
+          "max": 42.23
+        },
+        "warm": {
+          "median": 15.08,
+          "min": 7.45,
+          "max": 15.66
+        },
+        "after_usage": {
+          "median": 10.66,
+          "min": 9.75,
+          "max": 12.26
+        },
+        "corpus": {
+          "median": 17.53,
+          "min": 16.66,
+          "max": 21.78
+        }
+      }
+    },
+    {
+      "records": 1000,
+      "queries": 72,
+      "repeats": 5,
+      "python_peak_mib": 0.0,
+      "ms": {
+        "cold": {
+          "median": 14.11,
+          "min": 13.52,
+          "max": 36.68
+        },
+        "warm": {
+          "median": 15.84,
+          "min": 14.46,
+          "max": 29.71
+        },
+        "after_usage": {
+          "median": 27.59,
+          "min": 17.07,
+          "max": 38.67
+        },
+        "corpus": {
+          "median": 17.57,
+          "min": 16.6,
+          "max": 17.98
+        }
+      }
+    },
+    {
+      "records": 10000,
+      "queries": 12,
+      "repeats": 5,
+      "python_peak_mib": 64.92,
+      "ms": {
+        "cold": {
+          "median": 46.92,
+          "min": 35.44,
+          "max": 50.31
+        },
+        "warm": {
+          "median": 15.33,
+          "min": 11.94,
+          "max": 25.61
+        },
+        "after_usage": {
+          "median": 45.93,
+          "min": 42.28,
+          "max": 48.35
+        },
+        "corpus": {
+          "median": 169.28,
+          "min": 157.69,
+          "max": 174.01
+        }
+      }
+    },
+    {
+      "records": 10000,
+      "queries": 72,
+      "repeats": 5,
+      "python_peak_mib": 0.0,
+      "ms": {
+        "cold": {
+          "median": 63.31,
+          "min": 34.37,
+          "max": 80.75
+        },
+        "warm": {
+          "median": 39.1,
+          "min": 29.07,
+          "max": 48.11
+        },
+        "after_usage": {
+          "median": 67.54,
+          "min": 53.01,
+          "max": 74.27
+        },
+        "corpus": {
+          "median": 170.55,
+          "min": 159.18,
+          "max": 174.21
+        }
+      }
+    },
+    {
+      "records": 20000,
+      "queries": 12,
+      "repeats": 5,
+      "python_peak_mib": 129.79,
+      "ms": {
+        "cold": {
+          "median": 41.16,
+          "min": 22.89,
+          "max": 48.93
+        },
+        "warm": {
+          "median": 21.91,
+          "min": 18.6,
+          "max": 30.51
+        },
+        "after_usage": {
+          "median": 76.58,
+          "min": 73.78,
+          "max": 102.58
+        },
+        "corpus": {
+          "median": 346.14,
+          "min": 337.42,
+          "max": 359.71
+        }
+      }
+    },
+    {
+      "records": 20000,
+      "queries": 72,
+      "repeats": 5,
+      "python_peak_mib": 0.0,
+      "ms": {
+        "cold": {
+          "median": 60.98,
+          "min": 48.09,
+          "max": 81.06
+        },
+        "warm": {
+          "median": 41.21,
+          "min": 39.09,
+          "max": 57.21
+        },
+        "after_usage": {
+          "median": 118.9,
+          "min": 94.49,
+          "max": 137.04
+        },
+        "corpus": {
+          "median": 357.31,
+          "min": 352.19,
+          "max": 382.45
+        }
+      }
+    }
+  ],
+  "cold": "corpus prepared, text cache may be cold on first repeat",
+  "warm": "same process/corpus/text vectors",
+  "usage": "32 usage updates before search"
+}

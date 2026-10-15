@@ -1,0 +1,25 @@
+{
+  "scope": "unchanged production and existing source Electron tests between real/UI acceptance and final source; later changes strengthen ready-speech tests only",
+  "blobs": {
+    "scriptor/scene_intent.py": {
+      "53ff949123c6a3aa8210673509e33c727eee7049": "0bbff95a1ebcf9c1458fffc0aee287fa659098ae",
+      "aac2a2c36e0b34f64f12f881426593beef936797": "0bbff95a1ebcf9c1458fffc0aee287fa659098ae"
+    },
+    "scriptor/timeline.py": {
+      "53ff949123c6a3aa8210673509e33c727eee7049": "3d3f9a064c71624871f796a413f8c265f246fc90",
+      "aac2a2c36e0b34f64f12f881426593beef936797": "3d3f9a064c71624871f796a413f8c265f246fc90"
+    },
+    "scriptor/bridge.py": {
+      "53ff949123c6a3aa8210673509e33c727eee7049": "49ecdb53e114ff693039b1df4a17e2acc8cb3a0d",
+      "aac2a2c36e0b34f64f12f881426593beef936797": "49ecdb53e114ff693039b1df4a17e2acc8cb3a0d"
+    },
+    "scriptor/ai_index.py": {
+      "53ff949123c6a3aa8210673509e33c727eee7049": "4a29444d40154d321426b0001747db8ce05053d3",
+      "aac2a2c36e0b34f64f12f881426593beef936797": "4a29444d40154d321426b0001747db8ce05053d3"
+    },
+    "tests/test_electron_e2e.py": {
+      "53ff949123c6a3aa8210673509e33c727eee7049": "d7d3df242070fdff671944bbfc11cab051e18033",
+      "aac2a2c36e0b34f64f12f881426593beef936797": "d7d3df242070fdff671944bbfc11cab051e18033"
+    }
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "note": "cProfile cumulative spans overlap; not additive independent wall phases",
+  "rows": [
+    {
+      "file": "bridge.py",
+      "function": "_select_montage_candidate",
+      "calls": 91,
+      "self_seconds": 0.0046423,
+      "cumulative_seconds": 6.632355400000001
+    },
+    {
+      "file": "bridge.py",
+      "function": "_montage_search_ladders",
+      "calls": 1,
+      "self_seconds": 0.0037960000000000003,
+      "cumulative_seconds": 0.6052441000000001
+    },
+    {
+      "file": "ai_index.py",
+      "function": "search_many",
+      "calls": 10,
+      "self_seconds": 0.0041309,
+      "cumulative_seconds": 0.1312076
+    },
+    {
+      "file": "bridge.py",
+      "function": "_select_visual_continuity_candidate",
+      "calls": 9,
+      "self_seconds": 0.00024910000000000004,
+      "cumulative_seconds": 0.08338820000000001
+    },
+    {
+      "file": "subprocess.py",
+      "function": "communicate",
+      "calls": 2,
+      "self_seconds": 7.7e-06,
+      "cumulative_seconds": 0.050672800000000004
+    },
+    {
+      "file": "subprocess.py",
+      "function": "_communicate",
+      "calls": 2,
+      "self_seconds": 1.9900000000000003e-05,
+      "cumulative_seconds": 0.0482249
+    },
+    {
+      "file": "voice_map.py",
+      "function": "_validate_payload",
+      "calls": 1,
+      "self_seconds": 0.0001444,
+      "cumulative_seconds": 0.0196034
+    },
+    {
+      "file": "ai_index.py",
+      "function": "_valid_ranked_positions",
+      "calls": 54,
+      "self_seconds": 0.0014804,
+      "cumulative_seconds": 0.0100855
+    },
+    {
+      "file": "ai_index.py",
+      "function": "_search_corpus",
+      "calls": 10,
+      "self_seconds": 0.000156,
+      "cumulative_seconds": 0.007254
+    },
+    {
+      "file": "subprocess.py",
+      "function": "wait",
+      "calls": 4,
+      "self_seconds": 3.1000000000000004e-06,
+      "cumulative_seconds": 0.0024398
+    },
+    {
+      "file": "subprocess.py",
+      "function": "_wait",
+      "calls": 4,
+      "self_seconds": 1.3300000000000001e-05,
+      "cumulative_seconds": 0.0024367
+    },
+    {
+      "file": "bridge.py",
+      "function": "_read_proxy_cache_status",
+      "calls": 1,
+      "self_seconds": 3.3e-06,
+      "cumulative_seconds": 0.0009660000000000001
+    },
+    {
+      "file": "bridge.py",
+      "function": "_proxy_cache_status_path",
+      "calls": 1,
+      "self_seconds": 1.8000000000000001e-06,
+      "cumulative_seconds": 0.0009291000000000001
+    },
+    {
+      "file": "bridge.py",
+      "function": "prepare_voice_range_preview",
+      "calls": 1,
+      "self_seconds": 9.800000000000001e-06,
+      "cumulative_seconds": 0.0001211
+    },
+    {
+      "file": "config.py",
+      "function": "default_montage_renderer",
+      "calls": 50,
+      "self_seconds": 2.4200000000000002e-05,
+      "cumulative_seconds": 3.1100000000000004e-05
+    },
+    {
+      "file": "bridge.py",
+      "function": "_montage_selection_summary",
+      "calls": 1,
+      "self_seconds": 9.600000000000001e-06,
+      "cumulative_seconds": 1.8200000000000002e-05
+    },
+    {
+      "file": "config.py",
+      "function": "validate_gpu_chunk_size",
+      "calls": 13,
+      "self_seconds": 9.800000000000001e-06,
+      "cumulative_seconds": 1.3700000000000001e-05
+    },
+    {
+      "file": "bridge.py",
+      "function": "_cover_fastgen_visual_reference_selection",
+      "calls": 2,
+      "self_seconds": 3.3e-06,
+      "cumulative_seconds": 5.1e-06
+    },
+    {
+      "file": "tts_ranges.py",
+      "function": "validate_ranges",
+      "calls": 1,
+      "self_seconds": 1.6000000000000001e-06,
+      "cumulative_seconds": 2.0000000000000003e-06
+    }
+  ]
+}

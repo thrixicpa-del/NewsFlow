@@ -1,0 +1,231 @@
+{
+  "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+  "production_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+  "base_sha": "6f59443fb0b3a8787a6b3a73f3f88395fb8b7e98",
+  "merge_base": "43dd0709d7341eb79b308303031b5f3a47fd3ebc",
+  "branch": "codex/footage-semantic-person-fallback-v3",
+  "pr": "https://github.com/thrixicpa-del/NewsFlow/pull/403",
+  "draft": true,
+  "release_ready": false,
+  "scope": "source acceptance; no main mutation, merge, issue closure, EXE/Frozen build, lock change, production state writes or media uploads",
+  "gates": {
+    "TARGETED_REGRESSION": {
+      "status": "PASS",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "397 pytest tests; 1 owner-only opt-in SKIP; separate real run below",
+      "seconds": 100.98,
+      "guard": "PASS",
+      "log": ".test-pr403-final-aac2a2c.log"
+    },
+    "PROTEST_CONTRACT_TESTS": {
+      "status": "PASS",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "22 TestCase methods with subtests; actual planner/VoiceMap/selector/fast reuse/continuity/tail;22 matrix cases",
+      "base_matrix_pass": 7,
+      "after_matrix_pass": 22
+    },
+    "READY_SPEECH_EVIDENCE_REGRESSIONS": {
+      "status": "PASS",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "6 methods, short/missing/delayed streams, empty/incomplete coverage, controlled partial vs unexpected error; independent CI via load_tests",
+      "red": "5 initial subtest failures plus delayed-audio RED",
+      "green": 6
+    },
+    "WINDOWS_SOURCE_BUILD": {
+      "status": "PASS",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "independent GitHub Windows web/desktop source build only",
+      "url": "https://github.com/thrixicpa-del/NewsFlow/actions/runs/38697604355"
+    },
+    "WINDOWS_E2E": {
+      "status": "PASS_LOCAL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "11 source Electron tests on identical production code; UI IPC queue saved timeline and decoded MP4",
+      "tested_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+      "seconds": 78.33,
+      "guard": "PASS",
+      "independent": "NOT RUN; existing Windows workflow builds only"
+    },
+    "READY_SPEECH_SOURCE_UI": {
+      "status": "PASS_LOCAL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "actual owner speech300s, real CLIP35sources, Electron controls queue render and reload; one expected shortage task",
+      "tested_production_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+      "harness_sha": "0af2979a43b0967fe6eca58852259af3c7987935",
+      "seconds": 186.4,
+      "guard": "PASS",
+      "full_visual_acceptance": false
+    },
+    "REAL_MEDIA_TECHNICAL": {
+      "status": "PASS_LOCAL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "6 real footage MP4, tone audio, actual CLIP;102seconds; no injected expected vectors/scores",
+      "tested_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+      "seconds": 144.761,
+      "original_hashes": "UNCHANGED",
+      "guard": "PASS"
+    },
+    "READY_SPEECH_TECHNICAL": {
+      "status": "PARTIAL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "2 real speech originals trimmed300s test copies;1 controlled INCOMPLETE scene17,1 RENDERED50scenes",
+      "strict_engineering_tests": 6,
+      "harness_sha": "0af2979a43b0967fe6eca58852259af3c7987935",
+      "seconds": 152.303,
+      "original_hashes": "UNCHANGED",
+      "guard": "PASS",
+      "stream_verification_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "audio_seconds": 300,
+      "video_seconds": 299.933333
+    },
+    "REAL_MEDIA_SEMANTICS": {
+      "status": "FAIL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "agent visual inspection, real media without injected labels; independent human review pending",
+      "observations": [
+        "bar interview used for absent Pashinyan official fallback",
+        "map/interview accepted as exact action",
+        "ready speech has unrelated protest/interview under port queries",
+        "some transition boundary frames retain prior shot"
+      ]
+    },
+    "PERSON_MATCH": {
+      "status": "NOT VERIFIED",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "two visually observed correct speakers do not establish general person matching; no owner-confirmed interval annotations"
+    },
+    "PROTEST_REAL_MEDIA": {
+      "status": "PARTIAL / NOT VERIFIED",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "peaceful crowd observed; exact labor/farmer protest and close real negative examples absent from selected35, not asserted absent from full library"
+    },
+    "PROTEST_TOPICAL_FALLBACK": {
+      "status": "PARTIAL / FAIL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "contract context completion PASS; real contextual suitability/strict labels still fail in observed scenes"
+    },
+    "DIVERSITY": {
+      "status": "PASS_COMPARISON",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "original sufficient/scarce normal/fast serial/parallel suitable-pool simulation; all8regimes equal BASE; not real queue/visual quality",
+      "tested_sha": "aac2a2c36e0b34f64f12f881426593beef936797"
+    },
+    "PROTEST_DIVERSITY": {
+      "status": "PASS_COMPARISON",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "same8regimes protest/labor suitable pools; deficit repeated triples/openings retained explicitly",
+      "tested_sha": "aac2a2c36e0b34f64f12f881426593beef936797"
+    },
+    "DOCKER": {
+      "status": "NOT RUN",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "Docker CLI installed; daemon npipe dockerDesktopLinuxEngine missing; no install/privilege change"
+    },
+    "PRODUCTION_INTEGRITY": {
+      "status": "PASS_CURRENT / HISTORICAL UNKNOWN",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "current runner guards and read-only observer unchanged; no attribution of earlier FAIL",
+      "samples": 101,
+      "seconds": 101.8119999999908,
+      "changed_files": [],
+      "historical_failures": "retained unresolved; require prior trace or authorized concurrent-production reproduction"
+    },
+    "FROZEN_BINDING": {
+      "status": "FAIL",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "tracked lock stale for modified bridge.py; no lock/SHA/binary bypass; owner prohibits build"
+    },
+    "LINUX_INDEPENDENT_CI": {
+      "status": "FAIL_FROZEN_ONLY",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "current source all prior steps PASS; Frozen binding guard1failure (stale bridge lock); no disabled gate",
+      "url": "https://github.com/thrixicpa-del/NewsFlow/actions/runs/38697604326",
+      "logs": ".test-pr403-ci-aac2a2c-full.log",
+      "python_pre_frozen_pass": 774,
+      "voice_group_pass": 140,
+      "new_followup_methods_in_voice_group": 28,
+      "frontend_tests_pass": 381,
+      "frontend_files_pass": 47,
+      "frozen_pass": 10,
+      "frozen_fail": 1
+    },
+    "CODEQL": {
+      "status": "SKIPPED",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "draft workflow"
+    },
+    "DEPENDENCY_REVIEW": {
+      "status": "SKIPPED",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "draft workflow"
+    },
+    "LINT_SECRET_DIFF": {
+      "status": "PASS",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "precommit FAST_LOCAL_GATE, Ruff changed Python and git diff --check; no expectations weakened"
+    },
+    "ASR_WORD_ALIGNMENT": {
+      "status": "NOT VERIFIED",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "source approximate VoiceMaps, no alignment model; proportional cut preserves provenance"
+    },
+    "PROXY_CREATION": {
+      "status": "N/A",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "direct ffmpeg/cut run used proxy lookups but did not create full source proxies; not measured acceleration"
+    },
+    "PERFORMANCE": {
+      "status": "MEASURED / MIXED",
+      "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+      "scope": "final3alternating6syntheticMP4 series plus1k/10k/20k12/72 retrieval; improvements and slower cases disclosed",
+      "evidence": "pipeline.json;retrieval-base/after.json",
+      "aggregate_seconds": {
+        "base": {
+          "prepare": {
+            "median": 15.220497500005877,
+            "min": 14.997593400010373,
+            "max": 15.427778500015847
+          },
+          "render": {
+            "median": 57.86901269998634,
+            "min": 57.635430199996335,
+            "max": 58.96283550000226
+          },
+          "total": {
+            "median": 72.86660609999672,
+            "min": 72.85592770000221,
+            "max": 74.3906140000181
+          }
+        },
+        "after": {
+          "prepare": {
+            "median": 14.362184599987813,
+            "min": 14.160523899976397,
+            "max": 14.497978900006274
+          },
+          "render": {
+            "median": 53.917524599979515,
+            "min": 53.324768599981326,
+            "max": 54.45563870000478
+          },
+          "total": {
+            "median": 68.41550349998579,
+            "min": 67.48529249995772,
+            "max": 68.8178232999926
+          }
+        }
+      }
+    }
+  },
+  "local_commands": [
+    "python tests/run_isolated.py tests.test_voice_map -q",
+    "python tests/run_isolated.py --pytest [scoped modules listed in report] -q --tb=short",
+    "NEWSFLOW_RUN_ELECTRON_E2E=1 NEWSFLOW_PYTHON=python python tests/run_isolated.py --pytest tests/test_electron_e2e.py -q --tb=short",
+    "NEWSFLOW_REAL_FOOTAGE_MANIFEST=<local selected35 manifest> NEWSFLOW_REAL_MODEL_COPY=<local copied models> HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python tests/run_isolated.py tests.test_footage_real_acceptance -q",
+    "NEWSFLOW_READY_VOICE_MANIFEST=<local2speech manifest> NEWSFLOW_READY_VOICE_OUTPUT=<test output> [real media/offline flags] python tests/run_isolated.py tests.test_footage_ready_voice -q",
+    "NEWSFLOW_FOOTAGE_DIVERSITY=<test JSON> NEWSFLOW_FOOTAGE_DIVERSITY_TOPICS=original|protest python tests/run_isolated.py tests.test_footage_v3_diversity -q",
+    "NEWSFLOW_FOOTAGE_BENCHMARK=<test JSON> NEWSFLOW_FOOTAGE_BENCHMARK_TOPICS=protest python tests/run_isolated.py tests.test_footage_v3_benchmark -q",
+    "NEWSFLOW_FOOTAGE_MEDIA_OUTPUT=<test output> NEWSFLOW_FOOTAGE_MEDIA_FOLLOWUP=1 python tests/run_isolated.py tests.test_footage_v3_media -q",
+    "docker info"
+  ]
+}
