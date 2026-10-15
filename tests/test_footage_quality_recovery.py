@@ -22,6 +22,27 @@ class RecoveryVisualQualityTests(unittest.TestCase):
         self.voice.touch()
         self.settings = Settings(footage_folders=[str(self.root)], montage_auto_web=False)
 
+    def test_story_mention_is_reused_but_item_metadata_stays_live(self):
+        bridge._montage_story_mentions_iran.cache_clear()
+        self.addCleanup(bridge._montage_story_mentions_iran.cache_clear)
+        story = "В порту разгружают суда. " * 700
+        item = FootageItem(str(self.root / 'neutral.mp4'), 'neutral.mp4')
+        original_search = bridge.re.search
+        story_searches = []
+
+        def counted_search(pattern, value, *args, **kwargs):
+            if value == story:
+                story_searches.append(value)
+            return original_search(pattern, value, *args, **kwargs)
+
+        with patch.object(bridge.re, 'search', side_effect=counted_search):
+            for _ in range(50):
+                self.assertTrue(bridge._montage_story_candidate_allowed(story, item))
+            item.source_url = 'https://example.test/Iran-port'
+            self.assertFalse(bridge._montage_story_candidate_allowed(story, item))
+            self.assertTrue(bridge._montage_story_candidate_allowed(story + ' Иран', item))
+        self.assertEqual(len(story_searches), 1)
+
     def item(self, name, *, valid_start=0, valid_duration=30, source_url=''):
         path = self.root / name
         path.write_bytes(b'test-owned-contract-source')

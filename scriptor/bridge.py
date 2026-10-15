@@ -15925,6 +15925,12 @@ def _montage_explicit_metadata(item: FootageItem) -> str:
                                            if tag not in SEMANTIC_TAG_LABELS)))
 
 
+@lru_cache(maxsize=64)
+def _montage_story_mentions_iran(story: str) -> bool:
+    iran = r"(?<!\w)(?:iran(?:ian)?|tehran|persian gulf|иран\w*|тегеран\w*|персидск\w*\s+залив\w*)(?!\w)"
+    return re.search(iran, story.replace("_", " "), re.IGNORECASE) is not None
+
+
 def _montage_story_candidate_allowed(story: str, item: FootageItem) -> bool:
     """Keep explicitly Iran-related sources out of a story that omits Iran.
 
@@ -15933,7 +15939,7 @@ def _montage_story_candidate_allowed(story: str, item: FootageItem) -> bool:
     it does not disable footage or change the persistent library.
     """
     iran = r"(?<!\w)(?:iran(?:ian)?|tehran|persian gulf|иран\w*|тегеран\w*|персидск\w*\s+залив\w*)(?!\w)"
-    if re.search(iran, story.replace("_", " "), re.IGNORECASE):
+    if _montage_story_mentions_iran(story):
         return True
     return re.search(iran, _montage_explicit_metadata(item).replace("_", " "), re.IGNORECASE) is None
 
@@ -16925,6 +16931,7 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
                                         diversity_seed: str,
                                         allow_project_reuse: bool = True,
                                         scene_query: str = "",
+                                         current_candidate=None,
                                         ) -> tuple[FootageItem, float, str, bool] | None:
     """Keep the scene's suitability contract during final local recovery."""
     seen: set[str] = set()
@@ -16941,12 +16948,20 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
         ),
     )
     for item in ranked:
-        if scene_query and not _semantic_clip_ok(scene_query, item, source_start=0, duration=required_duration):
-            continue
         if scene_query and _montage_semantic_bonus(scene_query, item) <= 0 and _montage_metadata_relevance(scene_query, item) <= 0:
             continue
         key = _montage_clip_key(item.path)
         if key in seen:
+            continue
+        if not allow_project_reuse and key in project_used_paths:
+            continue
+        if current_candidate is not None:
+            item = current_candidate(item)
+            if item is None:
+                continue
+            if scene_query and _montage_semantic_bonus(scene_query, item) <= 0 and _montage_metadata_relevance(scene_query, item) <= 0:
+                continue
+        if scene_query and not _semantic_clip_ok(scene_query, item, source_start=0, duration=required_duration):
             continue
         seen.add(key)
         if not source_exists(item):
@@ -16956,6 +16971,24 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
             continue
         if source_allowed is not None and not source_allowed(item):
             continue
+        if current_candidate is not None:
+            latest = current_candidate(item)
+            if latest is None:
+                continue
+            changed = any(getattr(latest, field, None) != getattr(item, field, None) for field in (
+                "name", "source", "source_url", "license", "tags", "person_evidence", "visual_evidence",
+                "metadata_provenance",
+            ))
+            if changed:
+                if (scene_query and _montage_semantic_bonus(scene_query, latest) <= 0
+                        and _montage_metadata_relevance(scene_query, latest) <= 0):
+                    continue
+                if scene_query and not _semantic_clip_ok(scene_query, latest, source_start=0,
+                                                         duration=required_duration):
+                    continue
+                if source_allowed is not None and not source_allowed(latest):
+                    continue
+            item = latest
         family = source_family_identity_text(item.path, item.source_url)
         reused = key in project_used_paths or family in project_used_families
         if reused and not allow_project_reuse:
@@ -17203,6 +17236,14 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
     local_items = []
     if not settings.montage_external_only and not indexed_count:
         local_items = scan_folders(settings.footage_folders)
+    local_continuity_keys = {_montage_clip_key(item.path) for item in local_items}
+
+    def current_continuity_candidate(item):
+        # A first-run folder scan has no SQLite row yet. Its existing source,
+        # duration and screen gates still run in the continuity selector.
+        if _montage_clip_key(item.path) in local_continuity_keys:
+            return item
+        return index.current_continuity_item(item, exclude_english_text=True)
     if not indexed_count and not local_items and not settings.montage_auto_web:
         raise ValueError("Подключите папку с футажами или включите внешний поиск")
     if progress:
@@ -17805,7 +17846,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
         # preferable to repeating footage already visible in this timeline.
         if selected is None:
             try:
-                indexed_continuity = index.all_items(exclude_english_text=True)
+                indexed_continuity = index.continuity_items(exclude_english_text=True)
             except (OSError, RuntimeError, ValueError):
                 indexed_continuity = []
             continuity_items = list({
@@ -17826,6 +17867,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                 ),
                 diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
                 allow_project_reuse=False,
+                current_candidate=current_continuity_candidate,
             )
             if continuity is not None:
                 selected, selected_duration, candidate_family, reused_candidate = continuity
@@ -17888,14 +17930,6 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         if selected is None:
-            try:
-                indexed_continuity = index.all_items(exclude_english_text=True)
-            except (OSError, RuntimeError, ValueError):
-                indexed_continuity = []
-            continuity_items = list({
-                _montage_clip_key(item.path): item
-                for item in [*indexed_continuity, *local_items]
-            }.values())
             continuity = _select_visual_continuity_candidate(
                 continuity_items,
                 scene_query=scene["visual_query_en"],
@@ -17910,6 +17944,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                 ),
                 diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity-reuse",
                 allow_project_reuse=True,
+                current_candidate=current_continuity_candidate,
             )
             if continuity is not None:
                 selected, selected_duration, candidate_family, reused_candidate = continuity

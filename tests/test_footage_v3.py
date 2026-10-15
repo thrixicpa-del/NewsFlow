@@ -135,6 +135,162 @@ def test_continuity_cannot_fill_diplomacy_with_known_combat():
     assert result is None
 
 
+def test_continuity_skips_visual_work_for_existing_cheap_rejections():
+    query = "seaport cargo cranes ships"
+    calls = []
+
+    def candidate(name, tags=()):
+        item = FootageItem(f"/test/{name}.mp4", f"{name}.mp4", tags=list(tags))
+        item._visual_assessor = lambda *_args, **_kwargs: (calls.append(name) or {"relation": "direct"})
+        return item
+
+    irrelevant = candidate("hospital_doctors")
+    used = candidate("cargo_port")
+    fresh = candidate("fresh_cargo")
+    options = {"scene_query": query, "required_duration": 6, "project_used_families": set(),
+               "recent_project_paths": set(), "source_exists": lambda _: True,
+               "source_duration": lambda _: 6, "source_allowed": lambda _: True,
+               "diversity_seed": "fixed", "allow_project_reuse": False}
+    assert bridge._select_visual_continuity_candidate(
+        [irrelevant], project_used_paths=set(), **options) is None
+    assert calls == []
+    assert bridge._select_visual_continuity_candidate(
+        [used], project_used_paths={bridge._montage_clip_key(used.path)}, **options) is None
+    assert calls == []
+    result = bridge._select_visual_continuity_candidate(
+        [fresh], project_used_paths=set(), **options)
+    assert result is not None and result[0] is fresh
+    assert calls == ["fresh_cargo"]
+
+
+def test_continuity_inventory_keeps_all_rows_and_validates_only_finalists(tmp_path):
+    index = ClipIndex(tmp_path / "continuity.sqlite3")
+    index.allowed_roots = [str(tmp_path)]
+    late = tmp_path / "zz_cargo.mp4"
+    late.write_bytes(b"disposable legacy candidate")
+    with index._connect() as connection:
+        for number in range(80):
+            connection.execute("INSERT INTO clips(path,name,size,mtime_ns,embedding) VALUES(?,?,?,?,?)",
+                               (str(tmp_path / f"missing_{number:03}.mp4"),
+                                f"missing_{number:03}.mp4", 0, 0, bytes(2048)))
+        stat = late.stat()
+        connection.execute("INSERT INTO clips(path,name,size,mtime_ns,tags) VALUES(?,?,?,?,?)",
+                           (str(late), late.name, stat.st_size, stat.st_mtime_ns, '["cargo"]'))
+    assert hasattr(index, "continuity_items")
+    with patch.object(index, "path_allowed", wraps=index.path_allowed) as allowed:
+        inventory = index.continuity_items(exclude_english_text=True)
+        assert len(inventory) == 81
+        assert allowed.call_count == 0
+        chosen = next(item for item in inventory if item.path == str(late))
+        current = index.current_continuity_item(chosen, exclude_english_text=True)
+        assert current is not None and current.path == str(late)
+        assert allowed.call_count == 1
+        assert index.current_continuity_item(inventory[0], exclude_english_text=True) is None
+    result = bridge._select_visual_continuity_candidate(
+        inventory, scene_query="cargo shipping", required_duration=6,
+        project_used_paths=set(), project_used_families=set(), recent_project_paths=set(),
+        source_exists=lambda _: True, source_duration=lambda _: 6,
+        source_allowed=lambda _: True, diversity_seed="fixed", allow_project_reuse=False,
+        current_candidate=lambda item: index.current_continuity_item(item, exclude_english_text=True),
+    )
+    assert result is not None and result[0].path == str(late)
+
+
+def test_continuity_finalist_observes_current_db_file_root_and_quarantine(tmp_path):
+    from scriptor.ai_index import SCREEN_TEXT_CLASSIFIER_VERSION
+    from scriptor.media_health import MediaHealth
+
+    index = ClipIndex(tmp_path / "continuity.sqlite3")
+    other = ClipIndex(index.db_path)
+    clip = tmp_path / "cargo.mp4"
+    clip.write_bytes(b"disposable embedded source")
+    stat = clip.stat()
+    with index._connect() as connection:
+        connection.execute("INSERT INTO clips(path,name,size,mtime_ns,embedding,source_url) VALUES(?,?,?,?,?,?)",
+                           (str(clip), clip.name, stat.st_size, stat.st_mtime_ns,
+                            bytes(2048), "original"))
+    assert hasattr(index, "continuity_items")
+    with index.read_session():
+        item = index.continuity_items(exclude_english_text=True)[0]
+        with other._connect() as connection:
+            connection.execute("UPDATE clips SET source_url='changed' WHERE path=?", (str(clip),))
+        assert index.current_continuity_item(item, exclude_english_text=True).source_url == "changed"
+        other.set_visual_evidence(str(clip), [{"kind": "leisure", "start": 0, "end": 6,
+                                               "source": "manual"}])
+        fresh = index.current_continuity_item(item, exclude_english_text=True)
+        assert fresh.visual_evidence["observations"][0]["kind"] == "leisure"
+        with other._connect() as connection:
+            connection.execute("UPDATE clips SET disabled=1 WHERE path=?", (str(clip),))
+        assert index.current_continuity_item(item, exclude_english_text=True) is None
+        with other._connect() as connection:
+            connection.execute("UPDATE clips SET disabled=0,english_text=1,english_text_version=? WHERE path=?",
+                               (SCREEN_TEXT_CLASSIFIER_VERSION, str(clip)))
+        assert index.current_continuity_item(item, exclude_english_text=True) is None
+        with other._connect() as connection:
+            connection.execute("UPDATE clips SET english_text=0 WHERE path=?", (str(clip),))
+        assert index.current_continuity_item(item, exclude_english_text=True) is not None
+        index.allowed_roots = [str(tmp_path / "different-root")]
+        assert index.current_continuity_item(item, exclude_english_text=True) is None
+        index.allowed_roots = [str(tmp_path)]
+        clip.write_bytes(b"changed embedded source")
+        assert index.current_continuity_item(item, exclude_english_text=True) is None
+        stat = clip.stat()
+        with other._connect() as connection:
+            connection.execute("UPDATE clips SET size=?,mtime_ns=? WHERE path=?",
+                               (stat.st_size, stat.st_mtime_ns, str(clip)))
+        assert index.current_continuity_item(item, exclude_english_text=True) is not None
+        index.media_health.record(clip, MediaHealth("invalid", "fixture"))
+        assert index.current_continuity_item(item, exclude_english_text=True) is None
+
+
+def test_continuity_finalist_rechecks_changed_metadata_before_selection(tmp_path):
+    index = ClipIndex(tmp_path / "continuity.sqlite3")
+    clip = tmp_path / "cargo.mp4"
+    clip.write_bytes(b"disposable source")
+    index.add_item(FootageItem(str(clip), clip.name, tags=["cargo"]))
+    assert hasattr(index, "continuity_items")
+    item = index.continuity_items(exclude_english_text=True)[0]
+    with index._connect() as connection:
+        connection.execute("UPDATE clips SET name='hospital.mp4',tags='[\"healthcare\"]' WHERE path=?", (str(clip),))
+    result = bridge._select_visual_continuity_candidate(
+        [item], scene_query="cargo shipping", required_duration=6,
+        project_used_paths=set(), project_used_families=set(), recent_project_paths=set(),
+        source_exists=lambda _: True, source_duration=lambda _: 6,
+        source_allowed=lambda _: True, diversity_seed="fixed", allow_project_reuse=False,
+        current_candidate=lambda value: index.current_continuity_item(value, exclude_english_text=True),
+    )
+    assert result is None
+
+
+def test_continuity_finalist_cannot_be_disabled_during_visual_check(tmp_path):
+    index = ClipIndex(tmp_path / "continuity.sqlite3")
+    writer = ClipIndex(index.db_path)
+    clip = tmp_path / "cargo.mp4"
+    clip.write_bytes(b"disposable source")
+    index.add_item(FootageItem(str(clip), clip.name, tags=["cargo"]))
+    item = index.continuity_items(exclude_english_text=True)[0]
+
+    def current(value):
+        fresh = index.current_continuity_item(value, exclude_english_text=True)
+        if fresh is not None:
+            def assess(*_args, **_kwargs):
+                with writer._connect() as connection:
+                    connection.execute("UPDATE clips SET disabled=1 WHERE path=?", (str(clip),))
+                return {"relation": "direct"}
+            fresh._visual_assessor = assess
+        return fresh
+
+    with index.read_session():
+        result = bridge._select_visual_continuity_candidate(
+            [item], scene_query="cargo shipping", required_duration=6,
+            project_used_paths=set(), project_used_families=set(), recent_project_paths=set(),
+            source_exists=lambda _: True, source_duration=lambda _: 6,
+            source_allowed=lambda _: True, diversity_seed="fixed", allow_project_reuse=False,
+            current_candidate=current,
+        )
+    assert result is None
+
+
 class CountingText:
     def __init__(self):
         self.calls = []

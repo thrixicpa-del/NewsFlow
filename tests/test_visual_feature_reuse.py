@@ -1,5 +1,7 @@
 """Taxonomy upgrades reuse versioned, exact-window vectors without decoding."""
+import hashlib
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,41 @@ from scriptor.visual_evidence import TAXONOMY, TAXONOMY_VERSION
 
 
 class VisualFeatureReuseTests(unittest.TestCase):
+    def test_zero_budget_feature_misses_reuse_read_session_connection(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-reader-") as temporary:
+            index, clip = self.fixture(Path(temporary))
+            with index.read_session(), patch("sqlite3.connect", wraps=sqlite3.connect) as opens:
+                for start in range(40):
+                    value, state = index._visual_window_features(clip, float(start + 100), 6.)
+                    self.assertIsNone(value)
+                    self.assertEqual("cold-window-budget-exhausted", state)
+                self.assertEqual(0, opens.call_count)
+
+    def test_feature_reader_sees_external_cache_insert_during_read_session(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-reader-") as temporary:
+            reader, clip = self.fixture(Path(temporary))
+            writer = ClipIndex(reader.db_path)
+            start, duration = 17., 6.
+            stat = clip.stat()
+            revision = json.dumps(reader._local_model_revision(), sort_keys=True)
+            key = (str(clip.resolve()).casefold(), stat.st_size, stat.st_mtime_ns,
+                   start.hex(), duration.hex(), IMAGE_MODEL, TEXT_MODEL, revision, TAXONOMY_VERSION)
+            cache_key = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
+            scores = [{"port": .8, "leisure": .1}] * 3
+            with reader.read_session():
+                self.assertEqual("cold-window-budget-exhausted",
+                                 reader._visual_window_features(clip, start, duration)[1])
+                with writer._connect() as connection:
+                    connection.execute(
+                        "INSERT INTO visual_window_features VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (cache_key, str(clip.resolve()), stat.st_size, stat.st_mtime_ns,
+                         start, duration, IMAGE_MODEL, TEXT_MODEL, TAXONOMY_VERSION,
+                         b"", json.dumps(scores), json.dumps([18., 20., 22.]), revision),
+                    )
+                value, state = reader._visual_window_features(clip, start, duration)
+                self.assertEqual("sqlite", state)
+                self.assertEqual(scores, value["per_frame_scores"])
+
     def test_fresh_add_item_placeholder_duration_cannot_reject_valid_later_window(self):
         import cv2
         with tempfile.TemporaryDirectory(prefix='newsflow-placeholder-duration-') as temporary:

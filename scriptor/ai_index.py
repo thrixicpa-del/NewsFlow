@@ -938,7 +938,7 @@ class ClipIndex:
                     break
             pending.wait()
         try:
-            with self._connect() as connection:
+            def read_cached_features(connection):
                 row = connection.execute("SELECT scores,sample_times,model_revision FROM visual_window_features WHERE cache_key=?",
                                          (cache_key,)).fetchone()
                 reusable = None if row is not None else connection.execute(
@@ -949,6 +949,15 @@ class ClipIndex:
                     (str(path.resolve()), size, mtime_ns, start, duration, IMAGE_MODEL, TEXT_MODEL,
                      revision_key, TAXONOMY_VERSION),
                 ).fetchone()
+                return row, reusable
+
+            with self._lock:
+                session_reader = self._read_session_connection
+                if session_reader is not None:
+                    row, reusable = read_cached_features(session_reader)
+                else:
+                    with self._connect() as connection:
+                        row, reusable = read_cached_features(connection)
             if row is not None:
                 value = {"per_frame_scores": json.loads(row["scores"]), "sample_times": json.loads(row["sample_times"]),
                          "source_signature": {"size": size, "mtime_ns": mtime_ns},
@@ -1556,6 +1565,75 @@ class ClipIndex:
                                         "person_annotations": item.person_evidence}
             current.append(self._with_visual_assessor(item, int(row["embedding_bytes"] or 0) // 4))
         return current[:limit] if limit is not None else current
+
+    def continuity_items(self, *, exclude_english_text: bool = False) -> list[FootageItem]:
+        """Enumerate the whole continuity pool without eagerly probing every file.
+
+        Selection must call current_continuity_item before using a finalist.
+        No filesystem eligibility result is retained across scenes.
+        """
+        text_filter = (" AND NOT (english_text=1 AND english_text_version>=?)"
+                       if exclude_english_text else "")
+        query = ("SELECT path,name,size,mtime_ns,embedding IS NOT NULL AS embedded,length(embedding) AS embedding_bytes,"
+                 "source,source_url,license,tags,source_family,person_evidence,visual_evidence,semantic_scores "
+                 "FROM clips WHERE disabled=0" + text_filter + " ORDER BY name")
+        params = (SCREEN_TEXT_CLASSIFIER_VERSION,) if exclude_english_text else ()
+        with self._lock:
+            reader = self._read_session_connection
+            if reader is None:
+                with self._connect() as connection:
+                    rows = connection.execute(query, params).fetchall()
+            else:
+                rows = reader.execute(query, params).fetchall()
+        result = []
+        candidate_filter = self.candidate_filter
+        for row in rows:
+            item = self._continuity_item_from_row(row)
+            if candidate_filter is None or candidate_filter(item):
+                result.append(item)
+        return result
+
+    def _continuity_item_from_row(self, row) -> FootageItem:
+        item = IndexedFootageItem(row["path"], row["name"], row["source"], row["source_url"],
+                                  row["license"], json.loads(row["tags"] or "[]"),
+                                  self._row_person_evidence(row))
+        item.visual_evidence = self._row_visual_evidence(row)
+        item.metadata_provenance = {"path_hints": [row["name"]], "legacy_tags": list(item.tags),
+                                    "semantic_scores": json.loads(row["semantic_scores"] or "{}"),
+                                    "person_annotations": item.person_evidence}
+        return self._with_visual_assessor(item, int(row["embedding_bytes"] or 0) // 4)
+
+    def current_continuity_item(self, item: FootageItem, *, exclude_english_text: bool = False) -> FootageItem | None:
+        """Repeat the complete all_items eligibility gate for one current row."""
+        text_filter = (" AND NOT (english_text=1 AND english_text_version>=?)"
+                       if exclude_english_text else "")
+        query = ("SELECT path,name,size,mtime_ns,embedding IS NOT NULL AS embedded,length(embedding) AS embedding_bytes,"
+                 "source,source_url,license,tags,source_family,person_evidence,visual_evidence,semantic_scores "
+                 "FROM clips WHERE path=? AND disabled=0" + text_filter)
+        params = ((item.path, SCREEN_TEXT_CLASSIFIER_VERSION) if exclude_english_text else (item.path,))
+        with self._lock:
+            reader = self._read_session_connection
+            if reader is None:
+                with self._connect() as connection:
+                    row = connection.execute(query, params).fetchone()
+            else:
+                row = reader.execute(query, params).fetchone()
+        if row is None:
+            return None
+        path = Path(row["path"])
+        try:
+            if not self.path_allowed(path) or not path.is_file():
+                return None
+            if row["embedded"] and self._signature(path) != (row["size"], row["mtime_ns"]):
+                return None
+            health = self.media_health.cached(path)
+            if health is not None and health.state == "invalid":
+                return None
+        except OSError:
+            return None
+        current = self._continuity_item_from_row(row)
+        candidate_filter = self.candidate_filter
+        return current if candidate_filter is None or candidate_filter(current) else None
 
     def set_visual_evidence(self, path: str, observations: list[dict]) -> None:
         """Store explicit, local visual-kind intervals independently of path tags."""
