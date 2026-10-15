@@ -1,10 +1,10 @@
 # Goal
 
-Continue draft PR403 on `codex/footage-semantic-person-fallback-v3`: correct real footage, preserve topical fallback, speed, history/rotation and broad diversity between videos. The owner explicitly resumed after the earlier shutdown request. The latest addition requests semantic query analogs to use more suitable library material; implementation is in progress, with RED before fixes.
+Continue draft PR403 on `codex/footage-semantic-person-fallback-v3`: correct real footage, preserve topical fallback, speed, history/rotation and broad diversity between videos. **The owner now explicitly requested finishing the semantic-analogs block, recording the stop point and stopping. That source block is saved; resume only after a new owner request.** No background continuation or automation.
 
 # Current status
 
-Published source is `96dc6dfcb27df0f1dd97dffe764ef8820cdcb52d`; current worktree/HEAD must be checked on resume. Source and verification are recorded in [the current report](PR403_REAL_QUALITY_2026-10-15.md). Full task acceptance remains incomplete. `main`, merge, issue closure, Frozen/EXE, lock files and production data remain outside this pass. Only original authorized media/audio reads and disposable test state are allowed.
+Current source commit is `b927596d05128650d6a4ba3756fbdd9e5a0f50de`; the following documentation commit has the same source. Check actual HEAD/status on resume. Source and verification are recorded in [the current report](PR403_REAL_QUALITY_2026-10-15.md). Full task acceptance remains incomplete. `main`, merge, issue closure, Frozen/EXE, lock files and production data remain outside this pass. Only original authorized media/audio reads and disposable test state are allowed. New final production integrity gate is FAIL, not cleared by committing the draft.
 
 # Completed
 
@@ -12,24 +12,30 @@ Final12 on b86abbe repeated both unchanged300-second narrations through source R
 
 Military council/negation rules are tested bounded context rules, not weight training. Source performance changes preserve all candidates/current safety checks. Raw miss memo: RED6SELECTversus2,19focused/129related PASS; independent8PASS/11deselected APPROVE; final Windows-native534executions OK112.917s/guardPASS. Secret/Ruff/FASTPASS on source commit96dc6df.
 
+Semantic analogs onb927596 add at most two same-role CATEGORY_MATCH queries per scene; strict query, original clauses, person/action priority, thresholds and batched search remain. Confirmed legacy coverage regressions were fixed after RED. Final45targeted/147quality checks and independent46check review pass with guards; new tests are wired into the existing CI VoiceMap loader. Final genuine100scene proof1PASS0.54s/guardPASS preserves narration/timing/IDs/strictqueries. Actual expanded retrieval coverage/MP4/speed NOT RUN because the owner requested this stop.
+
 # Validation
 
 The report preserves RED/GREEN, independent review, native regression, real-output results and historical failures. Matched full-snapshot11e:50scenes/300s295.954s versus328.689s on11d, one matched pair with identical cache/settings/history0/threads/profiler,0newframes/guardPASS. Actual50project windows/narration/queries and timelinebounds unchanged.17paths/8families/33pathrepeats remain insufficient; no wide final MP4 yet. The earlier11a cold498.698s, interrupted11a, nativeAV11b, incomplete540s11c and resource/fixture failures remain distinct preserved results.
+
+**Final native on analogs+CI wiring:597executions OK123.187s, PRODUCTION_WRITE_GUARD=FAIL changed=settings.json; the combined gate is FAIL.** Writer unknown. A subsequent12-second hash/stat-only observation found no further changes and cannot identify the earlier writer or clear the failure. Previous550OK/guardPASS was on a pre-energy/CI-loader source and remains only a checkpoint. No retry was run to obtain PASS. Commit secret/Ruff/FAST PASS does not waive the failed integrity gate. Source is a draft checkpoint, not merge/release-ready.
 
 Frozen69holdout labels are still sealed for current taxonomy.192of384 cumulative automatic window-work credits remain; no new cold work was spent by diagnostics/replay. Internal retained evidence allocation raised8→9GiB because7.886GiB was already retained and mandatory final media/A-B remain. RSS4096MiB and per-case96cold/time caps unchanged. New retained artifacts go to D and must all be counted. TEMP/TMP on D, BLAS1/MKL1/OMP4/offline for both comparison arms.
 
 # Next steps
 
-1. Inspect current HEAD/status and agent/source ownership before edits. Preserve unrelated changes. Finish the bounded semantic-query analog RED/GREEN/review block without changing original strict query, classifier thresholds, person/action priority or batched search contract.
-2. Resolve the independently reviewed cold-work allocation design: exact selector/final duration keys must align, person contradictions are interval-scoped, borrowed budget debt does not guarantee ordinary credit for the next scene. No fairness implementation is accepted yet; preserve full pools and cached/external evidence visibility.
+1. Wait for an explicit resume request. Then inspect current HEAD/status and source ownership. Investigate the new production settings integrity FAIL without changing real settings/library/keys/sessions or stopping the production app; do not assume its writer from timing alone. Preserve all prior failures.
+2. Resume cold-work allocation from the ignored local `test-data/footage-v3/quality-pass/cold-budget-fairness-implementation-private.md` and `cold-budget-fairness-PARKED-private.md`. Exact index-only WIP diff/full file copies/test copies/hashes are retained; live ai_index is restored to committed blob a46cfd8 and the new test is parked. Apply only after HEAD/status/hash/reverse checks; never overwrite existing work. Bridge integration is not implemented. Align selector/final actual durations and fixed fast-reuse origin, keep contradictions interval-scoped and full pools visible. Mandatory RED: two failed primaries must not strand scene1 while a permitted cold alternative and94global credits remain. Emergency debt protects aggregate reserve, not next-scene ordinary credit.
 3. Repeat both original300-second narrations and six controls on final source; include real broad-library MP4 and active source UI. Check every scene/window/PTS/full decode/PCM; keep word timing approximate.
 4. Finish bounded whole-library normal/fast and serial/parallel diversity with history/concurrency effects disclosed. Use remaining192work credits only after reviewed freeze and explicit internal allocation; arbitrary unknown late matches cannot be guaranteed under96.
 5. Freeze final sequential A/B and identical fixed-timeline renders on the same inputs/runtime/settings/history. Current D benchmark is prepared, not measured; preserve old incomplete benchmark and slow cases.
 6. Run prepared matched normal-mode comparison and unchanged sealed secondary holdout, whole-branch review, then update the same draft PR/report and verify CI on resulting HEAD.
 
+The local D `benchmark-final11/broad-acceptance-final14/RESUME.md` is a static PREPARED_INCOMPLETE/NOTRUNNABLE handoff. Worker/supervisor/freeze/proof and exclusive cross-process budget ledger still need implementation. Treating two-end-frame native health as one work unit is a pending proposal, not authorization; a possible240-frame fallback must not bypass budgets. No model/frame/worker was launched from this preparation.192remaining credits are unspent.
+
 # Risks/blockers
 
-Semantic/fallback behavior now completes the two small-pool real outputs, but broad diversity and latency remain unaccepted. Person identity/event attribution and exact word timing remain unverified; three controls and15wide source-window scenes remain uncertain. Source-window review does not replace a wide final MP4. Eligibility replay18no-new-family/4healthBLOCKED does not prove absence of fresh paths in used families. Docker engine unavailable; independent Windows E2E NOT RUN. Historical production-integrity FAIL remains unresolved by writer, including later missing production VoiceMap paths; verified genuine saved test crops are used without production restoration. Frozen binding FAIL remains; rebuilding/changing lock is forbidden. At b86abbe Windows source build PASS and Linux CI FAIL only at Frozen lock; later HEAD CI is separate. No merge/release readiness is claimed.
+Semantic/fallback behavior completes the earlier two small-pool real outputs, but broad diversity/latency and new analog-source real output remain unaccepted. Person/event attribution and exact word timing remain unverified; three controls and15wide source-window scenes remain uncertain. Source-window review does not replace a wide final MP4. Eligibility18no-new-family/4healthBLOCKED does not prove absence of fresh paths in used families. Docker info rechecked unavailable, NOT RUN; independent Windows E2E NOT RUN. Historical and new597-run integrity FAIL remain unresolved by writer; missing production VoiceMaps are not restored. Frozen binding FAIL remains; rebuilding/changing lock is forbidden. Source96dc Windows PASS/Linux FAILonlyFrozen are verified; current new HEAD CI is separate and pending. No merge/release readiness is claimed.
 
 # Files/context
 
