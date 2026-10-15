@@ -111,30 +111,98 @@ def term_matches(stem: str, text: str) -> bool:
     return bool(re.search(rf"(?<!\w){expression}(?!\w)", text, re.IGNORECASE))
 
 
-def _negated_attack(text: str) -> bool:
+def _negated_attack(text: str, stem: str | None = None) -> bool:
     # Clause-local bounded rules: do not erase a later real attack after a
     # refused proposal. This deliberately stops short of a linguistic parser.
     text = re.sub(r"\bне\s+(?:отмен\w*|предотврат\w*)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bтак\s+и\s+не\b", "не", text, flags=re.IGNORECASE)
+    event = re.escape(stem) + r"\w*" if stem else r"(?:удар\w*|обстрел\w*|атак\w*|наступлен\w*)"
     return bool(re.search(
         r"(?:отказ\w*|отмен\w*|предотврат\w*|не\s+(?:было|будет|начал\w*|начн\w*|нанес\w*|нанос\w*|атак\w*|обстрел\w*))"
-        r"(?:\s+\w+){0,5}\s+(?:удар\w*|обстрел\w*|атак\w*|наступлен\w*)"
-        r"|(?:удар\w*|обстрел\w*|атак\w*|наступлен\w*)(?:\s+\w+){0,5}\s+(?:отмен\w*|предотврат\w*|не\s+состоя\w*)",
+        rf"(?:\s+(?!и\b)\w+){{0,5}}\s+{event}"
+        rf"|{event}(?:\s+(?!и\b)\w+){{0,5}}\s+(?:отмен\w*|предотврат\w*|не\s+(?:состоя\w*|нача\w*|начн\w*))"
+        rf"|\bесли\s+(?:\w+\s+){{0,3}}{event}",
         text, re.IGNORECASE,
     ))
 
 
+_PROTEST_WORDS = r"(?:митинг\w*|протест\w*|демонстран\w*|демонстраци\w*|шестви\w*|пикет\w*|забастов\w*|бастующ\w*|беспоряд\w*)"
+_SPEECH_VERBS = r"(?:ответи\w*|выступи\w*|заяви\w*|сказа\w*|прокомментир\w*|комментир\w*|отверг\w*|подтверд\w*)"
+
+
+def _protest_intent(text: str, protest_context: bool = False) -> str:
+    """Bounded local event rules, not a universal language classifier."""
+    # Resolve each explicit event locally. A cancelled event must not erase a
+    # later gathering, and a diplomatic protest must not hide a street rally.
+    clauses = re.split(r"[,;.!?]|\b(?:но|затем)\b", text)
+    if len(clauses) > 1:
+        modes = []
+        for clause in clauses:
+            if clause.strip():
+                mode = _protest_intent(clause, protest_context=protest_context)
+                modes.append(mode)
+                protest_context = protest_context or mode in {"peaceful", "labor", "farmers", "conflict"}
+        active = [mode for mode in modes if mode != "none"]
+        if active:
+            return active[-1]
+    if re.search(r"дипломатическ\w*\s+протест", text):
+        return "diplomatic"
+    if re.search(r"демонстраци\w*(?:\s+\w+){0,3}\s+(?:оборудован\w*|техник\w*|продук\w*)", text):
+        return "equipment"
+    contextual_conflict = bool(re.search(r"разгон\w*|столкнов\w*", text)
+                               and (protest_context or re.search(r"полиц\w*", text)))
+    if not (contextual_conflict or re.search(rf"\b{_PROTEST_WORDS}", text) or
+            re.search(r"участник\w*\s+акци\w*.*(?:собрал\w*|площад\w*)", text)):
+        return "none"
+    event_clauses = [clause for clause in re.split(r"[,;.!?]|\b(?:но|затем)\b", text)
+                     if re.search(_PROTEST_WORDS, clause)]
+    def inactive(clause):
+        clause = re.sub(r"\bне\s+(?:отмен\w*|предотврат\w*)", "", clause)
+        return bool(re.search(r"отмен\w*|предотврат\w*|не\s+нач\w*|угрожа\w*|обсужда\w*|\bесли\b", clause))
+    if event_clauses and all(inactive(clause) for clause in event_clauses):
+        return "inactive"
+    conflict_clauses = [clause for clause in re.split(r"[,;.!?]|\b(?:но|затем)\b", text)
+                        if re.search(r"разгон\w*|столкнов\w*|беспоряд\w*", clause)]
+    conflict = any(not re.search(r"не\s+(?:было|нач\w*|произош\w*)|без\s+(?:столкнов\w*|беспоряд\w*)", clause)
+                   for clause in conflict_clauses)
+    if conflict:
+        return "conflict"
+    if re.search(r"забастов\w*|бастующ\w*|пикет\w*|рабочи\w*", text):
+        return "labor"
+    if re.search(r"фермер\w*", text):
+        return "farmers"
+    return "peaceful"
+
+
 def visual_intent(text: str, associations: dict[str, str], *, previous: dict | None = None) -> dict:
+    sequence = re.split(r"\b(?:затем|после этого)\b", text, flags=re.IGNORECASE)
+    if len(sequence) > 1 and sequence[-1].strip():
+        # A single VoiceMap segment may contain an explicit action switch.
+        # Resolve the later action; preserve only a valid pronoun antecedent.
+        prior = visual_intent(sequence[0], associations, previous=previous)
+        for clause in sequence[1:]:
+            if clause.strip():
+                prior = visual_intent(clause, associations, previous=prior)
+        return {**prior, "text": text, "mentioned_people": named_people(text)}
     lowered = text.casefold().replace("ё", "е")
     people = named_people(text)
     industrial = bool(re.search(r"\b(?:завод\w*|производств\w*|мост\w*|ремонт\w*|урожа\w*|порт\w*)", lowered))
-    speech = bool(re.search(r"\b(?:заяв\w*|ответ\w*|выступ\w*|обращени\w*|журналист\w*|сказ\w*)", lowered))
-    joint = bool(re.search(r"\b(?:обсуд\w*|переговор\w*|встрет\w*)", lowered))
+    speech = bool(re.search(rf"\b(?:{_SPEECH_VERBS}|заяв\w*|обращени\w*|журналист\w*)", lowered))
+    joint = bool(re.search(r"\b(?:обсуд\w*|обсужден\w*|переговор\w*|встреч\w*|встрет\w*|консультаци\w*)", lowered))
     indirect = bool(re.search(r"\b(?:по\s+решени\w*|по\s+указ\w*|поручени\w*)", lowered))
     primary = [] if industrial and (indirect or not speech) else people[:1]
-    if primary and len(people) > 1 and re.search(r"\b(?:ответил\w*|выступил\w*|заявил\w*|сказал\w*)", lowered):
+    speech_action = re.search(rf"\b{_SPEECH_VERBS}", lowered)
+    if primary and len(people) > 1 and speech_action:
         subjects = [identity for identity in people
                     if re.search(rf"\b{PERSON_SUBJECT_FORMS[identity]}\b", lowered)]
-        if len(subjects) == 1:
+        if len(subjects) > 1:
+            before_action = lowered[:speech_action.start()]
+            main_subjects = [identity for identity in subjects
+                            if re.search(rf"\b{PERSON_SUBJECT_FORMS[identity]}\b", before_action)]
+            # Both coordinated speakers remain eligible. A subordinate quote
+            # after the main predicate does not become a second main speaker.
+            primary = main_subjects
+        else:
             primary = subjects
     if joint and not speech and not indirect:
         primary = people
@@ -144,7 +212,12 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
             primary = prior
     economic = any(term_matches(stem, lowered) for stem in ("санкц", "эконом", "рынк", "банк"))
     cyber = any(term_matches(stem, lowered) for stem in ("кибер", "хакер", "сервер"))
-    protest = any(term_matches(stem, lowered) for stem in ("протест", "митинг", "забастов"))
+    protest_mode = _protest_intent(lowered, protest_context=(previous or {}).get("protest_mode") in {
+        "peaceful", "labor", "farmers", "conflict",
+    })
+    if joint and re.search(r"(?:затем|после этого).*?(?:переговор\w*|встрет\w*|консультаци\w*)", lowered):
+        protest_mode = "none"
+    protest = protest_mode in {"peaceful", "labor", "farmers", "conflict"} and not (speech and primary)
     ceasefire = bool(re.search(r"прекращени\w*\s+огня|перемири\w*", lowered))
     actual_kinetic = bool(re.search(r"(?:обстрел\w*|артилл\w*|удар\w*)", lowered)
                           and re.search(r"несмотря|продолж\w*|начал\w*|произош\w*", lowered))
@@ -156,24 +229,45 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
             continue
         if named_people(stem):
             continue
+        # Contextual event rules replace ambiguous dictionary associations.
+        if re.search(_PROTEST_WORDS, stem) or stem in {"демонстр", "беспоряд", "фермер"}:
+            if stem == "фермер" and protest_mode == "none":
+                terms.append("agriculture farming fields farm workers")
+            continue
+        if (protest or (speech and primary and protest_mode != "none")) and stem not in {
+            "иран", "тегеран", "украин", "росси", "москв", "вашингтон", "киев", "брюссел", "армени", "азербайдж",
+        }:
+            continue
         if stem in kinetic:
             clauses = re.split(r"[,;.!?]|\b(?:но|затем)\b", lowered)
             matching = [clause for clause in clauses if term_matches(stem, clause)]
-            if stem in {"удар", "обстрел", "артилл", "наступлен"} and matching and all(_negated_attack(clause) for clause in matching):
+            if stem in {"удар", "обстрел", "артилл", "наступлен"} and matching and all(_negated_attack(clause, stem) for clause in matching):
                 continue
             if stem == "удар" and economic:
                 continue
             if (cyber or (ceasefire and not actual_kinetic) or (speech and primary)) and stem in {"удар", "обстрел", "артилл"}:
                 continue
-        if stem == "фермер":
-            if not protest:
-                terms.append("agriculture farming fields farm workers")
-            continue
         if protest and stem in {"урож", "картош", "сельхоз", "пшениц", "зерн", "комбайн"}:
             continue
         if rail and stem in {"зерн", "пшениц"}:
             continue
         terms.append(english)
+    if protest:
+        terms.append({
+            "peaceful": "peaceful civilian protest crowd placards street rally march",
+            "farmers": "peaceful farmers protest tractors placards government demonstration",
+            "labor": "peaceful workers labor strike picket line union protest factory gate",
+            "conflict": "civilian protest police dispersal clashes street unrest",
+        }[protest_mode])
+    elif protest_mode in {"inactive", "diplomatic"}:
+        terms.append("diplomatic official statement government building exterior" if protest_mode == "diplomatic"
+                     else "official statement government building exterior venue illustrative context")
+    elif protest_mode == "equipment":
+        terms.append("industrial equipment exhibition technology demonstration")
+    if re.search(r"реклам\w*\s+акци\w*|стоимост\w*.*акци\w*", lowered):
+        terms.append("company business finance advertising markets")
+    if joint and not protest and not (speech and primary):
+        terms.append("diplomatic negotiations delegations meeting consultations")
     if ceasefire and not actual_kinetic:
         terms.append("diplomatic negotiations delegations statements ceasefire")
     if rail:
@@ -182,6 +276,8 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         terms.append("data center servers computer network infrastructure")
     if speech and primary:
         terms.append("press conference statement journalists cameras")
+    if not terms and (speech or _negated_attack(lowered)):
+        terms.append("official statement government briefing illustrative context")
     terms = [person_name(identity) for identity in primary] + terms
     query = ", ".join(dict.fromkeys(terms))
     return {
@@ -190,12 +286,13 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         "person_role": "speaker" if primary and speech else ("participant" if primary else "none"),
         "provenance": "local-lexical-context", "confidence": "rule-based",
         "illustrative_only": True,
+        "protest_mode": protest_mode if not (speech and primary) else "mentioned-by-speaker",
     }
 
 
 def visual_topics(query: str) -> set[str]:
     vocabularies = {
-        "agriculture": r"harvest|agriculture|farming|wheat|tractor",
+        "agriculture": r"harvest|agriculture|farming|wheat",
         "protest": r"protest|rally|picket|labor strike",
         "diplomacy": r"diplomatic|negotiations|summit",
         "combat": r"artillery|shelling|battlefield|frontline|tanks|explosion",

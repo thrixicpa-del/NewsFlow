@@ -349,6 +349,17 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             browser.close()
 
     def test_footage_v3_named_person_context_switch_renders_through_montage_ui(self):
+        self._run_footage_montage_ui(
+            ("parliament-government", "oil-tanker-port"),
+            "Путин выступил с заявлением. Танкер прибыл в порт.", ("Putin", "tanker"))
+
+    def test_pr403_protest_topic_switches_render_through_montage_ui(self):
+        self._run_footage_montage_ui(
+            ("frontline-combat", "protest-crowd", "diplomatic-negotiations", "workers-strike", "oil-tanker-port"),
+            "На фронте продолжаются бои. Жители собрались на мирный митинг. Представители властей начали переговоры. Рабочие объявили забастовку. В порту возобновилась погрузка.",
+            ("frontline", "protest", "diplomatic", "labor strike", "port"))
+
+    def _run_footage_montage_ui(self, tags, script, expected_queries):
         """Actual UI/IPC/queue/source render; synthetic imagery is not face QA."""
         import numpy as np
 
@@ -368,7 +379,7 @@ class ElectronE2ESmokeTests(unittest.TestCase):
         library = fixture / "library"
         library.mkdir(exist_ok=True)
         index = ClipIndex(app_data_root() / "footage-index.sqlite3")
-        for number, tag in enumerate(("parliament-government", "oil-tanker-port")):
+        for number, tag in enumerate(tags):
             path = library / f"pattern_{number}.mp4"
             subprocess.run([ffmpeg_executable(), "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=7",
                             "-an", "-c:v", "libx264", str(path)], check=True, capture_output=True)
@@ -383,7 +394,7 @@ class ElectronE2ESmokeTests(unittest.TestCase):
                 )
         voice = fixture / "tone.wav"
         subprocess.run([ffmpeg_executable(), "-y", "-f", "lavfi", "-i",
-                        "sine=frequency=440:sample_rate=48000:duration=12", str(voice)],
+                        f"sine=frequency=440:sample_rate=48000:duration={len(expected_queries) * 6}", str(voice)],
                        check=True, capture_output=True)
         title = "Footage V3 source UI"
         settings = Settings(
@@ -396,7 +407,7 @@ class ElectronE2ESmokeTests(unittest.TestCase):
         )
         save_settings(settings)
         save_session([title], [Job(ScenarioRequest(0, title, ""), RunState.DONE,
-                                  "Путин выступил с заявлением. Танкер прибыл в порт.", "")])
+                                  script, "")])
         self._launch()
         self._wait_for_cdp()
         from playwright.sync_api import sync_playwright
@@ -422,12 +433,15 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             project_path = Path(task.get("projectPath", ""))
             self.assertTrue(project_path.is_file(), task)
             project = TimelineProject.load(project_path)
-            self.assertIn("Putin", project.clips[0].visual_query_en)
-            self.assertIn("tanker", project.clips[1].visual_query_en)
-            self.assertNotEqual(project.clips[0].path, project.clips[1].path)
+            self.assertEqual(len(expected_queries), len(project.clips))
+            for clip, expected in zip(project.clips, expected_queries):
+                self.assertIn(expected, clip.visual_query_en)
+            self.assertEqual(len(expected_queries), len({clip.path for clip in project.clips}))
             self.assertNotEqual(project.clips[0].selection_diagnostics["person"]["status"], "confirmed")
             mp4 = Path(task["outputPath"])
-            self.assertAlmostEqual(probe_media_duration(mp4), 12, delta=.25)
+            self.assertAlmostEqual(probe_media_duration(mp4), len(expected_queries) * 6, delta=.25)
+            subprocess.run([ffmpeg_executable(), '-v', 'error', '-i', str(mp4), '-f', 'null', '-'],
+                           capture_output=True, check=True)
             prepared = [(clip.path, clip.source_start, clip.duration) for clip in project.clips]
             page.reload()
             page.locator(".nf-page-header h1").wait_for(timeout=20_000)

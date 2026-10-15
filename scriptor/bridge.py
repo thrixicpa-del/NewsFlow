@@ -15748,6 +15748,46 @@ def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     return min(0.30, bonus)
 
 
+def _protest_suitability(scene_query: str, item: FootageItem) -> str | None:
+    """Metadata contract for civilian actions; crowd alone is insufficient.
+
+    This does not verify the real event, geography or identity in an image.
+    It is shared by selection, reuse, continuity, repair and tail validation.
+    """
+    from .scene_intent import named_people
+    query = scene_query.casefold()
+    if not re.search(r"\b(?:protest|rally|picket|labor strike|demonstration)\b", query):
+        return None
+    if "equipment" in query or "diplomatic protest" in query:
+        return None
+    metadata = " ".join((item.name, " ".join(item.tags or []))).casefold()
+    if named_people(metadata):
+        return "reject"
+    if re.search(r"concert|football|fans|religious|parade|people queue|equipment demonstration|product demonstration|exhibition|концерт|болельщик|религиоз|парад|очередь", metadata):
+        return "reject"
+    if _montage_has_war_action(metadata.replace("-", " ")) or _has_any(metadata, _WAR_VISUAL_TAGS):
+        return "reject"
+    conflict = bool(re.search(r"dispersal|clashes|street unrest", query))
+    # The legacy public-unrest-police label includes ordinary police barriers;
+    # it cannot by itself prove clashes at a peaceful gathering.
+    action_metadata = metadata.replace("public-unrest-police", "")
+    violent = bool(re.search(r"dispersal|clashes|riot|unrest|разгон|столкнов|беспоряд|fire|burning|shooting", action_metadata))
+    if violent and not conflict:
+        return "reject"
+    protest = bool(re.search(r"protest|rally|picket|workers.strike|labor strike|митинг|протест|пикет|забастов|demonstration|march.*placards", metadata))
+    if conflict and (violent or protest):
+        return "direct" if violent else "context"
+    if protest:
+        if "labor strike" in query and not re.search(r"workers|labor|union|picket|забастов|пикет|рабочи", metadata):
+            return "context"
+        if "farmers protest" in query and not re.search(r"farmers|tractor|фермер|трактор", metadata):
+            return "context"
+        return "direct"
+    if "labor strike" in query and "factory-industry" in (item.tags or []):
+        return "context"
+    return "reject"
+
+
 def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: float | None = None,
                       duration: float = 6) -> bool:
     from .scene_intent import (
@@ -15763,6 +15803,18 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
         return False
     query = str(scene_query or "").casefold()
     haystack = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
+    protest_suitability = _protest_suitability(query, item)
+    if protest_suitability == "reject":
+        return False
+    # Mixed advisory CLIP labels can put refinery and frontline on one map.
+    # A positive generic tag must not cancel an explicit combat contradiction
+    # when the scene requests a civilian activity (including port loading).
+    combat_tags = {"frontline-combat", "offensive-advance", "artillery-fire", "war-action",
+                   "military-drone", "missile-strike"}
+    if (combat_tags.intersection(item.tags or []) and not _montage_has_war_action(query)
+            and not re.search(r"\b(?:fire|emergency|damaged|explosion)\b", query)
+            and evidence["status"] != "confirmed"):
+        return False
     # Never let a generic Kremlin / politician / cabinet shot illustrate a
     # concrete military action.  The exception keeps legitimate scenes such
     # as "Putin comments on strikes" usable when the political subject was
@@ -15801,7 +15853,8 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
     semantic_tags = set(item.tags or ()) & SEMANTIC_TAG_LABELS
     specific_semantic_tags = semantic_tags - _MONTAGE_GENERIC_SAFE_SEMANTIC_TAGS
     if (expected_semantic_tags and specific_semantic_tags
-            and not (expected_semantic_tags & specific_semantic_tags)):
+            and not (expected_semantic_tags & specific_semantic_tags)
+            and protest_suitability != "context"):
         return False
     for scene_terms, wanted_terms, forbidden_terms in _MONTAGE_TOPIC_GUARDS:
         if not any(term in query for term in scene_terms):
@@ -15869,6 +15922,13 @@ def _montage_query_ladder(value: str) -> dict[str, list[str]]:
     joined = normalized.casefold()
     categories: list[str] = []
     contexts: list[str] = []
+    protest_query = bool(re.search(r"\b(?:protest|rally|picket|labor strike)\b", joined))
+    if protest_query:
+        conflict = bool(re.search(r"dispersal|clashes|street unrest", joined))
+        categories.append("civilian protest police dispersal street unrest" if conflict
+                          else "peaceful civilian protest rally placards march")
+        contexts.append("peaceful union picket factory exterior labor protest" if "labor strike" in joined
+                        else "peaceful civilian protest placards street march")
     if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
         categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
         contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
@@ -15879,7 +15939,7 @@ def _montage_query_ladder(value: str) -> dict[str, list[str]]:
                          "переговор", "дипломат", "саммит")):
         categories.extend(["government building parliament flags diplomatic meeting"])
         contexts.extend(["city government exterior", "journalists cameras diplomatic venue"])
-    if _has_any(joined, _AGRICULTURE_QUERY_TERMS):
+    if not protest_query and _has_any(joined, _AGRICULTURE_QUERY_TERMS):
         categories.extend(["agriculture farming harvest machinery"])
         contexts.extend(["rural fields food production documentary"])
     if _has_any(joined, ("cyber", "server", "data center", "network")):
@@ -16281,6 +16341,8 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                 reject("diversity", key)
                 continue
             reported_level = level
+            if _protest_suitability(scene_query, hit.item) == "context":
+                reported_level = "SAFE_CONTEXT"
             if level == "STRICT_MATCH" and evidence["targets"]:
                 if evidence["status"] == "unknown":
                     reported_level = "SAFE_CONTEXT"

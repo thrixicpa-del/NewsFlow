@@ -69,6 +69,9 @@ class FootageV3MediaSmoke(unittest.TestCase):
             ("agriculture-farming", "agriculture farming harvest"),
             ("protest-crowd", "protest crowd placards"),
         ]
+        if os.environ.get("NEWSFLOW_FOOTAGE_MEDIA_FOLLOWUP") == "1":
+            categories.extend([("workers-strike", "workers labor strike picket line"),
+                               ("public-unrest-police", "police dispersal clashes")])
         index = SyntheticIndex(app_data_root() / "footage-index.sqlite3")
         before_hashes = {}
         for number, (tag, words) in enumerate(categories):
@@ -92,7 +95,12 @@ class FootageV3MediaSmoke(unittest.TestCase):
              "Зеленский выступил с обращением. Кибератака нарушила работу серверов. Фермеры собирают урожай."),
             "Пашинян выступил с заявлением. На НПЗ произошёл пожар. Нарушена работа дата-центра.",
         ]
-        titles = [f"Footage V3 engineering {i + 1}" for i in range(4)]
+        if os.environ.get("NEWSFLOW_FOOTAGE_MEDIA_FOLLOWUP") == "1":
+            scripts.extend([
+                "На фронте продолжаются бои. Жители собрались на мирный митинг. Представители властей начали переговоры. Рабочие объявили забастовку. В порту возобновилась погрузка.",
+                "На митинге не было столкновений. Митинг отменили. Делегации встретились. Фермеры протестуют у здания правительства.",
+            ])
+        titles = [f"Footage V3 engineering {i + 1}" for i in range(len(scripts))]
         settings = Settings(
             footage_folders=[str(library)], montage_project_folder=str(output / "projects"),
             montage_output_folder=str(output / "outputs"), montage_renderer="ffmpeg",
@@ -115,7 +123,7 @@ class FootageV3MediaSmoke(unittest.TestCase):
         self.assertTrue(index.search("Vladimir Putin press conference"))
         records = []
         with patch.object(bridge, "ClipIndex", SyntheticIndex):
-            for number in range(4):
+            for number in range(len(scripts)):
                 started = time.perf_counter()
                 prepared = bridge.prepare_montage({"scenarioIndex": number,
                     "_progress": lambda stage, detail: print(stage, detail)})["preparedProject"]

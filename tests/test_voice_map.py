@@ -763,5 +763,13 @@ class VoiceMapTests(unittest.TestCase):
         legacy_fitter.assert_not_called()
 
 
+def load_tests(loader, standard_tests, pattern):
+    # The existing CI invokes this module with unittest. Keep the follow-up
+    # planner/VoiceMap/selection regressions in that independently run suite.
+    from tests.test_footage_followup import FootageFollowupTests
+    standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
+    return standard_tests
+
+
 if __name__ == "__main__":
     unittest.main()

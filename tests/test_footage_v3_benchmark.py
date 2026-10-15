@@ -43,7 +43,11 @@ class FootageRetrievalBenchmark(unittest.TestCase):
                     )
                 for batch in (12, 72):
                     # Distinct queries, equal dimensions/seed/workload in BASE and AFTER.
-                    queries = [f"diplomatic negotiations press meeting {i}" for i in range(batch)]
+                    topics = ["diplomatic negotiations press meeting"]
+                    if os.environ.get("NEWSFLOW_FOOTAGE_BENCHMARK_TOPICS") == "protest":
+                        topics = ["peaceful civilian protest rally placards", "workers labor strike picket line",
+                                  "farmers protest tractors placards", "civilian protest police dispersal clashes"]
+                    queries = [f"{topics[i % len(topics)]} {i}" for i in range(batch)]
                     samples = {key: [] for key in ("cold", "warm", "after_usage", "corpus")}
                     tracemalloc.start()
                     index._search_corpus()

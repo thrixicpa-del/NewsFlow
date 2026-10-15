@@ -24,8 +24,13 @@ class FootageDiversityComparison(unittest.TestCase):
                     # Restore initial history between modes; retain it within each series.
                     pools = {}
                     count = 3 if scarce else 96
-                    for topic, tag in (("diplomatic negotiations", "diplomatic-negotiations"),
-                                       ("data center servers cybersecurity", "technology-datacenter")):
+                    topics = (("diplomatic negotiations", "diplomatic-negotiations"),
+                              ("data center servers cybersecurity", "technology-datacenter"))
+                    if os.environ.get("NEWSFLOW_FOOTAGE_DIVERSITY_TOPICS") == "protest":
+                        topics = (("peaceful civilian protest rally placards", "protest-crowd"),
+                                  ("workers labor strike picket line", "workers-strike"),
+                                  *topics)
+                    for topic, tag in topics:
                         pools[topic] = [SearchHit(
                             FootageItem(f"/synthetic/{tag}/clip_{i:03}.mp4", f"clip_{i:03}.mp4", tags=[tag]),
                             .5 + (i % 5) * .001, 6, source_family=f"{tag}-{i // 2}",
@@ -85,4 +90,5 @@ class FootageDiversityComparison(unittest.TestCase):
         target = Path(os.environ["NEWSFLOW_FOOTAGE_DIVERSITY"])
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"scope": "deterministic suitable-pool selector/history simulation; no visual acceptance",
-                                      "seed": "fixed-video-N", "results": result}, indent=2), encoding="utf-8")
+                                      "seed": "fixed-video-N", "topics": os.environ.get("NEWSFLOW_FOOTAGE_DIVERSITY_TOPICS", "original"),
+                                      "results": result}, indent=2), encoding="utf-8")

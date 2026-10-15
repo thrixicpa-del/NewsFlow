@@ -258,7 +258,11 @@ def fallback_scene_plan(narration: str, topic: str = "") -> list[dict]:
         word_count = len(sentence.split())
         duration = min(6.0, max(2.5, word_count / 2.7))
         intent = visual_intent(sentence, VISUAL_TERMS, previous=previous)
-        query = intent["visual_query"] or (previous or {}).get("visual_query") or topic_query or GENERIC_VISUAL_QUERY
+        # Only an explicit anaphoric continuation may inherit a visual action.
+        # An unrelated sentence with unknown vocabulary must not repeat a battle.
+        continuation = bool(re.match(r"\s*(?:это|там|здесь|также)\b", sentence, re.IGNORECASE))
+        inherited = (previous or {}).get("visual_query") if continuation else ""
+        query = intent["visual_query"] or inherited or topic_query or GENERIC_VISUAL_QUERY
         plan.append({"narration": sentence, "visual_query_en": query,
                      "duration": round(duration, 2), "scene_intent": intent})
         previous = intent
