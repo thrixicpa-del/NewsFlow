@@ -15,6 +15,174 @@ from scriptor.visual_evidence import TAXONOMY, TAXONOMY_VERSION
 
 
 class VisualFeatureReuseTests(unittest.TestCase):
+    def test_repeated_zero_budget_raw_miss_avoids_feature_selects_within_session(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            index, clip = self.fixture(Path(temporary))
+            feature_selects = []
+            with index.read_session():
+                index._read_session_connection.set_trace_callback(
+                    lambda statement: feature_selects.append(statement)
+                    if statement.startswith("SELECT ") and "FROM visual_window_features" in statement else None
+                )
+                try:
+                    for _ in range(3):
+                        value, state = index._visual_window_features(clip, 17., 6.)
+                        self.assertIsNone(value)
+                        self.assertEqual("cold-window-budget-exhausted", state)
+                finally:
+                    index._read_session_connection.set_trace_callback(None)
+            self.assertEqual(2, len(feature_selects), feature_selects)
+            self.assertEqual(2, index._visual_raw_miss_hits)
+            self.assertEqual(1, index._visual_raw_miss_misses)
+
+    def test_raw_miss_expires_with_session_and_budget_change(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            index, clip = self.fixture(Path(temporary))
+            selects = []
+            with index.read_session():
+                index._read_session_connection.set_trace_callback(
+                    lambda sql: selects.append(sql) if "FROM visual_window_features" in sql else None)
+                self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                self.assertEqual(2, len(selects))
+                index.visual_window_budget = 1
+                index._loaded_model_revision = index._local_model_revision()
+                with (patch.object(index, "_models", return_value=(object(), object())),
+                      patch.object(index, "_sample_visual_window", side_effect=ValueError("synthetic decode stop"))):
+                    self.assertEqual("window-assessment-unavailable:ValueError",
+                                     index._visual_window_features(clip, 17., 6.)[1])
+                self.assertEqual(1, index._visual_cold_windows)
+                self.assertEqual(4, len(selects))
+                self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                self.assertEqual(6, len(selects))
+                index._visual_cold_windows = 0
+                with (patch.object(index, "_models", return_value=(object(), object())),
+                      patch.object(index, "_sample_visual_window", side_effect=ValueError("synthetic decode stop"))):
+                    self.assertEqual("window-assessment-unavailable:ValueError",
+                                     index._visual_window_features(clip, 17., 6.)[1])
+                self.assertEqual(8, len(selects))
+                index._read_session_connection.set_trace_callback(None)
+            index.visual_window_budget = 0
+            index._visual_cold_windows = 0
+            with index.read_session():
+                index._read_session_connection.set_trace_callback(
+                    lambda sql: selects.append(sql) if "FROM visual_window_features" in sql else None)
+                self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                index._read_session_connection.set_trace_callback(None)
+            self.assertEqual(10, len(selects))
+
+    def test_raw_miss_identity_includes_source_window_model_and_taxonomy(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            index, clip = self.fixture(Path(temporary))
+            other = clip.with_name("other.mp4")
+            other.write_bytes(clip.read_bytes())
+            text_ref = index.model_cache / ("models--" + TEXT_MODEL.replace("/", "--")) / "refs" / "main"
+            selects = []
+            with index.read_session():
+                index._read_session_connection.set_trace_callback(
+                    lambda sql: selects.append(sql) if "FROM visual_window_features" in sql else None)
+                for source, start in ((clip, 17.), (clip, 18.), (other, 17.)):
+                    self.assertEqual("cold-window-budget-exhausted",
+                                     index._visual_window_features(source, start, 6.)[1])
+                clip.write_bytes(b"new synthetic source identity")
+                self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                text_ref.write_text("local-revision-B", encoding="utf-8")
+                self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                with patch("scriptor.visual_evidence.TAXONOMY_VERSION", TAXONOMY_VERSION + 1):
+                    self.assertEqual("cold-window-budget-exhausted", index._visual_window_features(clip, 17., 6.)[1])
+                index._read_session_connection.set_trace_callback(None)
+            self.assertEqual(12, len(selects))
+
+    def test_external_old_taxonomy_vectors_win_after_raw_miss(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            reader, clip = self.fixture(Path(temporary))
+            writer = ClipIndex(reader.db_path)
+            with reader.read_session():
+                self.assertEqual("cold-window-budget-exhausted", reader._visual_window_features(clip, 17., 6.)[1])
+                with writer._connect() as connection:
+                    connection.execute(
+                        "UPDATE visual_window_features SET source_start=?,sample_times=? WHERE cache_key=?",
+                        (17., json.dumps([17.5, 20., 22.5]), "older-taxonomy"),
+                    )
+                reader._text_embedder = self.text_model()
+                reader._loaded_model_revision = reader._local_model_revision()
+                with patch.object(reader, "_sample_visual_window", side_effect=AssertionError("decoded image")):
+                    value, state = reader._visual_window_features(clip, 17., 6.)
+            self.assertEqual("sqlite-vectors-rescored", state)
+            self.assertEqual([17.5, 20., 22.5], value["sample_times"])
+
+    def test_external_insert_between_select_and_memo_stamp_is_seen_on_next_call(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            reader, clip = self.fixture(Path(temporary))
+            writer = ClipIndex(reader.db_path)
+            scores = [{"port": .8, "leisure": .1}] * 3
+            inserted = False
+
+            def insert_after_feature_selects(sql):
+                nonlocal inserted
+                if not inserted and "FROM clips WHERE path=" in sql:
+                    inserted = True
+                    self.insert_exact_scores(writer, clip, 17., 6., scores)
+
+            with reader.read_session():
+                reader._read_session_connection.set_trace_callback(insert_after_feature_selects)
+                try:
+                    self.assertEqual("cold-window-budget-exhausted", reader._visual_window_features(clip, 17., 6.)[1])
+                finally:
+                    reader._read_session_connection.set_trace_callback(None)
+                self.assertTrue(inserted)
+                self.assertFalse(reader._visual_raw_misses)
+                self.assertEqual(1, reader._visual_raw_miss_invalidations)
+                value, state = reader._visual_window_features(clip, 17., 6.)
+            self.assertEqual("sqlite", state)
+            self.assertEqual(scores, value["per_frame_scores"])
+
+    def test_global_feature_memory_wins_after_raw_miss(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            reader, clip = self.fixture(Path(temporary))
+            writer = ClipIndex(reader.db_path)
+            scores = [{"port": .8, "leisure": .1}] * 3
+            with reader.read_session():
+                self.assertEqual("cold-window-budget-exhausted", reader._visual_window_features(clip, 17., 6.)[1])
+                self.insert_exact_scores(writer, clip, 17., 6., scores)
+                self.assertEqual("sqlite", writer._visual_window_features(clip, 17., 6.)[1])
+                value, state = reader._visual_window_features(clip, 17., 6.)
+            self.assertEqual("memory", state)
+            self.assertEqual(scores, value["per_frame_scores"])
+
+    def test_curated_annotation_update_wins_after_raw_miss(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
+            reader, clip = self.fixture(Path(temporary))
+            writer = ClipIndex(reader.db_path)
+            stat = clip.stat()
+            with writer._connect() as connection:
+                connection.execute("INSERT INTO clips(path,name,size,mtime_ns,duration) VALUES(?,?,?,?,?)",
+                                   (str(clip.resolve()), clip.name, stat.st_size, stat.st_mtime_ns, 30.))
+            reader._visual_models_available = lambda: True
+            with reader.read_session():
+                self.assertEqual("cold-window-budget-exhausted",
+                                 reader.assess_visual_window("seaport cargo", clip, 17., 6.)["reason"])
+                writer.set_visual_evidence(str(clip),
+                                           [{"kind": "port", "start": 17., "end": 23., "source": "manual"}])
+                result = reader.assess_visual_window("seaport cargo", clip, 17., 6.)
+            self.assertEqual("direct", result["relation"])
+            self.assertEqual("curated-interval", result["source"])
+
+    @staticmethod
+    def insert_exact_scores(index, clip, start, duration, scores):
+        stat = clip.stat()
+        revision = json.dumps(index._local_model_revision(), sort_keys=True)
+        key = (str(clip.resolve()).casefold(), stat.st_size, stat.st_mtime_ns,
+               start.hex(), duration.hex(), IMAGE_MODEL, TEXT_MODEL, revision, TAXONOMY_VERSION)
+        cache_key = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
+        with index._connect() as connection:
+            connection.execute(
+                "INSERT INTO visual_window_features VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cache_key, str(clip.resolve()), stat.st_size, stat.st_mtime_ns,
+                 start, duration, IMAGE_MODEL, TEXT_MODEL, TAXONOMY_VERSION,
+                 b"", json.dumps(scores), json.dumps([start + 1., start + 3., start + 5.]), revision),
+            )
+
     def test_zero_budget_feature_misses_reuse_read_session_connection(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-feature-reader-") as temporary:
             index, clip = self.fixture(Path(temporary))

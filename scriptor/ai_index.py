@@ -317,6 +317,12 @@ class ClipIndex:
         self._read_session_connection = None
         self._read_session_depth = 0
         self._read_session_data_version = None
+        self._visual_raw_misses = OrderedDict()
+        self._visual_raw_miss_data_version = None
+        self._visual_raw_miss_hits = 0
+        self._visual_raw_miss_misses = 0
+        self._visual_raw_miss_evictions = 0
+        self._visual_raw_miss_invalidations = 0
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_schema()
         from .media_health import MediaHealthStore
@@ -361,6 +367,8 @@ class ClipIndex:
             if self._read_session_depth == 0:
                 self._read_session_connection = self._open_catalog_reader()
                 self._read_session_data_version = None
+                self._visual_raw_misses.clear()
+                self._visual_raw_miss_data_version = None
             self._read_session_depth += 1
         try:
             yield self
@@ -371,6 +379,8 @@ class ClipIndex:
                     self._read_session_connection.close()
                     self._read_session_connection = None
                     self._read_session_data_version = None
+                    self._visual_raw_misses.clear()
+                    self._visual_raw_miss_data_version = None
 
     def _catalog_row(self, path: str | Path):
         """Bounded unfiltered row memo with SQLite revision invalidation."""
@@ -954,8 +964,24 @@ class ClipIndex:
             with self._lock:
                 session_reader = self._read_session_connection
                 if session_reader is not None:
+                    # The session reader's data_version sees feature-only commits,
+                    # which do not advance search_revision.
+                    data_version = int(session_reader.execute("PRAGMA data_version").fetchone()[0])
+                    if self._visual_raw_miss_data_version != data_version:
+                        if self._visual_raw_misses:
+                            self._visual_raw_miss_invalidations += 1
+                        self._visual_raw_misses.clear()
+                        self._visual_raw_miss_data_version = data_version
+                    budget_state = (self.visual_window_budget, self._visual_cold_windows)
+                    if (self._visual_cold_windows >= self.visual_window_budget
+                            and self._visual_raw_misses.get(cache_key) == budget_state):
+                        self._visual_raw_misses.move_to_end(cache_key)
+                        self._visual_raw_miss_hits += 1
+                        return None, "cold-window-budget-exhausted"
+                    self._visual_raw_miss_misses += 1
                     row, reusable = read_cached_features(session_reader)
                 else:
+                    data_version = None
                     with self._connect() as connection:
                         row, reusable = read_cached_features(connection)
             if row is not None:
@@ -994,6 +1020,20 @@ class ClipIndex:
                             return None, 'window-outside-source'
                     with self._lock:
                         if self._visual_cold_windows >= self.visual_window_budget:
+                            if session_reader is not None and session_reader is self._read_session_connection:
+                                # An external insert between the two feature SELECTs
+                                # and this return must not stamp a stale absence.
+                                after_version = int(session_reader.execute("PRAGMA data_version").fetchone()[0])
+                                if after_version == data_version:
+                                    self._visual_raw_misses[cache_key] = (self.visual_window_budget, self._visual_cold_windows)
+                                    self._visual_raw_misses.move_to_end(cache_key)
+                                    if len(self._visual_raw_misses) > 65536:
+                                        self._visual_raw_misses.popitem(last=False)
+                                        self._visual_raw_miss_evictions += 1
+                                else:
+                                    self._visual_raw_misses.clear()
+                                    self._visual_raw_miss_data_version = after_version
+                                    self._visual_raw_miss_invalidations += 1
                             return None, "cold-window-budget-exhausted"
                         self._visual_cold_windows += 1
                     image_model, _ = self._models(local_files_only=True)
