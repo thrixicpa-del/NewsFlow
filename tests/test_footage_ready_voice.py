@@ -29,10 +29,63 @@ from scriptor.voice_map import (
 )
 
 
+def _validate_ready_probe(probe, duration):
+    if abs(float(probe['format']['duration']) - duration) > .25:
+        raise ValueError('ready speech container duration mismatch')
+    if not {'audio', 'video'} <= {s['codec_type'] for s in probe['streams']}:
+        raise ValueError('ready speech requires audio and video')
+    endpoints = {}
+    for kind in ('audio', 'video'):
+        stream = next(s for s in probe['streams'] if s['codec_type'] == kind)
+        try:
+            endpoint = float(stream.get('start_time', 0)) + float(stream['duration'])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f'{kind} duration is unverified') from error
+        if not duration - .25 <= endpoint <= duration + .25:
+            raise ValueError(f'{kind} endpoint does not preserve ready speech: {endpoint}')
+        endpoints[kind] = endpoint
+    return endpoints
+
+
+def _validate_ready_results(results):
+    if len(results) != 2 or not any(row['status'] == 'RENDERED' for row in results):
+        raise ValueError('expected two ready voices and at least one verified rendered output')
+    if any(row['status'] not in {'RENDERED', 'INCOMPLETE'} for row in results):
+        raise ValueError('unexpected ready speech outcome')
+
+
+class ReadyVoiceEvidenceTests(unittest.TestCase):
+    def test_short_audio_cannot_pass_with_long_video(self):
+        with self.assertRaises(ValueError):
+            _validate_ready_probe({'format': {'duration': '300'}, 'streams': [
+                {'codec_type': 'video', 'duration': '300'},
+                {'codec_type': 'audio', 'duration': '6'},
+            ]}, 300)
+
+    def test_missing_stream_duration_is_not_verified(self):
+        with self.assertRaises(ValueError):
+            _validate_ready_probe({'format': {'duration': '300'}, 'streams': [
+                {'codec_type': 'video', 'duration': '300'}, {'codec_type': 'audio'},
+            ]}, 300)
+
+    def test_no_rendered_output_is_not_passing_coverage(self):
+        for rows in ([], [{'status': 'INCOMPLETE'}] * 2, [{'status': 'RENDERED'}]):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                _validate_ready_results(rows)
+
+    def test_controlled_shortage_and_one_verified_render_are_distinct(self):
+        _validate_ready_results([{'status': 'INCOMPLETE'}, {'status': 'RENDERED'}])
+        _validate_ready_probe({'format': {'duration': '300.1'}, 'streams': [
+            {'codec_type': 'video', 'start_time': '0', 'duration': '300.1'},
+            {'codec_type': 'audio', 'start_time': '0', 'duration': '300'},
+        ]}, 300)
+
+
 @unittest.skipUnless(os.environ.get('NEWSFLOW_READY_VOICE_MANIFEST'), 'owner-authorized local speech manifest required')
 class ReadyVoiceMontage(unittest.TestCase):
     def test_two_five_minute_ready_voices(self):
         inputs = json.loads(Path(os.environ['NEWSFLOW_READY_VOICE_MANIFEST']).read_text(encoding='utf-8'))
+        self.assertEqual(2, len(inputs), 'this acceptance requires exactly two ready voices')
         output = Path(os.environ['NEWSFLOW_READY_VOICE_OUTPUT']).resolve()
         output.mkdir(parents=True, exist_ok=True)
         sources = json.loads(Path(os.environ['NEWSFLOW_REAL_FOOTAGE_MANIFEST']).read_text(encoding='utf-8'))
@@ -116,8 +169,7 @@ class ReadyVoiceMontage(unittest.TestCase):
                 mp4=output/'outputs'/f'{title}.mp4'
                 probe=json.loads(subprocess.check_output([shutil.which('ffprobe'),'-v','error',
                     '-show_streams','-show_format','-of','json',str(mp4)],text=True))
-                self.assertAlmostEqual(300,float(probe['format']['duration']),delta=.25)
-                self.assertTrue({'audio','video'} <= {s['codec_type'] for s in probe['streams']})
+                endpoints = _validate_ready_probe(probe, duration)
                 subprocess.run([ffmpeg_executable(),'-v','error','-i',str(mp4),'-f','null','-'],capture_output=True,check=True)
                 rows=[]
                 for position,clip in enumerate(plan.clips):
@@ -132,12 +184,14 @@ class ReadyVoiceMontage(unittest.TestCase):
                                  'frame':frame.name})
                 results.append({'status':'RENDERED','output':mp4.name,'duration':300,'scenes':rows,
                                 'preparation_seconds':preparation,'render_seconds':elapsed,
-                                'timing':plan.voice_map_provenance,'metrics':plan.preparation_metrics_ms})
-            except (ValueError,RuntimeError,bridge.MontageSelectionFailure) as error:
+                                'timing':plan.voice_map_provenance,'metrics':plan.preparation_metrics_ms,
+                                'stream_endpoints':endpoints})
+            except bridge.MontageSelectionFailure as error:
                 results.append({'status':'INCOMPLETE','reason':str(error),'elapsed':time.perf_counter()-started})
             (output/'manifest.json').write_text(json.dumps({'scope':'real owner speech trimmed to 300s test copies and real CLIP footage',
                 'timing_limit':'source maps approximate; cropped last segment proportional; no measured speech alignment',
                 'results':results},ensure_ascii=False,indent=2),encoding='utf-8')
         self.assertEqual(audio_hashes,{path:hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in audio_hashes})
         self.assertEqual(media_hashes,{path:hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in media_hashes})
+        _validate_ready_results(results)
         print('ready speech outcomes',[row['status'] for row in results])

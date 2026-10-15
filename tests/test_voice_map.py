@@ -767,7 +767,9 @@ def load_tests(loader, standard_tests, pattern):
     # The existing CI invokes this module with unittest. Keep the follow-up
     # planner/VoiceMap/selection regressions in that independently run suite.
     from tests.test_footage_followup import FootageFollowupTests
+    from tests.test_footage_ready_voice import ReadyVoiceEvidenceTests
     standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ReadyVoiceEvidenceTests))
     return standard_tests
 
 
