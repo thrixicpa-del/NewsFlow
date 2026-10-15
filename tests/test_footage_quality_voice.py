@@ -21,6 +21,19 @@ def segment(text, duration=12, query="", identity=1, start=0):
 
 
 class BeatLocalVoiceQualityTests(unittest.TestCase):
+    def test_military_council_replaces_stale_frontline_without_rewriting_voice(self):
+        texts = ["На фронте продолжаются бои.", "Генералы провели совещание в штабе."]
+        raw = "frontline trenches soldiers battlefield military action"
+        scenes, provenance = bridge._voice_map_scenes(status_for([
+            segment(text, 6, raw, i + 1, i * 6) for i, text in enumerate(texts)], 12))
+        self.assertIn("frontline", scenes[0]["visual_query_en"])
+        self.assertIn("meeting", scenes[1]["visual_query_en"])
+        self.assertNotIn("frontline", scenes[1]["visual_query_en"])
+        self.assertEqual(texts, [scene["narration"] for scene in scenes])
+        self.assertEqual([[1], [2]], [scene["voice_segment_ids"] for scene in scenes])
+        self.assertEqual([6, 6], [scene["duration"] for scene in scenes])
+        self.assertEqual("approximate", provenance["alignmentMode"])
+
     def test_unfinished_rally_clause_crosses_segment_without_prior_combat_or_future_meeting(self):
         texts = ["На фронте продолжаются бои.", "Горожане собрались на мирный",
                  "митинг. Власти начали переговоры."]

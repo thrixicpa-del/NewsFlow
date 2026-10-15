@@ -6,6 +6,95 @@ from scriptor.timeline import VISUAL_TERMS
 
 
 class LocalActionQualityTests(unittest.TestCase):
+    def test_asserted_military_council_is_a_meeting_not_battlefield_action(self):
+        from scriptor import bridge
+        from scriptor.footage import FootageItem
+        from scriptor.visual_evidence import classify_window
+
+        for text in ("Генералы провели совещание в штабе.",
+                     "Командующие проводят совещание.",
+                     "В штабе состоялось совещание офицеров.",
+                     "Военные делегации встретились для обсуждения соглашения.",
+                     "Министры обороны провели переговоры."):
+            with self.subTest(text=text):
+                query = visual_intent(text, VISUAL_TERMS)["visual_query"]
+                self.assertIn("meeting", query)
+                self.assertNotIn("military vehicles", query)
+                self.assertNotIn("frontline", query)
+                meeting = classify_window(query, [{"meeting": .36, "combat": .20}] * 3)
+                combat = classify_window(query, [{"meeting": .20, "combat": .36}] * 3)
+                self.assertEqual("direct", meeting["relation"])
+                self.assertEqual("contradiction", combat["relation"])
+                item = FootageItem("council.mp4", "military delegation meeting")
+                self.assertTrue(bridge._semantic_clip_ok(query, item, visual_assessment=meeting))
+                self.assertFalse(bridge._semantic_clip_ok(query, item, visual_assessment=combat))
+
+    def test_cancelled_or_conditional_council_does_not_assert_a_meeting(self):
+        for text in ("Генералы отменили совещание в штабе.",
+                     "Совещание офицеров не состоялось.",
+                     "Если генералы проведут совещание в штабе, решение объявят позже."):
+            with self.subTest(text=text):
+                self.assertNotIn("meeting", visual_intent(text, VISUAL_TERMS)["visual_query"])
+        query = visual_intent("Военные начали наступление после совещания.", VISUAL_TERMS)["visual_query"]
+        self.assertIn("advancing", query)
+        self.assertNotIn("meeting", query)
+
+    def test_past_council_prefix_cannot_capture_a_later_combat_predicate(self):
+        from scriptor.visual_evidence import query_topic
+
+        for text, action in (("После совещания военные начали наступление.", "advancing"),
+                             ("После совещания войска начали обстрел города.", "shelling")):
+            with self.subTest(text=text):
+                query = visual_intent(text, VISUAL_TERMS)["visual_query"]
+                self.assertIn(action, query)
+                self.assertNotIn("meeting", query)
+                self.assertEqual("combat", query_topic(query)[0])
+
+    def test_denied_council_does_not_erase_another_clauses_current_action(self):
+        for text in ("Совещание офицеров не проходило.", "Совещание офицеров не прошло."):
+            with self.subTest(text=text):
+                self.assertNotIn("meeting", visual_intent(text, VISUAL_TERMS)["visual_query"])
+        for text in ("Совещание отменили. Командующие провели совещание.",
+                     "Совещание офицеров не прошло. В штабе состоялось совещание командующих."):
+            with self.subTest(text=text):
+                self.assertIn("meeting", visual_intent(text, VISUAL_TERMS)["visual_query"])
+        query = visual_intent("Совещание отменили. Войска начали наступление.", VISUAL_TERMS)["visual_query"]
+        self.assertIn("advancing", query)
+        self.assertNotIn("meeting", query)
+
+    def test_modified_past_council_and_negated_auxiliary_are_not_assertions(self):
+        from scriptor.visual_evidence import query_topic
+
+        for text, action in (("После утреннего совещания военные начали наступление.", "advancing"),
+                             ("Перед закрытым совещанием войска начали обстрел города.", "shelling")):
+            with self.subTest(text=text):
+                query = visual_intent(text, VISUAL_TERMS)["visual_query"]
+                self.assertIn(action, query)
+                self.assertNotIn("meeting", query)
+                self.assertEqual("combat", query_topic(query)[0])
+        for text in ("Совещание офицеров не будет проходить.",
+                     "Совещание офицеров не планировали проводить.",
+                     "Совещание офицеров не смогло состояться."):
+            with self.subTest(text=text):
+                self.assertNotIn("meeting", visual_intent(text, VISUAL_TERMS)["visual_query"])
+
+    def test_council_predicate_is_linked_to_its_subject_in_either_order(self):
+        for text in ("Совещание офицеров началось.", "Совещания командиров проходят в штабе.",
+                     "После обеда офицеры провели совещание.",
+                     "Совещание не будет проходить. Офицеры провели другое совещание."):
+            with self.subTest(text=text):
+                self.assertIn("meeting", visual_intent(text, VISUAL_TERMS)["visual_query"])
+
+    def test_negation_covers_each_asserted_forward_council_predicate(self):
+        for predicate in ("провели", "проводят", "начали", "собрались на"):
+            with self.subTest(predicate=predicate):
+                self.assertIn("meeting", visual_intent(
+                    f"Офицеры {predicate} совещание.", VISUAL_TERMS)["visual_query"])
+                self.assertNotIn("meeting", visual_intent(
+                    f"Офицеры не {predicate} совещание.", VISUAL_TERMS)["visual_query"])
+        self.assertIn("meeting", visual_intent("Состоялось совещание офицеров.", VISUAL_TERMS)["visual_query"])
+        self.assertNotIn("meeting", visual_intent("Не состоялось совещание офицеров.", VISUAL_TERMS)["visual_query"])
+
     def test_grain_export_verbs_and_storage_describe_cargo_not_harvesting(self):
         for text in ("Пшеницу невозможно выгодно вывезти за границу.",
                      "Зерно оставляют на хранение перед продажей."):

@@ -205,7 +205,22 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     ))
     speech = (not reporting_reference
               and bool(re.search(rf"\b(?:{_SPEECH_VERBS}|заяв\w*|обращени\w*|журналист\w*)", lowered)))
-    joint = bool(re.search(r"\b(?:обсуд\w*|обсужден\w*|переговор\w*|встреч\w*|встрет\w*|консультаци\w*)", lowered))
+    # A council is a meeting only when its local predicate asserts one.
+    # A past council mentioned after an advance, or a cancelled/conditional
+    # council, must not turn the current action into a meeting.
+    council = any(
+        re.search(r"\b(?:провел\w*|провод(?:ят|ит|или|ил[ао]?)|начал\w*|состоял\w*|собрал\w*)"
+                  r"(?:\s+(?!после\b|до\b|перед\b)\w+){0,5}\s+совещан\w*"
+                  r"|\bсовещан\w*(?:\s+(?!после\b|до\b|перед\b)\w+){0,5}\s+"
+                  r"(?:состоял(?:ось|ись)|начал(?:ось|ись)|проход(?:ит|ят|ило|или)|прошл(?:о|и))\b", clause)
+        and not re.search(r"\bесли\b|отмен\w*|предотврат\w*|\bне\s+(?:(?:будет|будут|было|были)\s+)?"
+                          r"(?:провел\w*|провод\w*|нач\w*|состоя\w*|собрал\w*|проход\w*|прошл\w*)", clause)
+        for original in re.split(r"[,;.!?]", lowered)
+        # A temporal reference is not the subject of a later predicate.
+        for clause in [re.sub(r"\b(?:после|до|перед)\s+(?:\w+(?:ого|его|ым|им|ом|ем|ых|их)\s+){0,2}совещан\w*",
+                              "", original)]
+    )
+    joint = council or bool(re.search(r"\b(?:обсуд\w*|обсужден\w*|переговор\w*|встреч\w*|встрет\w*|консультаци\w*)", lowered))
     indirect = bool(re.search(r"\b(?:по\s+решени\w*|по\s+указ\w*|поручени\w*)", lowered))
     primary = [] if industrial and (indirect or not speech) else people[:1]
     speech_action = re.search(rf"\b{_SPEECH_VERBS}", lowered)
@@ -330,6 +345,9 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         }:
             continue
         if stem in kinetic:
+            if joint and stem in {"арм", "войск", "солдат", "военн"}:
+                # Military participants do not themselves assert combat.
+                continue
             clauses = re.split(r"[,;.!?]|\b(?:но|затем)\b", lowered)
             matching = [clause for clause in clauses if term_matches(stem, clause)]
             if stem in {"удар", "обстрел", "артилл", "наступлен"} and matching and all(_negated_attack(clause, stem) for clause in matching):
