@@ -311,6 +311,12 @@ class ClipIndex:
         self._lock = threading.RLock()
         self.visual_window_budget = 96
         self._visual_cold_windows = 0
+        # A montage scene may restrict new image work without hiding any
+        # previously computed or curated evidence. Other ClipIndex uses remain
+        # unrestricted by this optional, job-local admission gate.
+        self._visual_scene_admission = None
+        self._visual_cold_grants = {}
+        self._visual_scene_generation = 0
         self._visual_annotation_cache = OrderedDict()
         self._catalog_rows = OrderedDict()
         self._catalog_revision = None
@@ -916,6 +922,90 @@ class ClipIndex:
         with _VISUAL_FEATURES_LOCK:
             _VISUAL_FEATURES.clear()
 
+    @staticmethod
+    def _visual_feature_key(path: Path, size: int, mtime_ns: int, start: float,
+                            duration: float, revision_key: str, taxonomy_version: int) -> tuple:
+        return (str(path.resolve()).casefold(), size, mtime_ns, start.hex(), duration.hex(),
+                IMAGE_MODEL, TEXT_MODEL, revision_key, taxonomy_version)
+
+    def begin_visual_scene_admission(self, scene_number: int, total_scenes: int) -> None:
+        """Release cumulative ordinary cold credit for a one-indexed scene."""
+        if not 1 <= scene_number <= total_scenes:
+            raise ValueError("invalid visual scene number")
+        with self._lock:
+            self._visual_scene_generation += 1
+            self._visual_cold_grants.clear()
+            self._visual_scene_admission = {
+                "scene": scene_number,
+                "total": total_scenes,
+                "ordinary_limit": (self.visual_window_budget * scene_number + total_scenes - 1) // total_scenes,
+                "emergency_used": 0,
+                "charged_at_start": self._visual_cold_windows,
+                "deferred": 0,
+            }
+
+    def visual_cold_scene_snapshot(self) -> dict:
+        with self._lock:
+            scene = self._visual_scene_admission
+            if scene is None:
+                return {}
+            return {
+                "released": scene["ordinary_limit"],
+                "charged": self._visual_cold_windows - scene["charged_at_start"],
+                "deferred": scene["deferred"],
+                "emergency": scene["emergency_used"],
+                "cumulative_charged": self._visual_cold_windows,
+            }
+
+    def end_visual_scene_admission(self) -> None:
+        with self._lock:
+            self._visual_scene_generation += 1
+            self._visual_cold_grants.clear()
+            self._visual_scene_admission = None
+
+    def visual_cold_credit_available(self, *, emergency: bool = False) -> bool:
+        with self._lock:
+            if self._visual_cold_windows >= self.visual_window_budget:
+                return False
+            scene = self._visual_scene_admission
+            if scene is None:
+                return True
+            if not emergency:
+                return self._visual_cold_windows < scene["ordinary_limit"]
+            reserve = scene["total"] - scene["scene"]
+            return (self._visual_cold_windows >= scene["ordinary_limit"]
+                    and scene["emergency_used"] < 3
+                    and self._visual_cold_windows < self.visual_window_budget - reserve)
+
+    @contextmanager
+    def visual_cold_window_grant(self, path: str | Path, start: float, duration: float,
+                                 *, emergency: bool = False):
+        """Permit at most one new image assessment for this exact feature key."""
+        from .visual_evidence import TAXONOMY_VERSION
+
+        path, start, duration = Path(path), float(start), float(duration)
+        try:
+            size, mtime_ns = self._signature(path)
+            revision = self._loaded_model_revision or self._local_model_revision()
+            key = self._visual_feature_key(path, size, mtime_ns, start, duration,
+                                           json.dumps(revision, sort_keys=True), TAXONOMY_VERSION)
+        except OSError:
+            key = None
+        thread_id = threading.get_ident()
+        with self._lock:
+            generation = self._visual_scene_generation
+            previous = self._visual_cold_grants.get(thread_id)
+            self._visual_cold_grants[thread_id] = [key, emergency, generation, False]
+        try:
+            yield
+        finally:
+            with self._lock:
+                if generation == self._visual_scene_generation:
+                    if previous is None:
+                        self._visual_cold_grants.pop(thread_id, None)
+                    else:
+                        self._visual_cold_grants[thread_id] = previous
+
     def _visual_window_features(self, path: Path, start: float, duration: float) -> tuple[dict | None, str]:
         import numpy as np
 
@@ -926,8 +1016,8 @@ class ClipIndex:
             return None, "source-unavailable"
         model_revision = self._loaded_model_revision or self._local_model_revision()
         revision_key = json.dumps(model_revision, sort_keys=True)
-        key = (str(path.resolve()).casefold(), size, mtime_ns, start.hex(), duration.hex(),
-               IMAGE_MODEL, TEXT_MODEL, revision_key, TAXONOMY_VERSION)
+        key = self._visual_feature_key(path, size, mtime_ns, start, duration,
+                                       revision_key, TAXONOMY_VERSION)
         cache_key = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
         while True:
             with _VISUAL_FEATURES_LOCK:
@@ -1035,6 +1125,16 @@ class ClipIndex:
                                     self._visual_raw_miss_data_version = after_version
                                     self._visual_raw_miss_invalidations += 1
                             return None, "cold-window-budget-exhausted"
+                        scene = self._visual_scene_admission
+                        if scene is not None:
+                            grant = self._visual_cold_grants.get(threading.get_ident())
+                            if (grant is None or grant[0] != key or grant[2] != self._visual_scene_generation
+                                    or grant[3] or not self.visual_cold_credit_available(emergency=grant[1])):
+                                scene["deferred"] += 1
+                                return None, "scene-cold-credit-deferred"
+                            grant[3] = True
+                            if grant[1]:
+                                scene["emergency_used"] += 1
                         self._visual_cold_windows += 1
                     image_model, _ = self._models(local_files_only=True)
                     if self._loaded_model_revision != model_revision:

@@ -775,7 +775,12 @@ def load_tests(loader, standard_tests, pattern):
     from tests.test_footage_quality_visual import WindowVisualQualityTests
     from tests.test_footage_quality_voice import BeatLocalVoiceQualityTests
     from tests.test_footage_ready_voice import ReadyVoiceEvidenceTests
+    from tests.test_montage_cold_fairness import (
+        ColdFairnessPreparationTests,
+        ColdFairnessSelectorTests,
+    )
     from tests.test_montage_semantic_diversity import MontageSemanticDiversityTests
+    from tests.test_visual_cold_budget import VisualColdBudgetTests
     from tests.test_visual_evidence import VisualWindowTests
     from tests.test_visual_feature_reuse import VisualFeatureReuseTests
     standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
@@ -790,6 +795,9 @@ def load_tests(loader, standard_tests, pattern):
     standard_tests.addTests(loader.loadTestsFromTestCase(RecoveryVisualQualityTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(InstitutionalWindowRoleTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(MontageSemanticDiversityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ColdFairnessPreparationTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ColdFairnessSelectorTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualColdBudgetTests))
     return standard_tests
 
 
