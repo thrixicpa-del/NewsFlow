@@ -1,0 +1,96 @@
+{
+  "note": "cProfile cumulative spans overlap; not additive independent wall phases",
+  "rows": [
+    {
+      "file": "bridge.py",
+      "function": "_select_montage_candidate",
+      "calls": 52,
+      "self_seconds": 0.0029931000000000003,
+      "cumulative_seconds": 2.9347582
+    },
+    {
+      "file": "bridge.py",
+      "function": "_montage_search_ladders",
+      "calls": 1,
+      "self_seconds": 0.003079,
+      "cumulative_seconds": 1.0294166
+    },
+    {
+      "file": "config.py",
+      "function": "default_montage_renderer",
+      "calls": 25,
+      "self_seconds": 1.22e-05,
+      "cumulative_seconds": 0.3906375
+    },
+    {
+      "file": "subprocess.py",
+      "function": "communicate",
+      "calls": 2,
+      "self_seconds": 1.08e-05,
+      "cumulative_seconds": 0.1597654
+    },
+    {
+      "file": "subprocess.py",
+      "function": "_communicate",
+      "calls": 2,
+      "self_seconds": 1.94e-05,
+      "cumulative_seconds": 0.1561664
+    },
+    {
+      "file": "ai_index.py",
+      "function": "search_many",
+      "calls": 8,
+      "self_seconds": 0.0036528000000000003,
+      "cumulative_seconds": 0.11836410000000001
+    },
+    {
+      "file": "bridge.py",
+      "function": "_select_visual_continuity_candidate",
+      "calls": 8,
+      "self_seconds": 0.00022960000000000002,
+      "cumulative_seconds": 0.07612540000000001
+    },
+    {
+      "file": "voice_map.py",
+      "function": "_validate_payload",
+      "calls": 1,
+      "self_seconds": 0.00014920000000000002,
+      "cumulative_seconds": 0.0204831
+    },
+    {
+      "file": "ai_index.py",
+      "function": "_search_corpus",
+      "calls": 8,
+      "self_seconds": 0.0006356,
+      "cumulative_seconds": 0.008348600000000001
+    },
+    {
+      "file": "ai_index.py",
+      "function": "_valid_ranked_positions",
+      "calls": 58,
+      "self_seconds": 0.0012122,
+      "cumulative_seconds": 0.007941400000000001
+    },
+    {
+      "file": "subprocess.py",
+      "function": "wait",
+      "calls": 4,
+      "self_seconds": 3.4e-06,
+      "cumulative_seconds": 0.0035881000000000003
+    },
+    {
+      "file": "subprocess.py",
+      "function": "_wait",
+      "calls": 4,
+      "self_seconds": 3.4200000000000005e-05,
+      "cumulative_seconds": 0.0035847
+    },
+    {
+      "file": "config.py",
+      "function": "validate_gpu_chunk_size",
+      "calls": 7,
+      "self_seconds": 5.500000000000001e-06,
+      "cumulative_seconds": 7.6e-06
+    }
+  ]
+}

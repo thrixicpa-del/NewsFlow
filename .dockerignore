@@ -1,0 +1,10 @@
+**
+!requirements-test.lock
+!pytest.ini
+!scriptor/
+!scriptor/**/*.py
+!tests/
+!tests/**/*.py
+!tests/footage-v3/
+!tests/footage-v3/Dockerfile
+**/__pycache__/

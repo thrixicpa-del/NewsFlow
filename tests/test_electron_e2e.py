@@ -4,9 +4,11 @@ import json
 import os
 import socket
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +20,16 @@ class ElectronE2ESmokeTests(unittest.TestCase):
     """CDP/Playwright smoke for a real Electron process; providers are never invoked."""
 
     def setUp(self):
-        self.test_root = Path(os.environ["NEWSFLOW_TEST_ROOT"]).resolve()
+        boundary = Path(os.environ["NEWSFLOW_TEST_ROOT"]).resolve()
+        self.test_root = Path(tempfile.mkdtemp(prefix="electron-e2e-", dir=boundary))
         self.test_root.mkdir(parents=True, exist_ok=True)
+        environment = patch.dict(os.environ, {
+            "NEWSFLOW_TEST_ROOT": str(self.test_root),
+            "LOCALAPPDATA": str(self.test_root),
+            "NEWSFLOW_RENDER_TEMP_ROOT": str(self.test_root / "render-workspace"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
@@ -336,6 +346,107 @@ class ElectronE2ESmokeTests(unittest.TestCase):
             self.assertEqual("screen-text", result["kind"])
             self.assertEqual([], result["folders"])
             self.assertEqual(0, result["result"]["processed"])
+            browser.close()
+
+    def test_footage_v3_named_person_context_switch_renders_through_montage_ui(self):
+        self._run_footage_montage_ui(
+            ("parliament-government", "oil-tanker-port"),
+            "Путин выступил с заявлением. Танкер прибыл в порт.", ("Putin", "tanker"))
+
+    def test_pr403_protest_topic_switches_render_through_montage_ui(self):
+        self._run_footage_montage_ui(
+            ("frontline-combat", "protest-crowd", "diplomatic-negotiations", "workers-strike", "oil-tanker-port"),
+            "На фронте продолжаются бои. Жители собрались на мирный митинг. Представители властей начали переговоры. Рабочие объявили забастовку. В порту возобновилась погрузка.",
+            ("frontline", "protest", "diplomatic", "labor strike", "port"))
+
+    def _run_footage_montage_ui(self, tags, script, expected_queries):
+        """Actual UI/IPC/queue/source render; synthetic imagery is not face QA."""
+        import numpy as np
+
+        from scriptor.ai_index import SCREEN_TEXT_CLASSIFIER_VERSION, ClipIndex
+        from scriptor.config import Settings, app_data_root, save_settings
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+        from scriptor.session import save_session
+        from scriptor.timeline import (
+            TimelineProject,
+            ffmpeg_executable,
+            probe_media_duration,
+        )
+
+        fixture = self.test_root / "footage-v3-ui"
+        fixture.mkdir(exist_ok=True)
+        library = fixture / "library"
+        library.mkdir(exist_ok=True)
+        index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+        for number, tag in enumerate(tags):
+            path = library / f"pattern_{number}.mp4"
+            subprocess.run([ffmpeg_executable(), "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=7",
+                            "-an", "-c:v", "libx264", str(path)], check=True, capture_output=True)
+            stat = path.stat()
+            with index._connect() as connection:
+                connection.execute(
+                    "INSERT INTO clips(path,name,size,mtime_ns,embedding,tags,duration,width,height,fps,"
+                    "english_text,english_text_version) VALUES(?,?,?,?,?,?,7,320,180,30,-1,?)",
+                    (str(path), path.name, stat.st_size, stat.st_mtime_ns,
+                     np.full(8, 1 / np.sqrt(8), dtype=np.float32).tobytes(),
+                     json.dumps([tag]), SCREEN_TEXT_CLASSIFIER_VERSION),
+                )
+        voice = fixture / "tone.wav"
+        subprocess.run([ffmpeg_executable(), "-y", "-f", "lavfi", "-i",
+                        f"sine=frequency=440:sample_rate=48000:duration={len(expected_queries) * 6}", str(voice)],
+                       check=True, capture_output=True)
+        title = "Footage V3 source UI"
+        settings = Settings(
+            footage_folders=[str(library)], montage_project_folder=str(fixture / "projects"),
+            montage_output_folder=str(fixture / "outputs"), montage_renderer="ffmpeg",
+            montage_export_davinci_xml=False, montage_auto_web=False, montage_scene_planner="local",
+            montage_intro_enabled=False, montage_overlay_enabled=False, montage_transition_style="cut",
+            montage_transition_frames=0, montage_fast_reuse_enabled=True, montage_unique_footage_percent=50,
+            voice_scenario_outputs={"1": str(voice)},
+        )
+        save_settings(settings)
+        save_session([title], [Job(ScenarioRequest(0, title, ""), RunState.DONE,
+                                  script, "")])
+        self._launch()
+        self._wait_for_cdp()
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+            page = next(page for context in browser.contexts for page in context.pages)
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            page.get_by_role("button", name="ПРОИЗВОДСТВО", exact=True).click()
+            page.get_by_role("button", name="Монтаж", exact=True).first.click()
+            page.get_by_role("button", name="Собрать незавершённые", exact=True).click()
+            deadline = time.monotonic() + 120
+            task = None
+            while time.monotonic() < deadline:
+                state = page.evaluate("async () => await window.newsflowDesktop.snapshot()")
+                task = next((item for item in state["montageTasks"] if item["status"] == "Готово"), None)
+                if task:
+                    break
+                failures = [item for item in state["montageTasks"] if item["status"] == "Ошибка"]
+                self.assertEqual([], failures)
+                page.wait_for_timeout(1000)
+            self.assertIsNotNone(task, "montage queue did not produce a completed task")
+            project_path = Path(task.get("projectPath", ""))
+            self.assertTrue(project_path.is_file(), task)
+            project = TimelineProject.load(project_path)
+            self.assertEqual(len(expected_queries), len(project.clips))
+            for clip, expected in zip(project.clips, expected_queries):
+                self.assertIn(expected, clip.visual_query_en)
+            self.assertEqual(len(expected_queries), len({clip.path for clip in project.clips}))
+            self.assertNotEqual(project.clips[0].selection_diagnostics["person"]["status"], "confirmed")
+            mp4 = Path(task["outputPath"])
+            self.assertAlmostEqual(probe_media_duration(mp4), len(expected_queries) * 6, delta=.25)
+            subprocess.run([ffmpeg_executable(), '-v', 'error', '-i', str(mp4), '-f', 'null', '-'],
+                           capture_output=True, check=True)
+            prepared = [(clip.path, clip.source_start, clip.duration) for clip in project.clips]
+            page.reload()
+            page.locator(".nf-page-header h1").wait_for(timeout=20_000)
+            reloaded = TimelineProject.load(project_path)
+            self.assertEqual(prepared, [(clip.path, clip.source_start, clip.duration) for clip in reloaded.clips])
             browser.close()
 
     def test_production_reset_uses_in_app_dialog(self):

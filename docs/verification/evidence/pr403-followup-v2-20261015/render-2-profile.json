@@ -1,0 +1,173 @@
+{
+  "note": "cProfile cumulative spans overlap; not additive independent wall phases",
+  "rows": [
+    {
+      "file": "bridge.py",
+      "function": "render_montage",
+      "calls": 1,
+      "self_seconds": 0.00016370000000000002,
+      "cumulative_seconds": 42.398575400000006
+    },
+    {
+      "file": "timeline.py",
+      "function": "render_project",
+      "calls": 1,
+      "self_seconds": 0.0012285,
+      "cumulative_seconds": 41.444183200000005
+    },
+    {
+      "file": "subprocess.py",
+      "function": "communicate",
+      "calls": 99,
+      "self_seconds": 0.0005936,
+      "cumulative_seconds": 25.1932194
+    },
+    {
+      "file": "subprocess.py",
+      "function": "_communicate",
+      "calls": 99,
+      "self_seconds": 0.0010535,
+      "cumulative_seconds": 25.037626600000003
+    },
+    {
+      "file": "timeline.py",
+      "function": "validate_rendered_montage",
+      "calls": 1,
+      "self_seconds": 4.38e-05,
+      "cumulative_seconds": 0.3019775
+    },
+    {
+      "file": "timeline.py",
+      "function": "render_source_for_proxy",
+      "calls": 50,
+      "self_seconds": 0.0002565,
+      "cumulative_seconds": 0.183697
+    },
+    {
+      "file": "subprocess.py",
+      "function": "wait",
+      "calls": 176,
+      "self_seconds": 0.00022970000000000003,
+      "cumulative_seconds": 0.1549792
+    },
+    {
+      "file": "subprocess.py",
+      "function": "_wait",
+      "calls": 176,
+      "self_seconds": 0.0005585000000000001,
+      "cumulative_seconds": 0.1547389
+    },
+    {
+      "file": "timeline.py",
+      "function": "source_proxy_path",
+      "calls": 50,
+      "self_seconds": 0.0001262,
+      "cumulative_seconds": 0.0454368
+    },
+    {
+      "file": "timeline.py",
+      "function": "source_proxy_cache_root",
+      "calls": 50,
+      "self_seconds": 0.0001585,
+      "cumulative_seconds": 0.038683
+    },
+    {
+      "file": "timeline.py",
+      "function": "_writable_render_folder",
+      "calls": 153,
+      "self_seconds": 0.0008675000000000001,
+      "cumulative_seconds": 0.0379561
+    },
+    {
+      "file": "timeline.py",
+      "function": "_proxy_lock",
+      "calls": 200,
+      "self_seconds": 0.0014033000000000001,
+      "cumulative_seconds": 0.0297262
+    },
+    {
+      "file": "timeline.py",
+      "function": "proxy_cache_root",
+      "calls": 51,
+      "self_seconds": 0.0001606,
+      "cumulative_seconds": 0.0272773
+    },
+    {
+      "file": "timeline.py",
+      "function": "render_workspace_root",
+      "calls": 52,
+      "self_seconds": 0.00021070000000000003,
+      "cumulative_seconds": 0.0146981
+    },
+    {
+      "file": "timeline.py",
+      "function": "_source_proxy_key",
+      "calls": 50,
+      "self_seconds": 0.0002482,
+      "cumulative_seconds": 0.0063652000000000005
+    },
+    {
+      "file": "timeline.py",
+      "function": "_proxy_key",
+      "calls": 50,
+      "self_seconds": 0.00042100000000000004,
+      "cumulative_seconds": 0.0062467
+    },
+    {
+      "file": "bridge.py",
+      "function": "_read_proxy_cache_status",
+      "calls": 1,
+      "self_seconds": 2.7e-06,
+      "cumulative_seconds": 0.0010032
+    },
+    {
+      "file": "bridge.py",
+      "function": "_proxy_cache_status_path",
+      "calls": 1,
+      "self_seconds": 1.8000000000000001e-06,
+      "cumulative_seconds": 0.0009661
+    },
+    {
+      "file": "bridge.py",
+      "function": "prepare_voice_range_preview",
+      "calls": 1,
+      "self_seconds": 4.3e-06,
+      "cumulative_seconds": 0.00010520000000000001
+    },
+    {
+      "file": "bridge.py",
+      "function": "_is_valid_montage_output",
+      "calls": 1,
+      "self_seconds": 3.5000000000000004e-06,
+      "cumulative_seconds": 6.6e-05
+    },
+    {
+      "file": "config.py",
+      "function": "default_montage_renderer",
+      "calls": 35,
+      "self_seconds": 1.55e-05,
+      "cumulative_seconds": 2.09e-05
+    },
+    {
+      "file": "config.py",
+      "function": "validate_gpu_chunk_size",
+      "calls": 8,
+      "self_seconds": 5.9e-06,
+      "cumulative_seconds": 7.8e-06
+    },
+    {
+      "file": "bridge.py",
+      "function": "_cover_fastgen_visual_reference_selection",
+      "calls": 2,
+      "self_seconds": 2.7e-06,
+      "cumulative_seconds": 4.000000000000001e-06
+    },
+    {
+      "file": "tts_ranges.py",
+      "function": "validate_ranges",
+      "calls": 1,
+      "self_seconds": 2.6e-06,
+      "cumulative_seconds": 3.1000000000000004e-06
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "scope": "actual source Electron UI IPC queue Python actual CLIP and ready speech300s; no mocked vectors/scores",
+  "rendered_title": "PR403 ready speech 2",
+  "stream_endpoints": {
+    "audio": 300.0,
+    "video": 299.933333
+  },
+  "scenes": 50,
+  "expected_shortage_tasks": 1,
+  "semantic_status": "NOT_PASS; requires visual assessment",
+  "source_sha": "53ff949 production code; current ready-voice evidence checks"
+}

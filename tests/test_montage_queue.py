@@ -885,6 +885,38 @@ class MontageQueueStateTests(unittest.TestCase):
 
         self.assertEqual(result["preparedProject"]["clips"], 1)
 
+    def test_continuity_keeps_unindexed_local_scan_after_semantic_pool_exhausts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            footage = root / "footage"
+            footage.mkdir()
+            write_readable_video(footage / "oil tanker cargo port.mp4")
+            voice = root / "voice.mp3"
+            voice.write_bytes(b"voice")
+            settings = Settings(
+                footage_folders=[str(footage)], voicer_output_folder=str(root),
+                montage_project_folder=str(root / "projects"), montage_output_folder=str(root / "output"),
+                montage_use_script_text=False, montage_auto_web=False,
+            )
+            settings.voice_scenario_outputs = {"1": str(voice)}
+            job = Job(ScenarioRequest(0, "oil tanker cargo port", ""), RunState.DONE, "", "")
+            with (patch.object(bridge, "load_settings", return_value=settings),
+                  patch.object(bridge, "load_session", return_value=(["oil tanker cargo port"], [job])),
+                  patch.object(bridge, "save_settings"),
+                  patch.object(bridge, "snapshot", return_value={}),
+                  patch.object(bridge, "_montage_screen_text_safe", return_value=True),
+                  patch.object(bridge.ClipIndex, "count", return_value=0),
+                  patch.object(bridge.ClipIndex, "all_items",
+                               side_effect=AssertionError("continuity must use fresh finalist checks")),
+                  patch.object(bridge, "_select_montage_candidate",
+                               side_effect=bridge.MontageSelectionFailure({})),
+                  patch.object(bridge, "probe_media_duration", return_value=6.0),
+                  patch.object(bridge, "probe_video_duration", return_value=8.0)):
+                result = bridge.prepare_montage({"scenarioIndex": 0})
+            project = TimelineProject.load(Path(result["preparedProject"]["path"]))
+            self.assertEqual(project.clips[0].fallback_level, "VISUAL_CONTINUITY_FALLBACK")
+            self.assertEqual(result["preparedProject"]["clips"], 1)
+
     def test_available_narration_is_used_even_when_title_only_fallback_is_allowed(self):
         from scriptor.core import ScenarioRequest
         from scriptor.runner import Job
@@ -1281,8 +1313,10 @@ class MontageQueueStateTests(unittest.TestCase):
                 title="Тема", voiceover_path=str(voice),
                 clips=[TimelineClip(str(footage), "narration", "news footage", duration=6.0)],
             )
-            # target = 7.53 seconds: one six-second clip leaves exactly 1.53.
-            with patch.object(bridge, "probe_media_duration", return_value=7.4466666667), \
+            # Exact narration target: one six-second clip leaves 1.53 seconds.
+            # The renderer's cumulative frame grid no longer needs an extra
+            # per-clip safety margin borrowed from an unverified interval.
+            with patch.object(bridge, "probe_media_duration", return_value=7.53), \
                  patch.object(bridge, "_cached_or_probed_montage_duration", return_value=6.0), \
                  patch.object(bridge, "_replacement_candidates_for_clip", return_value=[
                      FootageItem(str(footage), footage.name, "local"),

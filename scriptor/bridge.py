@@ -27,7 +27,7 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -5747,6 +5747,10 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     independent of short speech-segment boundaries: normal footage runs for
     six seconds and only the terminal visual beat is shortened to the MP3 end.
     """
+    from itertools import pairwise
+
+    from .scene_intent import person_name, visual_intent
+    from .timeline import VISUAL_TERMS
     payload = status.data
     if status.state not in {"ready", "approximate"} or not payload:
         raise ValueError(status.reason or "VoiceMap is unavailable")
@@ -5756,21 +5760,190 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         raise ValueError("VoiceMap audio duration is invalid")
 
     visual_beat_count = _voice_map_visual_beat_count(audio_duration)
+    previous_intent = None
+    segment_clauses = {int(segment["id"]): [] for segment in segments}
+    pending_clause = []
+    previous_end = None
+
+    def finish_clause(*, context_limited=False):
+        nonlocal previous_intent
+        if not pending_clause:
+            return
+        text = " ".join(word for _identity, _first, _last, words in pending_clause for word in words)
+        intent = visual_intent(text, VISUAL_TERMS, previous=previous_intent)
+        stitched = len(pending_clause) > 1
+        for identity, first, last, _words in pending_clause:
+            segment_clauses[identity].append((first, last, intent, stitched, context_limited))
+        previous_intent = intent
+        pending_clause.clear()
+
+    for segment_index, segment in enumerate(segments):
+        words = str(segment.get("text", "")).split()
+        if previous_end is not None and abs(float(segment["start"]) - previous_end) > .02:
+            finish_clause(context_limited=True)
+        previous_end = float(segment["end"])
+        boundaries = {0, len(words)}
+        starts_action = False
+        following_words = []
+        if (segment_index + 1 < len(segments)
+                and abs(float(segments[segment_index + 1]["start"]) - previous_end) <= .02):
+            following_words = str(segments[segment_index + 1].get("text", "")).split()
+        for index, word in enumerate(words):
+            marker = word.casefold().strip(",;:.!?\"'»”()")
+            next_word = (words[index + 1] if index + 1 < len(words)
+                         else following_words[0] if following_words else "")
+            if re.search(r"[.!?;][\"'»”)]*$", word):
+                boundaries.add(index + 1)
+            if marker == "затем" or (
+                marker == "после" and next_word.casefold().strip(",;:.!?\"'»”()") == "этого"
+            ) or (
+                word.casefold() in {"а", "но"} and index > 0 and words[index - 1].endswith(",")
+            ):
+                boundaries.add(index)
+                starts_action = starts_action or index == 0
+        ordered = sorted(boundaries)
+        for first, last in pairwise(ordered):
+            # A VoiceMap segment can end in the middle of a subject, object
+            # or negated predicate. Join only its contiguous unfinished clause;
+            # keep completed comma clauses and explicit action cuts separate.
+            budget_exhausted = bool(pending_clause) and (
+                len(pending_clause) >= 6
+                or sum(end - start for _id, start, end, _words in pending_clause) + last - first > 64)
+            independent_action = False
+            if pending_clause:
+                pending_text = " ".join(word for _id, _start, _end, part in pending_clause for word in part)
+                local = visual_intent(pending_text, VISUAL_TERMS, previous=previous_intent)
+                following = visual_intent(" ".join(words[first:last]), VISUAL_TERMS, previous=local)
+                dangling = re.search(
+                    r"\b(?:не|ни|на|в|во|к|ко|у|с|со|из|по|о|об|для|от|без|через|перед|при|под|над|за"
+                    r"|начал[аи]?|начали|провел[аи]?|объявил[аи]?|возобновил[аи]?|увеличил[аи]?)\s*$",
+                    pending_text.casefold().replace("ё", "е"),
+                )
+                speech_continuation = re.search(r"\b(?:press conference|official statement|government briefing)\b",
+                                                following["visual_query"], re.IGNORECASE)
+                subject_only = (local["person_role"] == "participant" and local["target_people"]
+                                and local["visual_query"] == ", ".join(
+                                    person_name(identity) for identity in local["target_people"]))
+                statement_author = re.fullmatch(
+                    r"(?:на\s+)?(?:заявлен\w*|выступлен\w*|слов\w*|реч\w*)\s+\S+(?:\s+\S+)?",
+                    pending_text.casefold(),
+                )
+                independent_action = bool(local["visual_query"] and not dangling
+                                          and not (speech_continuation and (subject_only or statement_author)))
+            if first > 0 or starts_action or budget_exhausted or independent_action:
+                finish_clause(context_limited=budget_exhausted)
+            pending_clause.append((int(segment["id"]), first, last, words[first:last]))
+            if last < len(words) or re.search(r"[,;:.!?][\"'»”)]*$", words[last - 1]):
+                finish_clause()
+    finish_clause()
+    beat_segments = []
+    fragments = []
+    for beat_index in range(visual_beat_count):
+        beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
+        beat_end = (audio_duration if beat_index == visual_beat_count - 1
+                    else min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS))
+        overlapping = []
+        for segment in segments:
+            if float(segment["end"]) <= beat_start or float(segment["start"]) >= beat_end:
+                continue
+            text = _voice_map_overlap_text(segment, beat_start, beat_end)
+            first = len(_voice_map_overlap_text(segment, float(segment["start"]), beat_start).split())
+            last = first + len(text.split())
+            clauses = segment_clauses[int(segment["id"])]
+            # Keep a continuing sentence's subject/negation on both sides of
+            # the cut, without importing a later independent action.
+            if clauses:
+                clause = max(clauses, key=lambda entry: (
+                    max(0, min(last, entry[1]) - max(first, entry[0])),
+                    entry[0] <= first < entry[1], -entry[0],
+                ))
+                intent = clause[2]
+            else:
+                intent = visual_intent("", VISUAL_TERMS)
+            fragment = {**segment, "_intent": intent,
+                        "_clipped": float(segment["start"]) < beat_start
+                        or float(segment["end"]) > beat_end
+                        or bool(clauses and clause[3]),
+                        "_context_limited": bool(clauses and clause[4])}
+            overlapping.append(fragment)
+            fragments.append(fragment)
+        beat_segments.append(overlapping)
 
     def concrete_query(segment: dict) -> str:
+        intent = segment["_intent"]
+        intent_query = intent["visual_query"]
+        if segment["_context_limited"] and not intent_query:
+            return ""
         raw = str(segment.get("visualQuery", "")).strip()
         normalized = _normalized_montage_visual_query(raw)
+        # Preserve concrete authored queries when they express the same intent.
+        # Correct stale generated lexical collisions/role inheritance locally.
+        from .scene_intent import _negated_attack, named_people, visual_topics
+        people_differ = set(named_people(raw)) != set(intent["target_people"])
+        kinetic_differs = _montage_has_war_action(raw) != _montage_has_war_action(intent_query)
+        actual_topics, stored_topics = visual_topics(intent_query), visual_topics(raw)
+        if (_negated_attack(intent["text"])
+                and re.search(r"\b(?:artillery|shelling)\b", raw, re.IGNORECASE)
+                and not re.search(r"\b(?:artillery|shelling)\b", intent_query, re.IGNORECASE)):
+            # A military subject is context, not evidence of a denied shelling.
+            # A separately affirmed shelling still appears in the local query.
+            return intent_query
+        if (_montage_has_naval_hint(raw) and not _montage_has_naval_hint(intent_query)):
+            return intent_query
+        emergency = r"\b(?:fire|firefighters?|emergency|explosion|blast)\b|пожар\w*|взрыв\w*"
+        if (re.search(emergency, raw, re.IGNORECASE)
+                and not re.search(emergency, intent_query, re.IGNORECASE)
+                and not _montage_has_war_action(intent_query)):
+            return intent_query
+        if ("protest" in stored_topics
+                and intent.get("protest_mode") not in {"peaceful", "labor", "farmers", "conflict"}):
+            # A generated farmer/cost association is not a narrated protest.
+            # Empty local intent can inherit actual neighbouring context.
+            return intent_query
+        if (not intent_query
+                and re.search(r"\b(?:harvest|farming|combine)\b", raw, re.IGNORECASE)):
+            # An empty local intent does not establish a harvesting event.
+            # Resolve its nearby explicit context instead of a stale crop tag.
+            return ""
+        for query, topics in ((intent_query, actual_topics), (raw, stored_topics)):
+            if re.search(r"\b(?:press conference|statement|briefing)\b", query, re.IGNORECASE):
+                topics.add("official-speech")
+        topic_differs = bool(actual_topics and stored_topics and actual_topics.isdisjoint(stored_topics))
+        if (re.search(r"\b(?:cargo|freight|warehouse)\b", intent_query, re.IGNORECASE)
+                and not re.search(r"\b(?:harvest|farming|combine)\b", intent_query, re.IGNORECASE)
+                and re.search(r"\b(?:harvest|farming|combine)\b", raw, re.IGNORECASE)):
+            # Grain is cargo during loading/transport; a stale crop keyword
+            # must not replace that action with a harvesting shot.
+            topic_differs = True
+        # A long segment's stored union must not import a different action
+        # into this beat. Compatible authored locations/details still survive.
+        if segment["_clipped"] and actual_topics and stored_topics - actual_topics:
+            topic_differs = True
+        if (actual_topics & {"shipping", "rail", "agriculture"}
+                and re.search(r"\b(?:parliament|commission|institutions)\b", raw, re.IGNORECASE)
+                and not re.search(r"\b(?:parliament|commission|institutions)\b", intent_query, re.IGNORECASE)):
+            topic_differs = True
+        if intent_query and (not normalized or people_differ or kinetic_differs or topic_differs):
+            return intent_query
+        if intent_query and actual_topics and not stored_topics:
+            # A saved location without an action cannot replace this beat's
+            # concrete object. Preserve authored geography as context.
+            return ", ".join(dict.fromkeys([intent_query, normalized]))
         return normalized if normalized else ""
 
     def resolved_query(segment: dict) -> str:
         query = concrete_query(segment)
         if query:
             return query
-        segment_index = segments.index(segment)
-        for distance in range(1, len(segments)):
+        if segment["_context_limited"]:
+            # An unresolved partial clause outside the context bounds cannot
+            # borrow a future event merely because it is the next known topic.
+            return GENERIC_VISUAL_QUERY
+        segment_index = next(index for index, fragment in enumerate(fragments) if fragment is segment)
+        for distance in range(1, len(fragments)):
             for candidate_index in (segment_index - distance, segment_index + distance):
-                if 0 <= candidate_index < len(segments):
-                    candidate = concrete_query(segments[candidate_index])
+                if 0 <= candidate_index < len(fragments):
+                    candidate = concrete_query(fragments[candidate_index])
                     if candidate:
                         return candidate
         topic_query = _normalized_montage_visual_query(
@@ -5788,10 +5961,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         )
         if beat_end <= beat_start:
             continue
-        overlapping = [
-            segment for segment in segments
-            if float(segment["end"]) > beat_start and float(segment["start"]) < beat_end
-        ]
+        overlapping = beat_segments[beat_index]
         if not overlapping:
             raise ValueError("VoiceMap has a visual timing gap")
 
@@ -5820,6 +5990,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         scenes.append({
             "narration": " ".join(narration_parts).strip(),
             "visual_query_en": resolved_query(dominant),
+            "scene_intent": dominant["_intent"],
             "duration": duration,
             "minimum_footage_duration": min(
                 duration, _VOICE_MAP_CUTTER_TARGET_SECONDS,
@@ -15484,7 +15655,9 @@ def _fast_reuse_percent_for_scenario(settings: Settings, scenario_index: int) ->
 def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
                           reuse_pool: dict[str, TimelineClip],
                           required_duration: float,
-                          source_duration) -> dict[str, list[SearchHit]]:
+                          source_duration, scene_query: str = "", *,
+                          match_threshold: float | None = None, source_allowed=None,
+                          assessment_duration: float | None = None) -> dict[str, list[SearchHit]]:
     """Restrict post-threshold matching to already prepared proxy windows.
 
     The slider is a speed/uniqueness target, so a higher-scoring fresh source
@@ -15493,7 +15666,61 @@ def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
     media for the current beat.  The caller may deliberately expand the pool
     later only when this safe cached set cannot illustrate the scene.
     """
+    from .scene_intent import named_people, person_evidence, person_window
+    assessment_duration = required_duration if assessment_duration is None else assessment_duration
     result: dict[str, list[SearchHit]] = {}
+    assessments = {}
+    candidate_priorities = {}
+    def assessment(hit, start=0.0, *, allow_alternatives=False):
+        key = hit.item.path, start, allow_alternatives
+        if key not in assessments:
+            assessments[key] = _montage_window_visual(
+                scene_query, hit.item, start, assessment_duration, allow_alternatives=allow_alternatives)
+        return assessments[key]
+
+    def relation(hit, start=0.0, *, allow_alternatives=False):
+        visual = assessment(hit, start, allow_alternatives=allow_alternatives)
+        return visual.get("relation") if visual else _protest_suitability(scene_query, hit.item)
+
+    def usable_priority(hit, level):
+        if match_threshold is not None and float(hit.score) < _montage_level_score_floor(level, match_threshold):
+            return None
+        if hit.item.path in candidate_priorities:
+            return candidate_priorities[hit.item.path]
+        candidate_priorities[hit.item.path] = None
+        if float(hit.duration or 0) + .05 < required_duration:
+            return None
+        initial_start = person_window(scene_query, hit.item, assessment_duration)
+        visual = assessment(hit, initial_start, allow_alternatives=True)
+        start = float((visual or {}).get("source_start", initial_start))
+        initial = person_evidence(scene_query, hit.item, initial_start, assessment_duration)
+        evidence = person_evidence(scene_query, hit.item, start, assessment_duration)
+        if initial["status"] == "confirmed" and evidence["status"] != "confirmed":
+            start, evidence = initial_start, initial
+            visual = assessment(hit, start)
+        if (float(source_duration(hit.item) or 0) - start + .05 < assessment_duration
+                or not _semantic_clip_ok(scene_query, hit.item, source_start=start, duration=assessment_duration,
+                                         visual_assessment=visual)
+                or (source_allowed is not None and not source_allowed(hit.item))):
+            return None
+        person_priority = {"confirmed": 0, "probable": 1}.get(evidence["status"], 2)
+        visual_relation = visual.get("relation") if visual else _protest_suitability(scene_query, hit.item)
+        priority = person_priority, int(visual_relation != "direct")
+        candidate_priorities[hit.item.path] = priority
+        return priority
+
+    best_available = None
+    if scene_query:
+        strongest = (0 if named_people(scene_query) else 2), 0
+        for level in _MONTAGE_FALLBACK_LEVELS:
+            for hit in hits_by_level.get(level, []):
+                priority = usable_priority(hit, level)
+                if priority is not None and (best_available is None or priority < best_available):
+                    best_available = priority
+                if best_available == strongest:
+                    break
+            if best_available == strongest:
+                break
     for level in _MONTAGE_FALLBACK_LEVELS:
         filtered: list[SearchHit] = []
         for hit in hits_by_level.get(level, []):
@@ -15501,15 +15728,160 @@ def _fast_reuse_pool_hits(hits_by_level: dict[str, list[SearchHit]],
             origin = reuse_pool.get(key)
             if origin is None:
                 continue
+            if scene_query:
+                cached_evidence = person_evidence(scene_query, hit.item, origin.source_start, assessment_duration)
+                cached_priority = ({"confirmed": 0, "probable": 1}.get(cached_evidence["status"], 2),
+                                   int(relation(hit, origin.source_start) != "direct"))
+                if best_available is not None and cached_priority > best_available:
+                    continue
+                best_start = person_window(scene_query, hit.item, assessment_duration)
+                best_evidence = person_evidence(scene_query, hit.item, best_start, assessment_duration)
+                if (not _semantic_clip_ok(scene_query, hit.item, source_start=origin.source_start, duration=assessment_duration,
+                                          visual_assessment=assessment(hit, origin.source_start))
+                        or (best_evidence["status"] == "confirmed" and cached_evidence["status"] != "confirmed")):
+                    continue
             available_from_cached_window = (
                 float(source_duration(hit.item) or 0.0)
                 - max(0.0, float(origin.source_start))
             )
-            if available_from_cached_window + .05 < float(required_duration):
+            if available_from_cached_window + .05 < float(assessment_duration):
                 continue
             filtered.append(hit)
         result[level] = filtered
     return result
+
+
+def _montage_visual_work_order(scene_query: str, hits_by_level: dict[str, list[SearchHit]],
+                               assessment_duration: float,
+                               fixed_source_starts: dict[str, float] | None = None,
+                               include_contradictory: bool = False) -> list[tuple[SearchHit, float]]:
+    """Order exact primary windows for bounded work without dropping eligible hits."""
+    from .scene_intent import person_evidence, person_window
+
+    unique: dict[str, SearchHit] = {}
+    fixed_source_starts = fixed_source_starts or {}
+    for level in _MONTAGE_FALLBACK_LEVELS:
+        for hit in hits_by_level.get(level, []):
+            key = _montage_clip_key(hit.item.path)
+            if key not in unique or hit.score > unique[key].score:
+                unique[key] = hit
+    tiers: dict[int, dict[str, list[tuple[SearchHit, float]]]] = {0: {}, 1: {}, 2: {}}
+    for hit in unique.values():
+        fixed = fixed_source_starts.get(_montage_clip_key(hit.item.path))
+        start = (person_window(scene_query, hit.item, assessment_duration)
+                 if fixed is None else float(fixed))
+        status = person_evidence(scene_query, hit.item, start, assessment_duration)["status"]
+        if status in {"contradiction", "contradiction_hint"} and not include_contradictory:
+            continue  # This interval only; later cached/curated windows remain eligible.
+        tier = {"confirmed": 0, "probable": 1}.get(status, 2)
+        tiers[tier].setdefault(_montage_hit_family(hit), []).append((hit, start))
+    ordered: list[tuple[SearchHit, float]] = []
+    for groups in tiers.values():
+        for values in groups.values():
+            values.sort(key=lambda entry: (-entry[0].score, _montage_clip_key(entry[0].item.path)))
+        families = sorted(groups, key=lambda family: (-groups[family][0][0].score, family))
+        while families:
+            next_families = []
+            for family in families:
+                ordered.append(groups[family].pop(0))
+                if groups[family]:
+                    next_families.append(family)
+            families = next_families
+    return ordered
+
+
+def _prefetch_montage_visual_windows(index, scene_query: str,
+                                     hits_by_level: dict[str, list[SearchHit]], *,
+                                     required_duration: float,
+                                     assessment_duration: float,
+                                     source_exists, source_allowed,
+                                     fixed_source_starts: dict[str, float] | None = None,
+                                     max_charges: int | None = None) -> list[str]:
+    """Spend released ordinary credit on one primary exact window at a time."""
+    funded_families = []
+    for hit, start in _montage_visual_work_order(scene_query, hits_by_level, assessment_duration,
+                                                 fixed_source_starts):
+        if max_charges is not None and len(funded_families) >= max_charges:
+            break
+        if not index.visual_cold_credit_available():
+            break
+        if (float(hit.duration or 0) + .05 < required_duration
+                or float(hit.duration or 0) - start + .05 < assessment_duration
+                or not callable(getattr(hit.item, "_visual_assessor", None))
+                or not source_exists(hit.item) or not source_allowed(hit.item)):
+            continue
+        before = index._visual_cold_windows if hasattr(index, "_visual_cold_windows") else None
+        with index.visual_cold_window_grant(hit.item.path, start, assessment_duration):
+            _montage_window_visual(scene_query, hit.item, start, assessment_duration)
+        if before is None or index._visual_cold_windows > before:
+            funded_families.append(_montage_hit_family(hit))
+    return funded_families
+
+
+def _recover_montage_visual_alternatives(index, scene_query: str,
+                                         hits_by_level: dict[str, list[SearchHit]], *,
+                                         required_duration: float, assessment_duration: float,
+                                         source_exists, source_allowed, source_duration,
+                                         can_complete, primary_only_paths: set[str] | None = None,
+                                         current_candidate=None):
+    """Fund remaining primaries, then existing alternatives, only for completion."""
+    from .scene_intent import person_evidence
+
+    try:
+        return can_complete()
+    except MontageSelectionFailure:
+        pass
+    primary_only_paths = primary_only_paths or set()
+    work_order = _montage_visual_work_order(scene_query, hits_by_level, assessment_duration,
+                                           {key: 0. for key in primary_only_paths},
+                                           include_contradictory=True)
+    # The ordinary tranche may have stopped before a later family's primary.
+    # Exhaust those primary opportunities before spending completion debt on
+    # additional windows of the already explored families. Probe lazily: a
+    # full continuity inventory must not trigger thousands of health decodes.
+    for alternate_pass in (False, True):
+        for hit, primary in work_order:
+            continuity_only = _montage_clip_key(hit.item.path) in primary_only_paths
+            if alternate_pass and continuity_only:
+                continue
+            emergency = not index.visual_cold_credit_available()
+            if not index.visual_cold_credit_available(emergency=emergency):
+                return None
+            if continuity_only and current_candidate is not None:
+                current = current_candidate(hit.item)
+                if current is None or (_montage_semantic_bonus(scene_query, current) <= 0
+                                       and _montage_metadata_relevance(scene_query, current) <= 0):
+                    continue
+                hit = replace(hit, item=current)
+            if ((not continuity_only and float(hit.duration or 0) + .05 < required_duration)
+                    or not callable(getattr(hit.item, "_visual_assessor", None))
+                    or not source_exists(hit.item) or not source_allowed(hit.item)):
+                continue
+            available = float(source_duration(hit.item) or 0)
+            if available + .05 < max(required_duration, assessment_duration):
+                continue
+            last = max(0.0, available - assessment_duration)
+            starts = ([value for value in dict.fromkeys((0.0, last / 2, last))
+                       if abs(value - primary) > .001][:2] if alternate_pass else [primary])
+            for start in starts:
+                if start > last + .05 or person_evidence(
+                        scene_query, hit.item, start, assessment_duration)["status"] in {
+                            "contradiction", "contradiction_hint"}:
+                    continue
+                emergency = not index.visual_cold_credit_available()
+                if not index.visual_cold_credit_available(emergency=emergency):
+                    return None
+                before = getattr(index, "_visual_cold_windows", None)
+                with index.visual_cold_window_grant(hit.item.path, start, assessment_duration,
+                                                    emergency=emergency):
+                    _montage_window_visual(scene_query, hit.item, start, assessment_duration)
+                if before is not None and index._visual_cold_windows == before:
+                    continue
+                try:
+                    return can_complete()
+                except MontageSelectionFailure:
+                    pass
+    return None
 
 
 def _random_video(folder: str) -> str:
@@ -15610,13 +15982,15 @@ _MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                  "ukraine-government-kyiv")),
     ("russia", ("russia", "moscow", "kremlin", "putin", "sevastopol", "fsb", "росси", "москв", "кремл", "путин",
                 "севастопол", "фсб", "russia-government-moscow")),
-    ("eu", ("european union", "brussels", "eu parliament", "europe", "евросоюз", "брюссел",
-            "европ", "eu-institutions")),
+    ("eu", ("european union", "brussels", "eu parliament", "european parliament", "евросоюз", "брюссел",
+            "европейского союза", "европейский союз", "европарламент", "eu-institutions")),
     ("iran", ("iran", "tehran", "persian", "иран", "тегеран", "персид", "iran-government-tehran")),
     ("armenia", ("armenia", "yerevan", "pashinyan", "армени", "ереван", "пашинян",
                  "armenia-government-yerevan")),
     ("azerbaijan", ("azerbaijan", "baku", "aliyev", "азербайдж", "баку", "алиев",
                     "azerbaijan-government-baku")),
+    ("kazakhstan", ("kazakhstan", "astana", "tokayev", "tokaev", "казахстан", "астана", "токаев")),
+    ("belarus", ("belarus", "minsk", "lukashenko", "беларус", "минск", "лукашенко")),
 )
 
 # Country-level identity is not enough for an explicitly named government
@@ -15637,6 +16011,8 @@ _MONTAGE_SEMANTIC_RULES = (
      ("migrant-border", "refugee-transport", "civilian-evacuation")),
     (("negotiation", "diplomatic", "summit", "переговор", "дипломат", "саммит"),
      ("negotiations", "diplomatic-negotiations", "parliament-government", "press-conference", "political-office")),
+    (("press conference", "journalists cameras", "official statement"),
+     ("press-conference", "political-office", "parliament-government", "diplomatic-negotiations")),
     (("washington", "white house", "united states", "us government", "вашингтон", "сша", "америк"),
      ("us-government-washington", "press-conference", "parliament-government")),
     (("kyiv", "ukraine government", "ukrainian government", "киев", "украин"),
@@ -15662,10 +16038,13 @@ def _has_any(value: str, terms: tuple[str, ...]) -> bool:
 
 def _montage_entity_groups(value: str) -> set[str]:
     lowered = str(value or "").casefold()
-    return {
+    groups = {
         name for name, terms in _MONTAGE_ENTITY_GROUPS
         if any(term in lowered for term in terms)
     }
+    if re.search(r"\bевропейск\w*\s+(?:союз|парламент)\w*", lowered):
+        groups.add("eu")
+    return groups
 
 
 def _montage_entity_conflict(scene_query: str, candidate_metadata: str) -> bool:
@@ -15673,6 +16052,31 @@ def _montage_entity_conflict(scene_query: str, candidate_metadata: str) -> bool:
     requested = _montage_entity_groups(scene_query)
     candidate = _montage_entity_groups(candidate_metadata)
     return bool(requested and candidate and requested.isdisjoint(candidate))
+
+
+def _montage_explicit_metadata(item: FootageItem) -> str:
+    """Catalog hints, excluding advisory automatic semantic categories."""
+    return " ".join((item.path, item.name, item.source_url, *(tag for tag in (item.tags or [])
+                                           if tag not in SEMANTIC_TAG_LABELS)))
+
+
+@lru_cache(maxsize=64)
+def _montage_story_mentions_iran(story: str) -> bool:
+    iran = r"(?<!\w)(?:iran(?:ian)?|tehran|persian gulf|иран\w*|тегеран\w*|персидск\w*\s+залив\w*)(?!\w)"
+    return re.search(iran, story.replace("_", " "), re.IGNORECASE) is not None
+
+
+def _montage_story_candidate_allowed(story: str, item: FootageItem) -> bool:
+    """Keep explicitly Iran-related sources out of a story that omits Iran.
+
+    Use catalog path/name hints, not advisory model country labels. This
+    transient story restriction is shared by retrieval and final validation;
+    it does not disable footage or change the persistent library.
+    """
+    iran = r"(?<!\w)(?:iran(?:ian)?|tehran|persian gulf|иран\w*|тегеран\w*|персидск\w*\s+залив\w*)(?!\w)"
+    if _montage_story_mentions_iran(story):
+        return True
+    return re.search(iran, _montage_explicit_metadata(item).replace("_", " "), re.IGNORECASE) is None
 
 
 def _montage_exact_location_conflict(scene_query: str, candidate_metadata: str) -> bool:
@@ -15703,7 +16107,7 @@ def _montage_semantic_rule_applies(query: str, query_terms: tuple[str, ...],
 def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     """Prefer concrete enriched footage for every supported news cluster."""
     query = str(scene_query or "").casefold()
-    haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
+    haystack = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
     bonus = 0.0
     for query_terms, preferred_tags in _MONTAGE_SEMANTIC_RULES:
         if _montage_semantic_rule_applies(query, query_terms, preferred_tags):
@@ -15718,9 +16122,141 @@ def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     return min(0.30, bonus)
 
 
-def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
+def _protest_suitability(scene_query: str, item: FootageItem) -> str | None:
+    """Metadata contract for civilian actions; crowd alone is insufficient.
+
+    This does not verify the real event, geography or identity in an image.
+    It is shared by selection, reuse, continuity, repair and tail validation.
+    """
+    from .scene_intent import named_people
+    query = scene_query.casefold()
+    if not re.search(r"\b(?:protest|rally|picket|labor strike|demonstration)\b", query):
+        return None
+    if "equipment" in query or "diplomatic protest" in query:
+        return None
+    metadata = " ".join((item.name, " ".join(item.tags or []))).casefold()
+    if named_people(metadata):
+        return "reject"
+    if re.search(r"concert|football|fans|religious|parade|people queue|equipment demonstration|product demonstration|exhibition|концерт|болельщик|религиоз|парад|очередь", metadata):
+        return "reject"
+    if _montage_has_war_action(metadata.replace("-", " ")) or _has_any(metadata, _WAR_VISUAL_TAGS):
+        return "reject"
+    conflict = bool(re.search(r"dispersal|clashes|street unrest", query))
+    # The legacy public-unrest-police label includes ordinary police barriers;
+    # it cannot by itself prove clashes at a peaceful gathering.
+    action_metadata = metadata.replace("public-unrest-police", "")
+    violent = bool(re.search(r"dispersal|clashes|riot|unrest|разгон|столкнов|беспоряд|fire|burning|shooting", action_metadata))
+    if violent and not conflict:
+        return "reject"
+    protest = bool(re.search(r"protest|rally|picket|workers.strike|labor strike|митинг|протест|пикет|забастов|demonstration|march.*placards", metadata))
+    if conflict and (violent or protest):
+        return "direct" if violent else "context"
+    if protest:
+        if "labor strike" in query and not re.search(r"workers|labor|union|picket|забастов|пикет|рабочи", metadata):
+            return "context"
+        if "farmers protest" in query and not re.search(r"farmers|tractor|фермер|трактор", metadata):
+            return "context"
+        return "direct"
+    if "labor strike" in query and "factory-industry" in (item.tags or []):
+        return "context"
+    return "reject"
+
+
+def _montage_window_visual(scene_query: str, item: FootageItem, start: float, duration: float,
+                           *, allow_alternatives: bool = False) -> dict | None:
+    """Read reusable window features; a result never confirms identity or event."""
+    assessor = getattr(item, "_visual_assessor", None)
+    if not callable(assessor):
+        return None
+    try:
+        return assessor(scene_query, start, duration, allow_alternatives=allow_alternatives)
+    except (OSError, ValueError, RuntimeError) as error:
+        return {"relation": "unknown", "source": "window-check-unavailable",
+                "reason": type(error).__name__, "source_start": start, "duration": duration}
+
+
+def _montage_has_naval_hint(value: str) -> bool:
+    return bool(re.search(
+        r"\b(?:warship|naval|navy|patrol boat|destroyer|frigate|submarine)\b|"
+        r"патрульн\w*\s+катер|(?:военн|боев)\w*\s+кораб|\bвм[сф]\b|"
+        r"эсмин|фрегат|подлод|подводн\w*\s+лодк", str(value), re.IGNORECASE))
+
+
+def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: float | None = None,
+                      duration: float = 6, visual_assessment: dict | None = None) -> bool:
+    from .scene_intent import (
+        PERSON_ALIASES,
+        named_people,
+        person_evidence,
+        person_name,
+        person_window,
+    )
+    from .visual_evidence import query_topic
+    start = person_window(scene_query, item, duration) if source_start is None else source_start
+    evidence = person_evidence(scene_query, item, start, duration)
+    if evidence["status"] in {"contradiction", "contradiction_hint"}:
+        return False
     query = str(scene_query or "").casefold()
-    haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
+    haystack = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
+    visual = visual_assessment or _montage_window_visual(query, item, start, duration)
+    requested_role = query_topic(query)
+    # Commercial shipping must not inherit a known naval source because
+    # both contain decks and water. Catalog hints only exclude this close
+    # negative; they never positively confirm a vessel or loading action.
+    if (requested_role and requested_role[0] in {"port", "warehouse", "rail", "road_cargo"}
+            and not _montage_has_naval_hint(query)
+            and _montage_has_naval_hint(_montage_explicit_metadata(item))):
+        return False
+    # Unknown identity in a mixed file is not institutional context. Also
+    # reject older accepted speaker verdicts passed by repair/reuse.
+    if (requested_role and requested_role[0] == "institutional_context"
+            and (visual is None or visual.get("dominant_kind") not in {"government_building", "meeting"})):
+        return False
+    if visual is not None:
+        if visual.get("relation") not in {"direct", "context"}:
+            return False
+        # An unrecognized single politician is not a substitute for a named
+        # speaker. Institutions/delegations are illustrative context instead.
+        if (evidence["targets"] and evidence["status"] == "unknown"
+                and visual.get("dominant_kind") not in {"government_building", "meeting"}):
+            return False
+        haystack = _montage_explicit_metadata(item).casefold()
+        if evidence["status"] == "confirmed":
+            for _identity, _name, expression in PERSON_ALIASES:
+                haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
+            haystack += " " + " ".join(person_name(identity).casefold() for identity in evidence["visible"])
+        if visual.get("dominant_kind") in {"official", "meeting", "government_building"}:
+            # A government discussing another country is not that country's
+            # institution. Prefer fresh curated identity over catalog names;
+            # incidental country words in a title cannot erase this conflict.
+            identities = person_evidence(" ".join(name for _, name, _ in PERSON_ALIASES),
+                                         item, start, duration)
+            people = (identities["visible"] if identities["status"] == "confirmed"
+                      else named_people(haystack))
+            if identities["status"] == "confirmed" and evidence["status"] != "confirmed":
+                for _identity, _name, expression in PERSON_ALIASES:
+                    haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
+                haystack += " " + " ".join(person_name(identity).casefold() for identity in people)
+            government_places = _montage_entity_groups(" ".join(person_name(person) for person in people))
+            requested_places = _montage_entity_groups(query)
+            if government_places and requested_places and government_places.isdisjoint(requested_places):
+                return False
+        # Folder/model topic labels are weak. A checked actual window may
+        # correct them; existing explicit entity/location contradictions stay.
+        return not (_montage_entity_conflict(query, haystack)
+                    or _montage_exact_location_conflict(query, haystack))
+    protest_suitability = _protest_suitability(query, item)
+    if protest_suitability == "reject":
+        return False
+    # Mixed advisory CLIP labels can put refinery and frontline on one map.
+    # A positive generic tag must not cancel an explicit combat contradiction
+    # when the scene requests a civilian activity (including port loading).
+    combat_tags = {"frontline-combat", "offensive-advance", "artillery-fire", "war-action",
+                   "military-drone", "missile-strike"}
+    if (combat_tags.intersection(item.tags or []) and not _montage_has_war_action(query)
+            and not re.search(r"\b(?:fire|emergency|damaged|explosion)\b", query)
+            and evidence["status"] != "confirmed"):
+        return False
     # Never let a generic Kremlin / politician / cabinet shot illustrate a
     # concrete military action.  The exception keeps legitimate scenes such
     # as "Putin comments on strikes" usable when the political subject was
@@ -15737,9 +16273,17 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     if (_has_any(query, _ENERGY_PORT_QUERY_TERMS) and _has_any(haystack, _AGRICULTURE_TERMS)
             and not _has_any(query, _AGRICULTURE_QUERY_TERMS)):
         return False
-    for requested_names, contradictory_names in _MONTAGE_NAMED_PERSON_GUARDS:
-        if _has_any(query, requested_names) and _has_any(haystack, contradictory_names):
-            return False
+    requested_people = set(named_people(query))
+    candidate_people = set(named_people(haystack))
+    if (requested_people and candidate_people and requested_people.isdisjoint(candidate_people)
+            and evidence["status"] != "confirmed"):
+        return False
+    if evidence["status"] == "confirmed":
+        # Curated interval identity corrects filename aliases before geography
+        # guards derive a country from those same weak person-name hints.
+        for _identity, _name, expression in PERSON_ALIASES:
+            haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
+        haystack += " " + " ".join(person_name(identity).casefold() for identity in evidence["visible"])
     if _montage_entity_conflict(query, haystack):
         return False
     if _montage_exact_location_conflict(query, haystack):
@@ -15751,7 +16295,8 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     semantic_tags = set(item.tags or ()) & SEMANTIC_TAG_LABELS
     specific_semantic_tags = semantic_tags - _MONTAGE_GENERIC_SAFE_SEMANTIC_TAGS
     if (expected_semantic_tags and specific_semantic_tags
-            and not (expected_semantic_tags & specific_semantic_tags)):
+            and not (expected_semantic_tags & specific_semantic_tags)
+            and protest_suitability != "context"):
         return False
     for scene_terms, wanted_terms, forbidden_terms in _MONTAGE_TOPIC_GUARDS:
         if not any(term in query for term in scene_terms):
@@ -15814,24 +16359,130 @@ def _montage_query_variants(value: str) -> list[str]:
 
 def _montage_query_ladder(value: str) -> dict[str, list[str]]:
     """Build bounded strict/relaxed/category/context queries for one scene."""
+    from .visual_evidence import query_topic
+
     normalized = _normalized_montage_visual_query(value)
     parts = [part.strip() for part in normalized.split(",") if part.strip()]
     joined = normalized.casefold()
+    topic = query_topic(normalized)
+    role = topic[0] if topic else ""
     categories: list[str] = []
     contexts: list[str] = []
-    if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
+    analogs: list[str] = []
+    # Preserve explicit catalog entity words in the first analog. The second
+    # remains broad enough to find neutral footage; final validation still uses
+    # the original scene query for identity and location safety.
+    anchor_matches: list[tuple[int, int, str]] = []
+    for _, terms in _MONTAGE_ENTITY_GROUPS:
+        for term in terms:
+            match = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", normalized, re.IGNORECASE)
+            if match:
+                anchor_matches.append((match.start(), match.end(), match.group()))
+    anchors: list[str] = []
+    covered: list[tuple[int, int]] = []
+    for start, end, original in sorted(anchor_matches, key=lambda row: (row[0], -(row[1] - row[0]))):
+        if not any(start < previous_end and end > previous_start for previous_start, previous_end in covered):
+            anchors.append(original)
+            covered.append((start, end))
+        if len(anchors) == 2:
+            break
+    anchor = " ".join(anchors)
+    cancelled = bool(re.search(
+        r"\b(?:cancelled|canceled|called off|not held|did not happen|did not take place)\b"
+        r"|\bno (?:\w+\s+){0,3}(?:meeting|protest|rally|loading|harvest)\b"
+        r"|отмен\w*|не состоял\w*", joined,
+    ))
+    peaceful_march = bool(re.search(r"\b(?:peaceful|civilian|street)\b.{0,24}\bmarch\b", joined))
+    protest_query = bool(re.search(r"\b(?:protest|rally|picket|placard|labor strike)\b", joined)
+                         or peaceful_march)
+    if protest_query and not cancelled:
+        conflict = bool(re.search(r"dispersal|clashes|street unrest", joined)
+                        and not re.search(r"peaceful|without clashes|no clashes|мирн|без столкнов", joined))
+        categories.append("civilian protest police dispersal street unrest" if conflict
+                          else "peaceful civilian protest rally placards march")
+        contexts.append("peaceful union picket factory exterior labor protest" if "labor strike" in joined
+                        else "peaceful civilian protest placards street march")
+        if role == "labor_protest":
+            analogs.append("striking workers union picket outside factory")
+        elif role == "farmers_protest":
+            analogs.append("farmers tractors peaceful protest road placards")
+        elif role == "protest" or peaceful_march:
+            analogs.append("civilians peaceful street march holding banners")
+    if role == "port":
+        if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "нефт", "танкер")):
+            categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
+            contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
+            if not cancelled:
+                analogs.extend(["oil tanker loading at marine terminal", "commercial ships docked at oil port"])
+        else:
+            categories.append("cargo port cranes ships")
+            contexts.extend(["cargo warehouse dock logistics", "commercial seaport documentary"])
+            if not cancelled:
+                analogs.extend(["cargo loading container cranes at seaport",
+                                "freight ships unloading at port terminal"])
+    elif role == "energy":
+        categories.append("oil refinery industrial infrastructure")
+        contexts.append("energy infrastructure documentary")
+    elif not role and not cancelled and _has_any(joined, (
+            "tanker", "refinery", "oil terminal", "oil", "energy")):
         categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
         contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
-    if _montage_has_war_action(joined):
+    if role in {"combat", ""} and not cancelled and _montage_has_war_action(joined):
         categories.extend(["military equipment smoke city aerial", "emergency aftermath damaged buildings"])
         contexts.extend(["civilian evacuation emergency services", "damaged city documentary aerial"])
-    if _has_any(joined, ("negotiation", "diplomatic", "summit", "government", "parliament",
-                         "переговор", "дипломат", "саммит")):
+    legacy_meeting = not role and _has_any(joined, (
+        "negotiation", "diplomatic", "summit", "government", "parliament",
+        "переговор", "дипломат", "саммит",
+    ))
+    if (role == "meeting" or legacy_meeting) and not cancelled:
         categories.extend(["government building parliament flags diplomatic meeting"])
         contexts.extend(["city government exterior", "journalists cameras diplomatic venue"])
-    if _has_any(joined, _AGRICULTURE_QUERY_TERMS):
+        if _has_any(joined, ("military", "headquarters", "officers", "command", "штаб", "офицер")):
+            analogs.extend(["military officers meeting at headquarters planning table",
+                            "military command council discussion indoors"])
+        else:
+            analogs.extend(["government council meeting around conference table",
+                            "diplomatic delegations discussion around table"])
+    elif role == "institutional_context":
+        categories.append("government building parliament flags exterior")
+        contexts.append("city government exterior")
+        analogs.append("parliament institution exterior with flags")
+    farm_query = role == "farm" or (not role and _has_any(joined, _AGRICULTURE_QUERY_TERMS))
+    if (farm_query and not cancelled
+            and not _has_any(joined, ("cargo", "freight", "export", "shipping", "transport", "loading"))):
         categories.extend(["agriculture farming harvest machinery"])
         contexts.extend(["rural fields food production documentary"])
+        if _has_any(joined, ("harvest", "combine", "farming", "crops", "уборк", "комбайн")):
+            analogs.extend(["combine harvester cutting crops in fields", "farmers harvesting wheat fields"])
+    if role == "digital" or (not role and _has_any(joined, ("cyber", "server", "data center", "network"))):
+        categories.extend(["data center servers computer network infrastructure"])
+        contexts.extend(["technology network equipment technical infrastructure"])
+    if role == "finance" or (not role and _has_any(joined, (
+            "sanction", "economy", "finance", "banking", "trade", "markets"))):
+        categories.extend(["economy finance trade factory industry"])
+        contexts.extend(["industrial production cargo warehouse commerce"])
+    if role == "rail" or (not role and _has_any(joined, ("rail", "train", "freight"))):
+        categories.extend(["rail freight train cargo logistics"])
+        contexts.extend(["cargo warehouse transport logistics"])
+        if not cancelled:
+            analogs.extend(["freight railway wagons carrying cargo", "rail cargo loading at warehouse terminal"])
+    if role == "warehouse":
+        categories.append("cargo warehouse storage forklifts")
+        contexts.append("freight logistics warehouse exterior")
+        if not cancelled:
+            analogs.extend(["workers loading cargo inside warehouse", "freight storage pallets and forklifts"])
+    legacy_official = not role and _has_any(joined, (
+        "press conference", "statement", "putin", "zelensk", "trump", "pashinyan", "tokayev",
+    ))
+    if (role == "official" or legacy_official) and not cancelled:
+        categories.extend(["press conference journalists government statement"])
+        contexts.extend(["government building exterior press venue cameras"])
+        if role == "official":
+            analogs.extend(["government official giving formal address at podium",
+                            "official statement to journalists with microphones"])
+    if analogs:
+        analogs[0] = f"{anchor} {analogs[0]}".strip() if anchor else analogs[0]
+        categories.extend(analogs[:2])
     if not contexts:
         contexts.append("contextual news documentary city infrastructure")
 
@@ -15869,7 +16520,7 @@ def _montage_metadata_relevance(query: str, item: FootageItem) -> float:
     """Conservative relevance for the no-index bootstrap path."""
     wanted = tokenize(re.sub(r"[_\-]+", " ", str(query or "")))
     available: set[str] = set()
-    for value in (item.name, item.path, *(item.tags or ())):
+    for value in (item.name, *(item.tags or ())):
         available.update(tokenize(re.sub(r"[_\-]+", " ", str(value or ""))))
     if not wanted or not available:
         return 0.0
@@ -16086,7 +16737,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                               relaxed_hits=None, category_hits=None, safe_context_hits=None,
                               position_bucket: str = "", batch_family_buckets=None,
                               diversity_seed: str = "", allow_safe_reuse: bool = True,
-                              allow_below_threshold: bool = False) -> MontageCandidateSelection:
+                              allow_below_threshold: bool = False,
+                              assessment_duration: float | None = None,
+                              fixed_source_starts: dict[str, float] | None = None) -> MontageCandidateSelection:
     """Select one valid clip without letting batch uniqueness become a hard failure.
 
     The candidate collections come from a bounded in-memory vector search.
@@ -16094,6 +16747,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
     timeline source is never reused by this helper (which prevents adjacent
     duplicate footage as well as any accidental current-project duplicate).
     """
+    from .scene_intent import person_evidence, person_window
+    assessment_duration = required_duration if assessment_duration is None else assessment_duration
+    fixed_source_starts = fixed_source_starts or {}
     diagnostics = {
         "candidates_retrieved": 0, "hard_valid": 0, "strict_accepted": 0, "rejection_events": 0,
         "rejected_threshold": 0,
@@ -16102,6 +16758,8 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
         "unique_rejected_threshold": 0, "unique_rejected_reservation": 0,
         "unique_rejected_diversity": 0, "unique_rejected_missing": 0,
         "unique_rejected_duration": 0, "unique_rejected_safety": 0,
+        "visual_rejection_reasons": {},
+        "semantic_rejection_reasons": {},
     }
     strict = list(strict_hits or [])
     relaxed = list(strict if relaxed_hits is None else relaxed_hits)
@@ -16116,6 +16774,50 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
     })
     first_rejection: dict[str, str] = {}
     hard_valid_paths: set[str] = set()
+    evidence_cache: dict[str, tuple[float, dict]] = {}
+    visual_cache: dict[str, dict | None] = {}
+    semantic_verdicts: dict[str, bool] = {}
+    physical_verdicts: dict[str, tuple[str, float]] = {}
+    source_presence: dict[str, bool] = {}
+    declared_durations: dict[str, float] = {}
+    for hit in all_candidates:
+        declared_durations[hit.item.path] = max(declared_durations.get(hit.item.path, 0), float(hit.duration or 0))
+
+    def exists_for(item):
+        if item.path not in source_presence:
+            source_presence[item.path] = bool(source_exists(item))
+        return source_presence[item.path]
+
+    def evidence_for(item):
+        if item.path not in evidence_cache:
+            fixed_start = fixed_source_starts.get(_montage_clip_key(item.path))
+            start = (person_window(scene_query, item, assessment_duration)
+                     if fixed_start is None else float(fixed_start))
+            if declared_durations.get(item.path, 0) - start + .05 < required_duration:
+                visual = {"relation": "unknown", "reason": "short-source-before-visual-check"}
+            elif not exists_for(item):
+                visual = {"relation": "unknown", "reason": "missing-or-disallowed-before-visual-check"}
+            else:
+                visual = _montage_window_visual(scene_query, item, start, assessment_duration,
+                                                 allow_alternatives=fixed_start is None)
+            if visual and visual.get("relation") in {"direct", "context"}:
+                proposed = float(visual.get("source_start", start))
+                # Curated person windows remain stronger than automatic
+                # action features; never move a confirmed person out of view.
+                initial = person_evidence(scene_query, item, start, assessment_duration)
+                alternate = person_evidence(scene_query, item, proposed, assessment_duration)
+                if initial["status"] != "confirmed" or alternate["status"] == "confirmed":
+                    start = proposed
+                elif proposed != start:
+                    visual = _montage_window_visual(scene_query, item, start, assessment_duration)
+            visual_cache[item.path] = visual
+            evidence_cache[item.path] = start, person_evidence(scene_query, item, start, assessment_duration)
+        return evidence_cache[item.path]
+
+    def relation_for(item):
+        evidence_for(item)
+        visual = visual_cache.get(item.path)
+        return visual.get("relation") if visual else _protest_suitability(scene_query, item)
 
     def reject(reason: str, key: str) -> None:
         """Count examination events separately from unique rejected clips."""
@@ -16130,7 +16832,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                level: str, skip_previous: bool = False):
         seen: set[str] = set()
 
-        def rank_value(value: SearchHit) -> tuple[float, str]:
+        def rank_value(value: SearchHit) -> tuple[int, int, int, float, str]:
             family = _montage_hit_family(value)
             placements = list(family_buckets.get(family, []))
             rotation_penalty = _montage_rotation_penalty(placements, position_bucket)
@@ -16143,7 +16845,16 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                 min(0.18, max(0, len(placements) - 1) * 0.045)
                 if level == "SAFE_REUSE" else 0.0
             )
-            return -(quality - rotation_penalty - reuse_penalty + variation), _montage_clip_key(value.item.path)
+            _start, evidence = evidence_for(value.item)
+            priority = {"confirmed": 0, "probable": 1}.get(evidence["status"], 2)
+            contextual = int(relation_for(value.item) == "context")
+            key = _montage_clip_key(value.item.path)
+            # Once family reuse is necessary, exhaust unseen paths within
+            # those families before repeating footage already in this video.
+            # Person and action evidence remain stronger than path freshness.
+            repeated_path = int(level == "SAFE_REUSE" and allow_project_reuse
+                                and key in project_used_paths)
+            return priority, contextual, repeated_path, -(quality - rotation_penalty - reuse_penalty + variation), key
 
         ranked = sorted(
             pool,
@@ -16171,21 +16882,57 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if float(hit.duration or 0.0) + .05 < required_duration:
                 reject("duration", key)
                 continue
-            if not _semantic_clip_ok(scene_query, hit.item):
+            if not exists_for(hit.item):
+                reject("missing", key)
+                continue
+            start, evidence = evidence_for(hit.item)
+            if key not in semantic_verdicts:
+                semantic_verdicts[key] = _semantic_clip_ok(
+                    scene_query, hit.item, source_start=start, duration=assessment_duration,
+                    visual_assessment=visual_cache.get(hit.item.path))
+                visual = visual_cache.get(hit.item.path)
+                if not semantic_verdicts[key]:
+                    if evidence["status"] in {"contradiction", "contradiction_hint"}:
+                        reason = "person-contradiction"
+                    elif visual and visual.get("relation") not in {"direct", "context"}:
+                        reason = visual.get("reason", "visual-incompatible")
+                        counts = diagnostics["visual_rejection_reasons"]
+                        counts[reason] = counts.get(reason, 0) + 1
+                    else:
+                        metadata = (_montage_explicit_metadata(hit.item) if visual else
+                                    " ".join((hit.item.name, " ".join(hit.item.tags or []))))
+                        if _montage_entity_conflict(scene_query, metadata):
+                            reason = "entity-geography-conflict"
+                        elif _montage_exact_location_conflict(scene_query, metadata):
+                            reason = "exact-location-conflict"
+                        else:
+                            reason = "semantic-incompatible"
+                    counts = diagnostics["semantic_rejection_reasons"]
+                    counts[reason] = counts.get(reason, 0) + 1
+            if not semantic_verdicts[key]:
+                reject("safety", key)
+                continue
+            if evidence["status"] in {"contradiction", "contradiction_hint"}:
                 reject("safety", key)
                 continue
             if minimum_score is not None and float(hit.score) < minimum_score:
                 reject("threshold", key)
                 continue
-            if not source_exists(hit.item):
-                reject("missing", key)
-                continue
-            actual_duration = float(source_duration(hit.item) or 0.0)
-            if actual_duration + .05 < required_duration:
-                reject("duration", key)
-                continue
-            if source_allowed is not None and not source_allowed(hit.item):
-                reject("safety", key)
+            if key not in physical_verdicts:
+                actual_duration = 0.0
+                reason = ""
+                if not exists_for(hit.item):
+                    reason = "missing"
+                else:
+                    actual_duration = float(source_duration(hit.item) or 0.0)
+                    if actual_duration - start + .05 < assessment_duration:
+                        reason = "duration"
+                    elif source_allowed is not None and not source_allowed(hit.item):
+                        reason = "safety"
+                physical_verdicts[key] = reason, actual_duration
+            reason, actual_duration = physical_verdicts[key]
+            if reason:
+                reject(reason, key)
                 continue
             if key not in hard_valid_paths:
                 hard_valid_paths.add(key)
@@ -16204,7 +16951,19 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             if historical and not allow_historical:
                 reject("diversity", key)
                 continue
-            if level == "STRICT_MATCH":
+            reported_level = level
+            visual = visual_cache.get(hit.item.path)
+            if relation_for(hit.item) == "context":
+                reported_level = "SAFE_CONTEXT"
+            elif (visual and visual.get("source") == "automatic-window-clip"
+                  and reported_level == "STRICT_MATCH"):
+                reported_level = "RELAXED_SEMANTIC"
+            if level == "STRICT_MATCH" and evidence["targets"]:
+                if evidence["status"] == "unknown":
+                    reported_level = "SAFE_CONTEXT"
+                elif evidence["status"] == "probable":
+                    reported_level = "RELAXED_SEMANTIC"
+            if reported_level == "STRICT_MATCH":
                 diagnostics["strict_accepted"] += 1
             placements = list(family_buckets.get(family, []))
             same_bucket = sum(bucket == position_bucket for bucket in placements)
@@ -16220,11 +16979,15 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                 rotation_reason = "новая семья для этого сегмента"
             strict_reason = next(iter(first_rejection.values()), "") if level != "STRICT_MATCH" else ""
             diagnostics["strict_rejection_reason"] = strict_reason
+            diagnostics["person"] = evidence
+            diagnostics["retrieval_level"] = level
+            diagnostics["visual"] = visual or {"relation": "unverified-metadata", "source": "metadata-only"}
             return MontageCandidateSelection(
-                hit.item, actual_duration, float(hit.score), level,
+                hit.item, actual_duration, float(hit.score), reported_level,
                 reserved, dict(diagnostics), source_family=family, reused=reused,
                 position_bucket=position_bucket, position_rotation_penalty=rotation_penalty,
                 position_rotation_reason=rotation_reason, strict_rejection_reason=strict_reason,
+                source_start=start,
             )
         return None
 
@@ -16232,17 +16995,11 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
         return None if allow_below_threshold else _montage_level_score_floor(level, match_threshold)
 
     ladder = [
-        (strict, floor("STRICT_MATCH"), False, False, False, True, "STRICT_MATCH"),
-        (relaxed, floor("RELAXED_SEMANTIC"), False, False, False, True, "RELAXED_SEMANTIC"),
-        (category, floor("CATEGORY_MATCH"), False, False, False, True, "CATEGORY_MATCH"),
-        (context, floor("SAFE_CONTEXT"), False, False, False, True, "SAFE_CONTEXT"),
+        (strict, floor("STRICT_MATCH"), False, False, False, True, "STRICT_MATCH", False),
+        (relaxed, floor("RELAXED_SEMANTIC"), False, False, False, True, "RELAXED_SEMANTIC", False),
+        (category, floor("CATEGORY_MATCH"), False, False, False, True, "CATEGORY_MATCH", False),
+        (context, floor("SAFE_CONTEXT"), False, False, False, True, "SAFE_CONTEXT", False),
     ]
-    for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level in ladder:
-        selected = choose(pool, minimum_score=minimum, allow_historical=old_allowed,
-                          allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
-                          avoid_recent=avoid_recent, level=level)
-        if selected:
-            return selected
     if allow_safe_reuse:
         # Reuse is still specificity-first and must satisfy the score floor of
         # the semantic level that produced the candidate. Diversity exhaustion
@@ -16253,35 +17010,45 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             (category, floor("CATEGORY_MATCH")),
             (context, floor("SAFE_CONTEXT")),
         ]
-        # Preserve uniqueness inside the current video before preserving
-        # uniqueness across older/batch videos.  A family already used by a
+        # Within each evidence tier, preserve uniqueness inside the current
+        # video before preserving it across older/batch videos. A family used by a
         # different video is still a better fallback than repeating a family
         # already visible in this video's own timeline.
         for avoid_recent in (True, False):
             for pool, minimum in reuse_ladder:
-                selected = choose(
-                    pool, minimum_score=minimum, allow_historical=True,
-                    allow_reserved=True, allow_project_reuse=False,
-                    avoid_recent=avoid_recent, level="SAFE_REUSE",
-                    skip_previous=True,
-                )
-                if selected:
-                    return selected
+                ladder.append((pool, minimum, True, True, False, avoid_recent, "SAFE_REUSE", True))
 
-        # Only after every semantically valid cross-video option is exhausted
-        # may the current project reuse one of its own sources.  Still avoid
+        # Only after cross-video options in the same evidence tier are exhausted
+        # may the current project reuse one of its own sources. Still avoid
         # A→A whenever another valid used source exists.
         for skip_previous in (True, False):
             for avoid_recent in (True, False):
                 for pool, minimum in reuse_ladder:
-                    selected = choose(
-                        pool, minimum_score=minimum, allow_historical=True,
-                        allow_reserved=True, allow_project_reuse=True,
-                        avoid_recent=avoid_recent, level="SAFE_REUSE",
-                        skip_previous=skip_previous,
-                    )
-                    if selected:
-                        return selected
+                    ladder.append((pool, minimum, True, True, True, avoid_recent, "SAFE_REUSE", skip_previous))
+
+    def intent_priority(item):
+        _start, evidence = evidence_for(item)
+        # Explicit identity contradictions are hard rejections, not weaker
+        # preferences. Examine them first to retain safety diagnostics.
+        if evidence["status"] in {"contradiction", "contradiction_hint"}:
+            return -1, 0
+        person_priority = {"confirmed": 0, "probable": 1}.get(evidence["status"], 2)
+        return person_priority, int(relation_for(item) != "direct")
+
+    # Exhaust stronger person/action evidence across both fresh and reused
+    # material before falling back to illustrative context. Each evidence
+    # tier retains the existing retrieval floors and diversity relaxation.
+    priorities = sorted({intent_priority(hit.item) for hit in all_candidates})
+    for priority in priorities:
+        for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
+            eligible = [hit for hit in pool if intent_priority(hit.item) == priority]
+            if not eligible:
+                continue
+            selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
+                              allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
+                              avoid_recent=avoid_recent, level=level, skip_previous=skip_previous)
+            if selected:
+                return selected
     raise MontageSelectionFailure(diagnostics)
 
 
@@ -16391,14 +17158,12 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
                                         source_exists, source_duration, source_allowed,
                                         diversity_seed: str,
                                         allow_project_reuse: bool = True,
+                                        scene_query: str = "",
+                                        current_candidate=None,
+                                        assessment_duration: float | None = None,
                                         ) -> tuple[FootageItem, float, str, bool] | None:
-    """Choose any technically valid footage when semantic matching is exhausted.
-
-    This layer is intentionally topic-agnostic. It exists to keep a montage
-    renderable even when the library contains no relevant scene. It still
-    rejects missing/too-short media and screen-safety BLOCKED footage, and it
-    prefers a family not yet shown in the current video.
-    """
+    """Keep the scene's suitability contract during final local recovery."""
+    assessment_duration = required_duration if assessment_duration is None else assessment_duration
     seen: set[str] = set()
     ranked = sorted(
         items,
@@ -16413,23 +17178,59 @@ def _select_visual_continuity_candidate(items: list[FootageItem], *,
         ),
     )
     for item in ranked:
+        if scene_query and _montage_semantic_bonus(scene_query, item) <= 0 and _montage_metadata_relevance(scene_query, item) <= 0:
+            continue
         key = _montage_clip_key(item.path)
         if key in seen:
+            continue
+        if not allow_project_reuse and key in project_used_paths:
+            continue
+        if current_candidate is not None:
+            item = current_candidate(item)
+            if item is None:
+                continue
+            if scene_query and _montage_semantic_bonus(scene_query, item) <= 0 and _montage_metadata_relevance(scene_query, item) <= 0:
+                continue
+        if scene_query and not _semantic_clip_ok(scene_query, item, source_start=0, duration=assessment_duration):
             continue
         seen.add(key)
         if not source_exists(item):
             continue
         duration = float(source_duration(item) or 0.0)
-        if duration + .05 < float(required_duration):
+        if duration + .05 < float(assessment_duration):
             continue
         if source_allowed is not None and not source_allowed(item):
             continue
+        if current_candidate is not None:
+            latest = current_candidate(item)
+            if latest is None:
+                continue
+            changed = any(getattr(latest, field, None) != getattr(item, field, None) for field in (
+                "name", "source", "source_url", "license", "tags", "person_evidence", "visual_evidence",
+                "metadata_provenance",
+            ))
+            if changed:
+                if (scene_query and _montage_semantic_bonus(scene_query, latest) <= 0
+                        and _montage_metadata_relevance(scene_query, latest) <= 0):
+                    continue
+                if scene_query and not _semantic_clip_ok(scene_query, latest, source_start=0,
+                                                         duration=assessment_duration):
+                    continue
+                if source_allowed is not None and not source_allowed(latest):
+                    continue
+            item = latest
         family = source_family_identity_text(item.path, item.source_url)
         reused = key in project_used_paths or family in project_used_families
         if reused and not allow_project_reuse:
             continue
         return item, duration, family, reused
     return None
+
+
+def _montage_external_retained_safe(index, item: FootageItem, story_context: str) -> bool:
+    """A cached external cut must pass the current story and screen gates."""
+    return (_montage_recovery_candidate_allowed(index, item, story_context)
+            and _montage_screen_text_safe(index, item))
 
 
 def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
@@ -16449,6 +17250,9 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
     query = str(scene.get("visual_query_en", "")).strip()
     if not query or not settings.montage_auto_web:
         return None
+    story_context = getattr(index, "montage_story_context", None)
+    if story_context is None:
+        story_context = str(scene.get("narration", ""))
     candidates: list[dict] = []
     if settings.montage_auto_web:
         try:
@@ -16460,13 +17264,25 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
     lock = semaphore or threading.BoundedSemaphore(1)
     for candidate in candidates:
         try:
+            raw_item = FootageItem(
+                str(candidate.get("url") or candidate.get("source_url") or ""),
+                str(candidate.get("title") or ""),
+                source_url=str(candidate.get("source_url") or ""),
+                tags=[str(value) for value in candidate.get("tags", []) if value],
+            )
+            if not _montage_recovery_candidate_allowed(index, raw_item, story_context):
+                continue
             if not _external_candidate_ok(query, candidate):
                 continue
             cache_key = str(candidate.get("source_url") or candidate.get("url") or candidate.get("title") or query)
             with _EXTERNAL_FOOTAGE_CACHE_LOCK:
                 cached = _EXTERNAL_FOOTAGE_CACHE.get(cache_key)
                 source_lock = _EXTERNAL_FOOTAGE_SOURCE_LOCKS.setdefault(cache_key, threading.Lock())
+            if cached and not _montage_recovery_candidate_allowed(index, cached, story_context):
+                continue
             if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
+                if not _montage_external_retained_safe(index, cached, story_context):
+                    continue
                 if progress:
                     progress("Подбор футажей", f"Кэш внешнего футажа: {Path(cached.path).name}")
                 return cached
@@ -16479,7 +17295,11 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
             with source_lock:
                 with _EXTERNAL_FOOTAGE_CACHE_LOCK:
                     cached = _EXTERNAL_FOOTAGE_CACHE.get(cache_key)
+                if cached and not _montage_recovery_candidate_allowed(index, cached, story_context):
+                    continue
                 if cached and Path(cached.path).is_file() and not _montage_item_is_excluded(cached, excluded, excluded_families):
+                    if not _montage_external_retained_safe(index, cached, story_context):
+                        continue
                     return cached
                 with lock:
                     operation_id = hashlib.sha256(cache_key.encode()).hexdigest()[:20]
@@ -16498,12 +17318,18 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                     item = download_footage(candidate, folder)
                     if created_paths is not None:
                         created_paths.append(Path(item.path))
+                    if not _montage_recovery_candidate_allowed(index, item, story_context):
+                        continue
                     if progress:
                         progress("Нарезка внешнего футажа", Path(item.path).name)
                     clip = cut_single_clip(Path(item.path), clip_folder,
                                            duration=6.0, fps=30, bitrate="4M")
                     if created_paths is not None:
                         created_paths.append(Path(clip))
+                retained = FootageItem(str(clip), Path(clip).name, item.source, item.source_url,
+                                       item.license, item.tags)
+                if not _montage_recovery_candidate_allowed(index, retained, story_context):
+                    continue
                 published = _publish_staged_paths(
                     settings,
                     [
@@ -16518,13 +17344,14 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
                 final_clip = published[1] / Path(clip).name
                 normalized = FootageItem(str(final_clip), final_clip.name, item.source, item.source_url,
                                          item.license, item.tags)
-                if _montage_item_is_excluded(normalized, excluded, excluded_families):
+                if (not _montage_recovery_candidate_allowed(index, normalized, story_context)
+                        or _montage_item_is_excluded(normalized, excluded, excluded_families)):
+                    continue
+                index.add_item(normalized)
+                if not _montage_external_retained_safe(index, normalized, story_context):
                     continue
                 with _EXTERNAL_FOOTAGE_CACHE_LOCK:
                     _EXTERNAL_FOOTAGE_CACHE[cache_key] = normalized
-            index.add_item(normalized)
-            if not _montage_screen_text_safe(index, normalized):
-                continue
             return normalized
         except _BRIDGE_OPERATION_ERRORS:
             # A weak or restricted external source must never prevent the
@@ -16533,7 +17360,42 @@ def _download_scene_fallback(scene: dict, settings: Settings, index: ClipIndex,
     return None
 
 
+def _preserve_montage_draft(settings: Settings, title: str, clips: list[TimelineClip],
+                             voice_path: str, failed_scene: int,
+                             failure_context: dict | None = None) -> Path:
+    """Keep the inspectable partial plan without listing it as a ready project."""
+    folder = Path(settings.montage_project_folder)
+    destination = folder / f"{safe_filename(title)}-{time.time_ns()}.newsflow.partial"
+    staging = _production_staging_folder(folder, settings.production_reset_generation, "project")
+    staged = staging / destination.name
+    summary = {"state": "INCOMPLETE", "failedScene": failed_scene,
+               "reason": "no-admissible-topical-footage"}
+    if failure_context:
+        summary["failure_context"] = failure_context
+        reasons = failure_context.get("selector", {}).get("visual_rejection_reasons", {})
+        if any("budget" in reason for reason in reasons):
+            summary["reason"] = "visual-verification-budget-exhausted"
+        elif any("unavailable" in reason or "incomplete" in reason for reason in reasons):
+            summary["reason"] = "visual-verification-unavailable"
+        else:
+            summary["reason"] = "no-admissible-material-in-bounded-pool"
+    draft = TimelineProject(title=title, clips=list(clips), voiceover_path=voice_path,
+                            selection_summary=summary)
+    draft.save(staged)
+    if not _publish_staged_paths(settings, [(staged, destination)]):
+        raise RuntimeError("Производство изменилось до сохранения черновика")
+    return destination
+
+
 def prepare_montage(payload: dict) -> dict:
+    # Keep a read-only revision monitor open only for this preparation. Its
+    # data_version detects concurrent annotation changes without thousands
+    # of connection opens; ExitStack closes it on every return and failure.
+    with ExitStack() as read_stack:
+        return _prepare_montage(payload, read_stack=read_stack)
+
+
+def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
     preparation_started = time.perf_counter()
     preparation_metrics = {
         "alignment": 0.0, "planning": 0.0, "retrieval": 0.0, "selection": 0.0,
@@ -16582,6 +17444,13 @@ def prepare_montage(payload: dict) -> dict:
         app_data_root() / "footage-index.sqlite3",
         screen_text_progress=screen_text_progress,
     )
+    read_session = getattr(index, "read_session", None)
+    if callable(read_session):
+        read_stack.enter_context(read_session())
+    index.allowed_roots = list(getattr(settings, "footage_folders", ()))
+    story_context = " ".join((titles[scenario_index], narration))
+    index.candidate_filter = lambda item: _montage_story_candidate_allowed(story_context, item)
+    index.montage_story_context = story_context
     if progress and not settings.montage_external_only:
         stats = index.screen_text_stats()
         progress(
@@ -16597,6 +17466,14 @@ def prepare_montage(payload: dict) -> dict:
     local_items = []
     if not settings.montage_external_only and not indexed_count:
         local_items = scan_folders(settings.footage_folders)
+    local_continuity_keys = {_montage_clip_key(item.path) for item in local_items}
+
+    def current_continuity_candidate(item):
+        # A first-run folder scan has no SQLite row yet. Its existing source,
+        # duration and screen gates still run in the continuity selector.
+        if _montage_clip_key(item.path) in local_continuity_keys:
+            return item
+        return index.current_continuity_item(item, exclude_english_text=True)
     if not indexed_count and not local_items and not settings.montage_auto_web:
         raise ValueError("Подключите папку с футажами или включите внешний поиск")
     if progress:
@@ -16776,10 +17653,21 @@ def prepare_montage(payload: dict) -> dict:
     preparation_metrics["retrieval"] = (time.perf_counter() - retrieval_started) * 1000
     existing_paths: dict[str, bool] = {}
     verified_source_durations: dict[str, float] = {}
+    selected_source_roots = tuple(Path(root).expanduser().resolve() for root in settings.footage_folders)
 
     def source_exists(item: FootageItem) -> bool:
         """A stale index row is rejected once, not once per candidate/scene."""
         key = _montage_clip_key(item.path)
+        if key in existing_paths:
+            return existing_paths[key]
+        if not _montage_story_candidate_allowed(story_context, item):
+            existing_paths[key] = False
+            return False
+        if item.source == "local" or not settings.montage_auto_web:
+            candidate = Path(item.path).resolve()
+            if not any(candidate.is_relative_to(root) for root in selected_source_roots):
+                existing_paths[key] = False
+                return False
         available = existing_paths.get(key)
         if available is None:
             available = Path(item.path).is_file()
@@ -16828,7 +17716,9 @@ def prepare_montage(payload: dict) -> dict:
             )
 
     def allocate_batch_source_start(family: str, bucket: str, source_duration: float,
-                                    beat_duration: float, seed: str) -> tuple[float, bool]:
+                                    beat_duration: float, seed: str,
+                                    preferred_start: float = 0.0,
+                                    window_allowed=None) -> tuple[float, bool]:
         """Choose and record one source window atomically for parallel planners."""
         def starts() -> list[float]:
             return [
@@ -16841,6 +17731,8 @@ def prepare_montage(payload: dict) -> dict:
             source_start = _montage_source_start(
                 source_duration, beat_duration, previous_starts, bucket, family, seed,
             )
+            if window_allowed and not window_allowed(source_start):
+                source_start = preferred_start
             batch_family_buckets.setdefault(family, []).append(bucket)
             batch_source_windows.setdefault(family, []).append(source_start)
             return source_start, bool(previous_starts)
@@ -16849,15 +17741,21 @@ def prepare_montage(payload: dict) -> dict:
             source_start = _montage_source_start(
                 source_duration, beat_duration, previous_starts, bucket, family, seed,
             )
+            if window_allowed and not window_allowed(source_start):
+                source_start = preferred_start
             batch_family_buckets.setdefault(family, []).append((scenario_index, bucket))
             batch_source_windows.setdefault(family, []).append((scenario_index, source_start))
             return source_start, bool(previous_starts)
 
     fast_reuse_pool: dict[str, TimelineClip] = {}
+    read_stack.callback(index.end_visual_scene_admission)
     for scene_number, scene in enumerate(scenes, 1):
         required_source_duration = float(
             scene.get("minimum_footage_duration", scene["duration"]),
         )
+        assessment_duration = float(scene["duration"])
+        index.begin_visual_scene_admission(scene_number, len(scenes))
+        scene_cold_families: list[str] = []
         position_bucket = _montage_position_bucket(scene_number - 1, len(scenes))
         hits_by_level = scene_hits_by_level[scene_number - 1]
         strict_hits = hits_by_level["STRICT_MATCH"]
@@ -16874,6 +17772,9 @@ def prepare_montage(payload: dict) -> dict:
         score = 0.0
         source = ""
         selection = None
+        last_selection_failure: dict = {}
+        broad_hits: list[SearchHit] = []
+        continuity_items: list[FootageItem] = []
         reuse_origin_clip: TimelineClip | None = None
         fast_pool_reuse = False
         # Reuse is acceptable only after quality exhaustion.  Keep a small
@@ -16884,8 +17785,26 @@ def prepare_montage(payload: dict) -> dict:
         }
         selection_started = time.perf_counter()
         if fast_reuse and scene_number > unique_scene_count and fast_reuse_pool:
+            origin_hits = {
+                level: [hit for hit in hits_by_level[level]
+                        if _montage_clip_key(hit.item.path) in fast_reuse_pool]
+                for level in _MONTAGE_FALLBACK_LEVELS
+            }
+            scene_cold_families.extend(_prefetch_montage_visual_windows(
+                index, scene["visual_query_en"], origin_hits,
+                required_duration=required_source_duration,
+                assessment_duration=assessment_duration,
+                source_exists=source_exists,
+                source_allowed=lambda item: _montage_screen_text_safe(index, item),
+                fixed_source_starts={key: clip.source_start for key, clip in fast_reuse_pool.items()},
+                max_charges=1,
+            ))
             pooled_hits = _fast_reuse_pool_hits(
                 hits_by_level, fast_reuse_pool, required_source_duration, verified_duration,
+                assessment_duration=assessment_duration,
+                scene_query=scene["visual_query_en"],
+                match_threshold=settings.montage_match_threshold,
+                source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
             )
             if any(pooled_hits.values()):
                 _reserved_paths, _reserved_families, family_buckets, _source_windows = reservation_snapshot(
@@ -16898,7 +17817,7 @@ def prepare_montage(payload: dict) -> dict:
                         relaxed_hits=pooled_hits["RELAXED_SEMANTIC"],
                         category_hits=pooled_hits["CATEGORY_MATCH"],
                         safe_context_hits=pooled_hits["SAFE_CONTEXT"],
-                        required_duration=required_source_duration,
+                        required_duration=required_source_duration, assessment_duration=assessment_duration,
                         match_threshold=settings.montage_match_threshold,
                         used_paths=used, used_families=used_families,
                         project_used_paths=project_used,
@@ -16912,6 +17831,7 @@ def prepare_montage(payload: dict) -> dict:
                         batch_family_buckets=family_buckets,
                         diversity_seed=f"{titles[scenario_index]}|{scenario_index}|fast-reuse",
                         allow_safe_reuse=True,
+                        fixed_source_starts={key: clip.source_start for key, clip in fast_reuse_pool.items()},
                     )
                     reuse_origin_clip = fast_reuse_pool.get(_montage_clip_key(selection.item.path))
                     if reuse_origin_clip is not None:
@@ -16924,12 +17844,55 @@ def prepare_montage(payload: dict) -> dict:
                             ),
                         )
                         fast_pool_reuse = True
-                except MontageSelectionFailure:
+                except MontageSelectionFailure as failure:
+                    last_selection_failure = failure.diagnostics
                     selection = None
                     reuse_origin_clip = None
 
-        # First exhaust unique local choices. EXTERNAL is intentionally tried
-        # before SAFE_REUSE so the persisted level order remains truthful.
+        if selection is None:
+            # Ordinary released work explores existing full-pool primaries even
+            # when a cached safe fallback can later complete this scene.
+            scene_cold_families.extend(_prefetch_montage_visual_windows(
+                index, scene["visual_query_en"], hits_by_level,
+                required_duration=required_source_duration,
+                assessment_duration=assessment_duration,
+                source_exists=source_exists,
+                source_allowed=lambda item: _montage_screen_text_safe(index, item),
+            ))
+
+        # Strong person/action evidence may require local reuse. Try it before
+        # unique illustrative context; repeated context still waits for the
+        # existing fallback stages below.
+        if selection is None:
+            reserved_paths, reserved_families, family_buckets, _source_windows = reservation_snapshot(position_bucket)
+            try:
+                primary = _select_montage_candidate(
+                    scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
+                    relaxed_hits=relaxed_hits, category_hits=category_hits,
+                    safe_context_hits=safe_context_hits,
+                    required_duration=required_source_duration, assessment_duration=assessment_duration, match_threshold=settings.montage_match_threshold,
+                    used_paths=used, used_families=used_families,
+                    project_used_paths=project_used, project_used_families=project_used_families,
+                    reserved_paths=reserved_paths, reserved_families=reserved_families,
+                    source_exists=source_exists, source_duration=verified_duration,
+                    source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
+                    recent_project_paths=recent_project_paths,
+                    immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                    position_bucket=position_bucket, batch_family_buckets=family_buckets,
+                    diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
+                    allow_safe_reuse=True,
+                )
+                person = primary.diagnostics.get("person", {})
+                visual = primary.diagnostics.get("visual", {})
+                if person.get("status") in {"confirmed", "probable"} or visual.get("relation") == "direct":
+                    selection = _safe_reuse_after_reservation_race(
+                        primary, lambda item, family=primary.source_family, bucket=position_bucket:
+                        claim_batch_source(item, family, bucket),
+                    )
+            except MontageSelectionFailure as failure:
+                last_selection_failure = failure.diagnostics
+
+        # Exhaust unique local context before weaker external/reuse fallbacks.
         # Parallel planners may collide on the same top family several times;
         # retry against the refreshed claim snapshot while distinct bounded
         # candidate families still exist.
@@ -16947,7 +17910,7 @@ def prepare_montage(payload: dict) -> dict:
                     scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                     relaxed_hits=relaxed_hits, category_hits=category_hits,
                     safe_context_hits=safe_context_hits,
-                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
+                    required_duration=required_source_duration, assessment_duration=assessment_duration, match_threshold=settings.montage_match_threshold,
                     used_paths=used, used_families=used_families,
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -16959,7 +17922,8 @@ def prepare_montage(payload: dict) -> dict:
                     diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
                     allow_safe_reuse=False,
                 )
-            except MontageSelectionFailure:
+            except MontageSelectionFailure as failure:
+                last_selection_failure = failure.diagnostics
                 selection = None
                 break
             if claim_batch_source(selection.item, selection.source_family, position_bucket):
@@ -16980,7 +17944,7 @@ def prepare_montage(payload: dict) -> dict:
                         scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                         relaxed_hits=relaxed_hits, category_hits=category_hits,
                         safe_context_hits=safe_context_hits,
-                        required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
+                        required_duration=required_source_duration, assessment_duration=assessment_duration, match_threshold=settings.montage_match_threshold,
                         used_paths=used, used_families=used_families,
                         project_used_paths=project_used, project_used_families=project_used_families,
                         reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -16992,7 +17956,8 @@ def prepare_montage(payload: dict) -> dict:
                         diversity_seed=f"{titles[scenario_index]}|{scenario_index}",
                         allow_safe_reuse=False,
                     )
-                except MontageSelectionFailure:
+                except MontageSelectionFailure as failure:
+                    last_selection_failure = failure.diagnostics
                     selection = None
                     break
                 if claim_batch_source(
@@ -17024,7 +17989,7 @@ def prepare_montage(payload: dict) -> dict:
                         scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                         relaxed_hits=relaxed_hits, category_hits=category_hits,
                         safe_context_hits=safe_context_hits,
-                        required_duration=required_source_duration,
+                        required_duration=required_source_duration, assessment_duration=assessment_duration,
                         match_threshold=settings.montage_match_threshold,
                         used_paths=set(), used_families=set(),
                         project_used_paths=project_used,
@@ -17040,9 +18005,10 @@ def prepare_montage(payload: dict) -> dict:
                         batch_family_buckets=family_buckets,
                         diversity_seed=f"{titles[scenario_index]}|{scenario_index}|semantic-rescue",
                         allow_safe_reuse=False,
-                        allow_below_threshold=True,
+                        allow_below_threshold=False,
                     )
-                except MontageSelectionFailure:
+                except MontageSelectionFailure as failure:
+                    last_selection_failure = failure.diagnostics
                     selection = None
                 if selection is None:
                     continue
@@ -17079,7 +18045,9 @@ def prepare_montage(payload: dict) -> dict:
             )
             preparation_metrics["external"] += (time.perf_counter() - external_started) * 1000
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
-            if (selected and _semantic_clip_ok(scene["visual_query_en"], selected)
+            if (selected and _montage_story_candidate_allowed(story_context, selected)
+                    and _semantic_clip_ok(scene["visual_query_en"], selected,
+                                          source_start=0, duration=assessment_duration)
                     and _montage_screen_text_safe(index, selected, allow_uncertain=True)
                     and not batch_is_reserved(selected, external_family, position_bucket)
                     and claim_batch_source(selected, external_family, position_bucket)):
@@ -17101,18 +18069,16 @@ def prepare_montage(payload: dict) -> dict:
         if selected is None and indexed_count:
             rescue_started = time.perf_counter()
             try:
-                broad_hits = index.search_many(
-                    ["contextual news documentary city infrastructure people buildings vehicles"],
-                    limit=512,
-                )[0]
+                rescue_queries = scene_query_ladders[scene_number - 1]["SAFE_CONTEXT"]
+                broad_hits = [hit for group in index.search_many(rescue_queries, limit=512) for hit in group]
             except (OSError, RuntimeError, ValueError, IndexError):
                 broad_hits = []
             try:
                 selection = _select_montage_candidate(
                     scene["visual_query_en"], strict_hits=[], fallback_hits=[],
                     relaxed_hits=[], category_hits=[], safe_context_hits=broad_hits,
-                    required_duration=required_source_duration,
-                    match_threshold=0.0,
+                    required_duration=required_source_duration, assessment_duration=assessment_duration,
+                    match_threshold=settings.montage_match_threshold,
                     used_paths=set(), used_families=set(),
                     project_used_paths=project_used,
                     project_used_families=project_used_families,
@@ -17127,13 +18093,14 @@ def prepare_montage(payload: dict) -> dict:
                     batch_family_buckets=family_buckets,
                     diversity_seed=f"{titles[scenario_index]}|{scenario_index}|neutral-rescue",
                     allow_safe_reuse=False,
-                    allow_below_threshold=True,
+                    allow_below_threshold=False,
                 )
                 selected = selection.item
                 selected_duration = selection.duration
                 score = selection.score
                 source = f"{selected.source or 'local'} · {selection.fallback_level}"
-            except MontageSelectionFailure:
+            except MontageSelectionFailure as failure:
+                last_selection_failure = failure.diagnostics
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
@@ -17143,7 +18110,7 @@ def prepare_montage(payload: dict) -> dict:
         # preferable to repeating footage already visible in this timeline.
         if selected is None:
             try:
-                indexed_continuity = index.all_items(exclude_english_text=True)
+                indexed_continuity = index.continuity_items(exclude_english_text=True)
             except (OSError, RuntimeError, ValueError):
                 indexed_continuity = []
             continuity_items = list({
@@ -17152,7 +18119,8 @@ def prepare_montage(payload: dict) -> dict:
             }.values())
             continuity = _select_visual_continuity_candidate(
                 continuity_items,
-                required_duration=required_source_duration,
+                scene_query=scene["visual_query_en"],
+                required_duration=required_source_duration, assessment_duration=assessment_duration,
                 project_used_paths=project_used,
                 project_used_families=project_used_families,
                 recent_project_paths=recent_project_paths,
@@ -17163,6 +18131,7 @@ def prepare_montage(payload: dict) -> dict:
                 ),
                 diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
                 allow_project_reuse=False,
+                current_candidate=current_continuity_candidate,
             )
             if continuity is not None:
                 selected, selected_duration, candidate_family, reused_candidate = continuity
@@ -17202,7 +18171,7 @@ def prepare_montage(payload: dict) -> dict:
                     scene["visual_query_en"], strict_hits=strict_hits, fallback_hits=[],
                     relaxed_hits=relaxed_hits, category_hits=category_hits,
                     safe_context_hits=safe_context_hits,
-                    required_duration=required_source_duration, match_threshold=settings.montage_match_threshold,
+                    required_duration=required_source_duration, assessment_duration=assessment_duration, match_threshold=settings.montage_match_threshold,
                     used_paths=used, used_families=used_families,
                     project_used_paths=project_used, project_used_families=project_used_families,
                     reserved_paths=reserved_paths, reserved_families=reserved_families,
@@ -17218,23 +18187,17 @@ def prepare_montage(payload: dict) -> dict:
                 selected_duration = selection.duration
                 score = selection.score
                 source = f"{selected.source or 'local'} · {selection.fallback_level}"
-            except MontageSelectionFailure:
+            except MontageSelectionFailure as failure:
+                last_selection_failure = failure.diagnostics
                 selection = None
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - fallback_started) * 1000
 
         if selected is None:
-            try:
-                indexed_continuity = index.all_items(exclude_english_text=True)
-            except (OSError, RuntimeError, ValueError):
-                indexed_continuity = []
-            continuity_items = list({
-                _montage_clip_key(item.path): item
-                for item in [*indexed_continuity, *local_items]
-            }.values())
             continuity = _select_visual_continuity_candidate(
                 continuity_items,
-                required_duration=required_source_duration,
+                scene_query=scene["visual_query_en"],
+                required_duration=required_source_duration, assessment_duration=assessment_duration,
                 project_used_paths=project_used,
                 project_used_families=project_used_families,
                 recent_project_paths=recent_project_paths,
@@ -17245,6 +18208,7 @@ def prepare_montage(payload: dict) -> dict:
                 ),
                 diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity-reuse",
                 allow_project_reuse=True,
+                current_candidate=current_continuity_candidate,
             )
             if continuity is not None:
                 selected, selected_duration, candidate_family, reused_candidate = continuity
@@ -17267,8 +18231,114 @@ def prepare_montage(payload: dict) -> dict:
                 source = f"{selected.source or 'local'} · VISUAL_CONTINUITY_FALLBACK"
 
         if selected is None:
+            # Completion-only recovery: existing cached/context/reuse routes
+            # have failed. Admit at most the ClipIndex emergency tranche for
+            # existing alternative starts, retaining its shared 96 cap/debt.
+            recovery_hits = dict(hits_by_level)
+            recovery_hits["SAFE_CONTEXT"] = [
+                *safe_context_hits, *broad_hits,
+            ]
+            semantic_recovery_paths = {
+                _montage_clip_key(hit.item.path)
+                for pool in recovery_hits.values() for hit in pool
+            }
+            continuity_work = [SearchHit(item, 0., 0.) for item in continuity_items
+                               if _montage_clip_key(item.path) not in semantic_recovery_paths
+                               and (_montage_semantic_bonus(scene["visual_query_en"], item) > 0
+                                    or _montage_metadata_relevance(scene["visual_query_en"], item) > 0)]
+            # Unknown duration here is only a queue hint: native duration and
+            # current row eligibility are checked before any grant. These
+            # zero-score rows never enter the semantic selector or its floors.
+            primary_only_paths = {_montage_clip_key(hit.item.path) for hit in continuity_work}
+            semantic_context = recovery_hits["SAFE_CONTEXT"]
+            recovery_hits["SAFE_CONTEXT"] = [*semantic_context, *continuity_work]
+            def recovered_selection(
+                bucket=position_bucket, query=scene["visual_query_en"],
+                strict_pool=strict_hits, relaxed_pool=relaxed_hits,
+                category_pool=category_hits, context_pool=semantic_context,
+                minimum=required_source_duration, actual=assessment_duration,
+                recent=recent_project_paths, continuity_pool=continuity_items,
+            ):
+                _reserved_paths, _reserved_families, family_buckets, _windows = reservation_snapshot(
+                    bucket,
+                )
+                try:
+                    return _select_montage_candidate(
+                        query, strict_hits=strict_pool, fallback_hits=[],
+                        relaxed_hits=relaxed_pool, category_hits=category_pool,
+                        safe_context_hits=context_pool,
+                        required_duration=minimum,
+                        assessment_duration=actual,
+                        match_threshold=settings.montage_match_threshold,
+                        used_paths=used, used_families=used_families,
+                        project_used_paths=project_used,
+                        project_used_families=project_used_families,
+                        reserved_paths=_reserved_paths, reserved_families=_reserved_families,
+                        source_exists=source_exists, source_duration=verified_duration,
+                        source_allowed=lambda candidate: _montage_screen_text_safe(index, candidate, allow_uncertain=True),
+                        recent_project_paths=recent,
+                        immediately_previous_path=_montage_clip_key(clips[-1].path) if clips else "",
+                        position_bucket=bucket, batch_family_buckets=family_buckets,
+                        diversity_seed=f"{titles[scenario_index]}|{scenario_index}|cold-recovery",
+                        allow_safe_reuse=True,
+                    )
+                except MontageSelectionFailure:
+                    for allow_reuse in (False, True):
+                        candidate = _select_visual_continuity_candidate(
+                            continuity_pool, scene_query=query,
+                            required_duration=minimum, assessment_duration=actual,
+                            project_used_paths=project_used,
+                            project_used_families=project_used_families,
+                            recent_project_paths=recent,
+                            source_exists=source_exists, source_duration=verified_duration,
+                            source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
+                            diversity_seed=f"{titles[scenario_index]}|{scenario_index}|visual-continuity",
+                            allow_project_reuse=allow_reuse,
+                            current_candidate=current_continuity_candidate,
+                        )
+                        if candidate is not None:
+                            item, duration, family, reused = candidate
+                            return MontageCandidateSelection(
+                                item, duration, 0., "VISUAL_CONTINUITY_FALLBACK", False,
+                                {"candidates_retrieved": len(continuity_pool), "hard_valid": 1},
+                                source_family=family, reused=reused, position_bucket=bucket,
+                            )
+                    raise
+            recovered = _recover_montage_visual_alternatives(
+                index, scene["visual_query_en"], recovery_hits,
+                required_duration=required_source_duration,
+                assessment_duration=assessment_duration,
+                source_exists=source_exists,
+                source_allowed=lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
+                source_duration=verified_duration,
+                can_complete=recovered_selection,
+                primary_only_paths=primary_only_paths,
+                current_candidate=current_continuity_candidate,
+            )
+            if recovered is not None:
+                selection = _safe_reuse_after_reservation_race(
+                    recovered, lambda item, family=recovered.source_family, bucket=position_bucket:
+                    claim_batch_source(item, family, bucket),
+                )
+                if selection is not None:
+                    selected = selection.item
+                    selected_duration = selection.duration
+                    score = selection.score
+                    source = f"{selected.source or 'local'} · {selection.fallback_level}"
+
+        if selected is None:
+            draft = _preserve_montage_draft(
+                settings, titles[scenario_index], clips, voice_path, scene_number,
+                failure_context={"query": scene["visual_query_en"], "narration": scene.get("narration", ""),
+                                 "indexed_count": indexed_count, "bounded_candidate_count": len(seen_candidate_paths),
+                                 "source_roots": [{"path": str(root), "available": root.is_dir()}
+                                                  for root in selected_source_roots],
+                                 "visual_window_budget": index.visual_window_budget,
+                                 "cold_budget": index.visual_cold_scene_snapshot(),
+                                 "selector": last_selection_failure})
             raise RuntimeError(
-                "В библиотеке нет ни одного физически пригодного видео для продолжения монтажа"
+                f"Нет допустимого тематического футажа для сцены {scene_number}. "
+                f"Неполный черновик сохранён: {draft.name}"
             )
         # The index may still contain a row for a user-deleted cut. Never
         # persist that stale database path into a .newsflow project.
@@ -17294,10 +18364,29 @@ def prepare_montage(payload: dict) -> dict:
                     batch_family_buckets.setdefault(source_family, []).append((scenario_index, position_bucket))
                     batch_source_windows.setdefault(source_family, []).append((scenario_index, source_start))
         else:
+            from .scene_intent import person_evidence
+            chosen_evidence = person_evidence(
+                scene["visual_query_en"], selected, selection.source_start, float(scene["duration"]),
+            )
+            def allowed_window(start, query=scene["visual_query_en"], item=selected,
+                               duration=float(scene["duration"]), chosen=chosen_evidence):
+                evidence = person_evidence(query, item, start, duration)
+                return (evidence["status"] not in {"contradiction", "contradiction_hint"}
+                        and (chosen["status"] != "confirmed" or evidence["status"] == "confirmed")
+                        and _semantic_clip_ok(query, item, source_start=start, duration=duration))
             source_start, family_reused = allocate_batch_source_start(
                 source_family, position_bucket, selected_duration,
                 float(scene["duration"]), titles[scenario_index],
+                preferred_start=selection.source_start, window_allowed=allowed_window,
             )
+        from .scene_intent import person_evidence
+        interval_evidence = person_evidence(scene["visual_query_en"], selected, source_start, float(scene["duration"]))
+        actual_visual = _montage_window_visual(scene["visual_query_en"], selected, source_start, float(scene["duration"]))
+        if (interval_evidence["status"] in {"contradiction", "contradiction_hint"}
+                or not _semantic_clip_ok(scene["visual_query_en"], selected, source_start=source_start,
+                                         duration=float(scene["duration"]), visual_assessment=actual_visual)):
+            _preserve_montage_draft(settings, titles[scenario_index], clips, voice_path, scene_number)
+            raise RuntimeError("Выбранный интервал противоречит целевой персоне; сохранён неполный черновик")
         reused = bool(selection.reused or family_reused or source_family in project_used_families)
         selection = replace(selection, source_family=source_family, source_start=source_start, reused=reused)
         used.add(_montage_clip_key(selected.path))
@@ -17321,8 +18410,24 @@ def prepare_montage(payload: dict) -> dict:
                                      narration_end=float(scene.get("narration_end", 0.0) or 0.0),
                                      minimum_source_duration=required_source_duration,
                                      visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
-                                     visual_beat_count=int(scene.get("visual_beat_count", 0) or 0))
+                                     visual_beat_count=int(scene.get("visual_beat_count", 0) or 0),
+                                     selection_diagnostics={
+                                         "scene_intent": scene.get("scene_intent", {}),
+                                         "person": interval_evidence,
+                                         "rejections": dict(selection.diagnostics),
+                                         "semantic_level": selection.fallback_level,
+                                         "retrieval_level": selection.diagnostics.get("retrieval_level", selection.fallback_level),
+                                         "visual": actual_visual or {"relation": "unverified-metadata", "source": "metadata-only"},
+                                         "reuse": {"used": reused, "reason": selection.position_rotation_reason},
+                                         "cold_budget": {
+                                             **index.visual_cold_scene_snapshot(),
+                                             "funded_families": scene_cold_families,
+                                         },
+                                         "timing_mode": voice_map_provenance.get("alignmentMode", "approximate"),
+                                         "illustrative_only": True,
+                                     })
         clips.append(timeline_clip)
+        index.end_visual_scene_admission()
         if fast_reuse and not fast_pool_reuse:
             fast_reuse_pool.setdefault(_montage_clip_key(selected.path), timeline_clip)
         if progress:
@@ -17969,39 +19074,103 @@ def _cached_or_probed_montage_duration(index: ClipIndex | None, path: Path,
 
 
 def _montage_project_missing_clips(project: TimelineProject, index: ClipIndex | None = None) -> list[str]:
-    """Return absent, empty or unreadable timeline clips before FFmpeg starts."""
+    """Return unavailable or story-incompatible sources before FFmpeg starts."""
     memo: dict[str, float] = {}
+    story_context = getattr(index, "montage_story_context", None)
+    if story_context is None:
+        story_context = " ".join((project.title, *(clip.narration for clip in project.clips)))
     return [str(clip.path) for clip in project.clips
-            if _cached_or_probed_montage_duration(index, Path(clip.path), memo) <= 0.05]
+            if (not _montage_retained_source_allowed(index, clip.path, story_context)
+                or _cached_or_probed_montage_duration(index, Path(clip.path), memo) <= 0.05)]
 
 
-def _repair_missing_project_clips(project: TimelineProject, candidate_provider) -> int:
-    """Replace only broken timeline slots while retaining all healthy edits.
+def _montage_retained_source_allowed(index, path: str, story_context: str) -> bool:
+    """Recheck saved paths using their catalog hints before retaining them."""
+    lookup = getattr(index, "catalog_item", None)
+    item = lookup(path) if callable(lookup) else None
+    if item is None:
+        item = FootageItem(path, Path(path).name)
+    return _montage_recovery_candidate_allowed(index, item, story_context)
+
+
+def _montage_recovery_candidate_allowed(index, item: FootageItem, story_context: str | None = None) -> bool:
+    story = str(getattr(index, "montage_story_context", "") if story_context is None else story_context)
+    candidate_filter = getattr(index, "candidate_filter", None)
+    return (_montage_story_candidate_allowed(story, item)
+            and (not callable(candidate_filter) or bool(candidate_filter(item))))
+
+
+def _montage_recovery_window_limit(query: str, item: FootageItem, requested: float) -> float:
+    from .visual_evidence import query_topic
+    evidence = getattr(item, "visual_evidence", None) or {}
+    topic = query_topic(query)
+    if not evidence or topic is None:
+        return requested
+    try:
+        stat = Path(item.path).stat()
+    except OSError:
+        return 0.0
+    if stat.st_size != evidence.get("size") or stat.st_mtime_ns != evidence.get("mtime_ns"):
+        return 0.0
+    supported = topic[1] | topic[2]
+    lengths = [float(value["end"]) - float(value["start"])
+               for value in evidence.get("observations", [])
+               if value.get("source") in {"manual", "curated"} and value.get("kind") in supported]
+    return min(requested, max(lengths, default=0.0))
+
+
+def _montage_recovery_window_start(query: str, item: FootageItem, duration: float) -> float | None:
+    from .scene_intent import person_evidence, person_window
+    if _montage_recovery_window_limit(query, item, duration) + 1e-6 < duration:
+        return None
+    start = person_window(query, item, duration)
+    visual = _montage_window_visual(query, item, start, duration, allow_alternatives=True)
+    if visual and visual.get("relation") in {"direct", "context"}:
+        proposed = float(visual.get("source_start", start))
+        if (person_evidence(query, item, start, duration)["status"] != "confirmed"
+                or person_evidence(query, item, proposed, duration)["status"] == "confirmed"):
+            start = proposed
+    return start
+
+
+def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
+                                  *, story_context: str | None = None,
+                                  index: ClipIndex | None = None) -> int:
+    """Replace unavailable or story-forbidden slots, retaining other edits.
 
     ``candidate_provider`` supplies ranked FootageItems for the failed scene.
     It receives the old clip and all prohibited paths/families.  The MP3,
     title, narration and valid clips never participate in this replacement.
     """
+    story = (" ".join((project.title, *(clip.narration for clip in project.clips)))
+             if story_context is None else story_context)
+    def story_allowed(clip):
+        return _montage_retained_source_allowed(index, clip.path, story)
     excluded_paths = {_montage_clip_key(clip.path) for clip in project.clips
-                      if _validated_montage_clip_duration(Path(clip.path)) > 0.05}
+                      if story_allowed(clip) and _validated_montage_clip_duration(Path(clip.path)) > 0.05}
     excluded_families = {clip.source_family or _montage_clip_family_key(clip.path) for clip in project.clips
-                         if _validated_montage_clip_duration(Path(clip.path)) > 0.05}
+                         if story_allowed(clip) and _validated_montage_clip_duration(Path(clip.path)) > 0.05}
     repaired = 0
     for position, clip in enumerate(list(project.clips)):
-        if _validated_montage_clip_duration(Path(clip.path)) > 0.05:
+        story_forbidden = not story_allowed(clip)
+        if _validated_montage_clip_duration(Path(clip.path)) > 0.05 and not story_forbidden:
             continue
         replacement = None
         for item in candidate_provider(clip, {"paths": excluded_paths, "families": excluded_families}) or []:
-            if _montage_item_is_excluded(item, excluded_paths, excluded_families):
+            from .scene_intent import person_evidence
+            if (not _montage_story_candidate_allowed(story, item)
+                    or _montage_item_is_excluded(item, excluded_paths, excluded_families)):
                 continue
             available = _validated_montage_clip_duration(Path(item.path))
-            required = float(clip.minimum_source_duration or clip.duration)
-            if available + 0.05 < required:
+            required = max(float(clip.minimum_source_duration), float(clip.duration))
+            start = _montage_recovery_window_start(clip.visual_query_en, item, required)
+            if (start is None or available - start + 1e-6 < required
+                    or not _semantic_clip_ok(clip.visual_query_en, item, source_start=start, duration=required)):
                 continue
             replacement = replace(
                 clip,
                 path=item.path,
-                source_start=0.0,
+                source_start=start,
                 score=0.0,
                 source=item.source or clip.source,
                 fallback_level="SAFE_CONTEXT",
@@ -18009,8 +19178,17 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
                 reused=False,
                 position_rotation_reason="восстановление отсутствующего или повреждённого футажа",
                 strict_rejection_reason=(
-                    clip.strict_rejection_reason or "исходный футаж отсутствовал или был повреждён"
+                    clip.strict_rejection_reason or (
+                        "исходный футаж исключён контекстом сценария" if story_forbidden
+                        else "исходный футаж отсутствовал или был повреждён"
+                    )
                 ),
+                selection_diagnostics={
+                    "person": person_evidence(clip.visual_query_en, item, start, required),
+                    "semantic_level": "SAFE_CONTEXT",
+                    "reason": "story-source-repaired" if story_forbidden else "source-repaired",
+                    "illustrative_only": True,
+                },
             )
             break
         if replacement is None:
@@ -18026,9 +19204,18 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
 
 def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, settings: Settings,
                                      download_semaphore: threading.BoundedSemaphore | None = None,
-                                     created_paths: list[Path] | None = None) -> list[FootageItem]:
+                                     created_paths: list[Path] | None = None,
+                                     *, required_duration: float | None = None,
+                                     story_context: str | None = None,
+                                     allow_shorter: bool = False) -> list[FootageItem]:
     """Find a bounded, semantically relevant replacement for one broken slot."""
     query = str(clip.visual_query_en or clip.narration or "news footage").strip()
+    if story_context is None:
+        story_context = getattr(index, "montage_story_context", None)
+        if story_context is None:
+            story_context = clip.narration
+    required = float(clip.duration if required_duration is None else required_duration)
+    index.allowed_roots = list(getattr(settings, "footage_folders", ()))
     try:
         hits = index.search_many([query], limit=96)[0]
     except (OSError, RuntimeError, ValueError, IndexError):
@@ -18039,11 +19226,22 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
         reverse=True,
     )
     minimum = _montage_level_score_floor("SAFE_CONTEXT", settings.montage_match_threshold)
-    candidates = [
-        hit.item for hit in ranked
-        if (float(hit.score) >= minimum and _semantic_clip_ok(query, hit.item)
-            and _montage_screen_text_safe(index, hit.item, allow_uncertain=True))
-    ]
+    def acceptable_window(item):
+        duration = _montage_recovery_window_limit(query, item, required) if allow_shorter else required
+        start = _montage_recovery_window_start(query, item, duration)
+        return (duration > 1e-6 and start is not None
+                and _semantic_clip_ok(query, item, source_start=start, duration=duration))
+
+    candidates = []
+    for hit in ranked:
+        if float(hit.score) < minimum or not _montage_recovery_candidate_allowed(index, hit.item, story_context):
+            continue
+        if not acceptable_window(hit.item):
+            continue
+        if (any(Path(hit.item.path).resolve().is_relative_to(Path(root).expanduser().resolve())
+                for root in settings.footage_folders)
+                and _montage_screen_text_safe(index, hit.item, allow_uncertain=True)):
+            candidates.append(hit.item)
     if candidates or not settings.montage_auto_web:
         return candidates
     # Local footage can be unavailable after a cleanup.  Download one bounded
@@ -18053,7 +19251,9 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
         settings, index, download_semaphore,
         created_paths=created_paths,
     )
-    return [downloaded] if downloaded else []
+    return ([downloaded] if downloaded
+            and _montage_external_retained_safe(index, downloaded, story_context)
+            and acceptable_window(downloaded) else [])
 
 
 def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, settings: Settings,
@@ -18061,30 +19261,30 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
                                   created_paths: list[Path] | None = None) -> int:
     """Verify real source lengths and append clips until the MP3 is covered."""
     voice = Path(project.voiceover_path)
+    from .scene_intent import person_evidence
+    story = str(getattr(index, "montage_story_context", None)
+                or " ".join((project.title, *(clip.narration for clip in project.clips))))
+    if any(not _montage_retained_source_allowed(index, clip.path, story)
+           for clip in project.clips):
+        raise ValueError("Сохранённый таймлайн содержит футаж, запрещённый контекстом сценария")
     if not voice.is_file():
         raise FileNotFoundError("Не найден готовый MP3 для проверки таймлайна")
-    # A 30fps MP4 commonly reports its last frame at ``N-1`` frames.  During
-    # a 40–100-shot news sequence that loses roughly one frame per proxy at
-    # concat time. Reserve that deterministic frame budget with real footage
-    # before FFmpeg starts; the audio mux still cuts the final output exactly
-    # at the MP3, never by freezing the last image.
     narration_duration = probe_media_duration(voice)
-    target = narration_duration + len(project.clips) / 30.0 + 0.05
+    target = narration_duration
     # Most saved projects already cover their MP3.  Normalise their real
     # durations without an unnecessary vector-index query.
     duration_memo: dict[str, float] = {}
     duration_probe = lambda path: _cached_or_probed_montage_duration(index, path, duration_memo)
     # A prepared MONTAGE-003 timeline already contains deliberate six-second
     # beats and source windows.  Preserve those edits when every source can
-    # satisfy its assigned beat; only extend/trim the final beat for the tiny
-    # 30 FPS safety margin.  The legacy full-source normalizer below remains
-    # the recovery path for genuinely short/incomplete saved projects.
+    # satisfy its assigned beat. The exact-frame renderer needs no per-clip
+    # safety extension; missing coverage gets another checked source window.
     preserved: list[TimelineClip] = []
     preserved_total = 0.0
     preserved_valid = bool(project.clips)
     for clip in project.clips:
         remaining = max(0.0, target - preserved_total)
-        if remaining <= 0.05:
+        if remaining <= 1e-6:
             break
         available = max(0.0, duration_probe(Path(clip.path)) - max(0.0, float(clip.source_start)))
         requested = min(max(0.0, float(clip.duration)), remaining)
@@ -18092,46 +19292,28 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
             requested,
             max(0.0, float(clip.minimum_source_duration or clip.duration)),
         )
-        if available + 0.05 < required:
+        if available + 1e-6 < required:
             preserved_valid = False
             break
         preserved.append(replace(clip, duration=requested))
         preserved_total += requested
-    if preserved_valid and preserved:
-        # VoiceMap beats carry an explicit source-duration contract. Once
-        # those authored beats cover the narration, keep their exact speech
-        # boundaries: the proxy renderer already requests one extra frame and
-        # loops a bounded short moving source, while the final mux ends at the
-        # exact MP3 duration. A synthetic sub-frame tail would only pollute the
-        # visible timeline without adding coverage.
-        if (
-            preserved_total >= narration_duration - 0.05
-            and all(float(clip.minimum_source_duration) > 0.0 for clip in preserved)
-        ):
-            project.clips = preserved
-            return 0
-        shortfall = target - preserved_total
-        if shortfall > 0.05:
-            final = preserved[-1]
-            final_available = max(
-                0.0,
-                duration_probe(Path(final.path)) - max(0.0, float(final.source_start)),
-            )
-            if final_available + 0.05 >= float(final.duration) + shortfall:
-                preserved[-1] = replace(final, duration=float(final.duration) + shortfall)
-                preserved_total += shortfall
-        if preserved_total >= target - 0.05:
-            project.clips = preserved
-            return 0
+    if preserved_valid and preserved and preserved_total >= target - 1e-6:
+        project.clips = preserved
+        return 0
     try:
-        align_timeline_to_audio(project, target, [], duration_probe=duration_probe)
+        align_timeline_to_audio(project, target, [], duration_probe=duration_probe,
+                                preserve_clip_windows=True, tolerance=1e-6)
         return 0
     except ValueError as initial_error:
         if "достаточное число валидных футажей" not in str(initial_error):
             raise
     last = project.clips[-1] if project.clips else TimelineClip("", project.title, project.title, duration=6.0)
+    remaining_tail = max(0.0, target - sum(min(float(clip.duration), max(0.0,
+        duration_probe(Path(clip.path)) - float(clip.source_start))) for clip in project.clips))
     candidates = _replacement_candidates_for_clip(
         index, last, settings, download_semaphore, created_paths=created_paths,
+        required_duration=min(6.0, remaining_tail), story_context=story,
+        allow_shorter=True,
     )
     existing_paths = {_montage_clip_key(clip.path) for clip in project.clips}
     existing_families = {clip.source_family or _montage_clip_family_key(clip.path) for clip in project.clips}
@@ -18150,10 +19332,25 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
         reuse_items.sort(key=lambda item: _montage_clip_key(item.path) == previous_key)
     tail_clips = []
     for item in [*unique_items, *reuse_items]:
+        if remaining_tail <= 1e-6:
+            break
+        if not _montage_recovery_candidate_allowed(index, item, story):
+            continue
+        available = duration_probe(Path(item.path))
+        requested = _montage_recovery_window_limit(last.visual_query_en, item, min(6.0, remaining_tail, available))
+        if requested <= 1e-6:
+            continue
+        start = _montage_recovery_window_start(last.visual_query_en, item, requested)
+        if start is None:
+            continue
+        duration = min(requested, max(0.0, available - start))
+        if duration <= 1e-6 or not _semantic_clip_ok(last.visual_query_en, item, source_start=start, duration=duration):
+            continue
         family = source_family_identity_text(item.path, item.source_url)
         reused = (_montage_clip_key(item.path) in existing_paths or family in existing_families)
         tail_clips.append(TimelineClip(
-            item.path, last.narration, last.visual_query_en, duration=6.0,
+            item.path, last.narration, last.visual_query_en, duration=duration,
+            source_start=start,
             score=0.0, source=item.source or last.source,
             fallback_level="SAFE_REUSE" if reused else "SAFE_CONTEXT",
             source_family=family, reused=reused, position_bucket="LATE",
@@ -18161,9 +19358,15 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
             strict_rejection_reason=(
                 last.strict_rejection_reason or "исходный таймлайн не покрывал длительность озвучки"
             ),
+            selection_diagnostics={
+                "person": person_evidence(last.visual_query_en, item, start, duration),
+                "reason": "visual-tail-recovery", "illustrative_only": True,
+            },
         ))
+        remaining_tail -= duration
     appended = align_timeline_to_audio(
         project, target, tail_clips, duration_probe=duration_probe, allow_terminal_reuse=True,
+        preserve_clip_windows=True, tolerance=1e-6,
     )
     return len(appended)
 
@@ -18433,6 +19636,11 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         _montage_task_update(settings, index, status="Рендер", phase="Подготовка рендера", progress=60)
         project = TimelineProject.load(Path(project_path))
         project_index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+        project_story_context = " ".join((project.title, str(getattr(jobs_by_index.get(index), "result", "") or ""),
+                                          *(clip.narration for clip in project.clips)))
+        project_index.allowed_roots = list(settings.footage_folders)
+        project_index.candidate_filter = lambda item: _montage_story_candidate_allowed(project_story_context, item)
+        project_index.montage_story_context = project_story_context
         missing_clips = _montage_project_missing_clips(project, project_index)
         if missing_clips:
             # A footage folder can be cleaned or an external cut can vanish.
@@ -18447,7 +19655,8 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 _montage_wait_if_paused(settings, index)
                 def candidates_for(clip: TimelineClip, _excluded: dict) -> list[FootageItem]:
                     return _replacement_candidates_for_clip(project_index, clip, settings, download_semaphore)
-                changed = _repair_missing_project_clips(project, candidates_for)
+                changed = _repair_missing_project_clips(project, candidates_for, story_context=project_story_context,
+                                                        index=project_index)
                 replaced += changed
                 remaining = _montage_project_missing_clips(project, project_index)
                 if not remaining:

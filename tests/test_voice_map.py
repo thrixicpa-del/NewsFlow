@@ -763,5 +763,43 @@ class VoiceMapTests(unittest.TestCase):
         legacy_fitter.assert_not_called()
 
 
+def load_tests(loader, standard_tests, pattern):
+    # The existing CI invokes this module with unittest. Keep the follow-up
+    # planner/VoiceMap/selection regressions in that independently run suite.
+    from tests.test_footage_followup import FootageFollowupTests
+    from tests.test_footage_quality_external import ExternalFallbackSafetyTests
+    from tests.test_footage_quality_intent import LocalActionQualityTests
+    from tests.test_footage_quality_recovery import RecoveryVisualQualityTests
+    from tests.test_footage_quality_roles import InstitutionalWindowRoleTests
+    from tests.test_footage_quality_timing import FootageQualityTimingTests
+    from tests.test_footage_quality_visual import WindowVisualQualityTests
+    from tests.test_footage_quality_voice import BeatLocalVoiceQualityTests
+    from tests.test_footage_ready_voice import ReadyVoiceEvidenceTests
+    from tests.test_montage_cold_fairness import (
+        ColdFairnessPreparationTests,
+        ColdFairnessSelectorTests,
+    )
+    from tests.test_montage_semantic_diversity import MontageSemanticDiversityTests
+    from tests.test_visual_cold_budget import VisualColdBudgetTests
+    from tests.test_visual_evidence import VisualWindowTests
+    from tests.test_visual_feature_reuse import VisualFeatureReuseTests
+    standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ExternalFallbackSafetyTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ReadyVoiceEvidenceTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(BeatLocalVoiceQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(WindowVisualQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualWindowTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualFeatureReuseTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(FootageQualityTimingTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(LocalActionQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(RecoveryVisualQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(InstitutionalWindowRoleTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(MontageSemanticDiversityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ColdFairnessPreparationTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ColdFairnessSelectorTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualColdBudgetTests))
+    return standard_tests
+
+
 if __name__ == "__main__":
     unittest.main()
