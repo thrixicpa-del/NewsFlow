@@ -30,6 +30,73 @@ class WindowVisualQualityTests(unittest.TestCase):
         item._visual_assessor = assess
         return item
 
+    def test_unchecked_explosion_metadata_cannot_replace_statement_or_meeting(self):
+        for query, tag in (("official statement journalists cameras", "press-conference"),
+                           ("delegations diplomatic meeting", "diplomatic-negotiations"),
+                           ("military officers meeting at headquarters", "diplomatic-negotiations")):
+            for title in ("explosion.mp4", "blast.mp4", "shelling.mp4", "frontline combat.mp4",
+                          "артиллерийский обстрел.mp4", "взрыв.mp4", "explosion during official statement.mp4"):
+                with self.subTest(query=query, title=title):
+                    item = FootageItem(str(self.root / "unchecked.mp4"), title, tags=[tag])
+                    self.assertFalse(bridge._semantic_clip_ok(query, item))
+
+    def test_raw_continuity_rejects_unchecked_explosion_for_meeting(self):
+        item = FootageItem(str(self.root / "unchecked.mp4"), "explosion blast shelling.mp4",
+                           tags=["diplomatic-negotiations"])
+        selected = bridge._select_visual_continuity_candidate(
+            [item], scene_query="delegations diplomatic meeting", required_duration=6,
+            project_used_paths=set(), project_used_families=set(), recent_project_paths=set(),
+            source_exists=lambda _: True, source_duration=lambda _: 6, source_allowed=lambda _: True,
+            diversity_seed="unchecked-kinetic-contract")
+        self.assertIsNone(selected)
+
+    def test_external_prefilter_rejects_unchecked_explosion_for_statement(self):
+        self.assertFalse(bridge._external_candidate_ok("official statement journalists cameras", {
+            "url": "https://example.invalid/fixture.mp4", "title": "explosion blast shelling",
+            "tags": ["press-conference"],
+        }))
+
+    def test_checked_meeting_window_in_mixed_kinetic_source_is_preserved(self):
+        from scriptor.visual_evidence import classify_window
+        item = self.item("explosion blast shelling.mp4", ["diplomatic-negotiations"], "direct")
+        checked = classify_window("delegations diplomatic meeting", [{"meeting": .36, "combat": .20}] * 3)
+        self.assertTrue(bridge._semantic_clip_ok("delegations diplomatic meeting", item, visual_assessment=checked))
+
+    def test_unknown_or_contradictory_windows_reject_peaceful_roles(self):
+        for query in ("official statement", "delegations diplomatic meeting", "peaceful civilian protest rally"):
+            for relation in ("unknown", "contradiction"):
+                with self.subTest(query=query, relation=relation):
+                    item = self.item("anonymous.mp4", [], relation)
+                    self.assertFalse(bridge._semantic_clip_ok(query, item))
+
+    def test_earlier_comment_cannot_hide_a_later_kinetic_event(self):
+        for title in (
+            "Putin comments, then shelling begins.mp4",
+            "Путин прокомментировал, затем произошёл взрыв.mp4",
+            "Putin comments on shelling, then an explosion begins.mp4",
+            "Putin comments then shelling begins.mp4",
+            "Путин прокомментировал затем произошёл взрыв.mp4",
+            "Putin comments on policy shelling starts.mp4",
+        ):
+            with self.subTest(title=title):
+                item = FootageItem(str(self.root / "unchecked.mp4"), title, tags=["press-conference"])
+                self.assertFalse(bridge._semantic_clip_ok("Vladimir Putin official statement", item))
+
+    def test_unchecked_kinetic_guard_preserves_comments_meetings_and_neutral_context(self):
+        for title, query, tag in (
+            ("Путин прокомментировал обстрел города.mp4", "Vladimir Putin official statement", "press-conference"),
+            ("Putin comments on shelling.mp4", "Vladimir Putin official statement", "press-conference"),
+            ("official statement about shelling.mp4", "official statement", "press-conference"),
+            ("military officers meeting about explosions.mp4", "delegations diplomatic meeting", "diplomatic-negotiations"),
+            ("government building exterior.mp4", "official statement", "parliament-government"),
+            ("no explosions.mp4", "official statement", "press-conference"),
+            ("взрывов не было.mp4", "official statement", "press-conference"),
+            ("frontline explosion.mp4", "frontline battlefield soldiers", "frontline-combat"),
+        ):
+            with self.subTest(title=title):
+                item = FootageItem(str(self.root / "unchecked.mp4"), title, tags=[tag])
+                self.assertTrue(bridge._semantic_clip_ok(query, item))
+
     def test_bar_cannot_be_official_context_from_a_model_tag(self):
         item = self.item('interview.mp4', ['diplomatic-negotiations'], 'contradiction')
         self.assertFalse(bridge._semantic_clip_ok('official statement government briefing', item))

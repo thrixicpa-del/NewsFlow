@@ -16200,13 +16200,14 @@ def _montage_has_naval_hint(value: str) -> bool:
 def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: float | None = None,
                       duration: float = 6, visual_assessment: dict | None = None) -> bool:
     from .scene_intent import (
+        _SPEECH_VERBS,
         PERSON_ALIASES,
         named_people,
         person_evidence,
         person_name,
         person_window,
     )
-    from .visual_evidence import query_topic
+    from .visual_evidence import _has_positive_occurrence, query_topic
     start = person_window(scene_query, item, duration) if source_start is None else source_start
     evidence = person_evidence(scene_query, item, start, duration)
     if evidence["status"] in {"contradiction", "contradiction_hint"}:
@@ -16260,6 +16261,23 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
         # correct them; existing explicit entity/location contradictions stay.
         return not (_montage_entity_conflict(query, haystack)
                     or _montage_exact_location_conflict(query, haystack))
+    if requested_role and requested_role[0] in {"official", "meeting"}:
+        # Raw local/external candidates have no checked window. A peaceful
+        # model tag cannot override an explicitly kinetic title. Discussing
+        # combat is still a statement/meeting; checked mixed files return above.
+        title = str(item.name or "").casefold().replace("_", " ").replace("-", " ")
+        kinetic = r"\b(?:explosions?|blasts?|shelling|combat|battlefield)\b|взрыв\w*|обстрел\w*"
+        title = re.sub(rf"(?:{kinetic})\s+не\s+было\b", " ", title)
+        for occurrence in re.finditer(kinetic, title):
+            if not _has_positive_occurrence(title[:occurrence.end()], rf"(?:{kinetic})$", clause_negation=True):
+                continue
+            prefix = re.split(r"[,;.!?]", title[:occurrence.start()])[-1]
+            own_role = query_topic(prefix)
+            reported = (re.search(rf"\b(?:{_SPEECH_VERBS}|comments?)\s+(?:(?:about|on|о|об)\s*)?$", prefix)
+                        or (own_role and own_role[0] in {"official", "meeting"}
+                            and re.search(r"\b(?:about|on|о|об)\s*$", prefix)))
+            if not reported:
+                return False
     protest_suitability = _protest_suitability(query, item)
     if protest_suitability == "reject":
         return False
