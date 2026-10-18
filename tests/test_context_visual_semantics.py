@@ -29,6 +29,36 @@ DESCRIPTIONS = {
 
 
 class ContextVisualSemanticsTests(unittest.TestCase):
+    def test_grain_commodity_fallback_keeps_direct_rail_and_close_negative_priority(self):
+        from scriptor import bridge
+        from scriptor.ai_index import SearchHit
+        from scriptor.footage import FootageItem
+        query = "rail freight train grain transport cargo logistics"
+        grain = {"farm": .35, "grain_field": .35, "non_grain_agriculture": .20}
+        candidates = []
+        for name, score, values in (
+                ("bare-soil", .99, {**grain, "non_grain_agriculture": .345}),
+                ("grain-context", .90, grain),
+                ("rail", .24, {"rail": .35, "farm": .10})):
+            item = FootageItem(f"D:/test-owned/{name}.mp4", name)
+            visual = classify_window(query, [values] * 3)
+            item._visual_assessor = lambda *_, result=visual, **__: result
+            candidates.append(SearchHit(item, score, 30))
+
+        def select(hits):
+            return bridge._select_montage_candidate(
+                query, strict_hits=hits, fallback_hits=[], required_duration=6,
+                match_threshold=.22, used_paths=set(), used_families=set(),
+                project_used_paths=set(), project_used_families=set(),
+                reserved_paths=set(), reserved_families=set(),
+                source_exists=lambda _: True, source_duration=lambda _: 30)
+
+        self.assertEqual(candidates[2].item.path, select(candidates).item.path)
+        fallback = select(candidates[:2])
+        self.assertEqual(candidates[1].item.path, fallback.item.path)
+        self.assertEqual("context", fallback.diagnostics["visual"]["relation"])
+        self.assertEqual("grain_field", fallback.diagnostics["visual"]["context_facet"]["kind"])
+
     def assess(self, query, values):
         kinds = list(dict.fromkeys([*TAXONOMY, *DESCRIPTIONS]))
 

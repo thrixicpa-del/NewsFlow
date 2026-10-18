@@ -15,6 +15,43 @@ from scriptor.visual_evidence import TAXONOMY, TAXONOMY_VERSION
 
 
 class VisualFeatureReuseTests(unittest.TestCase):
+    def test_grain_context_rescores_taxonomy7_vectors_without_images_or_health(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-grain-vector-reuse-") as temporary:
+            index, clip = self.fixture(Path(temporary))
+            vector = np.zeros(512, dtype=np.float32)
+            vector[:3] = [.35, .10, .10]
+            vector[-1] = np.sqrt(1 - float(vector @ vector))
+            with index._connect() as connection:
+                connection.execute("UPDATE visual_window_features SET vectors=?,rules_version=7",
+                                   (np.asarray([vector] * 3).tobytes(),))
+            wheat = TAXONOMY["grain_field"][0]
+            alternatives = TAXONOMY["non_grain_agriculture"]
+
+            class Text:
+                def query_embed(self, queries):
+                    for query in queries:
+                        text = np.zeros(512, dtype=np.float32)
+                        text[0 if query == wheat else 1 if query in alternatives else 2] = 1
+                        yield text
+
+            with (patch("fastembed.ImageEmbedding", side_effect=AssertionError("image model loaded")),
+                  patch("fastembed.TextEmbedding", return_value=Text()),
+                  patch("scriptor.media_health.inspect_video", side_effect=AssertionError("new health work")),
+                  patch.object(index, "_sample_visual_window", side_effect=AssertionError("new frames")),
+                  patch.object(index, "_sample_frames", side_effect=AssertionError("new screen work"))):
+                result = index.assess_visual_window("grain rail freight transport logistics", clip, 5, 6)
+                self.assertEqual("context", result["relation"])
+                self.assertEqual("grain_field", result["context_facet"]["kind"])
+                self.assertEqual("sqlite-vectors-rescored", result["feature_cache"])
+                self.assertEqual([5.5, 8., 10.5], result["sample_times"])
+                self.assertFalse(result["event_confirmed"])
+                self.assertFalse(result["motion_verified"])
+                self.assertEqual(0, index._visual_cold_windows)
+                index._visual_memory_clear()
+                persisted = index.assess_visual_window("grain rail freight logistics", clip, 5, 6)
+                self.assertEqual("context", persisted["relation"])
+                self.assertEqual("sqlite", persisted["feature_cache"])
+
     def test_repeated_zero_budget_raw_miss_avoids_feature_selects_within_session(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-feature-miss-") as temporary:
             index, clip = self.fixture(Path(temporary))

@@ -11,6 +11,77 @@ from scriptor.ai_index import ClipIndex
 
 
 class VisualWindowTests(unittest.TestCase):
+    def test_grain_rail_can_use_clear_grain_commodity_context_without_claiming_transport(self):
+        from scriptor.visual_evidence import classify_window
+        scores = [{"rail": .20, "farm": .35, "grain_field": .35,
+                   "non_grain_agriculture": .20}] * 3
+        for query in ("rail freight train grain transport cargo logistics",
+                      "железнодорожные перевозки зерна грузовая логистика"):
+            result = classify_window(query, scores)
+            self.assertEqual("context", result["relation"])
+            self.assertEqual("rail", result["topic"])
+            self.assertEqual(["grain_field"], result["supported_kinds"])
+            self.assertFalse(result["event_confirmed"])
+            self.assertFalse(result["motion_verified"])
+            self.assertEqual("grain_field", result["context_facet"]["kind"])
+
+    def test_grain_commodity_context_rejects_crop_alternatives_and_incomplete_evidence(self):
+        from scriptor.visual_evidence import classify_window
+        query = "rail freight train grain transport cargo logistics"
+        clear = {"farm": .35, "grain_field": .35, "non_grain_agriculture": .20}
+        for bad in (
+            {**clear, "non_grain_agriculture": .36},  # apples, vegetables, nursery or silos
+            {**clear, "non_grain_agriculture": .345},  # ambiguous bare-soil tillage
+            {**clear, "non_grain_agriculture": .35},
+            {"farm": .35, "grain_field": .35},
+            {"farm": .35, "non_grain_agriculture": .20},
+            {**clear, "grain_field": .19},
+            *[{**clear, kind: .36} for kind in ("combat", "equipment_display", "military_naval",
+                                               "vessel_incident", "factory", "energy", "interview")],
+        ):
+            with self.subTest(bad=bad):
+                for frames in ([bad] * 3, [clear, clear, bad]):
+                    self.assertNotIn(classify_window(query, frames)["relation"], {"direct", "context"})
+
+    def test_grain_commodity_context_requires_positive_general_grain_rail_intent(self):
+        from scriptor.visual_evidence import classify_window
+        scores = [{"farm": .35, "grain_field": .35, "non_grain_agriculture": .20}] * 3
+        for query in (
+            "rail freight train transport cargo logistics",
+            "rail grain", "grain cargo logistics hiking trail",
+            "rail freight train, no grain", "no rail freight train, grain cargo logistics",
+            "rail freight train grain logistics without wheat fields",
+            "rail freight train grain cargo loading", "grain rail train crossing a bridge",
+            "grain rail train derailment", "grain rail freight harvest",
+            "grain rail freight train moving", "зерно грузовой поезд движется по мосту",
+            "зерно грузовая поездка логистика", "зернистая текстура железнодорожного груза",
+            "grain rail freight logistics without visible wheat fields",
+            "зерно железнодорожная грузовая логистика без видимых полей",
+            "grain rail freight train on fire", "grain rail freight train explodes",
+            "зерно грузовой поезд горит", "grain rail freight train crosses a bridge",
+            "grain rail freight train arrives", "grain rail freight train under attack",
+            "зерно грузовой поезд едет по мосту", "зерно грузовой поезд идет по мосту",
+            "grain freight train in motion", "grain freight train running along tracks",
+            "grain freight train traveling", "grain freight train passes a bridge",
+            "грузовые поезда с зерном сейчас едут", "зерно грузовой движущийся поезд",
+            "grain rail freight logistics, frontline artillery battlefield",
+            "formal statement about rail freight train grain logistics",
+            "map of grain rail freight logistics", "peaceful protest against grain rail freight",
+        ):
+            with self.subTest(query=query):
+                self.assertNotIn(classify_window(query, scores)["relation"], {"direct", "context"})
+
+    def test_grain_facets_leave_existing_visual_roles_and_direct_priority_unchanged(self):
+        from scriptor.visual_evidence import classify_window
+        for query, kind in (("rail freight train grain cargo logistics", "rail"),
+                            ("harvest agriculture farming fields", "farm"),
+                            ("seaport cargo cranes ships", "port"),
+                            ("formal statement", "official"), ("frontline battlefield", "combat")):
+            scores = {kind: .35, "city": .10}
+            baseline = classify_window(query, [scores] * 3)
+            added = {**scores, "grain_field": .99, "non_grain_agriculture": .98}
+            self.assertEqual(baseline, classify_window(query, [added] * 3))
+
     def test_artillery_in_crop_fields_competes_with_farming_without_rejecting_farms(self):
         from scriptor.visual_evidence import TAXONOMY
         descriptions = (
@@ -859,8 +930,8 @@ class VisualWindowTests(unittest.TestCase):
             result = index.assess_visual_window("cargo seaport cranes ships", clip, 0, 6)
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
-            self.assertEqual(TAXONOMY_VERSION, 7)
-            self.assertEqual(RULES_VERSION, 10)
+            self.assertEqual(TAXONOMY_VERSION, 8)
+            self.assertEqual(RULES_VERSION, 11)
             self.assertFalse(result["event_confirmed"])
 
     def test_mixed_interval_is_not_direct(self):
@@ -898,7 +969,7 @@ class VisualWindowTests(unittest.TestCase):
                 self.assertEqual(current["relation"], "unknown")
                 self.assertEqual(current["feature_cache"], "memory")
                 self.assertEqual(current["rules_version"], 4)
-                self.assertEqual(current["taxonomy_version"], 7)
+                self.assertEqual(current["taxonomy_version"], 8)
                 index._visual_memory_clear()
                 persisted = index.assess_visual_window("cargo seaport", clip, 0, 6)
                 self.assertEqual(persisted["relation"], "unknown")

@@ -10,8 +10,8 @@ import math
 import re
 from statistics import median
 
-TAXONOMY_VERSION = 7
-RULES_VERSION = 10
+TAXONOMY_VERSION = 8
+RULES_VERSION = 11
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
 
@@ -94,6 +94,22 @@ _INSTITUTION_SYMBOL_PATTERNS = {
     "institution_ukraine": r"ukrain|\bkyiv\b|\bkiev\b|украин|киев",
     "institution_russia": r"\brussia\w*\b|\bmoscow\b|\bkremlin\b|росси|москв|кремл",
 }
+
+# A child cannot compete against a parent containing the identical prompt.
+# Partition wheat-field evidence from every remaining FARM interpretation;
+# these facets never change ordinary role competition or establish transport.
+_CONTEXT_FACET_PROMPTS = {
+    "grain_field": (TAXONOMY["farm"][0],),
+    "non_grain_agriculture": (
+        *TAXONOMY["farm"][1:],
+        "workers harvesting apples in an orchard with fruit trees",
+        "machines harvesting grapes in a vineyard",
+        "crates of broccoli vegetables at an outdoor produce market",
+        "tractor plowing bare soil in an empty agricultural field without crops",
+    ),
+}
+TAXONOMY.update(_CONTEXT_FACET_PROMPTS)
+_NON_ROLE_FACETS = frozenset(_INSTITUTION_SYMBOL_PATTERNS) | frozenset(_CONTEXT_FACET_PROMPTS)
 
 
 def _has_positive_occurrence(text: str, expression: str, *, clause_negation: bool = False) -> bool:
@@ -183,6 +199,40 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
     return None
 
 
+def _grain_rail_commodity_context(query: str, frame_scores: list[dict[str, float]]) -> dict | None:
+    """A last-resort grain illustration, never a claim of rail transport."""
+    text = str(query).casefold().replace("ё", "е").replace("_", " ")
+    if not all(_has_positive_occurrence(text, expression, clause_negation=True) for expression in (
+            r"\brail(?:way|road)?s?\b|\bfreight trains?\b|железнодорож\w*|\bпоезд(?:а|ы|ов|у|ом|е|ами|ах)?\b",
+            r"\bgrain\b|\bзерн(?:о\w*|а|у|е|ом|ами|ах)\b|\bзерен\b",
+            r"\b(?:cargo|export|freight|transport|logistics)\b|груз|экспорт|логист|перевоз")):
+        return None
+    # Keep explicit actions, incidents and excluded field imagery fail-closed.
+    if re.search(r"combat|battlefield|frontline|artillery|military|harvest|derail|collision|accident"
+                 r"|\b(?:loading|unloading|cross\w*|arriv\w*|depart\w*|moving|moves|approach\w*)\b|over a bridge"
+                 r"|\b(?:fire|burn\w*|explod\w*|explos\w*|attack\w*|bomb\w*)\b|горит|горят|взры|атак|бомб"
+                 r"|\bin motion\b|\b(?:running|travell?ing|goes|going|rolling|speeding|hauling|pulling|pass(?:es|ing)|driv\w*|leav\w*)\b"
+                 r"|движущ\w*|\bв движении\b|поезд\w*(?:\s+\w+){0,3}\s+(?:движ|прибы|отправ|едет|едут|идет|идут|ехал|следует|следуют|проезж)"
+                 r"|боев|фронт|артилл|войск|уборк|жатв|крушени|погруз|разгруз|пересек"
+                 r"|\b(?:no|not|without)\b[^,;.!?]{0,60}\b(?:fields?|crops?)\b"
+                 r"|\b(?:без|не)\b[^,;.!?]{0,60}\b(?:пол(?:е|я|ю|ях|ей)|посев\w*)\b", text):
+        return None
+    grain, alternatives = [], []
+    for scores in frame_scores:
+        if any(kind not in scores for kind in _CONTEXT_FACET_PROMPTS):
+            return None
+        positive = float(scores["grain_field"])
+        other = max(float(scores["non_grain_agriculture"]),
+                    max((float(value) for kind, value in scores.items()
+                         if kind != "farm" and kind not in _NON_ROLE_FACETS), default=0))
+        if positive < MIN_SIMILARITY or positive <= other + CLEAR_MARGIN:
+            return None
+        grain.append(positive)
+        alternatives.append(other)
+    return {"kind": "grain_field", "scores": grain, "alternative_scores": alternatives,
+            "scope": "commodity-illustration-only"}
+
+
 def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     topic = query_topic(query)
     result = {"relation": "unknown", "reason": "no-applicable-topic",
@@ -199,7 +249,7 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     if any(not math.isfinite(float(value)) for scores in frame_scores for value in scores.values()):
         result["reason"] = "nonfinite-model-scores"
         return result
-    kinds = set().union(*(scores.keys() for scores in frame_scores)) - _INSTITUTION_SYMBOL_PATTERNS.keys()
+    kinds = set().union(*(scores.keys() for scores in frame_scores)) - _NON_ROLE_FACETS
     if not kinds:
         result["reason"] = "no-visual-role-features"
         return result
@@ -228,7 +278,7 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     for scores in frame_scores:
         best = max((float(scores.get(kind, 0)) for kind in allowed), default=0)
         negative = max((float(value) for kind, value in scores.items()
-                        if kind not in allowed and kind not in _INSTITUTION_SYMBOL_PATTERNS), default=0)
+                        if kind not in allowed and kind not in _NON_ROLE_FACETS), default=0)
         if best < MIN_SIMILARITY or negative > best + CLEAR_MARGIN:
             frame_relations.append("contradiction" if negative >= MIN_SIMILARITY and negative > best + CLEAR_MARGIN else "unknown")
             continue
@@ -267,4 +317,10 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     else:
         result["reason"] = "inconsistent-or-weak-window"
     result["frame_relations"] = frame_relations
+    if topic_name == "rail" and result["relation"] not in {"direct", "context"}:
+        facet = _grain_rail_commodity_context(query, frame_scores)
+        if facet is not None:
+            result.update(relation="context", reason="consistent-grain-commodity-context",
+                          supported_kinds=["grain_field"], frame_relations=["context"] * 3,
+                          context_facet=facet)
     return result
