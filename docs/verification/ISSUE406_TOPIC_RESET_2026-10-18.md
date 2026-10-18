@@ -25,6 +25,7 @@
 - Независимый review: замечаний к корректности нет;3новых регрессии PASS6.310s, с отдельным FAIL контроля рабочего профиля. Qualified approval исходного исправления; разрешения на merge/release нет.
 - Security/action-map/integrity:26тестов,25PASS/1FAIL — существующий Frozen Core lock не соответствует изменённому `scriptor/bridge.py`. В этом коротком прогоне production hash guard PASS; это не снимает более ранние FAIL.
 - CI расширен suite `tests.test_production_reset` и `tests.test_ideas`. Windows-native запускает production reset и реальный Electron UI с полным перезапуском, отдельным профилем и обязательным наличием Electron runtime; удалённые результаты фиксируются в draft PR после отправки.
+- Первый Windows CI остановился до UI-тестов: политика pnpm не запускает postinstall Electron, поэтому исполняемый runtime отсутствовал. Добавлен явный вызов install.js уже закреплённого пакета Electron; обязательная проверка наличия runtime сохранена. Первый FAIL не засчитывается как выполненная UI-проверка.
 
 ## Ограничения и сохранённые FAIL
 

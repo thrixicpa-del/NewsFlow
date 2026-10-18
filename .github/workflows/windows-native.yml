@@ -17,6 +17,9 @@ jobs:
         with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
         working-directory: studio-ui-remotion-verify
+      - name: Install pinned Electron runtime for source UI acceptance
+        run: node node_modules/electron/install.js
+        working-directory: studio-ui-remotion-verify
       - run: pnpm build:web
         working-directory: studio-ui-remotion-verify
       - run: pnpm build:desktop
