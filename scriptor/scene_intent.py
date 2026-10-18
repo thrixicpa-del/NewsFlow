@@ -527,9 +527,33 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     volume_continuation = bool(re.search(r"\bобъем\w*|эт\w*\s+продукци\w*", lowered))
     export_outlet = bool(re.search(r"\bвыход\w*.*внешн\w*\s+рын\w*", lowered))
     prior_commodity = str((previous or {}).get("commodity_subject", ""))
+    # A quantity-only export predicate omits its already named product. Carry
+    # that identity into the existing cargo role, never its old harvest query.
+    number_words = (
+        r"од(?:ин|на|но|ни|ного|ной|ному|ним|ну|ними|них)|дв(?:а|е|ух|ум|умя)|тр(?:и|ех|ем|емя)|четыр(?:е|ех|ем|ьмя)"
+        r"|(?:пят|шест|сем|восем|девят|десят)(?:ь|и|ью|ая|ой|ую|ое|ые|ых|ым|ыми)"
+        r"|двадцат(?:ь|и|ью)|тридцат(?:ь|и|ью)|сорок(?:а)?|девяност(?:о|а)"
+        r"|(?:пять|шесть|семь|восемь)десят|(?:пяти|шести|семи|восьми)десяти|сто|ста|сот"
+        r"|тысяч(?:а|и|у|е|ей|ам|ами|ах)?|миллион(?:а|ов|у|ом|е|ы|ам|ами|ах)?|миллиард(?:а|ов|у|ом|е|ы|ам|ами|ах)?"
+        r"|цел(?:ая|ой|ую|ое|ые|ых|ым|ыми|ого|ому)|н[оу]л(?:ь|я|ю|ем|е)"
+    )
+    quantity_words = rf"(?:выв(?:ез|оз)\w*|экспортир\w*|около|примерно|порядка|более|менее|почти|всего|свыше|тонн(?:а|ы|у|е|ой|ами|ах)?|\d+(?:[.,]\d+)?|{number_words})"
+    quantified_export = bool(
+        prior_commodity in {"grain", "oil", "agricultural"} and export and re.search(r"\bтонн(?:а|ы|у|е|ой|ами|ах)?\b", lowered)
+        and re.fullmatch(rf"\s*{quantity_words}(?:\s+{quantity_words})*\s*[,;:.!?]?\s*", lowered)
+        and not primary and not people and not industrial and not speech and not joint
+        and protest_mode == "none" and prior_depth < 6 and prior_words + len(text.split()) <= 64
+    )
+    if quantified_export:
+        terms = [{"grain": "grain cargo export warehouse storage logistics",
+                  "oil": "oil tanker export terminal refinery logistics",
+                  "agricultural": "agricultural products cargo export warehouse logistics"}[prior_commodity]]
+        commodity_subject = prior_commodity
+        inherited_subject_depth = prior_depth + 1
+        inherited_subject_words = prior_words + len(text.split())
     # An explicitly named physical product keeps its identity through a short
     # anaphoric export summary. A financial institution/new action resets it.
-    if (not physical_export and prior_commodity and (volume_continuation or export_outlet)
+    if (not physical_export and not quantified_export and prior_commodity and (volume_continuation or export_outlet)
             and not primary and not people and not industrial and not speech and not joint
             and protest_mode == "none" and not term_matches("банк", lowered)
             and not visual_topics(", ".join(terms)) - {"economy"}
@@ -538,6 +562,64 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         commodity_subject = prior_commodity
         inherited_subject_depth = prior_depth + 1
         inherited_subject_words = prior_words + len(text.split())
+    # A destination fragment describes the preceding vehicle/product, rather
+    # than starting a police/guard scene. A denied destination alone keeps that
+    # same subject; its excluded port is never added back to the query.
+    route_source = text.casefold().replace("ё", "е")
+    route_ellipsis = bool(re.match(
+        r"\s*(?:(?:теперь|в|первую|очередь|он|она|оно|они|и|а)\s+)*"
+        r"(?:движ\w*|направля\w*|следу\w*|идет|идут)\b", lowered)
+        and re.search(r"\b(?:границ\w*|западн\w*|маршрут\w*)\b", lowered))
+    denied_route_only = (_positive_route_text(route_source) != route_source
+                         and not re.sub(r"\b(?:а|но|и)\b|[^\w]", "", lowered))
+    prior_route_query = str((previous or {}).get("visual_query", ""))
+    denied_port = bool(re.search(r"\bне\s+(?:к|ко|в|во|на|через|по)\s+(?:\w+\s+){0,3}порт\w*", route_source))
+    if denied_port:
+        # Rail remains the asserted mode. Retaining its old warehouse/port
+        # union would allow the denied port back as secondary cargo context.
+        if "rail" in prior_topics:
+            prior_route_query = ("rail freight train " + ("grain " if re.search(r"\bgrain\b", prior_route_query) else "")
+                                 + "cargo transport logistics")
+        elif re.search(r"\b(?:cargo|freight|transport|logistics|warehouse)\b", prior_route_query):
+            prior_route_query = "warehouse cargo storage logistics, not seaport"
+        else:
+            prior_route_query = ""
+    if ((route_ellipsis or denied_route_only) and prior_topics & {"rail", "logistics", "shipping"}
+            and not prior_topics - {"rail", "logistics", "shipping", "agriculture"}
+            and not primary and not people and not industrial and not speech and not joint
+            and protest_mode == "none" and prior_depth < 6 and prior_words + len(text.split()) <= 64
+            and not visual_topics(", ".join(terms)) and prior_route_query):
+        terms = [prior_route_query, *terms]
+        commodity_subject = commodity_subject or prior_commodity
+        inherited_subject_depth = prior_depth + 1
+        inherited_subject_words = prior_words + len(text.split())
+    # Cost/revenue statements can describe an existing cargo product without
+    # asserting a new crop or harvesting action. They consume the same finite
+    # context budget. Explicit current logistics costs retain a cargo role
+    # independently of that antecedent, without claiming its old commodity.
+    producer_revenue = bool(agricultural and re.search(r"\bполуч\w*.*\b(?:денег|доход\w*)\b", lowered)
+                            and not re.search(r"\b(?:выращ\w*|саж\w*|уборк\w*|собира\w*)", lowered))
+    trader_cost = bool(re.search(r"\bтрейдер\w*", lowered) and re.search(r"\b(?:денег|времен\w*|расход\w*)\b", lowered))
+    product_cost = bool(re.search(r"\b(?:его|ее|их)\s+продукци\w*", lowered)
+                        and re.search(r"\b(?:логистическ\w*|транспортн\w*)\s+расход\w*", lowered))
+    cost_continuation = bool(prior_commodity and (producer_revenue or trader_cost) and not product_cost
+                             and not physical_export and (not commodity_subject or commodity_subject == prior_commodity)
+                             and (not visual_topics(", ".join(terms)) - {"economy"}
+                                  or producer_revenue and terms == ["agriculture farming fields agricultural products"])
+                             and prior_topics & {"shipping", "rail", "logistics"}
+                             and not prior_topics - {"shipping", "rail", "logistics", "agriculture"}
+                             and not primary and not people and not speech and not joint and not harvesting
+                             and protest_mode == "none" and not term_matches("банк", lowered)
+                             and (not industrial or producer_revenue and not re.search(r"\b(?:завод\w*|ремонт\w*|мост\w*)", lowered)))
+    if cost_continuation and prior_depth < 6 and prior_words + len(text.split()) <= 64:
+        terms = [str(previous["visual_query"])]
+        commodity_subject = prior_commodity
+        inherited_subject_depth = prior_depth + 1
+        inherited_subject_words = prior_words + len(text.split())
+    if (product_cost and not primary and not people and not speech and not joint and not harvesting
+            and protest_mode == "none" and not industrial and not physical_export and not commodity_subject):
+        terms = ["cargo transport warehouse storage logistics"]
+        commodity_subject = ""
     # A transport subject can continue through a short enumeration. A place
     # on its second action (use river ports AND seek capacity in another
     # country) must not relocate the first action. Keep both places visible

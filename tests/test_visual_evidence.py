@@ -11,6 +11,67 @@ from scriptor.ai_index import ClipIndex
 
 
 class VisualWindowTests(unittest.TestCase):
+    def test_grain_farm_rejects_nongrain_when_generic_farm_wins(self):
+        from scriptor.visual_evidence import classify_window
+        scores = [
+            {"farm": .27, "combat": .235, "warehouse": .20,
+             "grain_field": .198, "non_grain_agriculture": .27},
+            {"farm": .216, "combat": .206, "warehouse": .20,
+             "grain_field": .205, "non_grain_agriculture": .216},
+            {"farm": .25, "combat": .205, "warehouse": .19,
+             "grain_field": .218, "non_grain_agriculture": .25},
+        ]
+        result = classify_window("grain harvest agricultural storage wheat field", scores)
+        self.assertEqual("contradiction", result["relation"])
+        self.assertFalse(result["event_confirmed"])
+        self.assertFalse(result["motion_verified"])
+
+    def test_grain_farm_direct_requires_clear_complete_commodity_facets(self):
+        from scriptor.visual_evidence import classify_window
+        clear = {"farm": .35, "grain_field": .35, "non_grain_agriculture": .20}
+        for bad in (
+            {**clear, "non_grain_agriculture": .38},
+            {**clear, "non_grain_agriculture": .345},
+            {**clear, "non_grain_agriculture": .35},
+            {**clear, "grain_field": .19},
+            {"farm": .35, "grain_field": .35},
+            {"farm": .35, "non_grain_agriculture": .20},
+        ):
+            for query in ("grain harvest agricultural storage wheat field", "wheat harvest",
+                          "уборка урожая зерна", "пшеница комбайн"):
+                with self.subTest(bad=bad, query=query):
+                    for frames in ([bad] * 3, [clear, clear, bad]):
+                        self.assertNotIn(classify_window(query, frames)["relation"], {"direct", "context"})
+                    if "grain_field" not in bad or "non_grain_agriculture" not in bad:
+                        missing = classify_window(query, [bad] * 3)
+                        self.assertEqual("unknown", missing["relation"])
+                        self.assertEqual("inconsistent-or-weak-window", missing["reason"])
+                        self.assertEqual(["unknown"] * 3, missing["frame_relations"])
+
+    def test_grain_farm_guard_preserves_clear_grain_and_real_warehouse_context(self):
+        from scriptor.visual_evidence import classify_window
+        grain = [{"farm": .35, "grain_field": .35, "non_grain_agriculture": .20}] * 3
+        self.assertEqual("direct", classify_window("grain wheat harvest", grain)["relation"])
+        for scores in ({"warehouse": .36, "farm": .21},
+                       {"warehouse": .40, "farm": .35, "grain_field": .20, "non_grain_agriculture": .35}):
+            with self.subTest(scores=scores):
+                self.assertEqual("context", classify_window("grain harvest agricultural storage wheat field", [scores] * 3)["relation"])
+        tied = [{"warehouse": .35, "farm": .35, "grain_field": .20, "non_grain_agriculture": .35}] * 3
+        self.assertNotIn(classify_window("grain wheat harvest", tied)["relation"], {"direct", "context"})
+
+    def test_grain_farm_guard_uses_positive_occurrences_and_preserves_other_crops(self):
+        from scriptor.visual_evidence import classify_window
+        nongrain = [{"farm": .35, "grain_field": .18, "non_grain_agriculture": .35}] * 3
+        for query in ("general agriculture harvest", "tomato harvest agricultural crops",
+                      "not grain, but tomato harvest agriculture", "no wheat, but tomato harvest",
+                      "не зерно, а помидоры сельхоз урожай", "не пшеница, а помидоры сельхоз урожай"):
+            with self.subTest(query=query):
+                self.assertEqual("direct", classify_window(query, nongrain)["relation"])
+        for query in ("not tomatoes, but grain harvest", "no grain here; wheat harvest",
+                      "не помидоры, а уборка урожая зерна"):
+            with self.subTest(query=query):
+                self.assertNotIn(classify_window(query, nongrain)["relation"], {"direct", "context"})
+
     def test_grain_rail_can_use_clear_grain_commodity_context_without_claiming_transport(self):
         from scriptor.visual_evidence import classify_window
         scores = [{"rail": .20, "farm": .35, "grain_field": .35,
@@ -637,7 +698,10 @@ class VisualWindowTests(unittest.TestCase):
         ]
         for query, kind, expected in rows:
             with self.subTest(query=query, kind=kind):
-                result = classify_window(query, [{kind: .32}] * 3)
+                scores = {kind: .32}
+                if query == "farm wheat harvest" and kind == "farm":
+                    scores.update(grain_field=.32, non_grain_agriculture=.18)
+                result = classify_window(query, [scores] * 3)
                 self.assertEqual(result["relation"], expected)
                 self.assertFalse(result["event_confirmed"])
                 self.assertFalse(result["motion_verified"])
@@ -931,7 +995,7 @@ class VisualWindowTests(unittest.TestCase):
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
             self.assertEqual(TAXONOMY_VERSION, 8)
-            self.assertEqual(RULES_VERSION, 11)
+            self.assertEqual(RULES_VERSION, 12)
             self.assertFalse(result["event_confirmed"])
 
     def test_mixed_interval_is_not_direct(self):
@@ -944,8 +1008,9 @@ class VisualWindowTests(unittest.TestCase):
         scores = [{"farm": .236, "combat": .242, "map": .240},
                   {"farm": .256, "combat": .262},
                   {"farm": .237, "combat": .229}]
+        scores = [{**row, "grain_field": row["farm"], "non_grain_agriculture": .15} for row in scores]
         self.assertEqual(classify_window("agriculture farming wheat harvest fields", scores)["relation"], "unknown")
-        strong = [{"farm": .28, "combat": .23}] * 3
+        strong = [{"farm": .28, "combat": .23, "grain_field": .28, "non_grain_agriculture": .15}] * 3
         self.assertEqual(classify_window("agriculture farming wheat harvest fields", strong)["relation"], "direct")
 
     def test_classifier_upgrade_reuses_features_and_recomputes_relation(self):

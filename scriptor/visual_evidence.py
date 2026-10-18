@@ -11,7 +11,7 @@ import re
 from statistics import median
 
 TAXONOMY_VERSION = 8
-RULES_VERSION = 11
+RULES_VERSION = 12
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
 
@@ -97,7 +97,8 @@ _INSTITUTION_SYMBOL_PATTERNS = {
 
 # A child cannot compete against a parent containing the identical prompt.
 # Partition wheat-field evidence from every remaining FARM interpretation;
-# these facets never change ordinary role competition or establish transport.
+# these facets stay outside ordinary role competition. Grain-specific FARM
+# eligibility and bounded grain-rail context use them without proving transport.
 _CONTEXT_FACET_PROMPTS = {
     "grain_field": (TAXONOMY["farm"][0],),
     "non_grain_agriculture": (
@@ -152,7 +153,14 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
     vessel_context = has(r"\b(?:ships?|vessels?|tanker|shipwreck)\b|судно|судна|судов|кораб|танкер")
     if vessel_context and _has_positive_occurrence(text, incident):
         return "vessel_incident", frozenset({"vessel_incident"}), frozenset({"port"})
-    if has(r"seaport|\bport\b|tanker|cargo ship|marine terminal|порт\w*|танкер|морск.*терминал"):
+    port_expression = r"seaport|\bport\b|tanker|cargo ship|marine terminal|порт\w*|танкер|морск.*терминал"
+    # Denying damage does not deny the commercial vessel or its location.
+    # Scope the remaining negation to the port phrase, not the whole clause.
+    port_text = re.sub(r"\b(?:no|not|without)\s+damage(?:d)?(?:\s+to)?\b", " ", text)
+    positive_port = _has_positive_occurrence(port_text, port_expression)
+    denied_port = bool(has(r"\b(?:not|no|without)\s+(?:\w+\s+){0,2}(?:seaport|port)\b")
+                       and not positive_port)
+    if positive_port:
         return "port", frozenset({"port"}), frozenset({"warehouse", "rail", "road_cargo"})
     if has(r"government building|institutional (?:venue|context)|(?:parliament|institution)\w* exterior|правительствен\w* здан|здан\w* правительств"):
         # An institutional exterior/reporting context is a visible role.
@@ -195,6 +203,8 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
                     and _has_positive_occurrence(text, r"\bwarehouse\b|склад\w*", clause_negation=True)
                     and _has_positive_occurrence(text, r"\b(?:cargo|export|freight|storage|logistics)\b|груз|экспорт|логист", clause_negation=True)):
                 contexts = contexts | {"port"}
+            if denied_port:
+                contexts = contexts - {"port"}
             return topic, frozenset({topic}), frozenset(contexts)
     return None
 
@@ -241,6 +251,11 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     if topic is None:
         return result
     topic_name, direct, context = topic
+    grain_farm = topic_name == "farm" and _has_positive_occurrence(
+        str(query).casefold().replace("ё", "е").replace("_", " "),
+        r"\b(?:grain|wheat)\b|\bзерн(?:о\w*|а|у|е|ом|ами|ах)\b|\bзерен\b|\bпшениц\w*",
+        clause_negation=True,
+    )
     allowed = direct | context
     result["topic"] = topic_name
     if len(frame_scores) != 3 or any(not scores for scores in frame_scores):
@@ -305,6 +320,20 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
             frame_relations.append("unknown")
             continue
         best_kinds = {kind for kind in allowed if float(scores.get(kind, 0)) >= max(MIN_SIMILARITY, best - CLEAR_MARGIN)}
+        # FARM includes vegetables/nursery/silos. A grain-specific request
+        # needs its existing commodity facet before FARM can be direct.
+        # A clear warehouse winner remains ordinary contextual evidence;
+        # a near-tied warehouse cannot erase a contradictory crop facet.
+        if grain_farm and "farm" in best_kinds:
+            if any(kind not in scores for kind in _CONTEXT_FACET_PROMPTS):
+                frame_relations.append("unknown")
+                continue
+            grain = float(scores["grain_field"])
+            nongrain = float(scores["non_grain_agriculture"])
+            if grain < MIN_SIMILARITY or grain <= nongrain + CLEAR_MARGIN:
+                frame_relations.append("contradiction" if nongrain >= MIN_SIMILARITY
+                                       and nongrain > grain + CLEAR_MARGIN else "unknown")
+                continue
         supported.update(best_kinds)
         frame_relations.append("direct" if best_kinds & direct else "context")
     result["supported_kinds"] = sorted(supported)

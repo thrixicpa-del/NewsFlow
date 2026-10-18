@@ -5890,10 +5890,13 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         actual_topics, stored_topics = visual_topics(intent_query), visual_topics(raw)
         route_text = str(segment["_beat_text"]).casefold().replace("ё", "е")
         if (_positive_route_text(route_text) != route_text
-                and (not intent_query or stored_topics - actual_topics)):
+                and (not intent_query or stored_topics - actual_topics or "not seaport" in intent_query)):
             # An authored union cannot reinstate a destination denied by the
             # current beat, even when its dominant comma clause is empty.
-            return visual_intent(route_text, VISUAL_TERMS)["visual_query"]
+            return (intent_query if actual_topics & {"rail", "logistics"}
+                    and (not re.search(r"\b(?:warehouse|port|seaport|shipping|maritime)\b", intent_query)
+                         or "not seaport" in intent_query)
+                    else visual_intent(route_text, VISUAL_TERMS)["visual_query"])
         if (_negated_attack(intent["text"])
                 and re.search(r"\b(?:artillery|shelling)\b", raw, re.IGNORECASE)
                 and not re.search(r"\b(?:artillery|shelling)\b", intent_query, re.IGNORECASE)):

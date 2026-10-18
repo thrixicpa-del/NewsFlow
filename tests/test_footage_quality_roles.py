@@ -60,7 +60,8 @@ class InstitutionalWindowRoleTests(unittest.TestCase):
 
     def test_actual_harvesting_still_requests_farm_direct_with_warehouse_context(self):
         query = "harvest farming combine wheat field agricultural storage warehouse"
-        farm = classify_window(query, [{"warehouse": .20, "farm": .35}] * 3)
+        farm = classify_window(query, [{"warehouse": .20, "farm": .35,
+                                       "grain_field": .35, "non_grain_agriculture": .18}] * 3)
         warehouse = classify_window(query, [{"warehouse": .35, "farm": .20}] * 3)
         self.assertEqual("direct", farm["relation"])
         self.assertEqual("context", warehouse["relation"])
