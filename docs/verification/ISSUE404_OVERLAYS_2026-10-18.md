@@ -56,7 +56,9 @@ Historical FAIL evidence remains in the ignored evidence directory. The48-test a
 
 **Integrity FAIL remains:** `tests.test_core_runtime_guard` detects the existing Frozen Core lock no longer matching modified source (`scriptor/bridge.py`). The20-test integrity/security run had19PASS/1FAIL. The lock and Frozen runtime were deliberately not rebuilt or refreshed, as requested. This prevents a packaged/release-ready claim and may fail the same CI gate; source verification does not clear it. Remote CI and Windows-native workflow results require the pushed draft PR.
 
-**Remote overlay Python CI BLOCKED:** GitHub rejected the initial push because the existing OAuth connection lacks `workflow` permission to change `.github/workflows/ci.yml`. The proposed added job step is retained in `ISSUE404_OVERLAY_CI_PROPOSAL.patch`; the branch leaves the workflow unchanged so the feature can be reviewed. Existing remote CI can run its normal UI/security/type/build checks, but the new isolated overlay Python/media modules need this proposed step applied with an authorized workflow-capable connection. Their local and independent runs above do not clear that remote gate.
+**Workflow authorization recovered:** GitHub initially rejected the workflow change because the active OAuth connection lacked `workflow` permission. The owner completed GitHub CLI device authorization, and `gh auth status` confirmed the added scope for the existing active account. The branch now includes the isolated overlay Python/media CI step. The earlier rejection remains historical evidence, not an active permission blocker. Remote results apply to the latest pushed SHA; local and independent PASS do not clear the remote gate.
+
+The first source-only PR revision passed Windows-native `source-electron`; its CI quality run was still in progress when workflow authorization was recovered. CodeQL and dependency review were skipped for the draft, not counted as PASS. Latest-revision results are available on draft PR405.
 
 ## GitHub alternatives considered
 
