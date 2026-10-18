@@ -6,6 +6,69 @@ from scriptor.timeline import VISUAL_TERMS
 
 
 class LocalActionQualityTests(unittest.TestCase):
+    def test_placards_and_resignation_chants_assert_a_protest_without_event_keyword(self):
+        from tests.test_footage_followup import voice_scenes
+
+        for text in ("У администрации жители развернули плакаты.",
+                     "Жители подошли к администрации, развернули плакаты.",
+                     "Люди держат плакаты у городской администрации.",
+                     "Горожане начали скандировать об отставке.",
+                     "Собравшиеся скандировали отставку."):
+            with self.subTest(text=text):
+                for intent in (visual_intent(text, VISUAL_TERMS), voice_scenes([text])[0]["scene_intent"]):
+                    self.assertEqual("peaceful", intent["protest_mode"])
+                    self.assertIn("protest crowd", intent["visual_query"])
+                    self.assertEqual([], intent["target_people"])
+
+    def test_local_chant_continues_only_a_current_protest_role(self):
+        from tests.test_footage_followup import voice_scenes
+
+        scenes = voice_scenes(["Жители развернули плакаты у администрации.", "И продолжили скандировать."])
+        self.assertTrue(all("protest crowd" in scene["visual_query_en"] for scene in scenes))
+        prior = visual_intent("Жители развернули плакаты у администрации.", VISUAL_TERMS)
+        for text in ("На фабрике печатают плакаты.", "В магазине продают плакаты.",
+                     "Хор скандировал припев.", "Хор скандировал об отставке.",
+                     "У администрации люди не развернули плакаты.", "У администрации люди не держат плакаты.",
+                     "Люди не начали скандировать об отставке.",
+                     "В правительстве состоялось совещание.", "Поезд доставил груз."):
+            with self.subTest(text=text):
+                intent = visual_intent(text, VISUAL_TERMS, previous=prior)
+                self.assertNotIn("protest crowd", intent["visual_query"])
+        self.assertNotIn("protest crowd", visual_intent("И продолжили скандировать.", VISUAL_TERMS)["visual_query"])
+
+    def test_entertainment_or_generic_placards_do_not_assert_a_political_protest(self):
+        prior = visual_intent("Жители развернули плакаты у администрации.", VISUAL_TERMS)
+        for text in ("Болельщики развернули плакаты на стадионе.",
+                     "На концерте зрители держат плакаты.", "Люди развернули плакаты.",
+                     "Болельщики скандировали об отставке тренера.",
+                     "На концерте зрители скандировали об отставке."):
+            for previous in (None, prior):
+                with self.subTest(text=text, previous=bool(previous)):
+                    self.assertNotIn("protest crowd", visual_intent(text, VISUAL_TERMS, previous=previous)["visual_query"])
+
+    def test_civic_placard_voice_chain_keeps_place_and_current_protest_action(self):
+        from tests.test_footage_followup import voice_scenes
+
+        scenes = voice_scenes(["В Киеве обсуждают работу мэра.",
+                              "Жители подошли к администрации, развернули плакаты.",
+                              "И начали скандировать об отставке."])
+        for scene in scenes[1:]:
+            self.assertIn("protest crowd", scene["visual_query_en"])
+            self.assertIn("Ukraine", scene["visual_query_en"])
+        relocated = voice_scenes(["В Киеве обсуждают работу мэра.",
+                                  "В Минске жители развернули плакаты у администрации."])[1]
+        self.assertIn("Belarus", relocated["visual_query_en"])
+        self.assertNotIn("Ukraine", relocated["visual_query_en"])
+        reset = voice_scenes(["У администрации жители развернули плакаты.",
+                             "В правительстве состоялось совещание.", "И продолжили скандировать."])
+        self.assertNotIn("protest crowd", reset[-1]["visual_query_en"])
+        current = scenes[-1]["scene_intent"]
+        expired = visual_intent("И продолжили скандировать об отставке.", VISUAL_TERMS, previous=current)
+        self.assertNotIn("Ukraine", expired["visual_query"])
+        overlong = visual_intent("слово " * 65 + "скандировали об отставке.", VISUAL_TERMS,
+                                 previous=scenes[0]["scene_intent"])
+        self.assertNotIn("Ukraine", overlong["visual_query"])
+
     def test_reported_indeclinable_author_keeps_explicit_coordinated_subjects(self):
         from tests.test_footage_followup import voice_scenes
 

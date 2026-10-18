@@ -132,16 +132,17 @@ _PROTEST_WORDS = r"(?:митинг\w*|протест\w*|демонстран\w*|
 _SPEECH_VERBS = r"(?:ответи\w*|выступи\w*|заяви\w*|сказа\w*|прокомментир\w*|комментир\w*|отверг\w*|подтверд\w*)"
 
 
-def _protest_intent(text: str, protest_context: bool = False) -> str:
+def _protest_intent(text: str, protest_context: bool = False, *, public_context: bool = False) -> str:
     """Bounded local event rules, not a universal language classifier."""
     # Resolve each explicit event locally. A cancelled event must not erase a
     # later gathering, and a diplomatic protest must not hide a street rally.
+    public_context = public_context or bool(re.search(r"администраци\w*|отставк\w*", text))
     clauses = re.split(r"[,;.!?]|\b(?:но|затем)\b", text)
     if len(clauses) > 1:
         modes = []
         for clause in clauses:
             if clause.strip():
-                mode = _protest_intent(clause, protest_context=protest_context)
+                mode = _protest_intent(clause, protest_context=protest_context, public_context=public_context)
                 modes.append(mode)
                 protest_context = protest_context or mode in {"peaceful", "labor", "farmers", "conflict"}
         active = [mode for mode in modes if mode != "none"]
@@ -153,14 +154,26 @@ def _protest_intent(text: str, protest_context: bool = False) -> str:
         return "equipment"
     contextual_conflict = bool(re.search(r"разгон\w*|столкнов\w*", text)
                                and (protest_context or re.search(r"полиц\w*", text)))
-    if not (contextual_conflict or re.search(rf"\b{_PROTEST_WORDS}", text) or
+    # Visible placard actions and resignation chants can assert a gathering
+    # without naming it. Generic chanting needs an already current protest;
+    # printing/shop posters and a choir do not establish that street role.
+    action = r"скандир\w*\s+(?:об?\s+)?отставк\w*"
+    if public_context:
+        action += r"|(?:развернул\w*|разворачива\w*|держ(?:ат|ит|ал\w*))\s+плакат\w*"
+    if protest_context:
+        action += r"|скандир\w*"
+    if re.search(r"\b(?:хор\w*|песн\w*|концерт\w*|болельщик\w*|стадион\w*)", text):
+        action = r"(?!)"
+    event = rf"(?:{_PROTEST_WORDS}|{action})"
+    if not (contextual_conflict or re.search(rf"\b{event}", text) or
             re.search(r"участник\w*\s+акци\w*.*(?:собрал\w*|площад\w*)", text)):
         return "none"
     event_clauses = [clause for clause in re.split(r"[,;.!?]|\b(?:но|затем)\b", text)
-                     if re.search(_PROTEST_WORDS, clause)]
+                     if re.search(event, clause)]
     def inactive(clause):
         clause = re.sub(r"\bне\s+(?:отмен\w*|предотврат\w*)", "", clause)
-        return bool(re.search(r"отмен\w*|предотврат\w*|не\s+нач\w*|угрожа\w*|обсужда\w*|\bесли\b", clause))
+        return bool(re.search(r"отмен\w*|предотврат\w*|\bне\s+нач\w*|угрожа\w*|обсужда\w*|\bесли\b"
+                              r"|\bне\s+(?:развернул\w*|разворачива\w*|держ\w*|скандир\w*)", clause))
     if event_clauses and all(inactive(clause) for clause in event_clauses):
         return "inactive"
     conflict_clauses = [clause for clause in re.split(r"[,;.!?]|\b(?:но|затем)\b", text)
@@ -656,6 +669,27 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
                 terms.extend(f"{place} regional context" for place in prior_places)
         elif explicit_places:
             physical_subject_places = explicit_places
+    protest_places = []
+    protest_place_depth = protest_place_words = 0
+    if protest and not primary:
+        # A short civic action chain keeps its local country hint, never the
+        # prior official portrait. Explicit relocation resets that context.
+        prior_protest = (previous or {}).get("protest_mode") in {"peaceful", "labor", "farmers", "conflict"}
+        local_places = (list((previous or {}).get("protest_places", [])) if prior_protest else
+                        _physical_places(str((previous or {}).get("text", "")), associations)
+                        if not prior_topics else [])
+        place_depth = int((previous or {}).get("protest_place_depth", 0))
+        place_words = int((previous or {}).get("protest_place_words", 0)) if prior_protest else len(
+            str((previous or {}).get("text", "")).split())
+        if explicit_places:
+            protest_places = explicit_places
+            protest_place_words = len(text.split())
+        elif (len(local_places) == 1 and not (previous or {}).get("target_people")
+              and place_depth < 2 and place_words + len(text.split()) <= 64):
+            protest_places = local_places
+            protest_place_depth = place_depth + 1
+            protest_place_words = place_words + len(text.split())
+            terms.append(f"{local_places[0]} regional context")
     terms = [person_name(identity) for identity in primary] + terms
     query = ", ".join(dict.fromkeys(terms))
     return {
@@ -670,6 +704,9 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         "physical_subject_places": physical_subject_places,
         "subject_place_depth": subject_place_depth,
         "subject_place_words": subject_place_words,
+        "protest_places": protest_places,
+        "protest_place_depth": protest_place_depth,
+        "protest_place_words": protest_place_words,
         "reported_context_query": reported_context_query,
         "reported_context_remaining": reported_context_remaining,
         "reported_action_claim": reported_kinetic_claim,
