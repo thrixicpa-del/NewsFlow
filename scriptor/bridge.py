@@ -28,6 +28,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -77,6 +78,7 @@ from .config import (
     _exclusive_settings_write,
     allow_empty_release_state,
     app_data_root,
+    config_path,
     load_settings,
     reconcile_voice_outputs,
     save_settings,
@@ -2828,12 +2830,14 @@ def snapshot() -> dict:
                 ) if project.selection_summary else "",
                 "preparationMetricsMs": project.preparation_metrics_ms,
                 "voiceMapProvenance": project.voice_map_provenance,
+                "overlayTemplate": deepcopy(project.overlay_template),
+                "overlayNeedsRender": project.overlay_needs_render,
                 "voicePath": project.voiceover_path,
                 "transitionStyle": project.transition_style,
                 "transitionFrames": project.transition_frames,
-                "outputPath": str(output_path) if output_path.is_file() else "",
-                "remotionPath": str(remotion_path) if remotion_path.is_file() else "",
-                "fcpxmlPath": str(fcpxml_path) if fcpxml_path.is_file() else "",
+                "outputPath": str(output_path) if not project.overlay_needs_render and output_path.is_file() else "",
+                "remotionPath": str(remotion_path) if not project.overlay_needs_render and remotion_path.is_file() else "",
+                "fcpxmlPath": str(fcpxml_path) if not project.overlay_needs_render and fcpxml_path.is_file() else "",
                 "clips": [{
                     "path": clip.path,
                     "duration": round(float(clip.duration), 2),
@@ -3020,6 +3024,7 @@ def snapshot() -> dict:
                             "transitionStyle": settings.montage_transition_style, "transitionFrames": settings.montage_transition_frames,
                             "introFolder": settings.montage_intro_folder, "introDuration": settings.montage_intro_duration, "overlayEnabled": settings.montage_overlay_enabled,
                             "overlayFolder": settings.montage_overlay_folder,
+                            "overlayTemplate": deepcopy(settings.montage_overlay_template),
                             "autoWeb": settings.montage_auto_web, "autoYoutube": settings.montage_auto_youtube,
                             "externalOnly": settings.montage_external_only,
                             "useScriptText": settings.montage_use_script_text,
@@ -7933,6 +7938,9 @@ def _sync_montage_handoff(settings: Settings, index: int, title: str, voice_path
         "voicePath": voice_path if has_voice else "", "error": "",
         "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if transferred and "overlayTemplate" not in updated:
+        updated["overlayTemplate"] = _materialize_montage_overlay_template(settings.montage_overlay_template)
+        updated["overlayTemplateIndividualized"] = False
     timeline = list(current.get("timeline") or [])
     if not timeline or timeline[-1].get("label") != next_phase or timeline[-1].get("detail") != next_detail:
         timeline.append({"at": time.strftime("%H:%M:%S"), "label": next_phase,
@@ -15350,6 +15358,146 @@ def set_proxy_cache_paused(payload: dict) -> dict:
     }}
 
 
+@contextmanager
+def _montage_overlay_edit_lock():
+    """Share the selected-overlay check/write boundary with queue starts."""
+    with _MONTAGE_QUEUE_LOCK, _exclusive_settings_write(config_path().with_name("montage-overlay-state.json")):
+        yield
+
+
+def _montage_overlay_template_for_task(settings: Settings, scenario_index: int, *, title: str = "") -> dict:
+    from .overlays import normalize_overlay_template
+
+    task = settings.montage_task_statuses.get(str(scenario_index)) or {}
+    if "overlayTemplate" not in task:
+        # Old/manual preparation also needs a durable choice before any
+        # expensive planner work. A retry must reuse even a missing chosen
+        # source instead of silently rolling another member of the pool.
+        with _montage_overlay_edit_lock():
+            latest = load_settings()
+            task = dict(latest.montage_task_statuses.get(str(scenario_index)) or {})
+            if "overlayTemplate" not in task:
+                task["overlayTemplate"] = _materialize_montage_overlay_template(latest.montage_overlay_template)
+                task["overlayTemplateIndividualized"] = False
+                task.setdefault("scenarioIndex", scenario_index)
+                task.setdefault("title", title or "Без названия")
+                voice = str(latest.voice_scenario_outputs.get(str(scenario_index + 1), ""))
+                has_voice = bool(voice and Path(voice).is_file())
+                task.setdefault("status", "Готов к монтажу" if has_voice else "Ожидает MP3")
+                task.setdefault("voicePath", voice if has_voice else "")
+                task.setdefault("progress", 0)
+                latest.montage_task_statuses[str(scenario_index)] = task
+                save_settings(latest)
+            settings.montage_task_statuses[str(scenario_index)] = deepcopy(task)
+    return normalize_overlay_template(task["overlayTemplate"], check_files=True)
+
+
+def _materialize_montage_overlay_template(template: object) -> dict:
+    from .overlays import resolve_overlay_template
+
+    return resolve_overlay_template(template)
+
+
+def scan_montage_overlays(payload: dict) -> dict:
+    from .overlay_library import scan_overlay_library
+
+    library = scan_overlay_library(str(payload.get("folder", "")).strip())
+    return {**snapshot(), "operationResult": {"kind": "overlay-library", **library}}
+
+
+def save_montage_overlays(payload: dict) -> dict:
+    """Save future defaults or apply only to explicitly selected idle plans."""
+    from .overlays import normalize_overlay_template
+
+    template = normalize_overlay_template(payload.get("template"), check_files=True)
+    scope = payload.get("scope", "new")
+    if scope not in {"new", "selected"}:
+        raise ValueError("scope должен быть new или selected")
+    if "template" not in payload:
+        raise ValueError("Передайте template наложений")
+    skipped: list[int] = []
+    changed: list[int] = []
+    with _montage_overlay_edit_lock():
+        settings = load_settings()
+        if scope == "new":
+            settings.montage_overlay_template = deepcopy(template)
+            settings._edited_montage_reuse = {"montage_overlay_template"}
+            save_settings(settings)
+        else:
+            raw_indices = payload.get("indices")
+            if (not isinstance(raw_indices, list) or not raw_indices
+                    or any(type(index) is not int or index < 0 for index in raw_indices)):
+                raise ValueError("Выберите indices строк для наложений")
+            plans = []
+            current_session = None
+            # Validate the entire selection before publishing any project.
+            for index in sorted(set(raw_indices)):
+                task = dict(settings.montage_task_statuses.get(str(index)) or {})
+                if not task:
+                    if current_session is None:
+                        current_session = load_session()
+                    titles, jobs = current_session
+                    if not 0 <= index < len(titles):
+                        raise ValueError(f"Строка сценария {index + 1} не найдена в текущем производстве")
+                    job = next((job for job in jobs if job.request.index == index), None)
+                    voice = str(settings.voice_scenario_outputs.get(str(index + 1), ""))
+                    has_voice = bool(voice and Path(voice).is_file())
+                    task = {
+                        "scenarioIndex": index, "title": titles[index],
+                        "status": "Новый MP3" if has_voice else "Ожидает MP3",
+                        "voicePath": voice if has_voice else "", "progress": 0,
+                        "production_item_id": str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip(),
+                    }
+                if str(task.get("status", "")) in MONTAGE_ACTIVE_STATUSES:
+                    skipped.append(index)
+                    continue
+                project_path = Path(str(task.get("projectPath") or ""))
+                project = None
+                if task.get("projectPath"):
+                    if not project_path.is_file():
+                        raise ValueError(f"Проект монтажа не найден: {project_path}")
+                    project = TimelineProject.load(project_path)
+                project_template = getattr(project, "overlay_template", {}) if project is not None else {}
+                project_has_layers = any(project_template.get("layouts", {}).values()) if isinstance(project_template, dict) else False
+                individualized = bool(task.get("overlayTemplateIndividualized")) or (
+                    project_has_layers and project_template != task.get("overlayTemplate")
+                )
+                if individualized and payload.get("overwrite") is not True:
+                    raise ValueError("Нужна подтверждённая перезапись индивидуальных наложений: overwrite=true")
+                plans.append((index, task, project_path, project))
+            staged_targets = []
+            revision = max((int(task.get("overlayTemplateRevision", 0) or 0)
+                            for _, task, _, _ in plans), default=0) + 1
+            for index, task, project_path, project in plans:
+                chosen_template = _materialize_montage_overlay_template(template)
+                if project is not None:
+                    if project.overlay_template != chosen_template:
+                        # Keep prior files intact, but never let XML export
+                        # describe that old master as the newly edited stack.
+                        project.output_path = ""
+                        project.davinci_xml_path = ""
+                        project.overlay_needs_render = True
+                    project.overlay_template = deepcopy(chosen_template)
+                    staging = _production_staging_folder(project_path.parent, settings.production_reset_generation, "overlay")
+                    staged = staging / f"{uuid.uuid4().hex}-{project_path.name}"
+                    project.save(staged)
+                    staged_targets.append((staged, project_path))
+                task.update(overlayTemplate=deepcopy(chosen_template), overlayTemplateIndividualized=True,
+                            overlayTemplateRevision=revision)
+                if project is not None:
+                    task["overlayNeedsRender"] = project.overlay_needs_render
+                settings.montage_task_statuses[str(index)] = task
+                changed.append(index)
+            if staged_targets and len(_publish_staged_paths(settings, staged_targets)) != len(staged_targets):
+                raise RuntimeError("Наложения отменены: производство было очищено")
+            if changed:
+                save_settings(settings)
+    return {**snapshot(), "operationResult": {
+        "kind": "montage-overlays", "count": len(changed), "scope": scope,
+        "skippedIndices": skipped,
+    }}
+
+
 def save_montage_settings(payload: dict) -> dict:
     settings = load_settings()
     if "gpuChunkSize" in payload:
@@ -16559,6 +16707,7 @@ def prepare_montage(payload: dict) -> dict:
         raise ValueError("Добавьте MP3 к этому сценарию: он задаёт точную длину ролика")
     if settings.montage_use_script_text and not narration.strip():
         raise ValueError("Включено «Использовать TXT сценария»: импортируйте или создайте текст, либо выключите эту опцию для быстрого монтажа только по названию и MP3")
+    overlay_template = _montage_overlay_template_for_task(settings, scenario_index, title=titles[scenario_index])
     # Manual preparation can omit queue callbacks, but the callback must be
     # ready before the persistent text-screening step below.
     # Queue workers pass their callback as the private ``_progress`` field so
@@ -17353,6 +17502,7 @@ def prepare_montage(payload: dict) -> dict:
                               # in front in full, with its original sound.
                               intro_duration=_full_intro_duration(intro_path, settings.montage_intro_duration) if intro_path else 0,
                               overlay_path=_random_video(settings.montage_overlay_folder) if settings.montage_overlay_enabled else "",
+                              overlay_template=overlay_template,
                               transition_style=settings.montage_transition_style,
                               transition_frames=settings.montage_transition_frames,
                               voice_map_provenance=voice_map_provenance)
@@ -17399,14 +17549,20 @@ def prepare_montage(payload: dict) -> dict:
     )
     staged_path = project_staging / path.name
 
+    xml_warning = ""
     try:
         project.save(staged_path)
         staged_targets = [(staged_path, path)]
         if settings.montage_export_davinci_xml:
-            staged_xml = staged_path.with_suffix(".fcpxml")
-            export_fcpxml(project, staged_xml)
-            staged_targets.append((staged_xml, path.with_suffix(".fcpxml")))
-            project.save(staged_path)
+            from .overlays import overlay_layers
+
+            if overlay_layers(project.overlay_template, project.aspect_ratio, legacy_path=project.overlay_path):
+                xml_warning = "DaVinci XML с наложениями будет создан после рендера: наложения будут сведены в MP4."
+            else:
+                staged_xml = staged_path.with_suffix(".fcpxml")
+                export_fcpxml(project, staged_xml)
+                staged_targets.append((staged_xml, path.with_suffix(".fcpxml")))
+                project.save(staged_path)
         if len(_publish_staged_paths(settings, staged_targets)) != len(staged_targets):
             raise RuntimeError("Подготовка монтажа отменена: производство было очищено")
     except OSError as exc:
@@ -17417,6 +17573,7 @@ def prepare_montage(payload: dict) -> dict:
         "title": title, "path": str(path), "clips": len(clips),
         "duration": round(project.duration, 1), "summary": selection_summary,
         "summaryText": summary_text, "timingsMs": project.preparation_metrics_ms,
+        "warning": xml_warning,
     }}
 
 
@@ -17447,9 +17604,11 @@ def render_montage(payload: dict) -> dict:
     staged_targets = [(Path(rendered), output)]
     if settings.montage_export_davinci_xml:
         staged_xml = project_staging / project_path.with_suffix(".fcpxml").name
-        export_fcpxml(project, staged_xml)
+        export_fcpxml(project, staged_xml, baked_source=Path(rendered), baked_reference=output)
         project.davinci_xml_path = str(project_path.with_suffix(".fcpxml"))
         staged_targets.append((staged_xml, project_path.with_suffix(".fcpxml")))
+    project.output_path = str(output)
+    project.overlay_needs_render = False
     staged_project = project_staging / project_path.name
     project.save(staged_project)
     staged_remotion = output_staging / output.with_suffix(".remotion.json").name
@@ -17544,7 +17703,8 @@ _DAVINCI_IMPORT_LOCK = threading.RLock()
 
 def _montage_task_update(settings: Settings, scenario_index: int, *, status: str | None = None,
                          phase: str | None = None, progress: int | None = None,
-                         detail: str = "", error: str | None = None, **extra) -> None:
+                         detail: str = "", error: str | None = None,
+                         _only_if_inactive: bool = False, _expected_task_identity: str | None = None, **extra) -> None:
     """Persist one visible queue event immediately.
 
     Electron invokes the long montage command in its own process, while the UI
@@ -17553,20 +17713,40 @@ def _montage_task_update(settings: Settings, scenario_index: int, *, status: str
     20-minute render.
     """
     key = str(scenario_index)
-    with _MONTAGE_QUEUE_LOCK:
+    with _montage_overlay_edit_lock():
         # The UI changes pause/resume from another Electron invocation.  Keep
         # that flag from the newest settings file instead of writing an old
         # in-memory value back while a worker reports its progress.
+        latest_task = {}
         try:
-            settings.montage_queue_paused = load_settings().montage_queue_paused
+            latest = load_settings()
+            settings.montage_queue_paused = latest.montage_queue_paused
+            latest_task = latest.montage_task_statuses.get(key) or {}
+            if _only_if_inactive and (
+                latest.production_reset_generation != settings.production_reset_generation
+                or str(latest_task.get("status", "")) in MONTAGE_ACTIVE_STATUSES
+                or (_expected_task_identity is not None
+                    and str(latest_task.get("production_item_id") or "").strip() != _expected_task_identity)
+            ):
+                return
+            if latest_task.get("overlayTemplateRevision"):
+                current_task = dict(settings.montage_task_statuses.get(key) or {})
+                for name in ("overlayTemplate", "overlayTemplateIndividualized", "overlayTemplateRevision", "overlayNeedsRender"):
+                    if name in latest_task:
+                        current_task[name] = deepcopy(latest_task[name])
+                settings.montage_task_statuses[key] = current_task
         except (OSError, ValueError):
-            pass
+            if _only_if_inactive:
+                return
         item = dict(settings.montage_task_statuses.get(key) or {})
         previous_progress = int(item.get("progress", 0) or 0)
         previous_status = str(item.get("status", ""))
         item.setdefault("scenarioIndex", scenario_index)
         item.setdefault("title", "Без названия")
         item.setdefault("timeline", [])
+        if "overlayTemplate" not in item:
+            item["overlayTemplate"] = _materialize_montage_overlay_template(settings.montage_overlay_template)
+        item.setdefault("overlayTemplateIndividualized", False)
         if status is not None:
             item["status"] = status
         if phase is not None:
@@ -17593,7 +17773,20 @@ def _montage_task_update(settings: Settings, scenario_index: int, *, status: str
             if not events or events[-1] != marker:
                 events.append(marker)
             item["timeline"] = events[-24:]
-        item["updatedAt"] = now
+        # A restart deliberately moves 100% back to 0%. Give ownership a
+        # strictly newer revision, even within one second or a clock rollback,
+        # so settings merging cannot keep an old "ready" row over active work.
+        updated_at = datetime.now().astimezone().replace(tzinfo=None)
+        for previous in (item.get("updatedAt"), latest_task.get("updatedAt")):
+            try:
+                previous_at = datetime.fromisoformat(str(previous))
+                if previous_at.tzinfo is not None:
+                    previous_at = previous_at.astimezone().replace(tzinfo=None)
+                if previous_at >= updated_at:
+                    updated_at = previous_at + timedelta(microseconds=1)
+            except ValueError:
+                pass
+        item["updatedAt"] = updated_at.isoformat(sep=" ", timespec="microseconds")
         runtime_session_id = _runtime_session_id()
         if runtime_session_id:
             item["runtimeSessionId"] = runtime_session_id
@@ -17749,6 +17942,9 @@ def _recover_interrupted_montage_tasks(settings: Settings) -> bool:
 def _montage_task_snapshot_projection(key: str, value: object) -> dict:
     """Expose task evidence with runtime freshness without rewriting history."""
     item = dict(value) if isinstance(value, dict) else {}
+    if item.get("overlayNeedsRender"):
+        item["previousOutputPath"] = str(item.get("outputPath") or "")
+        item["outputPath"] = ""
     saved_session = str(item.pop("runtimeSessionId", "") or "").strip()
     current_session = _runtime_session_id()
     runtime_current = bool(saved_session and current_session and saved_session == current_session)
@@ -18304,6 +18500,9 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     jobs when the desktop app is updated.
     """
     settings = load_settings()
+    if "renderOnly" in payload and type(payload["renderOnly"]) is not bool:
+        raise ValueError("renderOnly должно быть true/false")
+    render_only = payload.get("renderOnly") is True
     # Auto-clear a persisted pause only when this exact owner reclaimed a
     # dead PID record. A brand-new owner may race with a fresh operator Pause,
     # which must win and remain visible.
@@ -18319,13 +18518,16 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         settings.montage_queue_paused = False
         settings._edited_montage_reuse = {"montage_queue_paused"}
         save_settings(settings)
-    _reconcile_montage_outputs(settings)
-    if _recover_interrupted_montage_tasks(settings):
-        save_settings(settings)
+    if not render_only:
+        _reconcile_montage_outputs(settings)
+        if _recover_interrupted_montage_tasks(settings):
+            save_settings(settings)
     if montage_queue_is_active(settings.montage_task_statuses):
         raise ValueError("Очередь монтажа уже выполняется. Дождитесь завершения или поставьте её на паузу.")
     titles, jobs = load_session()
     requested = payload.get("indices")
+    if render_only and not isinstance(requested, list):
+        raise ValueError("Для рендера сохранённых планов выберите indices явно")
     if isinstance(requested, list):
         if not requested:
             raise ValueError("Выберите строки явно; пустой selected scope не означает всю очередь.")
@@ -18339,11 +18541,12 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     if not indices:
         raise ValueError("Нет готовых MP3. Передайте сценарии в озвучку или добавьте свой MP3.")
     valid: list[int] = []
+    saved_project_paths: dict[int, str] = {}
     jobs_by_index = {job.request.index: job for job in jobs}
     for index in indices:
         if not 0 <= index < len(titles):
             continue
-        if not payload.get("replaceOutput") and not _montage_task_needs_render(settings, index):
+        if not render_only and not payload.get("replaceOutput") and not _montage_task_needs_render(settings, index):
             # Normal start/resume is missing-only. Keeping the invariant here
             # protects ready videos even if an older interface sends all rows.
             continue
@@ -18352,6 +18555,47 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         narration = str(getattr(job, "result", "") or "")
         job_title = str(getattr(getattr(job, "request", None), "title", "") or "").strip()
         current_title = str(titles[index]).strip()
+        if render_only:
+            task = settings.montage_task_statuses.get(str(index)) or {}
+            task_identity = str(task.get("production_item_id") or "").strip()
+            try:
+                project_path = Path(str(task.get("projectPath") or ""))
+                if not task.get("projectPath") or project_path.suffix.lower() != ".newsflow" or not project_path.is_file():
+                    raise ValueError(f"Сначала подготовьте сохранённый проект для строки {index + 1}")
+                project = TimelineProject.load(project_path)
+                job_identity = str(getattr(getattr(job, "request", None), "production_item_id", "") or "").strip()
+                if ((task_identity or job_identity) and task_identity != job_identity
+                        or project.title.strip() != current_title or job_title != current_title
+                        or not voice.is_file() or not project.voiceover_path
+                        or Path(project.voiceover_path).resolve() != voice.resolve()):
+                    raise ValueError(f"Сохранённый проект не соответствует текущему производству строки {index + 1}")
+                if not project.clips:
+                    raise ValueError(f"Сохранённый таймлайн строки {index + 1} пуст")
+                # Re-export owns the saved plan's choice, including old rows
+                # which have no queue snapshot. Never roll the global pool.
+                task.setdefault("overlayTemplate", deepcopy(project.overlay_template))
+                settings.montage_task_statuses[str(index)] = task
+            except (OSError, TypeError, ValueError) as error:
+                # The Electron worker was already spawned. Publish a fresh
+                # terminal result for the entire aborted selection. Valid rows
+                # were never launched and must not leave the caller polling
+                # their unchanged results from a previous render forever.
+                for cancelled_index in indices:
+                    if not 0 <= cancelled_index < len(titles):
+                        continue
+                    cancelled_task = settings.montage_task_statuses.get(str(cancelled_index)) or {}
+                    identity = str(cancelled_task.get("production_item_id") or "").strip()
+                    message = (str(error) if cancelled_index == index else
+                               f"Запуск пакета отменён: ошибка проверки строки {index + 1}")
+                    _montage_task_update(
+                        settings, cancelled_index, status="Ошибка", phase="Проверка сохранённого проекта", progress=100,
+                        error=message, detail=message, _only_if_inactive=True,
+                        _expected_task_identity=identity,
+                    )
+                raise
+            saved_project_paths[index] = str(project_path)
+            valid.append(index)
+            continue
         if voice.is_file() and narration.strip() and job_title == current_title:
             valid.append(index)
         else:
@@ -18373,7 +18617,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         previous_output = _montage_output_path(settings, previous)
         retained_output = (
             str(previous_output)
-            if payload.get("replaceOutput") and _is_valid_montage_output(previous_output)
+            if (render_only or payload.get("replaceOutput")) and _is_valid_montage_output(previous_output)
             else ""
         )
         _montage_task_update(settings, index, status="В очереди", phase="Проверка входных данных", progress=0,
@@ -18434,6 +18678,8 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         project = TimelineProject.load(Path(project_path))
         project_index = ClipIndex(app_data_root() / "footage-index.sqlite3")
         missing_clips = _montage_project_missing_clips(project, project_index)
+        if render_only and missing_clips:
+            raise FileNotFoundError(f"Сохранённый футаж недоступен; подбор отключён: {missing_clips[0]}")
         if missing_clips:
             # A footage folder can be cleaned or an external cut can vanish.
             # Keep the existing project, MP3 and healthy edits; replace only
@@ -18473,9 +18719,19 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         # immediately before rendering and append normal footage for any tail.
         _montage_wait_if_paused(settings, index)
         try:
-            tail_added = _complete_project_visual_tail(
-                project, project_index, settings, download_semaphore,
-            )
+            if render_only:
+                narration_duration = probe_media_duration(Path(project.voiceover_path))
+                if sum(float(clip.duration) for clip in project.clips) + .05 < narration_duration:
+                    raise ValueError("сохранённый таймлайн короче MP3; автоматическое дополнение отключено")
+                for clip in project.clips:
+                    available = _validated_montage_clip_duration(Path(clip.path)) - max(0.0, float(clip.source_start))
+                    if available + .05 < float(clip.duration):
+                        raise ValueError(f"сохранённый футаж короче своего интервала: {clip.path}")
+                tail_added = 0
+            else:
+                tail_added = _complete_project_visual_tail(
+                    project, project_index, settings, download_semaphore,
+                )
         except ValueError as exc:
             raise RuntimeError(f"Таймлайн требует дополнительный футаж: {exc}") from exc
         if tail_added:
@@ -18514,9 +18770,11 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         if settings.montage_export_davinci_xml:
             _montage_task_update(settings, index, status="Рендер", phase="Создаём DaVinci XML", progress=99)
             staged_xml = project_staging / Path(project_path).with_suffix(".fcpxml").name
-            export_fcpxml(project, staged_xml)
+            export_fcpxml(project, staged_xml, baked_source=Path(rendered), baked_reference=output)
             project.davinci_xml_path = str(Path(project_path).with_suffix(".fcpxml"))
             staged_targets.append((staged_xml, Path(project_path).with_suffix(".fcpxml")))
+        project.output_path = str(output)
+        project.overlay_needs_render = False
         staged_project = project_staging / Path(project_path).name
         project.save(staged_project)
         staged_remotion = output_staging / output.with_suffix(".remotion.json").name
@@ -18539,7 +18797,8 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             if str(output) not in settings.pipeline_montage_outputs:
                 settings.pipeline_montage_outputs.append(str(output))
         _montage_task_update(settings, index, status="Готово", phase="MP4 сохранён", progress=100,
-                             detail=output.name, outputPath=str(output), projectPath=project_path, error="")
+                             detail=output.name, outputPath=str(output), projectPath=project_path, error="",
+                             overlayNeedsRender=False)
         return str(output)
 
     rendered_count = 0
@@ -18555,8 +18814,9 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     rendering_workers = requested_render_workers
     with ThreadPoolExecutor(max_workers=planning_workers, thread_name_prefix="newsflow-plan") as planners, \
             ThreadPoolExecutor(max_workers=rendering_workers, thread_name_prefix="newsflow-render") as renderers:
-        planned = {planners.submit(plan_task, index): index for index in valid}
-        renders = {}
+        planned = {} if render_only else {planners.submit(plan_task, index): index for index in valid}
+        renders = ({renderers.submit(render_task, index, saved_project_paths[index]): index for index in valid}
+                   if render_only else {})
         # Drain both pools together. The old two-loop implementation waited
         # for every planner before observing any render future, so a failed
         # FFmpeg job could look like endless "Рендер" in a large batch.
@@ -21954,6 +22214,10 @@ def main() -> None:
             result = set_proxy_cache_paused(payload if isinstance(payload, dict) else {})
         elif command == "save-montage-settings":
             result = save_montage_settings(payload if isinstance(payload, dict) else {})
+        elif command == "save-montage-overlays":
+            result = save_montage_overlays(payload if isinstance(payload, dict) else {})
+        elif command == "scan-montage-overlays":
+            result = scan_montage_overlays(payload if isinstance(payload, dict) else {})
         elif command == "prepare-montage":
             result = prepare_montage(payload if isinstance(payload, dict) else {})
         elif command == "render-montage":

@@ -19,6 +19,7 @@ from xml.sax.saxutils import quoteattr
 
 from .config import validate_gpu_chunk_size
 from .media_health import default_health_store, quarantine_cache, signature
+from .overlays import compose_overlays, normalize_overlay_template, overlay_layers
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
 _GPU_TIMELINE_CAPABILITY_CACHE: dict[str, dict[str, object]] = {}
@@ -153,12 +154,15 @@ class TimelineProject:
     selection_summary: dict = field(default_factory=dict)
     preparation_metrics_ms: dict = field(default_factory=dict)
     voice_map_provenance: dict = field(default_factory=dict)
+    overlay_template: dict = field(default_factory=dict)
+    overlay_needs_render: bool = False
 
     @property
     def duration(self) -> float:
         return self.intro_duration + sum(item.duration for item in self.clips)
 
     def save(self, path: Path):
+        self.overlay_template = normalize_overlay_template(self.overlay_template)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -166,6 +170,7 @@ class TimelineProject:
     def load(cls, path: Path):
         data = json.loads(path.read_text(encoding="utf-8"))
         data["clips"] = [TimelineClip(**item) for item in data.get("clips", [])]
+        data["overlay_template"] = normalize_overlay_template(data.get("overlay_template"))
         return cls(**data)
 
 
@@ -503,13 +508,15 @@ def probe_video_duration(path: Path) -> float:
     return result.duration
 
 
-def validate_rendered_montage(path: Path, *, expected_duration: float) -> float:
+def validate_rendered_montage(path: Path, *, expected_duration: float, require_audio: bool = True) -> float:
     """Validate the final published MP4 before a queue can mark it READY.
 
     Recovery may use a cheap ISO-BMFF header check for a large historical
     batch, but a *new* render must have readable video and audio and cover the
     planned narration.  This deliberately runs once per completed render,
     never once per dashboard row.
+    Intentional silent projects can opt out of the audio requirement; queue
+    acceptance for narration-backed projects retains the default requirement.
     """
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -518,7 +525,7 @@ def validate_rendered_montage(path: Path, *, expected_duration: float) -> float:
     details = result.stderr or ""
     if not re.search(r"\bVideo:\s", details):
         raise ValueError("В итоговом MP4 нет читаемого видеопотока")
-    if not re.search(r"\bAudio:\s", details):
+    if require_audio and not re.search(r"\bAudio:\s", details):
         raise ValueError("В итоговом MP4 нет аудиопотока")
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", details)
     if not match:
@@ -829,6 +836,8 @@ def _render_project_remotion(project: TimelineProject, output: Path,
                              progress: Callable[[int, int, str], None] | None = None,
                              frame_concurrency: int = 1,
                              parallel_jobs: int = 1) -> Path:
+    if overlay_layers(project.overlay_template, project.aspect_ratio, legacy_path=project.overlay_path):
+        raise ValueError("Наложения требуют общего финального прохода: используйте render_project")
     configured = _remotion_runner()
     if configured is None:
         raise RuntimeError("Remotion не найден в этой сборке NewsFlow")
@@ -983,6 +992,8 @@ def _render_project_gpu_timeline(
     output contract remain identical; only the physical render strategy is
     different.
     """
+    if overlay_layers(project.overlay_template, project.aspect_ratio, legacy_path=project.overlay_path):
+        raise ValueError("Наложения требуют общего финального прохода: используйте render_project")
     chunk_size = validate_gpu_chunk_size(chunk_size)
     ffmpeg = ffmpeg_executable()
     gpu_timeline_encoder_args(ffmpeg)
@@ -1025,19 +1036,6 @@ def _render_project_gpu_timeline(
         if progress:
             progress(total_chunks + 1, total_steps, "Склейка GPU-таймлайна")
         video_source = silent
-        overlay = Path(project.overlay_path) if project.overlay_path else None
-        if overlay and overlay.exists():
-            composited = work / "with-overlay.mp4"
-            filter_value = (
-                f"[1:v]chromakey=0x00FF00:0.12:0.08,scale={width}:-2[overlay];"
-                f"[0:v][overlay]overlay=(W-w)/2:H-h-24:shortest=1[outv]"
-            )
-            run_ffmpeg([
-                ffmpeg, "-y", "-i", str(silent), "-stream_loop", "-1", "-i", str(overlay),
-                "-filter_complex", filter_value, "-map", "[outv]", "-an",
-                *gpu_timeline_encoder_args(ffmpeg), "-movflags", "+faststart", str(composited),
-            ])
-            video_source = composited
         voiceover = Path(project.voiceover_path) if project.voiceover_path else None
         if voiceover and voiceover.exists():
             voice_duration = probe_media_duration(voiceover)
@@ -1085,6 +1083,70 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                    remotion_parallel_jobs: int = 1,
                    heartbeat: Callable[[int | None], None] | None = None,
                    gpu_chunk_size: int = GPU_TIMELINE_CHUNK_SIZE):
+    """Render with the selected engine, then finish all overlays in one pass.
+
+    A disabled/empty current layout takes exactly the existing renderer path.
+    Render and finish in disposable storage so a failed pass cannot replace a
+    previous good output or publish an overlay-free video as a success.
+    """
+    layers = overlay_layers(project.overlay_template, project.aspect_ratio,
+                            legacy_path=project.overlay_path, check_files=True)
+    options = {"renderer": renderer, "remotion_concurrency": remotion_concurrency,
+               "remotion_parallel_jobs": remotion_parallel_jobs, "heartbeat": heartbeat,
+               "gpu_chunk_size": gpu_chunk_size}
+    if not layers:
+        rendered = _render_project_base(project, output, progress, **options)
+        project.overlay_needs_render = False
+        return rendered
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Keep partial publication on the same volume as the destination. mkdtemp
+    # supplies per-worker uniqueness even when concurrent outputs share a name.
+    with tempfile.TemporaryDirectory(prefix=".newsflow-overlays-", dir=output.parent) as temporary:
+        work = Path(temporary)
+        clean = replace(project, overlay_path="", overlay_template={})
+        base = _render_project_base(clean, work / "base.mp4", progress, **options)
+        total = probe_media_duration(base)
+        if progress:
+            progress(0, 1, "Наложения")
+        composed = work / "finished.mp4"
+        ffmpeg = ffmpeg_executable()
+        encoder = video_encoder_args(ffmpeg)
+        try:
+            compose_overlays(base, composed, project.overlay_template, project.aspect_ratio,
+                             legacy_path=project.overlay_path, total_duration=total,
+                             ffmpeg=ffmpeg, encoder_args=encoder,
+                             run=lambda command: _run(command, process_observer=heartbeat))
+        except RuntimeError:
+            if "h264_nvenc" not in encoder:
+                raise
+            # A Remotion base can succeed on a machine whose FFmpeg advertises
+            # NVENC but has no usable NVIDIA driver. Match the FFmpeg route's
+            # existing CPU fallback and only publish a fully finished video.
+            fallback = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+            _ENCODER_CACHE[ffmpeg] = fallback
+            compose_overlays(base, composed, project.overlay_template, project.aspect_ratio,
+                             legacy_path=project.overlay_path, total_duration=total,
+                             ffmpeg=ffmpeg, encoder_args=fallback,
+                             run=lambda command: _run(command, process_observer=heartbeat))
+        # A saved project can intentionally have no narration or other audio.
+        # Existing narration must survive the finishing pass before publication.
+        require_audio = bool(project.voiceover_path and Path(project.voiceover_path).is_file())
+        validate_rendered_montage(composed, expected_duration=total, require_audio=require_audio)
+        _replace_with_retry(composed, output)
+    project.output_path = str(output)
+    project.overlay_needs_render = False
+    if progress:
+        progress(1, 1, "Наложения готовы")
+    return output
+
+
+def _render_project_base(project: TimelineProject, output: Path, progress: Callable[[int, int, str], None] | None = None,
+                   renderer: str = "ffmpeg", remotion_concurrency: int | None = None,
+                   remotion_parallel_jobs: int = 1,
+                   heartbeat: Callable[[int | None], None] | None = None,
+                   gpu_chunk_size: int = GPU_TIMELINE_CHUNK_SIZE):
+    if overlay_layers(project.overlay_template, project.aspect_ratio, legacy_path=project.overlay_path):
+        raise ValueError("Наложения требуют общего финального прохода: используйте render_project")
     if not project.clips:
         raise ValueError("Таймлайн пуст")
     # FAST NEWS uses the direct, cached FFmpeg pipeline by default.  Remotion
@@ -1237,17 +1299,6 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
         if progress:
             progress(len(render_clips) + 1, total, "Склейка")
         video_source = silent
-        overlay = Path(project.overlay_path) if project.overlay_path else None
-        if overlay and overlay.exists():
-            composited = work / "with-overlay.mp4"
-            filter_value = (
-                f"[1:v]chromakey=0x00FF00:0.12:0.08,scale={width}:-2[overlay];"
-                f"[0:v][overlay]overlay=(W-w)/2:H-h-24:shortest=1[outv]"
-            )
-            run_ffmpeg([ffmpeg, "-y", "-i", str(silent), "-stream_loop", "-1", "-i", str(overlay),
-                  "-filter_complex", filter_value, "-map", "[outv]", "-an", *video_encoder_args(ffmpeg),
-                  "-movflags", "+faststart", str(composited)])
-            video_source = composited
         voiceover = Path(project.voiceover_path) if project.voiceover_path else None
         if voiceover and voiceover.exists():
             # The planner is required to cover the whole narration with real
@@ -1321,6 +1372,9 @@ def remotion_payload(project: TimelineProject, fps: int = 30) -> dict:
             "durationInFrames": max(1, composition_frames), "visualDurationInFrames": frame, "sequences": sequences,
             "transitionStyle": project.transition_style,
             "transitionFrames": max(0, int(project.transition_frames)),
+            "overlayTemplate": normalize_overlay_template(project.overlay_template),
+            "requiresOverlayFinishing": bool(overlay_layers(project.overlay_template, project.aspect_ratio,
+                                                             legacy_path=project.overlay_path)),
             "voiceover": {"src": project.voiceover_path, "from": round(project.intro_duration * fps)},
             "overlay": {"src": project.overlay_path, "chromaKey": "#00ff00", "position": "bottom"}}
 
@@ -1344,13 +1398,43 @@ def _fcpxml_url(path: Path) -> str:
     return path.resolve().as_uri()
 
 
-def export_fcpxml(project: TimelineProject, output: Path, fps: int = 30) -> Path:
+def export_fcpxml(project: TimelineProject, output: Path, fps: int = 30, *,
+                  baked_source: Path | None = None, baked_reference: Path | None = None) -> Path:
     """Write an editable DaVinci Resolve FCPXML timeline for a NewsFlow plan.
 
     This is deliberately an export, not a third renderer: it references the
     selected original footage and MP3, so Resolve can open the exact sequence
     without duplicating or transcoding media.
+    Active overlays require a rendered, clearly labelled master instead. For
+    atomic queue publication, probe ``baked_source`` in staging and reference
+    its final destination through ``baked_reference`` in the exported XML.
     """
+    if overlay_layers(project.overlay_template, project.aspect_ratio, legacy_path=project.overlay_path):
+        master = baked_source or (Path(project.output_path) if project.output_path else None)
+        if master is None or not master.is_file():
+            raise ValueError("Наложения в DaVinci XML требуют готового MP4; сначала выполните рендер")
+        reference = baked_reference or master
+        duration = probe_media_duration(master)
+        width, height = _fcpxml_dimensions(project.aspect_ratio)
+        name = f"{project.title or reference.stem} — наложения сведены в MP4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Reference the published destination even while the source master is
+        # still staged. The queue atomically publishes this XML and its MP4.
+        output.write_text("\n".join([
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!DOCTYPE fcpxml>', '<fcpxml version="1.10">', '  <resources>',
+            f'    <format id="r1" name="NewsFlow {width}x{height}p{fps}" frameDuration="1/{fps}s" width="{width}" height="{height}"/>',
+            f'    <asset id="r2" name={quoteattr(name)} src={quoteattr(_fcpxml_url(reference))} start="0s" duration={quoteattr(_fcpxml_time(duration, fps))} hasVideo="1" hasAudio="1" format="r1" audioSources="1" audioChannels="2" audioRate="48000"/>',
+            '  </resources>', '  <library><event name="NewsFlow">',
+            f'    <project name={quoteattr(name)}>',
+            f'      <sequence format="r1" duration={quoteattr(_fcpxml_time(duration, fps))} tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">',
+            '        <spine>',
+            f'          <asset-clip ref="r2" name={quoteattr(name)} offset="0s" start="0s" duration={quoteattr(_fcpxml_time(duration, fps))}/>',
+            '        </spine>', '      </sequence>', '    </project>',
+            '  </event></library>', '</fcpxml>', '',
+        ]), encoding="utf-8")
+        project.davinci_xml_path = str(output)
+        return output
     if not project.clips:
         raise ValueError("Нельзя создать DaVinci XML: таймлайн пуст")
     width, height = _fcpxml_dimensions(project.aspect_ratio)
