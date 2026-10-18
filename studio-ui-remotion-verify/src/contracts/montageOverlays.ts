@@ -12,7 +12,10 @@ export interface MontageOverlayLayer {
   opacity: number;
   start: number;
   duration: number;
-  mode: "once" | "repeat" | "end" | "until-end";
+  mode: "once" | "repeat" | "end" | "until-end" | "intervals" | "count";
+  ranges?: Array<{ start: number; end: number }>;
+  repeatCount?: number;
+  rangeEnd?: number | null;
   repeatEvery: number;
   endOffset: number;
   chromaEnabled: boolean;

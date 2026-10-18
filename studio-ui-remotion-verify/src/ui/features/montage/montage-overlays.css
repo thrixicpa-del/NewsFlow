@@ -30,6 +30,12 @@
 .nf-overlay-number button { padding: 5px 8px; }
 .nf-overlay-properties { min-width: 0; display: grid; gap: 14px; border: 1px solid var(--nf-color-border-strong, #315b82); padding: 14px; border-radius: 7px; }
 .nf-overlay-properties legend { padding: 0 5px; }
+.nf-overlay-timing { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 14px; border: 1px solid #3975d0; border-radius: 7px; background: var(--nf-color-surface, #0a192b); }
+.nf-overlay-timing legend { font-size: 16px; font-weight: 700; }
+.nf-overlay-range-list { display: grid; gap: 10px; }
+.nf-overlay-range { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; padding: 10px; border: 1px solid var(--nf-color-border-strong, #315b82); border-radius: 6px; }
+.nf-overlay-range label { flex: 1; min-width: 110px; }
+.nf-overlay-range b, .nf-overlay-range > span { align-self: center; }
 .nf-overlay-content .nf-overlay-check { flex-direction: row; align-items: center; }
 .nf-overlay-path { grid-column: span 2; }
 .nf-overlay-confirmation { background: #fff7e5; border: 1px solid #dec187; padding: 14px; border-radius: 6px; color: #4b3517; }

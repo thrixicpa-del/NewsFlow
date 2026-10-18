@@ -139,6 +139,18 @@ class OverlayRendererModes(unittest.TestCase):
                     p = pixel(6.7, 420, 120)
                     self.assertGreater(p[0], 200)
                     self.assertGreater(p[2], 200)
+                    # New per-layer manual/count schedules must survive each
+                    # renderer route, including restart from source frame zero.
+                    for when, x, y, yellow in [(3.3, 780, 130, False), (4.8, 880, 130, True),
+                                               (3.1, 780, 250, False), (3.6, 780, 250, True),
+                                               (3.3, 880, 250, False), (3.8, 880, 250, True),
+                                               (6.3, 980, 130, False), (6.8, 980, 130, True)]:
+                        p = pixel(when, x, y)
+                        self.assertGreater(p[0], 180, (renderer, ratio, when, x, y, p))
+                        if yellow:
+                            self.assertGreater(p[1], 180, (renderer, ratio, when, x, y, p))
+                        else:
+                            self.assertLess(p[1], 35, (renderer, ratio, when, x, y, p))
                     decode("-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-")
                     report.append(
                         {

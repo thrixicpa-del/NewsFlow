@@ -19,6 +19,67 @@ function setup(extra: Partial<NewsFlowSnapshot> = {}) {
 afterEach(() => { delete window.newsflowDesktop; vi.useRealTimers(); });
 
 describe("inline montage overlays", () => {
+  it("preserves unfinished edits when another interval is removed and reindexes later drafts", () => {
+    setup();
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "intervals" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить интервал" }));
+    fireEvent.click(screen.getByRole("button", { name: "Добавить интервал" }));
+    fireEvent.change(screen.getByLabelText("Интервал 1: начало, с"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Интервал 3: конец, с"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Удалить интервал 2" }));
+    expect(screen.getByLabelText("Интервал 1: начало, с")).toHaveProperty("value", "");
+    expect(screen.getByLabelText("Интервал 2: конец, с")).toHaveProperty("value", "");
+    expect(screen.getByRole("button", { name: "Сохранить для новых" })).toHaveProperty("disabled", true);
+  });
+  it("keeps timing independent for different files and clears hidden invalid end drafts", () => {
+    setup({ montageSettings: { ...fallback.montageSettings, overlayTemplate: { ...template, layouts: { "16:9": [layer, { ...layer, id: "card", name: "Card" }], "9:16": [] } } } });
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "intervals" } });
+    fireEvent.change(screen.getByLabelText("Интервал 1: начало, с"), { target: { value: "6" } });
+    fireEvent.change(screen.getByLabelText("Интервал 1: конец, с"), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("button", { name: "Card" }));
+    expect((screen.getByLabelText("Режим показа") as HTMLSelectElement).value).toBe("once");
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "count" } });
+    fireEvent.click(screen.getByLabelText("Диапазон до конца MP4"));
+    fireEvent.change(screen.getByLabelText("Конец диапазона, с"), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Сохранить для новых" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByLabelText("Диапазон до конца MP4"));
+    expect(screen.getByRole("button", { name: "Сохранить для новых" })).toHaveProperty("disabled", false);
+    fireEvent.change(screen.getByLabelText("Количество показов"), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "until-end" } });
+    expect(screen.getByRole("button", { name: "Сохранить для новых" })).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByRole("button", { name: "Logo" }));
+    expect((screen.getByLabelText("Интервал 1: конец, с") as HTMLInputElement).value).toBe("12");
+  });
+  it("edits separate explicit ranges for each layer and saves them in the template", async () => {
+    const { command } = setup();
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "intervals" } });
+    expect(screen.getByRole("group", { name: "Когда показывать: Logo" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Интервал 1: начало, с"), { target: { value: "6" } });
+    fireEvent.change(screen.getByLabelText("Интервал 1: конец, с"), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить интервал" }));
+    fireEvent.change(screen.getByLabelText("Интервал 2: начало, с"), { target: { value: "80" } });
+    fireEvent.change(screen.getByLabelText("Интервал 2: конец, с"), { target: { value: "88" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить для новых" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-overlays", expect.objectContaining({ template: expect.objectContaining({ layouts: { "16:9": [expect.objectContaining({ mode: "intervals", ranges: [{ start: 6, end: 12 }, { start: 80, end: 88 }] })], "9:16": [] } }) })));
+  });
+  it("distributes a requested number over a bounded window or through the MP4 end", async () => {
+    const { command } = setup();
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "count" } });
+    fireEvent.change(screen.getByLabelText("Начало, с"), { target: { value: "6" } });
+    fireEvent.change(screen.getByLabelText("Длительность, с"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Количество показов"), { target: { value: "4" } });
+    expect((screen.getByLabelText("Диапазон до конца MP4") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByLabelText("Диапазон до конца MP4"));
+    fireEvent.change(screen.getByLabelText("Конец диапазона, с"), { target: { value: "12" } });
+    expect(screen.getByRole("button", { name: "Сохранить для новых" })).toHaveProperty("disabled", true);
+    fireEvent.change(screen.getByLabelText("Конец диапазона, с"), { target: { value: "32" } });
+    fireEvent.change(screen.getByLabelText("Позиция предпросмотра, с"), { target: { value: "15" } });
+    expect(screen.getByLabelText("Слой предпросмотра Logo")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Позиция предпросмотра, с"), { target: { value: "17" } });
+    expect(screen.queryByLabelText("Слой предпросмотра Logo")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить для новых" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-overlays", expect.objectContaining({ template: expect.objectContaining({ layouts: { "16:9": [expect.objectContaining({ mode: "count", start: 6, duration: 2, repeatCount: 4, rangeEnd: 32 })], "9:16": [] } }) })));
+  });
   it("updates geometry immediately, preserves ratio and keeps layouts independent", () => {
     setup();
     fireEvent.change(screen.getByLabelText("Ширина, px"), { target: { value: "600" } });

@@ -36,7 +36,7 @@ jobs:
       - name: Overlay persistence, render and real media regressions
         run: >-
           python tests/run_isolated.py
-          tests.test_overlay_persistence tests.test_overlays_render
+          tests.test_overlay_persistence tests.test_overlays_render tests.test_overlay_timing
           tests.test_overlay_library tests.test_overlay_random
           tests.test_overlay_storage_boundary
           tests.test_overlay_remotion_contract tests.test_overlay_media_acceptance

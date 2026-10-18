@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import type { MontageOverlayLayer as Layer, MontageOverlayTemplate as Template, MontageOverlayLibrarySource as LibrarySource } from "../../../contracts/montageOverlays";
 import type { CommandRequest, NewsFlowCommand } from "../../../contracts/newsflowCommands";
+import { overlayIntervals, overlaySourceTime, overlayTimecode, validOverlayTiming } from "../../../contracts/overlaySchedule";
 import "./montage-overlays.css";
 
 type Command = <K extends NewsFlowCommand>(name: K, payload?: CommandRequest<K>) => Promise<NewsFlowSnapshot | undefined>;
 type Layout = "16:9" | "9:16";
-type NumericField = "x" | "y" | "width" | "height" | "opacity" | "start" | "duration" | "repeatEvery" | "endOffset" | "chromaSimilarity" | "chromaBlend";
+type NumericField = "x" | "y" | "width" | "height" | "opacity" | "start" | "duration" | "repeatEvery" | "endOffset" | "chromaSimilarity" | "chromaBlend" | "repeatCount" | "rangeEnd";
 const emptyTemplate = (): Template => ({ version: 1, layouts: { "16:9": [], "9:16": [] } });
-const copyTemplate = (template: Template): Template => ({ ...template, ...(template.librarySources ? { librarySources: template.librarySources.map((source) => ({ ...source })) } : {}), version: 1, layouts: { "16:9": template.layouts["16:9"].map((layer) => ({ ...layer })), "9:16": template.layouts["9:16"].map((layer) => ({ ...layer })) } });
+const copyLayer = (layer: Layer): Layer => ({ ...layer, ...(layer.ranges ? { ranges: layer.ranges.map(range => ({ ...range })) } : {}) });
+const copyTemplate = (template: Template): Template => ({ ...template, ...(template.librarySources ? { librarySources: template.librarySources.map((source) => ({ ...source })) } : {}), version: 1, layouts: { "16:9": template.layouts["16:9"].map(copyLayer), "9:16": template.layouts["9:16"].map(copyLayer) } });
 const videoTime = (time: number, video: HTMLVideoElement) => Number.isFinite(video.duration) && video.duration > 0 ? time % video.duration : time;
 const pathKey = (path: string) => /^[A-Za-z]:/.test(path) ? path.replace(/\\/g, "/").toLowerCase() : path;
 const sourcePathKey = (path: string, sourceId = "") => JSON.stringify([sourceId, pathKey(path)]);
@@ -15,28 +17,19 @@ const bounds: Record<NumericField, [number, number]> = {
   x: [-16384, 16384], y: [-16384, 16384], width: [1, 16384], height: [1, 16384], opacity: [0, 1],
   start: [0, 604800], duration: [0.001, 604800], repeatEvery: [0.001, 604800], endOffset: [0, 604800],
   chromaSimilarity: [0.01, 1], chromaBlend: [0, 1],
+  repeatCount: [1, 513], rangeEnd: [0, 604800],
 };
 const localPath = (path: string) => /^[A-Za-z]:[\\/]/.test(path) || /^\/(?!\/)/.test(path);
 const validLayer = (layer: Layer) => localPath(layer.path) && (layer.kind !== "image" || /\.(png|jpe?g)$/i.test(layer.path)) &&
   Object.entries(bounds).every(([field, [min, max]]) => {
+    if (field === "repeatCount" || field === "rangeEnd") return true;
     const value = layer[field as NumericField];
-    return Number.isFinite(value) && value >= min && value <= max;
-  }) && /^#[0-9a-f]{6}$/i.test(layer.chromaColor);
+    return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+  }) && /^#[0-9a-f]{6}$/i.test(layer.chromaColor) && validOverlayTiming(layer);
 
 // Time is relative to the final output, including any intro. Each occurrence
 // returns its own source time; video never resumes from a previous occurrence.
-function sourceTime(layer: Layer, time: number, total: number): number | null {
-  if (!layer.enabled || time < 0 || time >= total) return null;
-  const start = layer.mode === "end" ? total - layer.endOffset : layer.start;
-  if (layer.mode === "end") {
-    const begin = Math.max(0, start);
-    return time >= begin && time < Math.min(total, start + layer.duration) ? time - begin : null;
-  }
-  if (time < start) return null;
-  if (layer.mode === "until-end") return time - start;
-  const offset = layer.mode === "repeat" ? (time - start) % layer.repeatEvery : time - start;
-  return offset >= 0 && offset < layer.duration ? offset : null;
-}
+const sourceTime = overlaySourceTime;
 
 // Lightweight RGB preview only. The final FFmpeg chromakey uses its own color
 // space; this preview deliberately makes no promise of encoder pixel identity.
@@ -177,7 +170,7 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
     const key = `${layout}:${layer.id}:${field}`;
     const number = Number(raw);
     const [min, max] = bounds[field];
-    if (!raw.trim() || !Number.isFinite(number) || number < min || number > max) {
+    if (!raw.trim() || !Number.isFinite(number) || number < min || number > max || (field === "repeatCount" && !Number.isInteger(number))) {
       setInvalid((current) => ({ ...current, [key]: raw }));
       setDirty(true);
       setConfirmation(null);
@@ -198,11 +191,11 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
     update(layer.id, patch);
   };
   const numeric = (label: string, field: NumericField, pixels = false) => active && <label className="nf-overlay-number">{label}
-    <span><input type="number" aria-label={label} min={bounds[field][0]} max={bounds[field][1]} step={pixels ? step : "any"}
-      value={invalid[`${layout}:${active.id}:${field}`] ?? active[field]} aria-invalid={`${layout}:${active.id}:${field}` in invalid}
+    <span><input type="number" aria-label={label} min={bounds[field][0]} max={bounds[field][1]} step={pixels ? step : field === "repeatCount" ? 1 : "any"}
+      value={invalid[`${layout}:${active.id}:${field}`] ?? active[field] ?? (field === "repeatCount" ? 1 : total)} aria-invalid={`${layout}:${active.id}:${field}` in invalid}
       onChange={(event) => changeNumeric(active, field, event.target.value)} />
-      {pixels && <><button type="button" aria-label={`${label} −${step}`} onClick={() => changeNumeric(active, field, String(active[field] - step))}>−</button>
-        <button type="button" aria-label={`${label} +${step}`} onClick={() => changeNumeric(active, field, String(active[field] + step))}>+</button></>}
+      {pixels && <><button type="button" aria-label={`${label} −${step}`} onClick={() => changeNumeric(active, field, String((active[field] ?? 0) - step))}>−</button>
+        <button type="button" aria-label={`${label} +${step}`} onClick={() => changeNumeric(active, field, String((active[field] ?? 0) + step))}>+</button></>}
     </span></label>;
   const createLayer = (path: string, kind: "image" | "video", name = path.split(/[\\/]/).pop() || "Слой"): Layer => {
     const id = `overlay-${Date.now()}-${++serial.current}`;
@@ -299,6 +292,41 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Не удалось экспортировать наложения."); }
     finally { setSaving(false); }
   };
+  const changeRange = (index: number, field: "start" | "end", raw: string) => {
+    if (!active) return;
+    const key = `${layout}:${active.id}:range-${index}-${field}`;
+    const value = Number(raw);
+    if (!raw.trim() || !Number.isFinite(value) || value < 0 || value > 604800) {
+      setInvalid(current => ({ ...current, [key]: raw })); setDirty(true); return;
+    }
+    setInvalid(current => { const next = { ...current }; delete next[key]; return next; });
+    update(active.id, { ranges: (active.ranges || []).map((range, i) => i === index ? { ...range, [field]: value } : range) });
+  };
+  const changeOnceEnd = (raw: string) => {
+    if (!active) return;
+    const key = `${layout}:${active.id}:onceEnd`;
+    const end = Number(raw);
+    if (!raw.trim() || !Number.isFinite(end) || end <= active.start || end > 604800) {
+      setInvalid(current => ({ ...current, [key]: raw })); setDirty(true); return;
+    }
+    setInvalid(current => { const next = { ...current }; delete next[key]; return next; });
+    update(active.id, { duration: end - active.start });
+  };
+  const clearTimingDrafts = () => {
+    if (!active) return;
+    const prefix = `${layout}:${active.id}:`;
+    const fields = ["start", "duration", "repeatEvery", "endOffset", "repeatCount", "rangeEnd", "onceEnd"];
+    setInvalid(current => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix) || (!fields.includes(key.slice(prefix.length)) && !key.slice(prefix.length).startsWith("range-")))));
+  };
+  let schedule: Array<[number, number]> = [], scheduleError = "";
+  if (active) {
+    try { schedule = overlayIntervals(active, total); }
+    catch (cause) { scheduleError = cause instanceof Error ? cause.message : "Проверьте расписание слоя."; }
+  }
+  const timingSummary = (layer: Layer) => layer.mode === "until-end" ? `С ${overlayTimecode(layer.start)} до конца MP4` :
+    layer.mode === "intervals" ? `Своих интервалов: ${layer.ranges?.length || 0}` : layer.mode === "count" ? `Показов: ${layer.repeatCount ?? 1}` :
+    layer.mode === "repeat" ? `С ${overlayTimecode(layer.start)}, каждые ${layer.repeatEvery} с` : layer.mode === "end" ? `За ${layer.endOffset} с до конца` :
+    `${overlayTimecode(layer.start)}–${overlayTimecode(layer.start + layer.duration)}`;
   return <section className="panel nf-overlay-panel">
     <div className="panel-title"><div><button type="button" className="nf-overlay-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>Наложения</button>
       <small>Картинки, PNG с прозрачностью и видео поверх финального монтажа.</small></div></div>
@@ -332,6 +360,7 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
           <input type="checkbox" aria-label={`Включить ${layer.name}`} checked={layer.enabled} onChange={(event) => update(layer.id, { enabled: event.target.checked })} />
           <span>{index + 1}</span><button type="button" aria-pressed={active?.id === layer.id} onClick={() => setActiveId(layer.id)}>{layer.name}</button>
           <small className="nf-overlay-layer-group">{layer.librarySourceId ? `${sourceById.get(layer.librarySourceId)?.name || "Группа недоступна"} · ` : ""}{layer.randomGroup?.trim() ? "Случайный вариант" : "Постоянный"}</small>
+          <small className="nf-overlay-layer-group">{timingSummary(layer)}</small>
         </div>) : <p>В этом формате пока нет слоёв.</p>}</div>
         <div className="nf-overlay-preview-column">
           <div className="nf-overlay-preview" role="img" aria-label={`Предпросмотр наложений ${layout}`} style={{ aspectRatio: `${frameWidth} / ${frameHeight}` }}>
@@ -359,6 +388,70 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
           <button type="button" onClick={() => { setTemplate((current) => ({ ...current, layouts: { ...current.layouts, [layout]: layers.filter((layer) => layer.id !== active.id) } })); setInvalid((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${layout}:${active.id}:`)))); setDirty(true); setConfirmation(null); }}>Удалить слой</button>
           <label>Шаг, px<select aria-label="Шаг, px" value={step} onChange={(event) => setStep(Number(event.target.value))}><option value="1">1</option><option value="10">10</option></select></label>
         </div>
+        <fieldset className="nf-overlay-timing" aria-label={`Когда показывать: ${active.name}`}>
+          <legend>Когда показывать: {active.name}</legend>
+          <p>Настройки только этого слоя. Все времена отсчитываются от начала готового MP4, включая заставку.</p>
+          <div className="nf-overlay-fields">
+            <label>Режим показа<select aria-label="Режим показа" value={active.mode} onChange={(event) => {
+              const mode = event.target.value as Layer["mode"];
+              clearTimingDrafts();
+              update(active.id, { mode, ...(mode === "intervals" && !active.ranges?.length ? { ranges: [{ start: active.start, end: active.start + active.duration }] } : {}),
+                ...(mode !== "intervals" && active.ranges && !validOverlayTiming({ ...active, mode: "intervals" }) ? { ranges: undefined } : {}),
+                ...(mode === "count" ? { repeatCount: active.repeatCount ?? 3, rangeEnd: active.rangeEnd != null && active.rangeEnd > active.start ? active.rangeEnd : null } : {}) });
+            }}>
+              <option value="once">Один интервал</option><option value="intervals">Мои интервалы «от–до»</option>
+              <option value="count">Заданное количество показов</option><option value="repeat">Повтор каждые N секунд</option>
+              <option value="until-end">С указанного времени до конца MP4</option><option value="end">За N секунд до конца</option>
+            </select></label>
+            {active.mode !== "intervals" && active.mode !== "end" && numeric("Начало, с", "start")}
+            {active.mode !== "intervals" && active.mode !== "until-end" && numeric("Длительность, с", "duration")}
+            {active.mode === "once" && <label>Конец интервала, с<input aria-label="Конец интервала, с" type="number" min={0} max={604800}
+              value={invalid[`${layout}:${active.id}:onceEnd`] ?? active.start + active.duration} onChange={event => changeOnceEnd(event.target.value)} /></label>}
+            {active.mode === "repeat" && numeric("Повтор каждые, с", "repeatEvery")}
+            {active.mode === "end" && numeric("За сколько до конца, с", "endOffset")}
+            {active.mode === "count" && <>
+              {numeric("Количество показов", "repeatCount")}
+              <label className="nf-overlay-check"><input type="checkbox" aria-label="Диапазон до конца MP4" checked={active.rangeEnd == null}
+                onChange={event => { setInvalid(current => { const next = { ...current }; delete next[`${layout}:${active.id}:rangeEnd`]; return next; });
+                  update(active.id, { rangeEnd: event.target.checked ? null : Math.max(active.start + active.duration, total) }); }} />Диапазон до конца MP4</label>
+              {active.rangeEnd != null && numeric("Конец диапазона, с", "rangeEnd")}
+            </>}
+          </div>
+          {active.mode === "intervals" && <div className="nf-overlay-range-list">
+            {(active.ranges || []).map((range, index) => <div className="nf-overlay-range" key={index}>
+              <b>Показ {index + 1}</b>
+              {(["start", "end"] as const).map(field => <label key={field}>{field === "start" ? "От, с" : "До, с"}
+                <input type="number" min={0} max={604800} step="any" aria-label={`Интервал ${index + 1}: ${field === "start" ? "начало" : "конец"}, с`}
+                  value={invalid[`${layout}:${active.id}:range-${index}-${field}`] ?? range[field]} onChange={event => changeRange(index, field, event.target.value)} />
+              </label>)}
+              <span>{overlayTimecode(range.start)}–{overlayTimecode(range.end)}</span>
+              <button type="button" aria-label={`Удалить интервал ${index + 1}`} onClick={() => {
+                setInvalid(current => {
+                  const prefix = `${layout}:${active.id}:range-`;
+                  return Object.fromEntries(Object.entries(current).flatMap(([key, value]) => {
+                    if (!key.startsWith(prefix)) return [[key, value]];
+                    const match = /^(\d+)-(start|end)$/.exec(key.slice(prefix.length));
+                    if (!match) return [[key, value]];
+                    const oldIndex = Number(match[1]);
+                    return oldIndex === index ? [] : [[`${prefix}${oldIndex > index ? oldIndex - 1 : oldIndex}-${match[2]}`, value]];
+                  }));
+                });
+                update(active.id, { ranges: active.ranges?.filter((_range, i) => i !== index) });
+              }}>Удалить</button>
+            </div>)}
+            <button type="button" onClick={() => { const end = Math.max(0, ...(active.ranges || []).map(range => range.end));
+              update(active.id, { ranges: [...(active.ranges || []), { start: end + 5, end: end + 10 }] });
+            }}>Добавить интервал</button>
+          </div>}
+          {active.mode === "count" && <small>Укажите диапазон, длительность одного показа и число показов. Они распределятся равномерно: первый начнётся в начале диапазона, последний закончится в его конце.</small>}
+          {active.mode === "once" && <small>Один показ: задайте начало и конец интервала в секундах. Длительность пересчитывается автоматически.</small>}
+          {active.mode === "repeat" && <small>Первый показ начнётся в указанное время, следующие — через каждые N секунд. Длительность задаётся для одного показа.</small>}
+          {active.mode === "end" && <small>Начало отсчитывается назад от фактического конца MP4: например, за 10 секунд до конца. Длительность задаётся для одного показа.</small>}
+          {active.mode === "until-end" && <small>Картинка остаётся на экране до фактического конца каждого MP4. Видео-вставка повторяется по кругу с обычной скоростью; основной ролик и озвучка сохраняют длину.</small>}
+          {active.mode === "intervals" && <small>Добавьте отдельную строку для каждого показа. Например: 6–12 с, 80–88 с, 180–190 с. Пересечения интервалов одного слоя не допускаются.</small>}
+          <p aria-label="Расписание показа" aria-live="polite">Для длины предпросмотра {total} с: {scheduleError || (schedule.length ? `${schedule.length} показ(а): ` + schedule.slice(0, 8).map(([begin, end]) => `${overlayTimecode(begin)}–${overlayTimecode(end)}`).join("; ") + (schedule.length > 8 ? `; ещё ${schedule.length - 8}` : "") : "нет показов внутри ролика")}</p>
+          <small>Каждый отдельный показ видео начинается с кадра 0. Выход за конец MP4 обрезается. Сохранение и применение шаблона сохраняет расписание каждого файла.</small>
+        </fieldset>
         <div className="nf-overlay-fields"><label>Имя слоя<input value={active.name} onChange={(event) => update(active.id, { name: event.target.value })} /></label>
           {activeSource ? <label className="nf-overlay-check"><input type="checkbox" aria-label="Использовать постоянно" checked={!active.randomGroup?.trim()} onChange={(event) => update(active.id, { randomGroup: event.target.checked ? "" : activeSource.name })} />Использовать постоянно в группе «{activeSource.name}»</label> :
             <label>Случайная группа (пусто = всегда)<input aria-label="Случайная группа (пусто = всегда)" value={active.randomGroup || ""} onChange={(event) => update(active.id, { randomGroup: event.target.value })} /></label>}
@@ -367,9 +460,6 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
           {numeric("X, px", "x", true)}{numeric("Y, px", "y", true)}{numeric("Ширина, px", "width", true)}{numeric("Высота, px", "height", true)}
           <label className="nf-overlay-check"><input type="checkbox" checked={active.keepAspect} onChange={(event) => update(active.id, { keepAspect: event.target.checked })} />Сохранять пропорции</label>
           {numeric("Непрозрачность 0–1", "opacity")}
-          <label>Режим показа<select aria-label="Режим показа" value={active.mode} onChange={(event) => update(active.id, { mode: event.target.value as Layer["mode"] })}><option value="once">Один раз</option><option value="repeat">Повторять</option><option value="end">Перед концом</option><option value="until-end">До конца ролика</option></select></label>
-          {active.mode !== "end" && numeric("Начало, с", "start")}{active.mode !== "until-end" && numeric("Длительность, с", "duration")}
-          {active.mode === "repeat" && numeric("Повтор каждые, с", "repeatEvery")}{active.mode === "end" && numeric("За сколько до конца, с", "endOffset")}
           <label className="nf-overlay-check"><input type="checkbox" aria-label="Хромакей" checked={active.chromaEnabled} onChange={(event) => update(active.id, { chromaEnabled: event.target.checked })} />Хромакей</label>
           {active.chromaEnabled && <><label>Цвет хромакея<input type="color" value={active.chromaColor} onChange={(event) => update(active.id, { chromaColor: event.target.value })} /></label>{numeric("Сходство цвета", "chromaSimilarity")}{numeric("Смягчение края", "chromaBlend")}</>}
           {active.kind === "video" && <label className="nf-overlay-check"><input type="checkbox" aria-label="Звук слоя" checked={active.audioEnabled} onChange={(event) => update(active.id, { audioEnabled: event.target.checked })} />Звук слоя (добавить к озвучке)</label>}

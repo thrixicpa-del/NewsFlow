@@ -180,6 +180,16 @@ class OverlayOutputAcceptance(unittest.TestCase):
                 duration=0.1,
                 mode="until-end",
             ),
+            layer("manual-ranges", tail, x=750, y=100, width=64, height=64, mode="intervals",
+                  ranges=[{"start": .8, "end": 1.1}, {"start": 3.2, "end": 3.6}, {"start": 6.5, "end": 9}]),
+            layer("count", jpg, x=850, y=100, width=64, height=64, mode="count",
+                  start=1, duration=.3, repeatCount=4, rangeEnd=6.8),
+            layer("loop-to-end", insert, kind="video", x=950, y=100, width=64, height=64,
+                  mode="until-end", start=4.2, chromaEnabled=True),
+            layer("animated-ranges", insert, kind="video", x=750, y=220, width=64, height=64,
+                  mode="intervals", ranges=[{"start": .5, "end": 1.3}, {"start": 3, "end": 3.8}, {"start": 5.8, "end": 7.8}], chromaEnabled=True),
+            layer("animated-count", insert, kind="video", x=850, y=220, width=64, height=64,
+                  mode="count", start=.5, duration=.8, repeatCount=3, rangeEnd=6.7, chromaEnabled=True),
         ]
         rows[0]["opacity"] = 0.5
         results = []
@@ -230,6 +240,16 @@ class OverlayOutputAcceptance(unittest.TestCase):
                     check=True,
                 )
                 metadata = json.loads(info.stdout)
+                for x, red_times, yellow_times in [(780, (.6, 3.1, 5.9, 6.9), (1.1, 3.6, 6.4)),
+                                                    (880, (.6, 3.3, 6), (1.1, 3.8, 6.5))]:
+                    for when in red_times:
+                        color = self.pixel(output, when, x, 250)
+                        self.assertGreater(color[0], 200, (ratio, x, when, color))
+                        self.assertLess(color[1], 35, (ratio, x, when, color))
+                    for when in yellow_times:
+                        color = self.pixel(output, when, x, 250)
+                        self.assertGreater(color[0], 200, (ratio, x, when, color))
+                        self.assertGreater(color[1], 200, (ratio, x, when, color))
                 video = next(
                     s for s in metadata["streams"] if s["codec_type"] == "video"
                 )
@@ -237,6 +257,26 @@ class OverlayOutputAcceptance(unittest.TestCase):
                 self.assertAlmostEqual(
                     float(metadata["format"]["duration"]), 7, delta=0.08
                 )
+                for time in (.9, 3.3, 6.8):
+                    color = self.pixel(output, time, 780, 130)
+                    self.assertGreater(color[0], 180)
+                    self.assertGreater(color[2], 180)
+                for time in (1.3, 3.8, 6.2):
+                    self.assertLess(self.pixel(output, time, 780, 130)[0], 40)
+                for time in (1.1, 2.95, 4.8, 6.6):
+                    color = self.pixel(output, time, 880, 130)
+                    self.assertGreater(color[0], 180)
+                    self.assertGreater(color[1], 180)
+                for time in (1.5, 3.3, 5.1):
+                    self.assertLess(self.pixel(output, time, 880, 130)[0], 40)
+                for time in (4.3, 5.3, 6.3):
+                    color = self.pixel(output, time, 980, 130)
+                    self.assertGreater(color[0], 180)
+                    self.assertLess(color[1], 80)
+                for time in (4.8, 5.8, 6.8):
+                    color = self.pixel(output, time, 980, 130)
+                    self.assertGreater(color[0], 180)
+                    self.assertGreater(color[1], 150)
                 self.assertLess(
                     self.pixel(output, 1.7, 24, 50)[0], 20
                 )  # transparent PNG hole

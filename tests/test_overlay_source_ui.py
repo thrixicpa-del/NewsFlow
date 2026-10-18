@@ -200,6 +200,10 @@ class OverlaySourceUITest(unittest.TestCase):
         self.assertEqual(json.loads(report.read_text())["status"], "PASS")
         stored = json.loads(projectfile.read_text(encoding="utf-8"))
         self.assertEqual(stored["overlay_template"]["layouts"]["16:9"][0]["x"], 41)
+        self.assertEqual(stored["overlay_template"]["layouts"]["16:9"][0]["ranges"],
+                         [{"start": .2, "end": .6}, {"start": 2, "end": 2.4}, {"start": 5.5, "end": 6.3}])
+        self.assertEqual(next(row for row in stored["overlay_template"]["layouts"]["16:9"]
+                              if row["name"] == "video-0.mp4")["repeatCount"], 3)
         self.assertEqual(
             config.load_settings().montage_overlay_template["layouts"]["9:16"][0]["x"],
             11,

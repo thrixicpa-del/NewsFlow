@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from functools import lru_cache
+from itertools import pairwise
 from pathlib import Path
 
 LAYOUTS = {"16:9": (1920, 1080), "9:16": (1080, 1920)}
@@ -91,6 +92,31 @@ def _source_active(row: dict, sources: dict[str, dict]) -> bool:
     return source["enabled"] and source["kind"] in ("all", row["kind"])
 
 
+def _timing_ranges(value, *, required: bool = True) -> list[dict]:
+    if not isinstance(value, list) or len(value) > MAX_REPEATED_ACTIVATIONS + 1 or (required and not value):
+        raise ValueError("Наложения: укажите интервалы показа в пределах бюджета повторов")
+    result = []
+    for pair in value:
+        if not isinstance(pair, dict):
+            raise ValueError("Наложения: интервал должен содержать начало и конец")  # noqa: TRY004 -- public JSON validation contract
+        begin = _number(pair.get("start"), "начало интервала", 0, MAX_SECONDS)
+        end = _number(pair.get("end"), "конец интервала", 0, MAX_SECONDS)
+        if end <= begin:
+            raise ValueError("Наложения: конец интервала должен быть позже начала")
+        result.append({"start": begin, "end": end})
+    result.sort(key=lambda pair: pair["start"])
+    if any(current["start"] < previous["end"] for previous, current in pairwise(result)):
+        raise ValueError("Наложения: интервалы одного слоя не должны пересекаться")
+    return result
+
+
+def _repeat_count(value) -> int:
+    count = _number(value, "количество показов", 1, MAX_REPEATED_ACTIVATIONS + 1)
+    if count != int(count):
+        raise ValueError("Наложения: количество показов должно быть целым")
+    return int(count)
+
+
 def normalize_overlay_template(template, *, check_files: bool = False) -> dict:
     """Return an independent canonical v1 template; never read media by default.
 
@@ -138,7 +164,7 @@ def normalize_overlay_template(template, *, check_files: bool = False) -> dict:
             if not item["id"] or item["id"] in ids:
                 raise ValueError("Наложения: id слоёв должны быть непустыми и уникальными")
             ids.add(item["id"])
-            if item["kind"] not in ("image", "video") or item["mode"] not in ("once", "repeat", "end", "until-end"):
+            if item["kind"] not in ("image", "video") or item["mode"] not in ("once", "repeat", "end", "until-end", "intervals", "count"):
                 raise ValueError("Наложения: недопустимый тип или режим слоя")
             for name, default in (("enabled", True), ("keepAspect", True), ("chromaEnabled", False), ("audioEnabled", False)):
                 value = row.get(name, default)
@@ -154,6 +180,17 @@ def normalize_overlay_template(template, *, check_files: bool = False) -> dict:
                 ("chromaBlend", .08, 0, 1, False),
             ):
                 item[name] = _number(row.get(name, default), name, low, high, positive=positive)
+            if "ranges" in row or item["mode"] == "intervals":
+                item["ranges"] = _timing_ranges(row.get("ranges", []), required=item["mode"] == "intervals")
+            if "repeatCount" in row or item["mode"] == "count":
+                item["repeatCount"] = _repeat_count(row.get("repeatCount", 1))
+            if "rangeEnd" in row or item["mode"] == "count":
+                item["rangeEnd"] = None if row.get("rangeEnd") is None else _number(row["rangeEnd"], "конец диапазона", 0, MAX_SECONDS)
+                if item["mode"] == "count" and item["rangeEnd"] is not None and item["rangeEnd"] <= item["start"]:
+                    raise ValueError("Наложения: конец диапазона должен быть позже начала")
+                if (item["mode"] == "count" and item["rangeEnd"] is not None and item["repeatCount"] > 1
+                        and item["repeatCount"] * item["duration"] > item["rangeEnd"] - item["start"] + 1e-9):
+                    raise ValueError("Наложения: показы заданной длительности не помещаются в диапазон; уменьшите длительность или количество")
             color = row.get("chromaColor", "#00FF00")
             if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
                 raise ValueError("Наложения: chromaColor должен быть #RRGGBB")
@@ -202,10 +239,23 @@ def overlay_intervals(layer: dict, total_duration: float) -> list[tuple[float, f
     if not layer.get("enabled", True) or not total:
         return []
     mode = layer.get("mode", "once")
+    if mode == "intervals":
+        return [(pair["start"], min(total, pair["end"])) for pair in _timing_ranges(layer.get("ranges", []))
+                if pair["start"] < total]
     start = _number(layer.get("start", 0), "start", 0, MAX_SECONDS)
     if mode == "until-end":
         return [(start, total)] if start < total else []
     duration = _number(layer.get("duration", 5), "duration", 0, MAX_SECONDS, positive=True)
+    if mode == "count":
+        count = _repeat_count(layer.get("repeatCount", 1))
+        window_end = layer.get("rangeEnd")
+        end = total if window_end is None else min(total, _number(window_end, "конец диапазона", 0, MAX_SECONDS))
+        if end <= start:
+            return []
+        if count > 1 and count * duration > end - start + 1e-9:
+            raise ValueError("Наложения: показы заданной длительности не помещаются в диапазон; уменьшите длительность или количество")
+        gap = (end - duration - start) / (count - 1) if count > 1 else 0
+        return [(start + index * gap, min(end, start + index * gap + duration)) for index in range(count)]
     if mode == "end":
         start = total - _number(layer.get("endOffset", 5), "endOffset", 0, MAX_SECONDS)
     count, every = 1, 0.0
@@ -300,7 +350,7 @@ def compose_overlays(source: Path, output: Path, template, aspect_ratio: str, *,
     rows = overlay_layers(template, aspect_ratio, legacy_path=legacy_path, total_duration=total, check_files=True)
     occurrences = [(row, overlay_intervals(row, total)) for row in rows]
     occurrences = [(row, times) for row, times in occurrences if times]
-    reactivations = sum(max(0, len(times) - 1) for row, times in occurrences if row["mode"] == "repeat")
+    reactivations = sum(max(0, len(times) - 1) for row, times in occurrences)
     if reactivations > MAX_REPEATED_ACTIVATIONS:
         raise ValueError(f"Наложения: максимум {MAX_REPEATED_ACTIVATIONS} повторных включений во всём ролике; увеличьте интервал повторов")
     command = [ffmpeg, "-y", "-protocol_whitelist", "file,pipe", "-i", str(source)]
