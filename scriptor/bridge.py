@@ -31,6 +31,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
+from itertools import pairwise
 from pathlib import Path
 
 from . import idea_engine
@@ -5705,15 +5706,21 @@ _VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS = 1.0
 
 
 def _voice_map_visual_beat_count(audio_duration: float) -> int:
-    """Avoid a sub-second terminal flash while preserving six-second cadence."""
+    """Keep every beat within the duration of ordinary cutter sources."""
     duration = max(0.0, float(audio_duration))
-    if duration <= _VOICE_MAP_CUTTER_TARGET_SECONDS:
-        return 1
-    full_beats = int(duration // _VOICE_MAP_CUTTER_TARGET_SECONDS)
-    remainder = duration - (full_beats * _VOICE_MAP_CUTTER_TARGET_SECONDS)
-    if 0.0 < remainder < _VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS:
-        return max(1, full_beats)
     return max(1, math.ceil(duration / _VOICE_MAP_CUTTER_TARGET_SECONDS))
+
+
+def _voice_map_visual_beats(audio_duration: float) -> list[tuple[float, float]]:
+    count = _voice_map_visual_beat_count(audio_duration)
+    boundaries = [number * _VOICE_MAP_CUTTER_TARGET_SECONDS for number in range(count)]
+    boundaries.append(float(audio_duration))
+    if count > 1 and boundaries[-1] - boundaries[-2] < _VOICE_MAP_MIN_TERMINAL_BEAT_SECONDS:
+        # Share the final six seconds plus remainder between two moving
+        # sources. Absorbing the remainder demanded a >6s source and rejected
+        # ordinary cutter clips, while a separate tiny beat caused a flash.
+        boundaries[-2] = (boundaries[-3] + boundaries[-1]) / 2
+    return list(pairwise(boundaries))
 
 
 def _voice_map_overlap_text(segment: dict, beat_start: float, beat_end: float) -> str:
@@ -5759,7 +5766,8 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     if audio_duration <= 0.0:
         raise ValueError("VoiceMap audio duration is invalid")
 
-    visual_beat_count = _voice_map_visual_beat_count(audio_duration)
+    visual_beats = _voice_map_visual_beats(audio_duration)
+    visual_beat_count = len(visual_beats)
     previous_intent = None
     segment_clauses = {int(segment["id"]): [] for segment in segments}
     pending_clause = []
@@ -5838,10 +5846,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
     finish_clause()
     beat_segments = []
     fragments = []
-    for beat_index in range(visual_beat_count):
-        beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
-        beat_end = (audio_duration if beat_index == visual_beat_count - 1
-                    else min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS))
+    for beat_index, (beat_start, beat_end) in enumerate(visual_beats):
         overlapping = []
         for segment in segments:
             if float(segment["end"]) <= beat_start or float(segment["start"]) >= beat_end:
@@ -5967,13 +5972,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         return topic_query or GENERIC_VISUAL_QUERY
 
     scenes: list[dict] = []
-    for beat_index in range(visual_beat_count):
-        beat_start = beat_index * _VOICE_MAP_CUTTER_TARGET_SECONDS
-        beat_end = (
-            audio_duration
-            if beat_index == visual_beat_count - 1
-            else min(audio_duration, beat_start + _VOICE_MAP_CUTTER_TARGET_SECONDS)
-        )
+    for beat_index, (beat_start, beat_end) in enumerate(visual_beats):
         if beat_end <= beat_start:
             continue
         overlapping = beat_segments[beat_index]
