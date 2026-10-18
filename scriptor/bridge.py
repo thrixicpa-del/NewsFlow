@@ -304,8 +304,26 @@ def _restore_cover_face_config(settings: Settings, value: dict[str, object]) -> 
     settings.cover_face_remove_background = bool(value.get("removeBackground", False))
 
 
+def _standalone_cover_production_ids(settings: Settings) -> set[str]:
+    """Current manual-cover rows own work independently of Ideas projections.
+
+    Read settings before hydrating the library: historical library rows alone
+    must never authorise work or resurrect a cleared production queue.
+    """
+    deleted = {*settings.idea_deleted_production_ids, *settings.deleted_scenario_production_ids}
+    return {
+        str(item.get("production_item_id", "")).strip()
+        for item in settings.cover_queue
+        if isinstance(item, dict) and item.get("origin") == "covers"
+        and item.get("manual") is True and str(item.get("production_item_id", "")).strip()
+        and not str(item.get("production_item_id", "")).strip().startswith("legacy-cover:")
+        and str(item.get("production_item_id", "")).strip() not in deleted
+        and "production:" + str(item.get("production_item_id", "")).strip() not in settings.cover_queue_tombstones
+    }
+
+
 def _active_cover_production_ids(settings: Settings) -> set[str]:
-    """Return only identities owned by the current durable scenario session.
+    """Return current scenario and explicitly owned standalone cover identities.
 
     The session job is the strongest current identity once scenario work has
     started. Title-indexed settings are only a fallback for rows that have not
@@ -347,7 +365,7 @@ def _active_cover_production_ids(settings: Settings) -> set[str]:
             if isinstance(item, dict) and str(item.get("id", "")).strip()
         }
         identities.update(current_ids & context_ids)
-    return identities
+    return identities | _standalone_cover_production_ids(settings)
 
 
 def _select_current_cover_generation_rows(
@@ -11470,7 +11488,29 @@ def import_cover_prompt_pairs(payload: dict) -> dict:
     records = _parse_cover_prompt_pairs(payload.get("text", ""))
     settings = load_settings()
     _hydrate_cover_library(settings)
-    resolved = _resolve_cover_prompt_import_ids(settings, records)
+    new_items: list[dict] = []
+    new_rows: list[dict] = []
+    if payload.get("createMissingTopics") is True:
+        by_title, _by_id = _cover_rows_by_title_and_production_id(settings)
+        lines = [line for line in str(payload.get("text", "")).removeprefix("\ufeff").splitlines() if line.strip()]
+        for raw_title in lines[::2]:
+            title = " ".join(raw_title.split())
+            key = _normalise_cover_text_import_title(title)
+            if key in by_title:
+                continue
+            item = {"title": title, "manual": True, "origin": "covers"}
+            ensure_production_item_ids([item])
+            new_items.append(item)
+            new_rows.append({"title": title, "production_item_id": item["id"], "script": "",
+                             "origin": "covers", "manual": True,
+                             "scenario_index": 0, "status": "Ожидает", "paths": []})
+            by_title[key] = [item["id"]]
+    # Resolve the complete proposed queue before mutating even the in-memory
+    # settings: an ambiguous existing title must not partially add new topics.
+    proposed = replace(settings, cover_queue=[*settings.cover_queue, *new_rows])
+    resolved = _resolve_cover_prompt_import_ids(proposed, records)
+    settings.cover_queue.extend(new_rows)
+    settings.idea_production_items.extend(new_items)
     _by_title, by_production_item_id = _cover_rows_by_title_and_production_id(settings)
 
     # All parsing, title matching and durable-ID validation happens before a
@@ -19458,6 +19498,7 @@ def _clear_production_queue_locked(payload: dict) -> dict:
         str(job.request.production_item_id).strip()
         for job in jobs if str(job.request.production_item_id).strip()
     }
+    removed_production_ids.update(_standalone_cover_production_ids(settings))
     removed_voice_maps = [
         VoiceMapContext(
             production_item_id=str(job.request.production_item_id).strip(),

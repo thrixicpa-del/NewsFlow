@@ -8,13 +8,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with: { lfs: true }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - run: python -m pip install --require-hashes -r requirements-test.lock
       - uses: pnpm/action-setup@v4
         with: { version: '11.19.0' }
       - uses: actions/setup-node@v6
         with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
         working-directory: studio-ui-remotion-verify
+      - run: node node_modules/electron/install.js
+        working-directory: studio-ui-remotion-verify
       - run: pnpm build:web
         working-directory: studio-ui-remotion-verify
       - run: pnpm build:desktop
         working-directory: studio-ui-remotion-verify
+      - name: Standalone cover topics and real UI restart
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'studio-ui-remotion-verify/node_modules/electron/dist/electron.exe')) {
+            throw 'Real Electron runtime required; UI acceptance must not skip'
+          }
+          python tests/run_isolated.py tests.test_cover_standalone_topics tests.test_cover_standalone_ui -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
