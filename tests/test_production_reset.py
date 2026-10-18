@@ -78,6 +78,71 @@ class ProductionResetTests(unittest.TestCase):
             [Job(ScenarioRequest(0, "Старая тема", "", "old-id"), RunState.DONE, "Сценарий")],
         )
 
+    def test_reset_releases_topic_memory_and_manual_readd_survives_restart(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory}):
+            root = Path(directory)
+            settings = self._settings(root)
+            settings.idea_title_memory = [{"title": "Старая тема", "topic": "Проверка памяти"}]
+            settings.idea_title_metadata = {"Старая тема": {"topic": "Проверка памяти"}}
+            save_settings(settings)
+            save_session(["Старая тема", "Тема без готового сценария"], [
+                Job(ScenarioRequest(0, "Старая тема", "", "old-id"), RunState.DONE, "Старый текст"),
+            ])
+            previous_ids = {"old-id"}
+            expected = ["Старая тема", "Тема без готового сценария", "Новая тема"]
+
+            for cycle in range(2):
+                with self.subTest(cycle=cycle):
+                    bridge.clear_production_queue(self.confirmation)
+                    reset = load_settings()
+                    self.assertEqual(reset.idea_title_memory, [])
+                    self.assertEqual(reset.idea_title_metadata, {})
+                    self.assertEqual(reset.idea_production_items, [])
+                    self.assertEqual(load_session(), ([], []))
+
+                    response = bridge.add_scenarios({"titles": "\n".join([*expected, "СТАРАЯ ТЕМА", "Новая тема"])})
+                    self.assertEqual([row["title"] for row in response["scenarios"]], expected)
+                    titles, jobs = load_session()
+                    self.assertEqual(titles, expected)
+                    fresh = next(job for job in jobs if job.request.title == "Старая тема")
+                    self.assertTrue(fresh.request.production_item_id)
+                    self.assertNotIn(fresh.request.production_item_id, previous_ids)
+                    self.assertEqual(fresh.result, "")
+                    previous_ids.add(fresh.request.production_item_id)
+                    restarted = load_settings()
+                    self.assertIn("old-id", restarted.deleted_scenario_production_ids)
+                    self.assertIn("старая тема", restarted.deleted_scenario_titles)
+                    self.assertEqual(restarted.youtube_oauth_tokens, {"channel": "preserved-token"})
+                    self.assertEqual(bridge.snapshot()["scenarios"][0]["productionItemId"], fresh.request.production_item_id)
+                    bridge.add_scenarios({"titles": "Старая тема\nНовая тема"})
+                    self.assertEqual(load_session()[0], expected, "Current topics must still deduplicate")
+
+    def test_reset_without_confirmation_does_not_erase_topic_memory(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory}):
+            settings = self._settings(Path(directory))
+            settings.idea_title_memory = [{"title": "Старая тема"}]
+            save_settings(settings)
+            self._seed_session()
+            with self.assertRaises(ValueError):
+                bridge.clear_production_queue({"confirmed": True, "confirmationPhrase": "нет"})
+            self.assertEqual(load_settings().idea_title_memory, [{"title": "Старая тема"}])
+            self.assertEqual(load_session()[0], ["Старая тема"])
+
+    def test_reset_fences_topic_ids_before_their_scenario_jobs_exist(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory}):
+            settings = self._settings(Path(directory))
+            settings.idea_production_items = [{"id": "topic-only", "title": "Тема без сценария"}]
+            settings.idea_scenario_context = {"Тема из контекста": {"id": "context-only", "title": "Тема из контекста"}}
+            save_settings(settings)
+            save_session(["Тема без сценария", "Тема из контекста"], [])
+            bridge.clear_production_queue(self.confirmation)
+            restored = load_settings()
+            self.assertTrue({"topic-only", "context-only"}.issubset(restored.deleted_scenario_production_ids))
+            self.assertTrue({"topic-only", "context-only"}.issubset(restored.idea_deleted_production_ids))
+            stale_jobs = [Job(ScenarioRequest(0, "Тема без сценария", "", "topic-only"))]
+            save_session(["Тема без сценария"], stale_jobs)
+            self.assertEqual(load_session(), ([], []), "Retired IDs must still fence a late worker")
+
     def test_reset_round_trip_erases_montage_and_release_metadata(self):
         with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io")}):
             root = Path(directory)

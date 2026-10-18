@@ -5336,6 +5336,35 @@ def regenerate_idea_results(payload: dict) -> dict:
     return {**snapshot(), "operationResult": {"kind": "ideas", "count": len(generated), "message": message}}
 
 
+def _new_scenario_titles(incoming: list[str], current: list[str]) -> list[str]:
+    known = {title.casefold() for title in current}
+    added = []
+    for title in incoming:
+        if title.casefold() not in known:
+            known.add(title.casefold())
+            added.append(title)
+    return added
+
+
+def _bind_readded_scenario_jobs(settings: Settings, titles: list[str], jobs: list[Job], added: list[str]) -> None:
+    """Give an explicit re-add a fresh identity without erasing deletion fences.
+
+    A title-only row is intentionally filtered from stale session snapshots.
+    The new ProductionItem ID is the authority distinguishing the user's new
+    request from old workers and backups with the same human title.
+    """
+    deleted_titles = {" ".join(str(value).split()).casefold()
+                      for value in settings.deleted_scenario_titles if str(value).strip()}
+    occupied = {job.request.index for job in jobs}
+    for index, title in enumerate(titles):
+        if title not in added or index in occupied or " ".join(title.split()).casefold() not in deleted_titles:
+            continue
+        context = settings.idea_scenario_context.get(title, {})
+        identity = str(context.get("id", "")).strip() if isinstance(context, dict) else ""
+        if identity and identity not in settings.deleted_scenario_production_ids:
+            jobs.append(Job(ScenarioRequest(index, title, "", identity)))
+
+
 def add_ideas_to_scenarios(payload: dict) -> dict:
     settings = load_settings()
     ensure_idea_production_items(settings)
@@ -5343,26 +5372,11 @@ def add_ideas_to_scenarios(payload: dict) -> dict:
     if not requested:
         raise ValueError("Выберите хотя бы одну идею для передачи в Новости")
     titles, jobs = load_session()
-    known = {title.casefold() for title in titles}
-    added = [value for value in requested if value.casefold() not in known]
+    added = _new_scenario_titles(requested, titles)
     titles.extend(added)
     if added:
         ensure_idea_production_items(settings, active_titles=added)
-        deleted_title_keys = {
-            " ".join(str(value).split()).casefold()
-            for value in settings.deleted_scenario_titles
-            if str(value).strip()
-        }
-        jobs_by_index = {job.request.index: job for job in jobs}
-        for index, title in enumerate(titles):
-            if title not in added or index in jobs_by_index:
-                continue
-            if " ".join(title.split()).casefold() not in deleted_title_keys:
-                continue
-            context = settings.idea_scenario_context.get(title, {})
-            production_item_id = str(context.get("id", "")).strip() if isinstance(context, dict) else ""
-            if production_item_id and production_item_id not in settings.deleted_scenario_production_ids:
-                jobs.append(Job(ScenarioRequest(index, title, "", production_item_id)))
+        _bind_readded_scenario_jobs(settings, titles, jobs, added)
     by_title = {str(item.get("title", "")).casefold(): item
                 for item in settings.idea_production_items if isinstance(item, dict)}
     for title in requested:
@@ -7100,12 +7114,12 @@ def add_scenarios(payload: dict) -> dict:
     if not incoming:
         raise ValueError("Добавьте хотя бы один заголовок сценария")
     titles, jobs = load_session()
-    known = {title.casefold() for title in titles}
-    added = [title for title in incoming if title.casefold() not in known]
+    added = _new_scenario_titles(incoming, titles)
     titles.extend(added)
     if added:
         settings = load_settings()
         ensure_idea_production_items(settings, active_titles=added)
+        _bind_readded_scenario_jobs(settings, titles, jobs, added)
         save_settings(settings)
     save_session(titles, jobs)
     return snapshot()
@@ -19458,6 +19472,14 @@ def _clear_production_queue_locked(payload: dict) -> dict:
         str(job.request.production_item_id).strip()
         for job in jobs if str(job.request.production_item_id).strip()
     }
+    # A manually added topic already owns an ID before a scenario Job exists.
+    # Retire that identity too: only an explicit re-add with a new ID may reuse
+    # its title, never a late worker or a restored pre-reset snapshot.
+    removed_production_ids.update(
+        str(item.get("id", "")).strip()
+        for item in [*settings.idea_production_items, *settings.idea_scenario_context.values()]
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    )
     removed_voice_maps = [
         VoiceMapContext(
             production_item_id=str(job.request.production_item_id).strip(),
@@ -19478,6 +19500,9 @@ def _clear_production_queue_locked(payload: dict) -> dict:
         *(str(value).strip()
           for value in settings.deleted_scenario_production_ids if str(value).strip()),
         *removed_production_ids,
+    })[-10000:]
+    settings.idea_deleted_production_ids = sorted({
+        *settings.idea_deleted_production_ids, *removed_production_ids,
     })[-10000:]
     settings.production_reset_generation += 1
     settings.youtube_publication_jobs = []
