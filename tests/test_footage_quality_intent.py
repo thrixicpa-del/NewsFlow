@@ -6,6 +6,79 @@ from scriptor.timeline import VISUAL_TERMS
 
 
 class LocalActionQualityTests(unittest.TestCase):
+    def test_reported_indeclinable_author_keeps_explicit_coordinated_subjects(self):
+        from tests.test_footage_followup import voice_scenes
+
+        for text, targets in (
+            ("Заявление Лукашенко и Путин прокомментировали вместе.", ["lukashenko", "putin"]),
+            ("Заявление Лукашенко и Путин комментируют вместе.", ["lukashenko", "putin"]),
+            ("Заявление Лукашенко и Путин прокомментируют вместе.", ["lukashenko", "putin"]),
+            ("Заявление Лукашенко и Путина прокомментировал Зеленский.", ["zelensky"]),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(targets, visual_intent(text, VISUAL_TERMS)["target_people"])
+                self.assertEqual(targets, voice_scenes([text])[0]["scene_intent"]["target_people"])
+
+    def test_protest_attendee_is_selected_outside_opposition_name_occurrences(self):
+        from tests.test_footage_followup import voice_scenes
+
+        for text, targets in (
+            ("Митинг против Лукашенко посетил Зеленский.", ["zelensky"]),
+            ("Лукашенко посетил митинг против Лукашенко.", ["lukashenko"]),
+            ("Митинг против Лукашенко посетил Лукашенко.", ["lukashenko"]),
+            ("В Минске прошёл протест против Лукашенко.", []),
+            ("Зеленский прокомментировал митинг против Лукашенко.", ["zelensky"]),
+            ("Лукашенко посетил мирный митинг.", ["lukashenko"]),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(targets, visual_intent(text, VISUAL_TERMS)["target_people"])
+                self.assertEqual(targets, voice_scenes([text])[0]["scene_intent"]["target_people"])
+
+    def test_belarus_place_survives_local_and_voice_protest_queries(self):
+        from scriptor import bridge
+        from scriptor.footage import FootageItem
+        from tests.test_footage_followup import voice_scenes
+
+        for text in ("В Минске жители вышли на митинг.",
+                     "В Беларуси рабочие объявили забастовку.",
+                     "В Белоруссии прошёл мирный марш протеста."):
+            with self.subTest(text=text):
+                for query in (visual_intent(text, VISUAL_TERMS)["visual_query"],
+                              voice_scenes([text])[0]["visual_query_en"]):
+                    self.assertIn("Belarus", query)
+                    self.assertNotIn("Lukashenko", query)
+                    self.assertFalse(bridge._semantic_clip_ok(query, FootageItem(
+                        "moscow.mp4", "Moscow peaceful workers rally", tags=["protest-crowd"])))
+                    self.assertTrue(bridge._semantic_clip_ok(query, FootageItem(
+                        "minsk.mp4", "Minsk peaceful workers rally", tags=["protest-crowd"])))
+        cancelled = visual_intent("В Минске митинг не начался.", VISUAL_TERMS)
+        self.assertIn("Belarus", cancelled["visual_query"])
+        self.assertNotIn("protest crowd", cancelled["visual_query"])
+
+    def test_indeclinable_reported_author_does_not_replace_actual_speaker(self):
+        from tests.test_footage_followup import voice_scenes
+
+        for text, target in (
+            ("Заявление Лукашенко прокомментировал Зеленский.", "zelensky"),
+            ("На заявление Лукашенко ответил Путин.", "putin"),
+            ("Зеленский прокомментировал заявление Лукашенко.", "zelensky"),
+            ("Путин ответил на заявление Лукашенко.", "putin"),
+            ("Лукашенко прокомментировал заявление Зеленского.", "lukashenko"),
+            ("На заявление Зеленского ответил Лукашенко.", "lukashenko"),
+            ("Заявление Лукашенко не прокомментировал Зеленский.", "zelensky"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual([target], visual_intent(text, VISUAL_TERMS)["target_people"])
+                self.assertEqual([target], voice_scenes([text])[0]["scene_intent"]["target_people"])
+        for text in ("Лукашенко и Зеленский прокомментировали заявление.",
+                     "Лукашенко и Зеленский встретились."):
+            self.assertEqual(["lukashenko", "zelensky"], visual_intent(text, VISUAL_TERMS)["target_people"])
+        protest = visual_intent("В Минске жители вышли на протест против Лукашенко.", VISUAL_TERMS)
+        self.assertIn("protest", protest["visual_query"])
+        self.assertEqual([], protest["target_people"])
+        participant = visual_intent("Лукашенко посетил мирный митинг.", VISUAL_TERMS)
+        self.assertEqual(["lukashenko"], participant["target_people"])
+
     def test_asserted_military_council_is_a_meeting_not_battlefield_action(self):
         from scriptor import bridge
         from scriptor.footage import FootageItem

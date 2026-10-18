@@ -67,6 +67,23 @@ def select(query, items):
 
 
 class FootageFollowupTests(unittest.TestCase):
+    def test_negated_transport_destination_does_not_become_positive_footage(self):
+        for text, wanted, excluded in (
+            ("Зерно везут по железной дороге к западной границе, а не к черноморским портам.", "rail", "seaport"),
+            ("Зерно везут по железной дороге, а не к портам Чёрного моря.", "rail", "maritime"),
+            ("Зерно везут к морским портам, а не по железной дороге.", "seaport", "rail freight"),
+            ("Груз направляют к морским портам, а не к западной границе.", "seaport", "border checkpoint"),
+        ):
+            with self.subTest(text=text):
+                stale = "seaport cargo cranes ships, rail freight train cargo logistics, border checkpoint guards fence"
+                for query in (fallback_visual_query(text), voice_scenes([text])[0]["visual_query_en"],
+                              voice_scenes([text], [stale])[0]["visual_query_en"]):
+                    self.assertIn(wanted, query)
+                    self.assertNotIn(excluded, query)
+        for text in ("Зерно везут не только к портам, но и по железной дороге.",
+                     "Маршрут не ведёт к порту, но порт продолжает принимать грузовые суда."):
+            self.assertIn("seaport", fallback_visual_query(text))
+
     def test_three_review_reproductions(self):
         scenes = fallback_scene_plan("На фронте продолжаются бои. Делегации встретились для обсуждения соглашения.")
         self.assertIn("frontline", scenes[0]["visual_query_en"])

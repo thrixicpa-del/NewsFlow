@@ -197,6 +197,8 @@ VISUAL_TERMS = {
     # specific political visual and are requested only when the narration
     # actually names them.
     "росси": "Russia current events", "москв": "Moscow Russia government city",
+    "беларус": "Belarus regional context", "белорус": "Belarus regional context",
+    "минск": "Minsk Belarus city",
     "кремл": "Kremlin Moscow government", "вашингтон": "Washington DC White House US government officials",
     "сша": "United States Washington DC government officials", "америк": "United States government Washington DC",
     "киев": "Kyiv Ukraine government city", "брюссел": "Brussels European Union institutions",

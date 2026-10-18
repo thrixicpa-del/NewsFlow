@@ -180,11 +180,22 @@ def _physical_places(text: str, associations: dict[str, str]) -> list[str]:
     """Country hints already expressed by the local vocabulary, never proof."""
     matched = ", ".join(english for stem, english in associations.items()
                         if stem not in {"европ", "евросоюз"} and term_matches(stem, text))
-    places = [place for place in ("Ukraine", "Russia", "Iran", "Armenia", "Azerbaijan", "Israel", "Lebanon")
+    places = [place for place in ("Ukraine", "Russia", "Belarus", "Iran", "Armenia", "Azerbaijan", "Israel", "Lebanon")
               if re.search(rf"\b{place}\b", matched)]
     if re.search(r"\b(?:евросоюз\w*|европейск\w*\s+союз\w*)", text, re.IGNORECASE):
         places.append("European Union")
     return places
+
+
+def _positive_route_text(text: str) -> str:
+    """Exclude a bounded denied destination, keeping the original narration."""
+    return re.sub(
+        r"\bне\s+(?:к|ко|в|во|на|через|по)\s+"
+        r"(?:(?!(?:а|но|затем)\b)[а-яё-]+\s+){0,3}?"
+        r"(?:порт\w*|границ\w*|железн\w*\s+дорог\w*)\b"
+        r"(?:\s+черн\w*\s+мор\w*)?",
+        " ", text,
+    )
 
 
 def visual_intent(text: str, associations: dict[str, str], *, previous: dict | None = None) -> dict:
@@ -197,7 +208,7 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
             if clause.strip():
                 prior = visual_intent(clause, associations, previous=prior)
         return {**prior, "text": text, "mentioned_people": named_people(text)}
-    lowered = text.casefold().replace("ё", "е")
+    lowered = _positive_route_text(text.casefold().replace("ё", "е"))
     people = named_people(text)
     industrial = bool(re.search(r"\b(?:завод\w*|производств\w*|мост\w*|ремонт\w*|урожа\w*|порт\w*)", lowered))
     reporting_reference = not people and bool(re.search(
@@ -225,8 +236,18 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     primary = [] if industrial and (indirect or not speech) else people[:1]
     speech_action = re.search(rf"\b{_SPEECH_VERBS}", lowered)
     if primary and len(people) > 1 and speech_action:
+        # An indeclinable surname after a reported statement is still its
+        # author unless coordinated nominatives assert a plural response.
+        nominatives = "|".join(PERSON_SUBJECT_FORMS.values())
+        coordinated = re.search(
+            rf"\bлукашенко\s+и\s+(?:{nominatives})\s+(?P<verb>{_SPEECH_VERBS})", lowered,
+        )
+        subject_text = lowered if coordinated and coordinated["verb"].endswith(("ли", "ют", "ут", "ят", "ат")) else re.sub(
+            r"\b(?:заявлени\w*|слов\w*|обращени\w*|высказывани\w*)"
+            r"(?:\s+александра)?\s+лукашенко\b", " ", lowered,
+        )
         subjects = [identity for identity in people
-                    if re.search(rf"\b{PERSON_SUBJECT_FORMS[identity]}\b", lowered)]
+                    if re.search(rf"\b{PERSON_SUBJECT_FORMS[identity]}\b", subject_text)]
         if len(subjects) > 1:
             before_action = lowered[:speech_action.start()]
             main_subjects = [identity for identity in subjects
@@ -250,6 +271,20 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     if joint and re.search(r"(?:затем|после этого).*?(?:переговор\w*|встрет\w*|консультаци\w*)", lowered):
         protest_mode = "none"
     protest = protest_mode in {"peaceful", "labor", "farmers", "conflict"} and not (speech and primary)
+    if protest:
+        # A protest against a leader does not assert their visible presence.
+        # Remove only those occurrences before resolving an explicit visitor.
+        participant_text = lowered
+        for _identity, _name, expression in PERSON_ALIASES:
+            participant_text = re.sub(
+                rf"\bпротив\s+(?:(?:президент\w*|александра)\s+){{0,2}}(?:{expression})(?!\w)",
+                " ", participant_text,
+            )
+        attendees = [identity for identity in people if re.search(
+            rf"\b{PERSON_SUBJECT_FORMS[identity]}\s+посетил\w*\b"
+            rf"|\bпосетил\w*\s+{PERSON_SUBJECT_FORMS[identity]}\b", participant_text,
+        )]
+        primary = attendees or [identity for identity in primary if identity in named_people(participant_text)]
     ceasefire = bool(re.search(r"прекращени\w*\s+огня|перемири\w*", lowered))
     actual_kinetic = bool(re.search(r"(?:обстрел\w*|артилл\w*|удар\w*)", lowered)
                           and re.search(r"несмотря|продолж\w*|начал\w*|произош\w*", lowered))
@@ -341,7 +376,8 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
                 terms.append("agriculture farming fields farm workers")
             continue
         if (protest or (speech and primary and protest_mode != "none")) and stem not in {
-            "иран", "тегеран", "украин", "росси", "москв", "вашингтон", "киев", "брюссел", "армени", "азербайдж",
+            "иран", "тегеран", "украин", "росси", "москв", "беларус", "белорус", "минск",
+            "вашингтон", "киев", "брюссел", "армени", "азербайдж",
         }:
             continue
         if stem in kinetic:

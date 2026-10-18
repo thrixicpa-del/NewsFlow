@@ -5861,6 +5861,7 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
             else:
                 intent = visual_intent("", VISUAL_TERMS)
             fragment = {**segment, "_intent": intent,
+                        "_beat_text": text,
                         "_clipped": float(segment["start"]) < beat_start
                         or float(segment["end"]) > beat_end
                         or bool(clauses and clause[3]),
@@ -5878,10 +5879,21 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
         normalized = _normalized_montage_visual_query(raw)
         # Preserve concrete authored queries when they express the same intent.
         # Correct stale generated lexical collisions/role inheritance locally.
-        from .scene_intent import _negated_attack, named_people, visual_topics
+        from .scene_intent import (
+            _negated_attack,
+            _positive_route_text,
+            named_people,
+            visual_topics,
+        )
         people_differ = set(named_people(raw)) != set(intent["target_people"])
         kinetic_differs = _montage_has_war_action(raw) != _montage_has_war_action(intent_query)
         actual_topics, stored_topics = visual_topics(intent_query), visual_topics(raw)
+        route_text = str(segment["_beat_text"]).casefold().replace("ё", "е")
+        if (_positive_route_text(route_text) != route_text
+                and (not intent_query or stored_topics - actual_topics)):
+            # An authored union cannot reinstate a destination denied by the
+            # current beat, even when its dominant comma clause is empty.
+            return visual_intent(route_text, VISUAL_TERMS)["visual_query"]
         if (_negated_attack(intent["text"])
                 and re.search(r"\b(?:artillery|shelling)\b", raw, re.IGNORECASE)
                 and not re.search(r"\b(?:artillery|shelling)\b", intent_query, re.IGNORECASE)):
