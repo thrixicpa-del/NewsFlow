@@ -785,8 +785,8 @@ class VisualWindowTests(unittest.TestCase):
             result = index.assess_visual_window("cargo seaport cranes ships", clip, 0, 6)
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
-            self.assertEqual(TAXONOMY_VERSION, 6)
-            self.assertEqual(RULES_VERSION, 8)
+            self.assertEqual(TAXONOMY_VERSION, 7)
+            self.assertEqual(RULES_VERSION, 9)
             self.assertFalse(result["event_confirmed"])
 
     def test_mixed_interval_is_not_direct(self):
@@ -824,7 +824,7 @@ class VisualWindowTests(unittest.TestCase):
                 self.assertEqual(current["relation"], "unknown")
                 self.assertEqual(current["feature_cache"], "memory")
                 self.assertEqual(current["rules_version"], 4)
-                self.assertEqual(current["taxonomy_version"], 6)
+                self.assertEqual(current["taxonomy_version"], 7)
                 index._visual_memory_clear()
                 persisted = index.assess_visual_window("cargo seaport", clip, 0, 6)
                 self.assertEqual(persisted["relation"], "unknown")

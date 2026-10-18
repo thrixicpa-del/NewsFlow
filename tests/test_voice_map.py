@@ -766,6 +766,7 @@ class VoiceMapTests(unittest.TestCase):
 def load_tests(loader, standard_tests, pattern):
     # The existing CI invokes this module with unittest. Keep the follow-up
     # planner/VoiceMap/selection regressions in that independently run suite.
+    from tests.test_context_visual_semantics import ContextVisualSemanticsTests
     from tests.test_footage_followup import FootageFollowupTests
     from tests.test_footage_quality_external import ExternalFallbackSafetyTests
     from tests.test_footage_quality_intent import LocalActionQualityTests
@@ -783,6 +784,7 @@ def load_tests(loader, standard_tests, pattern):
     from tests.test_visual_cold_budget import VisualColdBudgetTests
     from tests.test_visual_evidence import VisualWindowTests
     from tests.test_visual_feature_reuse import VisualFeatureReuseTests
+    standard_tests.addTests(loader.loadTestsFromTestCase(ContextVisualSemanticsTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(ExternalFallbackSafetyTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(ReadyVoiceEvidenceTests))

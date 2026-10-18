@@ -10,8 +10,8 @@ import math
 import re
 from statistics import median
 
-TAXONOMY_VERSION = 6
-RULES_VERSION = 8
+TAXONOMY_VERSION = 7
+RULES_VERSION = 9
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
 
@@ -69,7 +69,40 @@ TAXONOMY = {
     "maritime_display": (
         "fireboat ship spraying powerful water jets in a maritime parade display",
     ),
+    "equipment_display": (
+        "agricultural manure spreader trailer with large rear spreading beaters inside a machinery exhibition hall",
+        "stationary farm trailers and fertilizer spreading machinery displayed at an indoor agricultural trade show",
+    ),
+    "vessel_incident": (
+        "damaged cargo ship listing heavily to one side sinking in the sea",
+        "shipwreck cargo vessel capsized and partially submerged in water",
+    ),
+    # National symbols are a separate facet, not competing visual roles and
+    # never proof of a location. Only an explicit incompatible institution
+    # request can use their contrast as negative evidence.
+    "institution_ukraine": (
+        "government building exterior flying a blue and yellow Ukrainian national flag",
+        "Ukrainian government institution with the blue yellow national flag on the roof",
+    ),
+    "institution_russia": (
+        "government building exterior flying a white blue red Russian national flag",
+        "Russian government institution with the white blue red national flag on the roof",
+    ),
 }
+
+_INSTITUTION_SYMBOL_PATTERNS = {
+    "institution_ukraine": r"ukrain|\bkyiv\b|\bkiev\b|украин|киев",
+    "institution_russia": r"\brussia\w*\b|\bmoscow\b|\bkremlin\b|росси|москв|кремл",
+}
+
+
+def _has_positive_occurrence(text: str, expression: str) -> bool:
+    """An excluded occurrence must not erase another positive occurrence."""
+    for match in re.finditer(expression, text):
+        prefix = re.split(r"[,;.!?]|\b(?:but|however|но|однако)\b", text[:match.start()])[-1]
+        if not re.search(r"(?:\bno\b|\bnot\b|\bwithout\b|без|\bне\b)\s+(?:\w+\s+){0,2}$", prefix):
+            return True
+    return False
 
 
 def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None:
@@ -97,6 +130,10 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
         return "protest", frozenset({"peaceful_protest", "worker_picket", "farmer_protest"}), frozenset({"police_guard"})
     if has(r"military naval|naval warship|\bnavy\b|военн\w* корабл|патрульн\w* катер|\bвм[сф]\b"):
         return "military_naval", frozenset({"military_naval"}), frozenset()
+    incident = r"shipwreck|\bsinking\b|\bcapsiz\w*|damaged cargo (?:ship|vessel)|затонувш\w*|затонул\w*|тонущ\w* (?:суд|кораб)"
+    vessel_context = has(r"\b(?:ships?|vessels?|tanker|shipwreck)\b|судно|судна|судов|кораб|танкер")
+    if vessel_context and _has_positive_occurrence(text, incident):
+        return "vessel_incident", frozenset({"vessel_incident"}), frozenset({"port"})
     if has(r"seaport|\bport\b|tanker|cargo ship|marine terminal|порт\w*|танкер|морск.*терминал"):
         return "port", frozenset({"port"}), frozenset({"warehouse", "rail", "road_cargo"})
     if has(r"government building|institutional (?:venue|context)|(?:parliament|institution)\w* exterior|правительствен\w* здан|здан\w* правительств"):
@@ -105,6 +142,8 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
         return "institutional_context", frozenset({"government_building"}), frozenset({"meeting"})
     if has(r"negotiat|meeting|delegation|summit|переговор|встреч|делегаци|саммит"):
         return "meeting", frozenset({"meeting"}), frozenset({"official", "government_building"})
+    if _has_positive_occurrence(text, r"(?:machinery|equipment|agricultural)\s+(?:exhibition|showroom|trade show)|выставк\w*.*(?:техник|машин)"):
+        return "equipment_display", frozenset({"equipment_display"}), frozenset({"factory"})
     harvesting = has(r"harvest|combine|farming fields|wheat field|уборк\w* урож|комбайн|жатв")
     cargo_warehouse = (not harvesting and has(r"warehouse|склад")
                        and has(r"cargo|export|freight|storage|logistics|груз|экспорт|логист"))
@@ -148,15 +187,36 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     if any(not math.isfinite(float(value)) for scores in frame_scores for value in scores.values()):
         result["reason"] = "nonfinite-model-scores"
         return result
-    kinds = set().union(*(scores.keys() for scores in frame_scores))
+    kinds = set().union(*(scores.keys() for scores in frame_scores)) - _INSTITUTION_SYMBOL_PATTERNS.keys()
+    if not kinds:
+        result["reason"] = "no-visual-role-features"
+        return result
     aggregates = {kind: median(float(scores.get(kind, 0)) for scores in frame_scores) for kind in kinds}
     dominant = max(aggregates, key=aggregates.get)
     result.update(dominant_kind=dominant, class_scores=aggregates)
+    # The generic institution role cannot erase a clear incompatible symbol.
+    # Require two frames, the existing absolute floor/margin, a building role
+    # and exactly one requested country. Joint meetings and country-neutral
+    # context remain eligible; a matching symbol does not confirm geography.
+    requested_symbols = {kind for kind, expression in _INSTITUTION_SYMBOL_PATTERNS.items()
+                         if re.search(expression, str(query).casefold())}
+    if (topic_name in {"official", "institutional_context"}
+            and dominant == "government_building" and len(requested_symbols) == 1):
+        wanted = next(iter(requested_symbols))
+        opposite = next(kind for kind in _INSTITUTION_SYMBOL_PATTERNS if kind != wanted)
+        conflicts = [float(scores.get(opposite, 0)) >= MIN_SIMILARITY
+                     and float(scores.get(opposite, 0)) > float(scores.get(wanted, 0)) + CLEAR_MARGIN
+                     for scores in frame_scores]
+        if sum(conflicts) >= 2:
+            result.update(relation="contradiction", reason="institutional-national-symbol-conflict",
+                          frame_relations=["contradiction" if value else "unknown" for value in conflicts])
+            return result
     frame_relations = []
     supported = set()
     for scores in frame_scores:
         best = max((float(scores.get(kind, 0)) for kind in allowed), default=0)
-        negative = max((float(value) for kind, value in scores.items() if kind not in allowed), default=0)
+        negative = max((float(value) for kind, value in scores.items()
+                        if kind not in allowed and kind not in _INSTITUTION_SYMBOL_PATTERNS), default=0)
         if best < MIN_SIMILARITY or negative > best + CLEAR_MARGIN:
             frame_relations.append("contradiction" if negative >= MIN_SIMILARITY and negative > best + CLEAR_MARGIN else "unknown")
             continue
@@ -173,6 +233,13 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
         if ("warehouse" in allowed and "factory" not in allowed
                 and warehouse >= best and warehouse >= MIN_SIMILARITY
                 and float(scores.get("factory", 0)) >= warehouse - CLEAR_MARGIN):
+            frame_relations.append("unknown")
+            continue
+        # A parked exhibition machine can resemble a cargo truck. Near-tied
+        # display evidence cannot establish freight movement or storage.
+        display = float(scores.get("equipment_display", 0))
+        if (topic_name in {"port", "rail", "road_cargo", "warehouse"}
+                and display >= MIN_SIMILARITY and display >= best - CLEAR_MARGIN):
             frame_relations.append("unknown")
             continue
         best_kinds = {kind for kind in allowed if float(scores.get(kind, 0)) >= max(MIN_SIMILARITY, best - CLEAR_MARGIN)}
