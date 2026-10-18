@@ -436,6 +436,30 @@ class ProductionResetTests(unittest.TestCase):
                 self.assertTrue(folder.is_dir())
                 self.assertEqual(list(folder.iterdir()), [])
 
+    def test_staging_cleanup_through_alias_keeps_canonical_output_root(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = root / "canonical"
+            canonical.mkdir()
+            sentinel = canonical / "preserved.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+            alias = root / "alias"
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(str(canonical), str(alias))
+            else:
+                alias.symlink_to(canonical, target_is_directory=True)
+            output = canonical / "production"
+            staged = bridge._production_staging_folder(alias / "production", 0, "montage") / "old.json"
+            staged.write_text("old", encoding="utf-8")
+
+            bridge._remove_owned_staged_artifact(staged)
+
+            self.assertFalse(staged.exists())
+            self.assertTrue(output.is_dir(), "Resolved staging boundary must stop cleanup before the output root")
+            self.assertEqual(list(output.iterdir()), [])
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
     def test_stale_staging_cannot_replace_new_same_path_artifacts(self):
         with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io")}):
             root = Path(directory)

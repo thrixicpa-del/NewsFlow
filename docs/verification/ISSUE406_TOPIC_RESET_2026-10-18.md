@@ -12,6 +12,8 @@
 
 Дополнительная проверка UI выявила, что reset не записывал ID темы, если ScenarioJob ещё не существовал. Теперь при удалении учитываются ID из ProductionItems и текущего контекста тем, а также Jobs. Поздняя задача со старым ID не возвращает удалённый выпуск. Это не стирание всех защитных отметок, а корректное разделение старой и заново добавленной темы.
 
+Windows-native также выявил соседний дефект очистки staging позднего worker: исходный путь родителя сравнивался с canonical границей. При junction/алиасе Windows эти пути различаются, и удаление пустых папок могло подняться до рабочего output root. Новый тест через disposable junction сначала воспроизвёл потерю root (RED); обход теперь использует canonical родителей (GREEN). Assertions о сохранении пустых рабочих папок не ослаблялись. Дополнительный независимый review замечаний не нашёл; alias-регрессия PASS, с отдельным FAIL production hash guard при открытом рабочем NewsFlow.
+
 Используется прежняя кнопка и контрольная фраза. Переиспользуемые направления, каналы, OAuth, настройки, библиотеки и модели сохраняются. Автотесты работают с disposable-профилями, без удаления рабочего производства пользователя.
 
 ## Проверки
@@ -26,6 +28,8 @@
 - Security/action-map/integrity:26тестов,25PASS/1FAIL — существующий Frozen Core lock не соответствует изменённому `scriptor/bridge.py`. В этом коротком прогоне production hash guard PASS; это не снимает более ранние FAIL.
 - CI расширен suite `tests.test_production_reset` и `tests.test_ideas`. Windows-native запускает production reset и реальный Electron UI с полным перезапуском, отдельным профилем и обязательным наличием Electron runtime; удалённые результаты фиксируются в draft PR после отправки.
 - Первый Windows CI остановился до UI-тестов: политика pnpm не запускает postinstall Electron, поэтому исполняемый runtime отсутствовал. Добавлен явный вызов install.js уже закреплённого пакета Electron; обязательная проверка наличия runtime сохранена. Первый FAIL не засчитывается как выполненная UI-проверка.
+- Второй Windows CI: реальный UI/restart PASS и production hash guard PASS; общий результат FAIL из-за двух прежних регрессий сохранения output roots после позднего worker. Они привели к описанному выше исправлению canonical staging boundary, а не к удалению тестов из CI.
+- После исправления staging: **142 теста PASS**,88.267s, включая полный production reset suite, сценарии, сессии, Ideas и реальный Electron UI/restart. Внешний контроль рабочего settings.json снова FAIL; прежние ограничения сохраняются. Команда: `python tests/run_isolated.py tests.test_production_reset tests.test_scenarios tests.test_session tests.test_ideas tests.test_production_topic_reset_ui -q`.
 
 ## Ограничения и сохранённые FAIL
 

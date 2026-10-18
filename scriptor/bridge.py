@@ -559,7 +559,9 @@ def _remove_staged_artifact(path: Path, root: Path) -> None:
             shutil.rmtree(path)
         elif path.is_file():
             path.unlink()
-        parent = path.parent
+        # Compare canonical parents with the canonical boundary. A Windows
+        # short path or junction must not let cleanup climb into output roots.
+        parent = resolved_path.parent
         while parent != resolved_root:
             try:
                 parent.rmdir()
