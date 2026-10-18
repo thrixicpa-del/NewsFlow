@@ -4,6 +4,8 @@ Draft [PR403](https://github.com/thrixicpa-del/NewsFlow/pull/403), issue402. П�
 
 **Пользовательская приёмка ещё не завершена.** Владелец снова возобновил работу16 октября; запись остановки ниже теперь историческая. Создание MP4, успешное декодирование и контрактные PASS не равны правильному видеоряду. Ниже сохранены промежуточные результаты с указанием версии; последние проверки описаны в разделе возобновления. Широкое разнообразие, финальный matched A/B и обязательные неизвестные gates пока не приняты.
 
+**Последний результат18 октября:** после явного разрешения12GiB завершён cached-only UI-проход HEAD6154710/product23dedc7: оба настоящих300-секундных MP4, полное декодирование18000 кадров, PCM lag0ms, текущий production guardPASS. Независимый просмотр100 сцен/300 OUTPUT-кадров:58 совместимых тематических контекстов,39 сомнительных,3 screen-text FAIL. Артиллерии в просмотренных кадрах нет; **REAL_MEDIA_SEMANTICS=FAIL**. Подробности и отдельные результаты каждого выпуска — в последнем разделе. Разрешение12GiB не расширяет исчерпанный бюджет анализа оригиналов;32 дополнительных works не разрешены. Исторические integrityFAIL остаютсяOPEN.
+
 ## Причины и изменения
 
 | Наблюдаемая проблема | Причина и исправление |
@@ -300,3 +302,58 @@ Source commit `23dedc79db365f3a6d61d4fbc2438d0755986f86` отправлен в �
 
 
 Независимая проверка нового cached-only UI harness: bounded GO при выполненном fresh preflight,16controls PASS/1actual-UI SKIP. Это не разрешение на новые material works, не обход storage gate и не пользовательская приёмка. Сохраняются11GiB/2GiB headroom,0нового анализа исходников,4096MiB/1800с, собственное process-tree cleanup и проверка actual queue bootstrap. Полный новый UI-run ещё не начат.
+
+
+## 18 октября: разрешённые12GiB и завершённый реальный UI-проход6154710
+
+Владелец явно разрешил увеличить **только retained artifacts до12GiB**. Разрешения на отдельно предложенные32 новых material works нет; лимит нового анализа оригиналов остаётся0. Старый11GiB preflight FAIL сохранён. Новый отдельный harness закреплён на HEAD61547102a4b7429efbe8a8568957660004512099 (documentation-only над source23dedc7; diff scriptor/tests/frontend пуст), исходниковые web/desktop assets пересобраны. Изменены только pin/build-log, разрешённый cap и соответствующее control expectation/error message; независимая проверка resource delta подтвердила отсутствие других изменений в защитах. Первые controls выявили старый11GiB assertion (FAIL сохранён); после привязки к явному12GiB разрешению16PASS/1actual opt-inSKIP/guardPASS. Fresh preflight: retained10004128158bytes, cap12884901888, reserve2147483648; состав25566 разрешённых строк/исключённые69paths47parents и исходные signatures совпали.
+
+**Новый реальный UI-тест завершился:** React «Собрать незавершённые»→IPC→Electron→Python queue→два сохранённых50-сценовых/300-секундных таймлайна→два MP4, оба«Готово» после reload. Canonical1test PASS419.582с, **PRODUCTION_WRITE_GUARD=PASS**; launcher завершился438.672с, peak owned-tree2674798592bytes (~2.49GiB),139 instrumented Python PIDs,0BLOCKED/protected-write events, actual queue bootstrap подтверждён. После завершения собственных NewsFlow/Electron/Python/FFmpeg-процессов0. Все pinned source/input/build/media signatures прошли сравнение. Эти текущие PASS не снимают ни исторические, ни предыдущий новый settings integrity FAIL; writer прежних интервалов UNKNOWN.
+
+| Genuine MP4 этого source | Результат |
+|---|---|
+| Выпуск1 |363285989bytes, SHA256 `d6295491f9158492660afc0219e717d840ab7d86e4ee798f2ce80f34d833eab0`; video/audio endpoints300/300с,1920×1080H264/AAC, full decode9000кадров. PCM correlation0.9999898504/0.9999939474/0.9999938493 на0/148.5/297с, lag0ms. |
+| Выпуск2 |425103014bytes, SHA256 `02261e66de28265784ad99fe83356f322b0478f13fcfd33989e732ce5c97ca16`; video/audio endpoints300/300с,1920×1080H264/AAC, full decode9000кадров. PCM correlation0.9999923710/0.9999920390/0.9999926884, lag0ms. |
+
+Оба MP4 созданы на прежних подлинных crop WAV и проверенных approximate VoiceMaps, без изменения речи/сценариев. Это техническая приёмка, не word alignment. Из готовых OUTPUT отдельно извлечено300кадров (по150на выпуск) для просмотра; обе canonical extraction проверки PASS19.13/23.91с, guardsPASS/0protected attempts. Новое декодирование OUTPUT не объявлено анализом новых исходников.41 genuine native-health проверки относились только к новым собственным proxies/outputs, максимум82 endpoint-кадра;240-frame fallback заблокирован. Новых original-candidate analysis событий0. Весь накопленный известный ledger384spent и UNKNOWN дополнительная работа давнего uninstrumented UI-attempt1 остаются в отчёте, без reset/refund/clearance. Retained после проверки10941483505bytes (~10.19GiB) из12GiB, осталось1943418383bytes; все прежние FAIL/MP4/базы сохранены.
+
+### Текущие метрики выбора
+
+| | Выпуск1 | Выпуск2 |
+|---|---:|---:|
+| Сцены / секунды |50/300|50/300|
+| Разные файлы / source groups / окна |22/14/22|17/11/17|
+| Файловые / групповые повторы |28/36|33/39|
+| Соседние одинаковые файлы |0|1|
+| Повторённые тройки путей |2|2|
+| Разные файлы по половинам0–150/150–300с |15/15|10/14|
+| Preparation total, raw |179.335с|140.189с|
+| Retrieval / selection / fallback, raw spans |10.814/44.533/11.064с|10.637/49.579/7.256с|
+
+Выпуски используют14 общих файлов, объединение25. Все три прежних источника с артиллерией отсутствуют в **обоих** новых таймлайнах. У выпуска1 изменились окна21/37/38/40/41 относительно предыдущего source61e UI; остальные окна, narration и запросы сохранены. ROOT посмотрел OUTPUT-кадры изменившихся сцен: вместо артиллерии сельхозпродукция/обработка поля. Английский«65 DAYS» источник не исправлен, а переместился41→37; это остаётся screen-text FAIL. Независимый просмотр всех100сцен завершён ниже; автоматические direct/context не являются его результатом.
+
+Режим normal, один planner/renderer и общий ранее разрешённый footage root, полные25566 строк индекса. Текущие timings включают instrumentation; bootstrap/audit и snapshot вызывают множество Python child processes. Они не являются актуальным matched repeated A/B или доказательством скорости без instrumentation. Прежний UI61e total497.277с/340parent roots и новые179.335с/один root — различные профили; причинное«ускорение наX%» не заявлено. Текущие22/17 файлов не означают принятую широкую разнообразность: остаются повторения и одинаковые14источников между выпусками. Fast/parallel ранееBLOCKED, не переименованы в PASS.
+
+CI завершился на product23 и documentation615: [Windows native615 PASS](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39113106335), [Linux615 FAIL](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39113106331) **только stale Frozen lock**, test_repository_lock_matches_current_source_and_package_revision. Voice/TTS/VoiceMap418checks OK15.569с/guardPASS подтверждает выполнение нового теста; прочие Python группы15/200/197/7/147/69 OK/guardsPASS, frontend type/UI/security/build прошли. Core-runtime11checks/1FAIL/guardPASS. Source23Windows39112734521PASS/Linux39112734464FAIL на том же step. CodeQL/dependency reviewSKIP. Docker18октября повторноNOT RUN: pipe dockerDesktopLinuxEngine отсутствует. Frozen/EXE/lock не собирались/не менялись/не обходились.
+
+Статусы обновлены: TOPICAL_FALLBACK технически завершает оба current normal выпуска; AUDIO transportPASS/word timingsAPPROXIMATE; WINDOWS local source E2E technicalPASS, отдельная независимая Windows-host E2ENOT RUN; DIVERSITY измерено, не принято; REAL_MEDIA_SEMANTICS остаётсяFAIL как минимум из-за English overlay, PERSON/EVENT/MOTION UNKNOWN; PRODUCTION_INTEGRITY прежниеFAILOPEN; FROZEN_BINDINGFAIL. No main/merge/issue close. Разрешённый12GiB блок снял только storage препятствие; он не разрешает32новых original analyses и не отменяет другие ограничения.
+
+### Завершённое независимое ревью обоих новых MP4
+
+Другой агент просмотрел все100 сцен по300 уже сохранённым OUTPUT-кадрам (1/3/5с внутри каждого шестисекундного фрагмента), сопоставив их с narration/query. Сверены SHA256 именно новых MP4 выше; оригиналы/модели не читались и новый decode не выполнялся. Локальные отчёты `source615-voice1-independent-output-review-private.md` и `source615-voice2-independent-output-review-private.md` сохранены с посценочной таблицей. Это независимое scoped agent review, а не приёмка владельца или отдельный Windows-host E2E.
+
+| Оценка всех50 сцен | Выпуск1 | Выпуск2 |
+|---|---:|---:|
+| Совместимый тематический контекст |25|33|
+| Неопределённо, не принято |24|15|
+| Screen-text FAIL |1|2|
+
+В просмотренных кадрах артиллерия не обнаружена. Это ограниченный sampled-output результат, не доказательство непрерывного движения или правильности всех кадров/событий/людей. Все три старых артиллерийских source IDs отсутствуют в обоих сохранённых проектах.
+
+Подтверждённые незакрытые дефекты текста: выпуск1/сцена37 и выпуск2/сцена43 — «65 DAYS»; **дополнительно выпуск2/сцена50 — «RUGGED AND RELIABLE HYDRAULIC DRIVE»** на двух из трёх кадров. Последний дефект найден именно независимым ревью нового MP4. Существующий cached-only RED для первого источника остаётсяFAIL: stored clip-wide SAFE, а точные window vectors с действующими screen prompts даютUNCERTAIN, неBLOCKED. CLIP-сходство не является распознаванием букв. Порог не снижен, UNCERTAIN не превращён в blanket blacklist, конкретные source IDs не зашиты. Общее исправление screen-text ещё не установлено.
+
+Выпуск2/сцены14–15: кадр учреждения с сине-жёлтым флагом под narration о заявлениях Москвы/российского ведомства и query Moscow/Russia government. Требуемый институциональный контекст не подтверждён. Это риск подмены страны/актора; точное здание, место и происхождение флага по этим кадрам не установлены, поэтому обе сцены консервативно отмеченыUNCERTAIN/context mismatch, а не признаны верными или уверенно геолоцированы. Локальная трасса показывает российскую каталожную подсказку и общий visual government_building; ни то ни другое не доказывает соответствие изображённого учреждения реплике. Нужна общая проверка/замена, не ручной blacklist одного файла.
+
+Другие сомнения ревью: повторяющаяся техника в помещении без подтверждённой перевалки зерна; накренённое/повреждённое на вид судно вместо обычной логистики; посторонние кириллические заголовки и субтитры. Эти сцены не засчитаны принятыми и не объявлены отдельными English-policy FAIL. Повторные портовые панорамы дают допустимый широкий контекст, но не доказывают конкретный порт, событие, статистику или достаточную разнообразность.
+
+Итог этого блока: **технический путь UI→таймлайн→два реальных MP4 завершён, смысловая приёмкаFAIL**. Следующая работа: общее screen-text исправление с RED/GREEN и проверкой ложных запретов, учреждение/локальный контекст, затем повторная визуальная приёмка; fast/parallel completion, повторённый matched A/B и независимый Windows E2E остаютсяBLOCKED/NOT RUN по прежним причинам. Дополнительный анализ исходников требует отдельного ответа на32-work запрос и ограниченного ledger; разрешение12GiB его не заменяет. Исторические integrityFAIL и Frozen bindingFAIL не сняты.
