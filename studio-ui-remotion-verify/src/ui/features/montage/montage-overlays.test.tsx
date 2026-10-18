@@ -19,6 +19,29 @@ function setup(extra: Partial<NewsFlowSnapshot> = {}) {
 afterEach(() => { delete window.newsflowDesktop; vi.useRealTimers(); });
 
 describe("inline montage overlays", () => {
+  it("offers a visible until-MP4-end checkbox per file and restores its previous schedule", async () => {
+    const { command } = setup({ montageSettings: { ...fallback.montageSettings, overlayTemplate: { ...template, layouts: { "16:9": [layer, { ...layer, id: "card", name: "Card" }], "9:16": [] } } } });
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "intervals" } });
+    fireEvent.change(screen.getByLabelText("Интервал 1: начало, с"), { target: { value: "6" } });
+    fireEvent.change(screen.getByLabelText("Интервал 1: конец, с"), { target: { value: "12" } });
+    fireEvent.click(screen.getByLabelText("Показывать до конца MP4"));
+    fireEvent.change(screen.getByLabelText("Начало, с"), { target: { value: "6" } });
+    expect(screen.getByLabelText("Режим показа")).toHaveProperty("value", "until-end");
+    expect(screen.queryByLabelText("Длительность, с")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Card" }));
+    expect(screen.getByLabelText("Показывать до конца MP4")).toHaveProperty("checked", false);
+    fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "count" } });
+    fireEvent.click(screen.getByLabelText("Показывать до конца MP4"));
+    fireEvent.click(screen.getByLabelText("Показывать до конца MP4"));
+    expect(screen.getByLabelText("Режим показа")).toHaveProperty("value", "count");
+    fireEvent.click(screen.getByRole("button", { name: "Logo" }));
+    expect(screen.getByLabelText("Показывать до конца MP4")).toHaveProperty("checked", true);
+    fireEvent.click(screen.getByLabelText("Показывать до конца MP4"));
+    expect(screen.getByLabelText("Интервал 1: конец, с")).toHaveProperty("value", "12");
+    fireEvent.click(screen.getByLabelText("Показывать до конца MP4"));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить для новых" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-overlays", expect.objectContaining({ template: expect.objectContaining({ layouts: { "16:9": [expect.objectContaining({ mode: "until-end", start: 6 }), expect.objectContaining({ mode: "count" })], "9:16": [] } }) })));
+  });
   it("preserves unfinished edits when another interval is removed and reindexes later drafts", () => {
     setup();
     fireEvent.change(screen.getByLabelText("Режим показа"), { target: { value: "intervals" } });

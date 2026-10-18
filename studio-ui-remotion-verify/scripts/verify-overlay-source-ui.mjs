@@ -43,6 +43,9 @@ try {
     const saved=JSON.parse(await (await import('node:fs/promises')).readFile(process.env.NEWSFLOW_OVERLAY_UI_CHOICES,'utf8'));
     assert.deepEqual(current.tasks.find(t=>t.index===0).overlayTemplate,saved,'Restart keeps random choices');
     assert.deepEqual(current.template.layouts['16:9'][0].ranges,[{start:.2,end:.6},{start:2,end:2.4},{start:5.5,end:6.3}]);
+    assert.equal(current.template.layouts['16:9'][0].mode,'until-end');
+    assert.equal(current.template.layouts['16:9'][0].start,6);
+    assert.equal(await js(`document.querySelector('input[aria-label="Показывать до конца MP4"]').checked`),true);
     assert.equal(current.template.layouts['16:9'].find(row=>row.name==='video-0.mp4').repeatCount,3);
     await writeFile(process.env.NEWSFLOW_OVERLAY_UI_REPORT,JSON.stringify({status:'PASS',fullProcessRestart:true,defaultAndIndividualTemplatesRetained:true}));
     console.log('OVERLAY_RESTART=PASS');app.exit(0);return;
@@ -93,6 +96,13 @@ try {
     await setControl('document',`Интервал ${index}: начало, с`,String(start));
     await setControl('document',`Интервал ${index}: конец, с`,String(end));
   }
+  await js(`document.querySelector('input[aria-label="Показывать до конца MP4"]').click()`);
+  assert.equal(await js(`document.querySelector('select[aria-label="Режим показа"]').value`),'until-end');
+  assert.equal(await js(`document.querySelector('input[aria-label="Начало, с"]').value`),'0','Zero means the whole MP4');
+  await js(`document.querySelector('input[aria-label="Показывать до конца MP4"]').click()`);
+  assert.equal(await js(`document.querySelector('input[aria-label="Интервал 3: конец, с"]').value`),'6.3','Unchecking restores the manual schedule');
+  await js(`document.querySelector('input[aria-label="Показывать до конца MP4"]').click()`);
+  await setControl('document','Начало, с','6');
   await click('video-0.mp4');
   await setControl('document','Режим показа','count');
   await setControl('document','Начало, с','.5');
@@ -106,7 +116,7 @@ try {
   await until(async()=>((await snapshot()).tasks.find(t=>t.index===0)?.overlayTemplate?.layouts['16:9'].length===5),'two sources random plus permanent materialized');
   current=await snapshot();
   const choice=current.tasks.find(t=>t.index===0).overlayTemplate;
-  assert.equal(choice.layouts['16:9'][0].mode,'intervals');
+  assert.equal(choice.layouts['16:9'][0].mode,'until-end');
   assert.equal(choice.layouts['16:9'].find(row=>row.name==='video-0.mp4').mode,'count');
   for(const source of choice.librarySources){
     const rows=choice.layouts['16:9'].filter(row=>row.librarySourceId===source.id);

@@ -115,8 +115,12 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
   const [failedMedia, setFailedMedia] = useState<Record<string, boolean>>({});
   const autoSize = useRef(new Set<string>());
   const serial = useRef(0);
+  const previousTimingModes = useRef<Record<string, Layer["mode"]>>({});
   useEffect(() => {
-    if (!dirty && !saving && source === "defaults") setTemplate(data.montageSettings.overlayTemplate || emptyTemplate());
+    if (!dirty && !saving && source === "defaults") {
+      setTemplate(data.montageSettings.overlayTemplate || emptyTemplate());
+      previousTimingModes.current = {};
+    }
   }, [data.montageSettings.overlayTemplate, dirty, saving, source]);
   const layers = template.layouts[layout];
   const active = layers.find((item) => item.id === activeId) || layers[0];
@@ -275,11 +279,11 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
     finally { setSaving(false); }
   };
   const reset = () => {
-    setTemplate(data.montageSettings.overlayTemplate || emptyTemplate()); setDirty(false); setInvalid({});
+    setTemplate(data.montageSettings.overlayTemplate || emptyTemplate()); setDirty(false); setInvalid({}); previousTimingModes.current = {};
     setSource("defaults"); setError(""); setMessage(""); setFailedMedia({}); setConfirmation(null); setPendingLoad(null); autoSize.current.clear();
   };
   const loadIndividual = (value: Template) => {
-    setTemplate(copyTemplate(value)); setSource("individual"); setDirty(false); setInvalid({});
+    setTemplate(copyTemplate(value)); setSource("individual"); setDirty(false); setInvalid({}); previousTimingModes.current = {};
     setActiveId(null); setPendingLoad(null); setConfirmation(null); setError(""); setMessage("Загружены индивидуальные настройки выбранного ролика."); setFailedMedia({}); autoSize.current.clear();
   };
   const exportOverlays = async () => {
@@ -317,6 +321,14 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
     const prefix = `${layout}:${active.id}:`;
     const fields = ["start", "duration", "repeatEvery", "endOffset", "repeatCount", "rangeEnd", "onceEnd"];
     setInvalid(current => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix) || (!fields.includes(key.slice(prefix.length)) && !key.slice(prefix.length).startsWith("range-")))));
+  };
+  const changeTimingMode = (mode: Layer["mode"]) => {
+    if (!active) return;
+    if (mode === "until-end" && active.mode !== "until-end") previousTimingModes.current[`${layout}:${active.id}`] = active.mode;
+    clearTimingDrafts();
+    update(active.id, { mode, ...(mode === "intervals" && !active.ranges?.length ? { ranges: [{ start: active.start, end: active.start + active.duration }] } : {}),
+      ...(mode !== "intervals" && active.ranges && !validOverlayTiming({ ...active, mode: "intervals" }) ? { ranges: undefined } : {}),
+      ...(mode === "count" ? { repeatCount: active.repeatCount ?? 3, rangeEnd: active.rangeEnd != null && active.rangeEnd > active.start ? active.rangeEnd : null } : {}) });
   };
   let schedule: Array<[number, number]> = [], scheduleError = "";
   if (active) {
@@ -391,14 +403,11 @@ export function MontageOverlays({ data, command, selectedIndices, allIndices, me
         <fieldset className="nf-overlay-timing" aria-label={`Когда показывать: ${active.name}`}>
           <legend>Когда показывать: {active.name}</legend>
           <p>Настройки только этого слоя. Все времена отсчитываются от начала готового MP4, включая заставку.</p>
+          <label className="nf-overlay-check"><input type="checkbox" aria-label="Показывать до конца MP4" checked={active.mode === "until-end"}
+            onChange={event => changeTimingMode(event.target.checked ? "until-end" : previousTimingModes.current[`${layout}:${active.id}`] || "once")} />До конца MP4</label>
+          <small>Начало 0 с — на всю длину MP4. Например, начало 6 с — с шестой секунды до конца. Картинка держится, видео повторяется по кругу.</small>
           <div className="nf-overlay-fields">
-            <label>Режим показа<select aria-label="Режим показа" value={active.mode} onChange={(event) => {
-              const mode = event.target.value as Layer["mode"];
-              clearTimingDrafts();
-              update(active.id, { mode, ...(mode === "intervals" && !active.ranges?.length ? { ranges: [{ start: active.start, end: active.start + active.duration }] } : {}),
-                ...(mode !== "intervals" && active.ranges && !validOverlayTiming({ ...active, mode: "intervals" }) ? { ranges: undefined } : {}),
-                ...(mode === "count" ? { repeatCount: active.repeatCount ?? 3, rangeEnd: active.rangeEnd != null && active.rangeEnd > active.start ? active.rangeEnd : null } : {}) });
-            }}>
+            <label>Режим показа<select aria-label="Режим показа" value={active.mode} onChange={event => changeTimingMode(event.target.value as Layer["mode"])}>
               <option value="once">Один интервал</option><option value="intervals">Мои интервалы «от–до»</option>
               <option value="count">Заданное количество показов</option><option value="repeat">Повтор каждые N секунд</option>
               <option value="until-end">С указанного времени до конца MP4</option><option value="end">За N секунд до конца</option>
