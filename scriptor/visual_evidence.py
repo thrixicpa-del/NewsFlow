@@ -10,7 +10,7 @@ import math
 import re
 from statistics import median
 
-TAXONOMY_VERSION = 5
+TAXONOMY_VERSION = 6
 RULES_VERSION = 8
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
@@ -35,7 +35,12 @@ TAXONOMY = {
     "police_guard": ("police officers standing peacefully guarding a street demonstration behind barriers without violence",),
     "clashes": ("violent street riot police beating demonstrators tear gas burning barricades protesters throwing stones",),
     "combat": ("actual footage of soldiers in battlefield trenches military fighting",
-               "artillery cannon firing at a battlefield military vehicles in combat"),
+               "artillery cannon firing at a battlefield military vehicles in combat",
+               # Crop fields alone do not establish agricultural activity.
+               # These compete with farm descriptions using the same margins;
+               # neither country nor a specific battle/event is inferred.
+               "military rocket launchers firing on a green agricultural field",
+               "camouflaged army trucks with rocket launchers firing from a green farm field"),
     "map": ("television graphic map of battlefield front lines with arrows and colored territories",
             "animated infographic diagram map with text graphics and colored areas"),
     "interview": ("close up of an ordinary person being interviewed on the street by a reporter with a microphone",

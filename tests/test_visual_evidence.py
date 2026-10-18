@@ -11,6 +11,46 @@ from scriptor.ai_index import ClipIndex
 
 
 class VisualWindowTests(unittest.TestCase):
+    def test_artillery_in_crop_fields_competes_with_farming_without_rejecting_farms(self):
+        from scriptor.visual_evidence import TAXONOMY
+        descriptions = (
+            "military rocket launchers firing on a green agricultural field",
+            "camouflaged army trucks with rocket launchers firing from a green farm field",
+        )
+        with tempfile.TemporaryDirectory(prefix="newsflow-field-artillery-") as temporary:
+            root = Path(temporary)
+            index = self.make_index(root)
+            ordinary_queries = index._query_vectors
+
+            def queries(texts):
+                vectors = ordinary_queries(texts)
+                for i, text in enumerate(texts):
+                    if text in descriptions:
+                        vectors[i] = 0
+                        vectors[i, -2] = 1
+                return vectors
+
+            index._query_vectors = queries
+            for number, (farm, field_artillery, farm_relation, combat_relation) in enumerate((
+                    (.30, .34, "contradiction", "direct"),
+                    (.30, .305, "unknown", "direct"),
+                    (.35, .25, "direct", "contradiction"))):
+                with self.subTest(farm=farm, field_artillery=field_artillery):
+                    clip = root / f"unlabelled-{number}.mp4"
+                    clip.write_bytes(b"disposable field-window")
+                    image = np.zeros(512, dtype=np.float32)
+                    image[list(TAXONOMY).index("farm")] = farm
+                    image[list(TAXONOMY).index("combat")] = .24
+                    image[-2] = field_artillery
+                    image[-1] = np.sqrt(1 - float(image @ image))
+                    index._sample_visual_window = lambda *_, frame=image: ([frame] * 3, [.5, 3., 5.5])
+                    actual_farm = index.assess_visual_window("agriculture farming fields", clip, 0, 6)
+                    actual_combat = index.assess_visual_window("frontline artillery battlefield military action", clip, 0, 6)
+                    self.assertEqual(farm_relation, actual_farm["relation"])
+                    self.assertEqual(combat_relation, actual_combat["relation"])
+                    self.assertFalse(actual_combat["event_confirmed"])
+                    self.assertFalse(actual_combat["motion_verified"])
+
     def test_vegetable_nursery_trays_cannot_supply_battlefield_evidence(self):
         """A crop close-up must compete with more than grain/harvest prompts."""
         from scriptor.visual_evidence import TAXONOMY
@@ -745,7 +785,7 @@ class VisualWindowTests(unittest.TestCase):
             result = index.assess_visual_window("cargo seaport cranes ships", clip, 0, 6)
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
-            self.assertEqual(TAXONOMY_VERSION, 5)
+            self.assertEqual(TAXONOMY_VERSION, 6)
             self.assertEqual(RULES_VERSION, 8)
             self.assertFalse(result["event_confirmed"])
 
@@ -784,7 +824,7 @@ class VisualWindowTests(unittest.TestCase):
                 self.assertEqual(current["relation"], "unknown")
                 self.assertEqual(current["feature_cache"], "memory")
                 self.assertEqual(current["rules_version"], 4)
-                self.assertEqual(current["taxonomy_version"], 5)
+                self.assertEqual(current["taxonomy_version"], 6)
                 index._visual_memory_clear()
                 persisted = index.assess_visual_window("cargo seaport", clip, 0, 6)
                 self.assertEqual(persisted["relation"], "unknown")
