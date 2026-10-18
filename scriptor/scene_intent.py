@@ -129,7 +129,8 @@ def _negated_attack(text: str, stem: str | None = None) -> bool:
 
 
 _PROTEST_WORDS = r"(?:митинг\w*|протест\w*|демонстран\w*|демонстраци\w*|шестви\w*|пикет\w*|забастов\w*|бастующ\w*|беспоряд\w*)"
-_SPEECH_VERBS = r"(?:ответи\w*|выступи\w*|заяви\w*|сказа\w*|прокомментир\w*|комментир\w*|отверг\w*|подтверд\w*)"
+_SPEECH_VERBS = (r"(?:ответи\w*|выступи\w*|заяви\w*|сказа\w*|прокомментир\w*|комментир\w*|отверг\w*|подтверд\w*"
+                 r"|назвал\w*|называ\w*|объяви\w*|объявля\w*|высказ\w*)")
 
 
 def _protest_intent(text: str, protest_context: bool = False, *, public_context: bool = False) -> str:
@@ -248,7 +249,10 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     indirect = bool(re.search(r"\b(?:по\s+решени\w*|по\s+указ\w*|поручени\w*)", lowered))
     primary = [] if industrial and (indirect or not speech) else people[:1]
     speech_action = re.search(rf"\b{_SPEECH_VERBS}", lowered)
-    if primary and len(people) > 1 and speech_action:
+    russian_person = any(re.search(r"[а-я]", match.group())
+                         for identity, _name, expression in PERSON_ALIASES if identity in people
+                         for match in re.finditer(rf"(?<!\w)(?:{expression})(?!\w)", lowered))
+    if primary and speech_action and (len(people) > 1 or russian_person):
         # An indeclinable surname after a reported statement is still its
         # author unless coordinated nominatives assert a plural response.
         nominatives = "|".join(PERSON_SUBJECT_FORMS.values())
@@ -270,6 +274,11 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
             primary = main_subjects
         else:
             primary = subjects
+    elif primary and russian_person and re.search(r"\b(?:проще|сложнее|легче|труднее)\b.*\bдоговар\w*", lowered):
+        # A comparison with a politician is not their visible participation.
+        # Keep an explicit subject, but never promote its indirect object.
+        primary = [identity for identity in primary
+                   if re.search(rf"\b{PERSON_SUBJECT_FORMS[identity]}\b", lowered)]
     if joint and not speech and not indirect:
         primary = people
     if not people and not industrial and re.search(r"\b(?:он|его|президент)\b", lowered):

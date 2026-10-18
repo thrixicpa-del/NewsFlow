@@ -18523,12 +18523,12 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
     project.preparation_metrics_ms = {
         key: round(value, 3) for key, value in preparation_metrics.items()
     }
-    # Persist only the latest bounded history. It accelerates subsequent
-    # rebuilds while not allowing the settings file to grow without limit.
-    settings.montage_recent_clip_paths = list(dict.fromkeys([
+    # Keep the last occurrence so a reused clip refreshes its recency before
+    # evicting the oldest paths from the bounded history.
+    settings.montage_recent_clip_paths = list(dict.fromkeys(reversed([
         *settings.montage_recent_clip_paths,
         *(clip.path for clip in clips),
-    ]))[-3000:]
+    ])))[::-1][-3000:]
     project_folder = Path(settings.montage_project_folder)
     save_settings(settings)
     path = project_folder / f"{safe_filename(title)}.newsflow"

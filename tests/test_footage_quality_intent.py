@@ -6,6 +6,88 @@ from scriptor.timeline import VISUAL_TERMS
 
 
 class LocalActionQualityTests(unittest.TestCase):
+    def test_single_latin_alias_still_targets_the_current_speech_subject(self):
+        from tests.test_footage_followup import voice_scenes
+
+        for text, target in (("Donald Trump выступил перед журналистами.", "trump"),
+                             ("Vladimir Putin заявил о новых переговорах.", "putin"),
+                             ("Trump выступил перед журналистами.", "trump"),
+                             ("Putin заявил о новых переговорах.", "putin")):
+            with self.subTest(text=text):
+                self.assertEqual([target], visual_intent(text, VISUAL_TERMS)["target_people"])
+                self.assertEqual([target], voice_scenes([text])[0]["scene_intent"]["target_people"])
+
+    def test_negated_enemy_object_is_not_a_visible_person_target(self):
+        from scriptor.scene_intent import named_people
+        from tests.test_footage_followup import voice_scenes
+
+        prior = visual_intent("Зеленский ответил журналистам.", VISUAL_TERMS)
+        for text in ("И не объявил Трампа врагом.",
+                     "Он не объявил Трампа врагом.",
+                     "Украинский лидер не объявил Трампа врагом.",
+                     "Трампа Зеленский не объявил врагом."):
+            with self.subTest(text=text):
+                for intent in (visual_intent(text, VISUAL_TERMS, previous=prior),
+                               voice_scenes(["Зеленский ответил журналистам.", text])[-1]["scene_intent"]):
+                    self.assertNotIn("trump", intent["target_people"])
+                    self.assertNotIn("trump", named_people(intent["visual_query"]))
+
+    def test_reported_comparison_object_does_not_replace_explicit_speaker(self):
+        from tests.test_footage_followup import voice_scenes
+
+        for text in ("Путина Зеленский назвал сложным собеседником.",
+                     "О словах Путина высказался Зеленский.",
+                     "Трампа Зеленский не объявил врагом."):
+            with self.subTest(text=text):
+                for intent in (visual_intent(text, VISUAL_TERMS),
+                               voice_scenes([text])[0]["scene_intent"]):
+                    self.assertEqual(["zelensky"], intent["target_people"])
+        for text in ("С Путиным ему проще договариваться.",
+                     "И не объявил Трампа врагом."):
+            with self.subTest(text=text):
+                self.assertEqual([], visual_intent(text, VISUAL_TERMS)["target_people"])
+
+    def test_synthetic_approximate_beat_does_not_revive_negated_trump_object(self):
+        from scriptor import bridge
+        from scriptor.scene_intent import named_people
+        from scriptor.voice_map import VoiceMapStatus
+
+        # Synthetic paraphrases preserve the defective clause/beat structure.
+        # These approximate fixture boundaries do not assert word alignment.
+        segments = [
+            (0., 3.843, "На европейской встрече Зеленский ответил Трампу на замечания,",
+             "European Union regional context, Donald Trump press conference, Volodymyr Zelensky Ukraine"),
+            (3.843, 9.126, "которые осложняли отношения между Киевом и Вашингтоном.",
+             "Washington DC White House US government officials, Kyiv Ukraine government city"),
+            (9.126, 14.89, "Президент США заявил, что с Путиным ему легче договариваться, чем с Зеленским.",
+             "United States government Washington DC, Vladimir Putin press conference, Volodymyr Zelensky Ukraine"),
+            (14.89, 20.173, "Украинский руководитель возразил, но и не объявил Трампа врагом.",
+             "Ukraine Ukrainian flag Kyiv, Donald Trump press conference"),
+        ]
+        payload = {"audioDuration": 20.173, "timingMode": "approximate", "schemaVersion": 1,
+                   "productionItemId": "test-synthetic-approximate-beat", "scriptSha256": "test",
+                   "audioSha256": "test", "alignmentEngine": "newsflow-fallback",
+                   "segments": [{"id": n, "start": start, "end": end, "duration": end-start,
+                                 "text": text, "visualQuery": query}
+                                for n, (start, end, text, query) in enumerate(segments, 1)]}
+        scenes = bridge._voice_map_scenes(VoiceMapStatus("approximate", "approximate", data=payload))[0]
+        self.assertEqual(4, len(scenes))
+        self.assertIn("не объявил Трампа врагом", scenes[-1]["narration"])
+        self.assertNotIn("trump", scenes[-1]["scene_intent"]["target_people"])
+        self.assertNotIn("trump", named_people(scenes[-1]["visual_query_en"]))
+
+    def test_current_positive_speech_resets_a_previous_speaker(self):
+        from tests.test_footage_followup import voice_scenes
+
+        prior = visual_intent("Зеленский ответил журналистам.", VISUAL_TERMS)
+        for text, target in (("Трамп выступил с новым заявлением.", "trump"),
+                             ("Путин прокомментировал заявление Зеленского.", "putin")):
+            with self.subTest(text=text):
+                self.assertEqual([target], visual_intent(text, VISUAL_TERMS, previous=prior)["target_people"])
+                self.assertEqual([target], voice_scenes([prior["text"], text])[-1]["scene_intent"]["target_people"])
+        self.assertNotIn("Zelensky", visual_intent("На заводе начался ремонт оборудования.", VISUAL_TERMS,
+                                                  previous=prior)["visual_query"])
+
     def test_placards_and_resignation_chants_assert_a_protest_without_event_keyword(self):
         from tests.test_footage_followup import voice_scenes
 

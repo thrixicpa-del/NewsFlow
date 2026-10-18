@@ -67,6 +67,63 @@ def select(query, items):
 
 
 class FootageFollowupTests(unittest.TestCase):
+    def _prepare_history_case(self, history_names, selected_names):
+        from scriptor.config import Settings
+        from scriptor.core import ScenarioRequest
+        from scriptor.runner import Job, RunState
+
+        with tempfile.TemporaryDirectory(prefix="newsflow-history-recency-") as folder:
+            root = Path(folder)
+            footage = root / "footage"
+            footage.mkdir()
+            paths = {name: str(footage / f"{name}-oil-tanker-port.mp4")
+                     for name in set(history_names + selected_names)}
+            for name in set(selected_names):
+                Path(paths[name]).write_bytes(b"synthetic media; history test never decodes")
+            voice = root / "voice.mp3"
+            voice.write_bytes(b"synthetic voice; history test never decodes")
+            settings = Settings(
+                footage_folders=[str(footage)], montage_project_folder=str(root / "projects"),
+                montage_output_folder=str(root / "outputs"), montage_use_script_text=False,
+                montage_auto_web=False, montage_recent_clip_paths=[paths[name] for name in history_names],
+            )
+            settings.voice_scenario_outputs = {"1": str(voice)}
+            job = Job(ScenarioRequest(0, "oil tanker cargo port", ""), RunState.DONE, "", "")
+            selections = [bridge.MontageCandidateSelection(
+                FootageItem(paths[name], "oil tanker cargo port.mp4", tags=["oil-tanker-port"]),
+                8., .95, "RELAXED_SEMANTIC", False, {"visual": {"relation": "direct"}},
+                source_family=f"family-{name}",
+            ) for name in selected_names]
+            scenes = [{"narration": "", "visual_query_en": "oil tanker cargo port", "duration": 6.}
+                      for _ in selected_names]
+            with (patch.object(bridge, "load_settings", return_value=settings),
+                  patch.object(bridge, "load_session", return_value=(["oil tanker cargo port"], [job])),
+                  patch.object(bridge, "save_settings"), patch.object(bridge, "snapshot", return_value={}),
+                  patch.object(bridge, "_montage_screen_text_safe", return_value=True),
+                  patch.object(bridge.ClipIndex, "count", return_value=0),
+                  patch.object(bridge, "_select_montage_candidate", side_effect=selections),
+                  patch.object(bridge, "title_only_scene_plan", return_value=scenes),
+                  patch.object(bridge, "probe_media_duration", return_value=6. * len(scenes)),
+                  patch.object(bridge, "_cached_or_probed_montage_duration", return_value=8.)):
+                result = bridge.prepare_montage({"scenarioIndex": 0})
+            self.assertEqual(result["preparedProject"]["clips"], len(selected_names))
+            names = {path: name for name, path in paths.items()}
+            return [names[path] for path in settings.montage_recent_clip_paths]
+
+    def test_history_refreshes_reused_oldest_before_bounded_eviction(self):
+        history = ["reused", *[f"old-{number}" for number in range(2999)]]
+        actual = self._prepare_history_case(history, ["reused", "new"])
+        self.assertEqual(actual, [*history[2:], "reused", "new"])
+        self.assertEqual(len(actual), 3000)
+
+    def test_history_orders_repeated_current_paths_by_last_selection(self):
+        actual = self._prepare_history_case(["old", "a", "untouched"], ["a", "b", "a"])
+        self.assertEqual(actual, ["old", "untouched", "b", "a"])
+
+    def test_history_preserves_untouched_order_before_new_paths(self):
+        actual = self._prepare_history_case(["old-a", "old-b"], ["new-a", "new-b"])
+        self.assertEqual(actual, ["old-a", "old-b", "new-a", "new-b"])
+
     def test_negated_transport_destination_does_not_become_positive_footage(self):
         for text, wanted, excluded in (
             ("Зерно везут по железной дороге к западной границе, а не к черноморским портам.", "rail", "seaport"),
