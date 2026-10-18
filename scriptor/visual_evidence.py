@@ -11,7 +11,7 @@ import re
 from statistics import median
 
 TAXONOMY_VERSION = 7
-RULES_VERSION = 9
+RULES_VERSION = 10
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
 
@@ -96,11 +96,13 @@ _INSTITUTION_SYMBOL_PATTERNS = {
 }
 
 
-def _has_positive_occurrence(text: str, expression: str) -> bool:
+def _has_positive_occurrence(text: str, expression: str, *, clause_negation: bool = False) -> bool:
     """An excluded occurrence must not erase another positive occurrence."""
     for match in re.finditer(expression, text):
         prefix = re.split(r"[,;.!?]|\b(?:but|however|но|однако)\b", text[:match.start()])[-1]
-        if not re.search(r"(?:\bno\b|\bnot\b|\bwithout\b|без|\bне\b)\s+(?:\w+\s+){0,2}$", prefix):
+        negated = (re.search(r"\b(?:no|not|without|без|не)\b", prefix) if clause_negation else
+                   re.search(r"(?:\bno\b|\bnot\b|\bwithout\b|без|\bне\b)\s+(?:\w+\s+){0,2}$", prefix))
+        if not negated:
             return True
     return False
 
@@ -167,6 +169,16 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
         # explicit rail, truck, combat, energy and factory roles ahead of its
         # warehouse destination; actual harvesting retains its normal role.
         if has(expression) and not (cargo_warehouse and topic in {"farm", "finance"}):
+            # A grain-warehouse clause already permits commercial port context.
+            # Keep that secondary context when rail is the primary role, without
+            # treating a port as evidence of a train or broadening rail alone.
+            if (topic == "rail" and cargo_warehouse
+                    and _has_positive_occurrence(text, r"\brail(?:way|road)?s?\b|\bfreight trains?\b|железнодорож\w*|\bпоезд\w*", clause_negation=True)
+                    and not _has_positive_occurrence(text, r"combat|battlefield|frontline|artillery|military|soldier|armou?r|войск|фронт|артилл|солдат|боев|наступлен|танк(?:и|а|ов)?\b")
+                    and _has_positive_occurrence(text, r"\bgrain\b|зерн\w*", clause_negation=True)
+                    and _has_positive_occurrence(text, r"\bwarehouse\b|склад\w*", clause_negation=True)
+                    and _has_positive_occurrence(text, r"\b(?:cargo|export|freight|storage|logistics)\b|груз|экспорт|логист", clause_negation=True)):
+                contexts = contexts | {"port"}
             return topic, frozenset({topic}), frozenset(contexts)
     return None
 

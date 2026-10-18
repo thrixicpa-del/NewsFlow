@@ -1,5 +1,7 @@
 # Goal
 
+**Latest override18October:** owner explicitly resumed footage work. Current branch remains `codex/footage-semantic-person-fallback-v3`; inspect actual HEAD. The26remaining additional works are now spent:32/32,0remaining,83known returned frames. Do not repeat coverage or launch new original analysis. Rules10 retain secondary grain-warehouse port CONTEXT under an explicit positive rail+grain+warehouse logistics query, without changing rail DIRECT, thresholds/taxonomy7/models/search/diversity/history/reuse. Source regressions are functional GREEN, but production integrity gates repeatedly FAIL while working NewsFlow is active; writerUNKNOWN. Preserve every failure. See the latest entry in PR403_REAL_QUALITY_2026-10-15.md; older stop/resume and budgets below are historical. Next: fresh source-pinned cached-only UI using the augmented isolated coverage snapshot, then actual MP4/PCM/scene review if selection completes. No main/merge/issue-close/Frozen/EXE/lock changes.
+
 Continue draft PR403 on `codex/footage-semantic-person-fallback-v3`: correct real footage, preserve topical fallback, speed, history/rotation and broad diversity between videos. **The owner now explicitly requested finishing the semantic-analogs block, recording the stop point and stopping. That source block is saved; resume only after a new owner request.** No background continuation or automation.
 
 # Current status

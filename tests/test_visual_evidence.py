@@ -155,6 +155,80 @@ class VisualWindowTests(unittest.TestCase):
         self.assertEqual("direct", classify_window("grain cargo warehouse storage", scores)["relation"])
         self.assertEqual("context", classify_window("seaport cargo cranes ships", scores)["relation"])
 
+    def test_explicit_grain_warehouse_clause_keeps_port_context_for_rail(self):
+        from scriptor.visual_evidence import classify_window
+        for query in (
+            "rail freight train grain transport cargo logistics, grain cargo warehouse storage logistics",
+            "железнодорожные перевозки зерна, грузовой склад зерна логистика",
+            "rail freight train grain cargo logistics, no warehouse here; grain cargo warehouse storage logistics",
+        ):
+            with self.subTest(query=query):
+                result = classify_window(query, [{"port": .35, "rail": .21}] * 3)
+                self.assertEqual("context", result["relation"])
+                self.assertEqual("rail", result["topic"])
+                self.assertFalse(result["event_confirmed"])
+                self.assertFalse(result["motion_verified"])
+                self.assertEqual("direct", classify_window(query, [{"rail": .35, "port": .21}] * 3)["relation"])
+
+    def test_grain_rail_context_reuses_persisted_window_with_zero_cold_budget(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-grain-context-") as temporary:
+            root = Path(temporary)
+            clip = root / "unlabelled.mp4"
+            clip.write_bytes(b"disposable-window")
+            index = self.make_index(root)
+            self.assertEqual("direct", index.assess_visual_window("seaport cargo", clip, 0, 6)["relation"])
+            index._visual_memory_clear()
+            restored = self.make_index(root)
+            restored.visual_window_budget = 0
+            with patch.object(restored, "_sample_visual_window", side_effect=AssertionError("no new window")), \
+                    patch.object(restored, "_sample_frames", side_effect=AssertionError("no new screen analysis")):
+                query = "rail freight train grain cargo logistics, grain cargo warehouse storage logistics"
+                result = restored.assess_visual_window(query, clip, 0, 6)
+                self.assertEqual("context", result["relation"])
+                self.assertEqual("sqlite", result["feature_cache"])
+                self.assertEqual("contradiction", restored.assess_visual_window("rail freight train", clip, 0, 6)["relation"])
+            self.assertEqual(0, restored._visual_cold_windows)
+
+    def test_grain_rail_context_does_not_expand_without_positive_warehouse_intent(self):
+        from scriptor.visual_evidence import classify_window
+        for query in (
+            "rail freight train grain transport cargo logistics",
+            "rail freight train, cargo warehouse storage logistics",
+            "rail freight train, no grain cargo warehouse storage logistics",
+            "rail freight train grain cargo logistics, no warehouse",
+            "no rail freight train, grain cargo warehouse storage logistics",
+            "железнодорожные перевозки зерна, без склада",
+            "frontline artillery battlefield, rail freight train grain cargo warehouse storage logistics",
+            "grain harvest, rail freight train grain cargo warehouse storage logistics",
+            "rail freight train grain transport cargo logistics, no grain cargo storage warehouse",
+            "rail freight train grain cargo logistics, no grain-cargo storage warehouse",
+            "rail freight train grain cargo logistics, without grain: cargo storage warehouse",
+            "grain cargo warehouse storage logistics, hiking trail",
+            "rail freight train, woodgrain cargo warehouse storage logistics",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual("contradiction", classify_window(query, [{"port": .35, "rail": .21}] * 3)["relation"])
+
+    def test_grain_rail_port_context_preserves_close_negatives_and_explicit_roles(self):
+        from scriptor.visual_evidence import classify_window
+        query = "rail freight train grain cargo logistics, grain cargo warehouse storage logistics"
+        for kind in ("military_naval", "maritime_display", "vessel_incident", "equipment_display", "combat"):
+            with self.subTest(kind=kind):
+                self.assertEqual("contradiction", classify_window(query, [{"port": .30, kind: .35}] * 3)["relation"])
+                self.assertEqual("unknown", classify_window(query, [{"port": .30, kind: .305}] * 3)["relation"])
+        for prefix, kind, relation in (
+            ("military naval warship", "military_naval", "contradiction"),
+            ("sinking cargo ship", "vessel_incident", "context"),
+            ("machinery exhibition", "equipment_display", "contradiction"),
+            ("formal statement", "official", "contradiction"),
+            ("peaceful protest rally", "peaceful_protest", "contradiction"),
+            ("map infographic", "map", "contradiction"),
+        ):
+            with self.subTest(prefix=prefix):
+                result = classify_window(prefix + ", " + query, [{"port": .35, kind: .21}] * 3)
+                self.assertEqual(relation, result["relation"])
+                self.assertEqual(kind if kind != "peaceful_protest" else "protest", result["topic"])
+
     def make_index(self, root):
         from scriptor.visual_evidence import TAXONOMY
         classes = list(TAXONOMY)
@@ -786,7 +860,7 @@ class VisualWindowTests(unittest.TestCase):
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
             self.assertEqual(TAXONOMY_VERSION, 7)
-            self.assertEqual(RULES_VERSION, 9)
+            self.assertEqual(RULES_VERSION, 10)
             self.assertFalse(result["event_confirmed"])
 
     def test_mixed_interval_is_not_direct(self):

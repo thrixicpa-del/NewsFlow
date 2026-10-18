@@ -130,6 +130,8 @@ class ContextVisualSemanticsTests(unittest.TestCase):
         from scriptor.ai_index import SearchHit
         from scriptor.footage import FootageItem
         for query, bad_scores, context_kind in (
+            ("rail freight train grain cargo logistics, grain cargo warehouse storage logistics",
+             {"road_cargo": .28, "equipment_display": .275}, "port"),
             ("seaport cargo cranes ships", {"road_cargo": .28, "equipment_display": .275}, "warehouse"),
             ("seaport cargo ship shipping", {"port": .27, "vessel_incident": .31}, "warehouse"),
             ("Moscow Russia government building exterior", {"government_building": .28,
