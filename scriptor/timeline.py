@@ -227,6 +227,7 @@ VISUAL_TERMS = {
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
     "азербайдж": "Azerbaijan Baku", "израил": "Israel military border", "ливан": "Lebanon Beirut",
     "тавуш": "Tavush Armenia regional context",
+    "ереван": "Yerevan Armenia regional context", "баку": "Baku Azerbaijan regional context",
     "энерг": "energy infrastructure power plant", "склад": "warehouse fire emergency workers",
     # Military reports must request the visible action, not the abstract word
     # "war".  This separates an offensive/frontline from a Kremlin office or

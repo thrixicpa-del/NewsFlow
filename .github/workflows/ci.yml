@@ -36,7 +36,7 @@ jobs:
       - run: python tests/run_isolated.py tests.test_ai_index tests.test_montage_queue tests.test_montage_index_integrity
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-proxy
-      - run: python tests/run_isolated.py --pytest tests/test_montage_history_persistence.py -q
+      - run: python tests/run_isolated.py --pytest tests/test_montage_history_persistence.py tests/test_footage_three_country_matrix.py -q
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-history
       - run: >-
