@@ -18718,6 +18718,8 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
         *settings.montage_recent_clip_paths,
         *(clip.path for clip in clips),
     ])))[::-1][-3000:]
+    settings._montage_recent_clip_usage = [*getattr(settings, "_montage_recent_clip_usage", []),
+                                          *(clip.path for clip in clips)]
     project_folder = Path(settings.montage_project_folder)
     save_settings(settings)
     path = project_folder / f"{safe_filename(title)}.newsflow"

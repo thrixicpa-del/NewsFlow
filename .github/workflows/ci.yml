@@ -36,6 +36,9 @@ jobs:
       - run: python tests/run_isolated.py tests.test_ai_index tests.test_montage_queue tests.test_montage_index_integrity
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-proxy
+      - run: python tests/run_isolated.py --pytest tests/test_montage_history_persistence.py -q
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-history
       - run: >-
           python tests/run_isolated.py
           scriptor.test_montage_render.MontageRenderTests.test_source_proxy_cache_reuses_an_unchanged_source_without_touching_it
