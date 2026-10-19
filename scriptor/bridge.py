@@ -16301,6 +16301,15 @@ def _montage_has_naval_hint(value: str) -> bool:
         r"эсмин|фрегат|подлод|подводн\w*\s+лодк", str(value), re.IGNORECASE))
 
 
+@lru_cache(maxsize=1024)
+def _montage_requests_person_footage(scene_query: str) -> bool:
+    from .scene_intent import named_people
+    from .visual_evidence import query_topic
+    topic = query_topic(scene_query)
+    return bool(named_people(scene_query) and (
+        topic is None or topic[0] in {"official", "meeting", "interview", "political_context"}))
+
+
 def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: float | None = None,
                       duration: float = 6, visual_assessment: dict | None = None) -> bool:
     from .scene_intent import (
@@ -16315,6 +16324,13 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
     start = person_window(scene_query, item, duration) if source_start is None else source_start
     evidence = person_evidence(scene_query, item, start, duration)
     if evidence["status"] in {"contradiction", "contradiction_hint"}:
+        return False
+    if (evidence["status"] == "unknown" and _montage_requests_person_footage(scene_query)
+            and set(evidence["targets"]).intersection(named_people(
+                _montage_explicit_metadata(item).replace("_", " ")))):
+        # Stored evidence has withheld the catalog's named-person hint for
+        # this window. Do not re-admit that same hint as a delegation shot.
+        # Neutral checked institutions remain available as SAFE_CONTEXT.
         return False
     if str(scene_query).startswith("archival political context,") and (
             evidence["status"] not in {"confirmed", "probable"}
@@ -17113,7 +17129,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
             elif (visual and visual.get("source") == "automatic-window-clip"
                   and reported_level == "STRICT_MATCH"):
                 reported_level = "RELAXED_SEMANTIC"
-            if level == "STRICT_MATCH" and evidence["targets"]:
+            if reported_level == "STRICT_MATCH" and evidence["targets"]:
                 if evidence["status"] == "unknown":
                     reported_level = "SAFE_CONTEXT"
                 elif evidence["status"] == "probable":
@@ -17194,16 +17210,26 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
     # material before falling back to illustrative context. Each evidence
     # tier retains the existing retrieval floors and diversity relaxation.
     priorities = sorted({intent_priority(hit.item) for hit in all_candidates})
-    for priority in priorities:
-        for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
-            eligible = [hit for hit in pool if intent_priority(hit.item) == priority]
-            if not eligible:
-                continue
-            selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
-                              allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
-                              avoid_recent=avoid_recent, level=level, skip_previous=skip_previous)
-            if selected:
-                return selected
+    rotate_portrait = bool(allow_safe_reuse and previous_path and _montage_requests_person_footage(scene_query))
+    groups = ([[value for value in priorities if value[0] == person]
+               for person in sorted({value[0] for value in priorities})]
+              if rotate_portrait else [[priority] for priority in priorities])
+    for group in groups:
+        # Within the same person-confidence tier, a checked meeting context
+        # beats replaying the immediately preceding portrait. Stronger identity
+        # evidence still wins; a sole safe source may still complete the video.
+        for avoid_previous in ((True, False) if rotate_portrait else (False,)):
+            for priority in group:
+                for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
+                    eligible = [hit for hit in pool if intent_priority(hit.item) == priority]
+                    if not eligible:
+                        continue
+                    selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
+                                      allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
+                                      avoid_recent=avoid_recent, level=level,
+                                      skip_previous=skip_previous or avoid_previous)
+                    if selected:
+                        return selected
     raise MontageSelectionFailure(diagnostics)
 
 
