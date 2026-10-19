@@ -15999,13 +15999,55 @@ _MONTAGE_ENTITY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("eu", ("european union", "brussels", "eu parliament", "european parliament", "евросоюз", "брюссел",
             "европейского союза", "европейский союз", "европарламент", "eu-institutions")),
     ("iran", ("iran", "tehran", "persian", "иран", "тегеран", "персид", "iran-government-tehran")),
-    ("armenia", ("armenia", "yerevan", "pashinyan", "армени", "ереван", "пашинян",
+    ("armenia", ("armenia", "yerevan", "tavush", "тавуш", "pashinyan", "khachaturyan", "хачатурян", "армени", "ереван", "пашинян",
                  "armenia-government-yerevan")),
     ("azerbaijan", ("azerbaijan", "baku", "aliyev", "азербайдж", "баку", "алиев",
                     "azerbaijan-government-baku")),
     ("kazakhstan", ("kazakhstan", "astana", "tokayev", "tokaev", "казахстан", "астана", "токаев")),
     ("belarus", ("belarus", "minsk", "lukashenko", "беларус", "минск", "лукашенко")),
+    ("georgia", ("georgia", "georgian", "tbilisi", "грузи", "тбилиси")),
+    ("moldova", ("moldova", "moldovan", "chisinau", "sandu", "санду", "молдов", "кишин")),
+    ("uzbekistan", ("uzbekistan", "uzbek", "tashkent", "mirziyoyev", "мирзиёев", "мирзиеев", "узбеки", "узбекск", "ташкент")),
+    ("kyrgyzstan", ("kyrgyzstan", "kyrgyz", "bishkek", "japarov", "жапаров", "кыргыз", "киргиз", "бишкек")),
+    ("tajikistan", ("tajikistan", "tajik", "dushanbe", "rahmon", "рахмон", "таджик", "душанбе")),
+    ("turkmenistan", ("turkmenistan", "turkmen", "ashgabat", "berdymukhamedov", "бердымухамедов", "туркмен", "ашхабад")),
+    ("france", ("france", "french", "paris", "macron", "франци", "француз", "париж", "макрон")),
+    ("turkey", ("turkey", "turkish", "ankara", "турци", "турецк", "анкара")),
+    ("china", ("china", "chinese", "beijing", "китай", "китае", "китая", "пекин")),
+    ("germany", ("germany", "german", "berlin", "германи", "немецк", "берлин")),
+    ("uk", ("united kingdom", "britain", "british", "london", "британи", "британск", "лондон")),
+    ("poland", ("poland", "polish", "warsaw", "польш", "польск", "варшав")),
+    ("romania", ("romania", "romanian", "bucharest", "румыни", "румынск", "бухарест")),
+    ("israel", ("israel", "israeli", "израил")),
+    ("lebanon", ("lebanon", "lebanese", "beirut", "ливан", "бейрут")),
 )
+
+_MONTAGE_FLAG_ALIASES = {
+    "russia": r"russian|russia|российск\w*|росси[ияюей]+",
+    "ukraine": r"ukrainian|ukraine|украинск\w*|украин[аыуюеой]+",
+    "belarus": r"belarusian|belarus|белорусск\w*|беларус[ьи]+",
+    "armenia": r"armenian|armenia|армянск\w*|армени[ияюей]+",
+    "azerbaijan": r"azerbaijani|azerbaijan|азербайджанск\w*|азербайджан[ауы]?",
+    "kazakhstan": r"kazakh|kazakhstan|казахстанск\w*|казахстан[ауы]?",
+    "georgia": r"georgian|georgia|грузинск\w*|грузи[ияюей]+",
+    "moldova": r"moldovan|moldova|молдавск\w*|молдовск\w*|молдов[аыуеой]+",
+    "uzbekistan": r"uzbek|uzbekistan|узбекск\w*|узбекистан[ауы]?",
+    "kyrgyzstan": r"kyrgyz|kyrgyzstan|кыргызск\w*|киргизск\w*|кыргызстан[ауы]?",
+    "tajikistan": r"tajik|tajikistan|таджикск\w*|таджикистан[ауы]?",
+    "turkmenistan": r"turkmen|turkmenistan|туркменск\w*|туркменистан[ауы]?",
+    "us": r"american|united states|usa|us|американск\w*|сша",
+    "eu": r"eu|european union|евросоюз[ауы]?",
+    "iran": r"iranian|iran|иранск\w*|иран[ауы]?",
+    "france": r"french|france|французск\w*|франци[ияюей]+",
+    "turkey": r"turkish|turkey|турецк\w*|турци[ияюей]+",
+    "china": r"chinese|china|китайск\w*|кита[яйюе]+",
+    "germany": r"german|germany|немецк\w*|германск\w*|германи[ияюей]+",
+    "uk": r"british|united kingdom|britain|британск\w*|великобритани[ияюей]+",
+    "poland": r"polish|poland|польск\w*|польш[аыеуи]+",
+    "romania": r"romanian|romania|румынск\w*|румыни[ияюей]+",
+    "israel": r"israeli|israel|израильск\w*|израил[ьяюе]+",
+    "lebanon": r"lebanese|lebanon|ливанск\w*|ливан[аыуе]?",
+}
 
 # Country-level identity is not enough for an explicitly named government
 # city.  These are only known contradictory locations; neutral Ukraine B-roll
@@ -16066,6 +16108,59 @@ def _montage_entity_conflict(scene_query: str, candidate_metadata: str) -> bool:
     requested = _montage_entity_groups(scene_query)
     candidate = _montage_entity_groups(candidate_metadata)
     return bool(requested and candidate and requested.isdisjoint(candidate))
+
+
+def _montage_flag_conflict(scene_query: str, candidate_metadata: str) -> bool:
+    """Explicit foreign-flag provenance cannot be hidden by a shared title word.
+
+    This only excludes known contradictions; it does not recognize flags in
+    pixels or establish a real event's geography from a filename.
+    """
+    requested = _montage_entity_groups(scene_query)
+    if not requested:
+        return False
+    return bool(_montage_explicit_flag_countries(str(candidate_metadata)) - requested)
+
+
+@lru_cache(maxsize=4096)
+def _montage_explicit_flag_countries(candidate_metadata: str) -> frozenset[str]:
+    metadata = re.sub(r"[_-]+", " ", candidate_metadata).casefold()
+    flag = r"(?:flags?|флаг\w*)"
+    aliases = "|".join(_MONTAGE_FLAG_ALIASES.values())
+    conjunction = r"(?:,|/|&|\band\b|\bи\b)"
+    following = rf"(?:\s*{conjunction}\s*(?:{aliases})){{0,4}}\s+{flag}"
+    preceding = rf"{flag}\s+(?:(?:of|the)\s+)*(?:(?:{aliases})\s*{conjunction}\s*){{0,4}}"
+    return frozenset(country for country, names in _MONTAGE_FLAG_ALIASES.items()
+                     if re.search(rf"(?<!\w)(?:(?:{names}){following}|{preceding}(?:{names}))(?!\w)", metadata))
+
+
+def _montage_political_context_queries(scene: dict, story: str) -> list[str]:
+    """Bounded archive fallback, anchored to mentioned people and local topic.
+
+    No country-to-president inference. An explicit speaker wins over other
+    mentioned people; an unrelated scene cannot inherit a story-wide portrait.
+    """
+    from .scene_intent import named_people, person_name
+    query = str(scene.get("visual_query_en", ""))
+    intent = scene.get("scene_intent")
+    primary = (list(intent.get("target_people", [])) if isinstance(intent, dict)
+               else named_people(query))
+    mentioned = named_people(story)
+    places = _montage_entity_groups(query)
+    people = [identity for identity in primary if identity in mentioned]
+    if not primary and places:
+        people = [identity for identity in mentioned
+                  if places & _montage_entity_groups(person_name(identity))]
+    if not people:
+        return []
+    names = ", ".join(person_name(identity) for identity in people[:2])
+    # Keep the explicit scene countries for the foreign-flag guard, including
+    # a named host country at a bilateral meeting. Never borrow other topics.
+    geography = " ".join(sorted(places))
+    return [f"archival political context, {names}, {geography} {role}".strip() for role in (
+        "official statement press conference interview",
+        "diplomatic negotiations delegation meeting public event",
+    )]
 
 
 def _montage_explicit_metadata(item: FootageItem) -> str:
@@ -16182,6 +16277,16 @@ def _montage_window_visual(scene_query: str, item: FootageItem, start: float, du
     assessor = getattr(item, "_visual_assessor", None)
     if not callable(assessor):
         return None
+    from .scene_intent import PERSON_ALIASES, named_people
+    if named_people(scene_query):
+        remaining = str(scene_query)
+        for _identity, _name, expression in PERSON_ALIASES:
+            remaining = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", remaining, flags=re.IGNORECASE)
+        if not re.search(r"\w", remaining):
+            # A bare name used to bypass the action taxonomy altogether.
+            # Check an actual speech/meeting window; this confirms a role,
+            # never the person's identity or the reported event.
+            scene_query += ", press conference official statement"
     try:
         return assessor(scene_query, start, duration, allow_alternatives=allow_alternatives)
     except (OSError, ValueError, RuntimeError) as error:
@@ -16211,9 +16316,27 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
     evidence = person_evidence(scene_query, item, start, duration)
     if evidence["status"] in {"contradiction", "contradiction_hint"}:
         return False
+    if str(scene_query).startswith("archival political context,") and (
+            evidence["status"] not in {"confirmed", "probable"}
+            or not set(evidence["visible"]).issubset(evidence["targets"])):
+        return False
+    if (str(scene_query).startswith("archival political context,")
+            and evidence["source"] == "curated-interval"
+            and any(observation.get("source") in {"manual", "curated"}
+                    and observation.get("person_id") not in evidence["targets"]
+                    and float(observation.get("start", 0)) < start + duration - .001
+                    and float(observation.get("end", 0)) > start + .001
+                    for observation in (getattr(item, "person_evidence", None) or {}).get("observations", []))):
+        # Full-beat target coverage does not hide a different politician who
+        # enters the same shot partway through this illustrative archive beat.
+        return False
+    if _montage_flag_conflict(scene_query, _montage_explicit_metadata(item)):
+        return False
     query = str(scene_query or "").casefold()
     haystack = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
     visual = visual_assessment or _montage_window_visual(query, item, start, duration)
+    if query.startswith("archival political context,") and visual is None:
+        return False
     requested_role = query_topic(query)
     # Commercial shipping must not inherit a known naval source because
     # both contain decks and water. Catalog hints only exclude this close
@@ -17639,11 +17762,18 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
     # provides enough alternatives for concurrent jobs without any filesystem
     # rescan or full-library iteration per scene.
     scene_query_ladders: list[dict[str, list[str]]] = []
+    political_context_queries: list[list[str]] = []
     all_search_queries: list[str] = []
     for scene in scenes:
         original_query = str(scene.get("visual_query_en", ""))
         ladder = _montage_query_ladder(original_query)
         scene["visual_query_en"] = ladder["STRICT_MATCH"][0]
+        political_queries = _montage_political_context_queries(scene, story_context)
+        political_context_queries.append(political_queries)
+        # Share the existing batched retrieval/cache instead of rescanning the
+        # library per failed scene. Original-query validation stays unchanged
+        # until all its semantic candidates have been exhausted.
+        ladder["SAFE_CONTEXT"] = list(dict.fromkeys([*ladder["SAFE_CONTEXT"], *political_queries]))
         scene_query_ladders.append(ladder)
         all_search_queries.extend(
             query for level in _MONTAGE_FALLBACK_LEVELS for query in ladder.get(level, [])
@@ -17804,6 +17934,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
         score = 0.0
         source = ""
         selection = None
+        political_context: dict = {}
         last_selection_failure: dict = {}
         broad_hits: list[SearchHit] = []
         continuity_items: list[FootageItem] = []
@@ -18137,6 +18268,64 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                 selected = None
             preparation_metrics["fallback_expansion"] += (time.perf_counter() - rescue_started) * 1000
 
+        # Explicitly requested archive fallback: a related, script-mentioned
+        # politician may illustrate a topic when its exact action is absent.
+        # Assess this as a statement/meeting, never as proof of the original
+        # protest, incident or event. All physical/screen/person gates remain.
+        if selected is None and political_context_queries[scene_number - 1]:
+            from .scene_intent import person_evidence, person_window
+            context_query = political_context_queries[scene_number - 1][0]
+            political_hits = [hit for hit in [*safe_context_hits, *broad_hits]
+                              if person_evidence(context_query, hit.item,
+                                  person_window(context_query, hit.item, assessment_duration),
+                                  assessment_duration)["status"] in {"confirmed", "probable"}]
+            reserved_paths, reserved_families, family_buckets, _windows = reservation_snapshot(position_bucket)
+            try:
+                context_options = {"strict_hits": [], "fallback_hits": [], "relaxed_hits": [], "category_hits": [],
+                    "required_duration": required_source_duration, "assessment_duration": assessment_duration,
+                    "match_threshold": settings.montage_match_threshold,
+                    "used_paths": used, "used_families": used_families,
+                    "project_used_paths": project_used, "project_used_families": project_used_families,
+                    "reserved_paths": reserved_paths, "reserved_families": reserved_families,
+                    "source_exists": source_exists, "source_duration": verified_duration,
+                    "source_allowed": lambda item: _montage_screen_text_safe(index, item, allow_uncertain=True),
+                    "recent_project_paths": recent_project_paths,
+                    "immediately_previous_path": _montage_clip_key(clips[-1].path) if clips else "",
+                    "position_bucket": position_bucket, "batch_family_buckets": family_buckets,
+                    "diversity_seed": f"{titles[scenario_index]}|{scenario_index}|political-context",
+                    "allow_safe_reuse": True,
+                }
+                candidate = None
+                if fast_reuse and scene_number > unique_scene_count and fast_reuse_pool:
+                    fixed_starts = {key: clip.source_start for key, clip in fast_reuse_pool.items()}
+                    prepared_hits = [hit for hit in political_hits if _montage_clip_key(hit.item.path) in fixed_starts]
+                    try:
+                        candidate = _select_montage_candidate(context_query, **context_options,
+                            safe_context_hits=prepared_hits, fixed_source_starts=fixed_starts)
+                        reuse_origin_clip = fast_reuse_pool[_montage_clip_key(candidate.item.path)]
+                        fast_pool_reuse = True
+                    except MontageSelectionFailure:
+                        pass
+                if candidate is None:
+                    candidate = _select_montage_candidate(context_query, **context_options,
+                                                          safe_context_hits=political_hits)
+                candidate = _safe_reuse_after_reservation_race(
+                    candidate, lambda item, family=candidate.source_family, bucket=position_bucket:
+                    claim_batch_source(item, family, bucket))
+                if candidate is not None:
+                    political_context = {"requested_visual_query": scene["visual_query_en"],
+                                         "context_visual_query": context_query,
+                                         "archival_context": True, "event_confirmed": False,
+                                         "identity_confirmed": candidate.diagnostics["person"]["status"] == "confirmed"}
+                    scene["visual_query_en"] = context_query
+                    selection = replace(candidate, fallback_level="SAFE_CONTEXT",
+                        position_rotation_reason="архивный политический контекст; событие не подтверждено; "
+                                                 + candidate.position_rotation_reason)
+                    selected, selected_duration, score = selection.item, selection.duration, selection.score
+                    source = f"{selected.source or 'local'} · SAFE_CONTEXT · архивный контекст"
+            except MontageSelectionFailure:
+                pass
+
         # Topic-agnostic continuity comes before current-video reuse.
         # If semantic matching is exhausted, a new technically valid family is
         # preferable to repeating footage already visible in this timeline.
@@ -18444,6 +18633,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                                      visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
                                      visual_beat_count=int(scene.get("visual_beat_count", 0) or 0),
                                      selection_diagnostics={
+                                         **({"political_context": political_context} if political_context else {}),
                                          "scene_intent": scene.get("scene_intent", {}),
                                          "person": interval_evidence,
                                          "rejections": dict(selection.diagnostics),
@@ -19165,6 +19355,21 @@ def _montage_recovery_window_start(query: str, item: FootageItem, duration: floa
     return start
 
 
+def _montage_clip_effective_query(clip: TimelineClip) -> str:
+    query = str(clip.visual_query_en or clip.narration or "news footage").strip()
+    if (clip.selection_diagnostics.get("political_context", {}).get("archival_context")
+            and not query.startswith("archival political context,")):
+        query = "archival political context, " + query
+    return query
+
+
+def _montage_archive_diagnostics(clip: TimelineClip, person: dict) -> dict:
+    context = clip.selection_diagnostics.get("political_context")
+    return ({"political_context": {**context, "archival_context": True, "event_confirmed": False,
+                                  "identity_confirmed": person.get("status") == "confirmed"}}
+            if context else {})
+
+
 def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
                                   *, story_context: str | None = None,
                                   index: ClipIndex | None = None) -> int:
@@ -19184,6 +19389,7 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
                          if story_allowed(clip) and _validated_montage_clip_duration(Path(clip.path)) > 0.05}
     repaired = 0
     for position, clip in enumerate(list(project.clips)):
+        query = _montage_clip_effective_query(clip)
         story_forbidden = not story_allowed(clip)
         if _validated_montage_clip_duration(Path(clip.path)) > 0.05 and not story_forbidden:
             continue
@@ -19195,12 +19401,14 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
                 continue
             available = _validated_montage_clip_duration(Path(item.path))
             required = max(float(clip.minimum_source_duration), float(clip.duration))
-            start = _montage_recovery_window_start(clip.visual_query_en, item, required)
+            start = _montage_recovery_window_start(query, item, required)
             if (start is None or available - start + 1e-6 < required
-                    or not _semantic_clip_ok(clip.visual_query_en, item, source_start=start, duration=required)):
+                    or not _semantic_clip_ok(query, item, source_start=start, duration=required)):
                 continue
+            person = person_evidence(query, item, start, required)
             replacement = replace(
                 clip,
+                visual_query_en=query,
                 path=item.path,
                 source_start=start,
                 score=0.0,
@@ -19216,7 +19424,10 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
                     )
                 ),
                 selection_diagnostics={
-                    "person": person_evidence(clip.visual_query_en, item, start, required),
+                    **_montage_archive_diagnostics(clip, person),
+                    "person": person,
+                    "visual": _montage_window_visual(query, item, start, required)
+                              or {"relation": "unverified-metadata", "source": "metadata-only"},
                     "semantic_level": "SAFE_CONTEXT",
                     "reason": "story-source-repaired" if story_forbidden else "source-repaired",
                     "illustrative_only": True,
@@ -19241,7 +19452,7 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
                                      story_context: str | None = None,
                                      allow_shorter: bool = False) -> list[FootageItem]:
     """Find a bounded, semantically relevant replacement for one broken slot."""
-    query = str(clip.visual_query_en or clip.narration or "news footage").strip()
+    query = _montage_clip_effective_query(clip)
     if story_context is None:
         story_context = getattr(index, "montage_story_context", None)
         if story_context is None:
@@ -19340,6 +19551,7 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
         if "достаточное число валидных футажей" not in str(initial_error):
             raise
     last = project.clips[-1] if project.clips else TimelineClip("", project.title, project.title, duration=6.0)
+    last = replace(last, visual_query_en=_montage_clip_effective_query(last))
     remaining_tail = max(0.0, target - sum(min(float(clip.duration), max(0.0,
         duration_probe(Path(clip.path)) - float(clip.source_start))) for clip in project.clips))
     candidates = _replacement_candidates_for_clip(
@@ -19380,6 +19592,7 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
             continue
         family = source_family_identity_text(item.path, item.source_url)
         reused = (_montage_clip_key(item.path) in existing_paths or family in existing_families)
+        person = person_evidence(last.visual_query_en, item, start, duration)
         tail_clips.append(TimelineClip(
             item.path, last.narration, last.visual_query_en, duration=duration,
             source_start=start,
@@ -19391,7 +19604,10 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
                 last.strict_rejection_reason or "исходный таймлайн не покрывал длительность озвучки"
             ),
             selection_diagnostics={
-                "person": person_evidence(last.visual_query_en, item, start, duration),
+                **_montage_archive_diagnostics(last, person),
+                "person": person,
+                "visual": _montage_window_visual(last.visual_query_en, item, start, duration)
+                          or {"relation": "unverified-metadata", "source": "metadata-only"},
                 "reason": "visual-tail-recovery", "illustrative_only": True,
             },
         ))

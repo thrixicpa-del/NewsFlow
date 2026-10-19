@@ -791,6 +791,10 @@ def load_tests(loader, standard_tests, pattern):
     from tests.test_context_visual_semantics import ContextVisualSemanticsTests
     from tests.test_footage_actual_scene_context import ActualSceneContextTests
     from tests.test_footage_followup import FootageFollowupTests
+    from tests.test_footage_political_context import PoliticalContextTests
+    from tests.test_footage_political_context_review import (
+        IndependentPoliticalReviewTests,
+    )
     from tests.test_footage_quality_external import ExternalFallbackSafetyTests
     from tests.test_footage_quality_intent import LocalActionQualityTests
     from tests.test_footage_quality_recovery import RecoveryVisualQualityTests
@@ -810,6 +814,8 @@ def load_tests(loader, standard_tests, pattern):
     standard_tests.addTests(loader.loadTestsFromTestCase(ContextVisualSemanticsTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(ActualSceneContextTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(PoliticalContextTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(IndependentPoliticalReviewTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(ExternalFallbackSafetyTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(ReadyVoiceEvidenceTests))
     standard_tests.addTests(loader.loadTestsFromTestCase(BeatLocalVoiceQualityTests))

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
@@ -199,6 +200,14 @@ VISUAL_TERMS = {
     "росси": "Russia current events", "москв": "Moscow Russia government city",
     "беларус": "Belarus regional context", "белорус": "Belarus regional context",
     "минск": "Minsk Belarus city",
+    "грузи": "Georgia regional context", "тбилиси": "Tbilisi Georgia regional context",
+    "молдов": "Moldova regional context", "кишин": "Chisinau Moldova regional context",
+    "казахстан": "Kazakhstan regional context", "астан": "Astana Kazakhstan regional context",
+    "узбеки": "Uzbekistan regional context", "ташкент": "Tashkent Uzbekistan regional context",
+    "кыргыз": "Kyrgyzstan regional context", "киргиз": "Kyrgyzstan regional context",
+    "бишкек": "Bishkek Kyrgyzstan regional context", "таджик": "Tajikistan regional context",
+    "душанбе": "Dushanbe Tajikistan regional context", "туркмен": "Turkmenistan regional context",
+    "ашхабад": "Ashgabat Turkmenistan regional context",
     "кремл": "Kremlin Moscow government", "вашингтон": "Washington DC White House US government officials",
     "сша": "United States Washington DC government officials", "америк": "United States government Washington DC",
     "киев": "Kyiv Ukraine government city", "брюссел": "Brussels European Union institutions",
@@ -217,6 +226,7 @@ VISUAL_TERMS = {
     "завод": "industrial factory workers", "переговор": "diplomatic negotiations leaders journalists cameras",
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
     "азербайдж": "Azerbaijan Baku", "израил": "Israel military border", "ливан": "Lebanon Beirut",
+    "тавуш": "Tavush Armenia regional context",
     "энерг": "energy infrastructure power plant", "склад": "warehouse fire emergency workers",
     # Military reports must request the visible action, not the abstract word
     # "war".  This separates an offensive/frontline from a Kremlin office or
@@ -485,6 +495,19 @@ def gpu_timeline_encoder_args(ffmpeg: str) -> list[str]:
     return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", "-b:v", "0"]
 
 def probe_media_duration(path: Path) -> float:
+    # FFmpeg's human-readable Duration line rounds to centiseconds. A 12.387s
+    # PCM voice consequently looked like 12.39s and created a 3ms extra cut.
+    # Read PCM sample counts directly; compressed/container formats retain
+    # the existing probe path, with no new executable or decoder dependency.
+    if path.suffix.casefold() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as audio:
+                rate = audio.getframerate()
+                duration = audio.getnframes() / rate if rate else 0.0
+            if math.isfinite(duration) and duration > 0:
+                return duration
+        except (OSError, EOFError, wave.Error):
+            pass
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run([ffmpeg, "-i", str(path)], capture_output=True, text=True,

@@ -995,7 +995,9 @@ class VisualWindowTests(unittest.TestCase):
             self.assertEqual(result["relation"], "contradiction")
             self.assertAlmostEqual(result["class_scores"]["military_naval"], .29, places=5)
             self.assertEqual(TAXONOMY_VERSION, 8)
-            self.assertEqual(RULES_VERSION, 12)
+            # v13 adds the explicit archive role; naval features/thresholds
+            # remain taxonomy8 and the measured naval negative still rejects.
+            self.assertEqual(RULES_VERSION, 13)
             self.assertFalse(result["event_confirmed"])
 
     def test_mixed_interval_is_not_direct(self):

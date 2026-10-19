@@ -11,7 +11,7 @@ import re
 from statistics import median
 
 TAXONOMY_VERSION = 8
-RULES_VERSION = 12
+RULES_VERSION = 13
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
 
@@ -129,6 +129,11 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
     text = str(query).casefold().replace("ё", "е").replace("_", " ")
     def has(expression):
         return bool(re.search(expression, text))
+    if text.startswith("archival political context,"):
+        # This explicit fallback is illustrative, not footage of the reported
+        # event. Reuse the existing checked roles/floors, including interviews;
+        # an exterior alone cannot establish the requested visible politician.
+        return "political_context", frozenset({"official", "meeting", "interview"}), frozenset()
     # A speaker's statement about a ship/map is still a speaking scene. The
     # role is explicit in the query; no person's identity is inferred here.
     if has(r"press conference|formal statement|official address|government (?:statement|briefing)|пресс.?конференц|заяв(?:ил|лен|ля)|выступлен|обращени"):

@@ -17,6 +17,13 @@ PERSON_ALIASES = (
     ("aliyev", "Ilham Aliyev", r"алиев\w*|(?:ilham\s+)?aliyev"),
     ("macron", "Emmanuel Macron", r"макрон\w*|(?:emmanuel\s+)?macron"),
     ("lukashenko", "Alexander Lukashenko", r"лукашенко|(?:alexander\s+)?lukashenk[oa]"),
+    ("sandu", "Maia Sandu", r"(?:май[яию]\s+)?санду|(?:maia\s+)?sandu"),
+    ("mirziyoyev", "Shavkat Mirziyoyev", r"(?:шавкат\w*\s+)?мирзи[её]ев\w*|(?:shavkat\s+)?mirziyoyev"),
+    ("japarov", "Sadyr Japarov", r"(?:садыр\w*\s+)?жапаров\w*|(?:sadyr\s+)?(?:zh|j)aparov"),
+    ("rahmon", "Emomali Rahmon", r"(?:эмомали\s+)?рахмон\w*|(?:emomali\s+)?ra(?:kh|h)mon"),
+    # The surname alone also denotes another politician; do not infer Serdar.
+    ("berdymukhamedov", "Serdar Berdymukhamedov", r"сердар\w*\s+бердымухамедов\w*|serdar\s+berd[yi]mukhamedov"),
+    ("khachaturyan", "Vahagn Khachaturyan", r"(?:ваагн\w*\s+)?хачатурян\w*|(?:vahagn\s+)?khachaturyan"),
 )
 
 # Exact subject forms for the bounded Russian speaker rule. Broad aliases
@@ -25,6 +32,8 @@ PERSON_SUBJECT_FORMS = {
     "putin": "путин", "zelensky": "зеленский", "trump": "трамп",
     "pashinyan": "пашинян", "tokayev": "токаев", "aliyev": "алиев", "macron": "макрон",
     "lukashenko": "лукашенко",
+    "sandu": "санду", "mirziyoyev": "мирзиеев", "japarov": "жапаров", "rahmon": "рахмон",
+    "berdymukhamedov": "сердар бердымухамедов", "khachaturyan": "хачатурян",
 }
 
 
@@ -194,7 +203,8 @@ def _physical_places(text: str, associations: dict[str, str]) -> list[str]:
     """Country hints already expressed by the local vocabulary, never proof."""
     matched = ", ".join(english for stem, english in associations.items()
                         if stem not in {"европ", "евросоюз"} and term_matches(stem, text))
-    places = [place for place in ("Ukraine", "Russia", "Belarus", "Iran", "Armenia", "Azerbaijan", "Israel", "Lebanon")
+    places = [place for place in ("Ukraine", "Russia", "Belarus", "Iran", "Armenia", "Azerbaijan", "Israel", "Lebanon",
+                                  "Georgia", "Moldova", "Kazakhstan", "Uzbekistan", "Kyrgyzstan", "Tajikistan", "Turkmenistan")
               if re.search(rf"\b{place}\b", matched)]
     if re.search(r"\b(?:евросоюз\w*|европейск\w*\s+союз\w*)", text, re.IGNORECASE):
         places.append("European Union")
@@ -399,7 +409,9 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
             continue
         if (protest or (speech and primary and protest_mode != "none")) and stem not in {
             "иран", "тегеран", "украин", "росси", "москв", "беларус", "белорус", "минск",
-            "вашингтон", "киев", "брюссел", "армени", "азербайдж",
+            "вашингтон", "киев", "брюссел", "армени", "азербайдж", "тавуш",
+            "грузи", "тбилиси", "молдов", "кишин", "казахстан", "астан", "узбеки", "ташкент",
+            "кыргыз", "киргиз", "бишкек", "таджик", "душанбе", "туркмен", "ашхабад",
         }:
             continue
         if stem in kinetic:
