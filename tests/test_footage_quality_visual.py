@@ -221,7 +221,7 @@ class WindowVisualQualityTests(unittest.TestCase):
         self.assertEqual('SAFE_REUSE', selection.fallback_level)
         self.assertTrue(selection.reused)
 
-    def test_unseen_sibling_cannot_bypass_reuse_score_floor_or_action_priority(self):
+    def test_unseen_sibling_context_rotates_without_bypassing_floor_or_contradiction(self):
         for relation, score in (('direct', .01), ('context', .4), ('contradiction', .9)):
             with self.subTest(relation=relation, score=score):
                 repeated = self.item('used-ship.mp4', ['port-logistics'], 'direct')
@@ -235,7 +235,7 @@ class WindowVisualQualityTests(unittest.TestCase):
                     project_used_paths={repeated_key}, project_used_families={'cargo-family'},
                     reserved_paths=set(), reserved_families=set(),
                     source_exists=lambda _: True, source_duration=lambda _: 7)
-                self.assertEqual(repeated.path, selection.item.path)
+                self.assertEqual(sibling.path if relation == 'context' else repeated.path, selection.item.path)
 
     def test_unseen_sibling_cannot_displace_confirmed_person_in_reused_family(self):
         query = 'Nikol Pashinyan official statement government briefing'
@@ -279,13 +279,13 @@ class WindowVisualQualityTests(unittest.TestCase):
         self.assertEqual(context.path, selection.item.path)
         self.assertFalse(selection.reused)
 
-    def test_reused_direct_port_beats_fresh_context(self):
+    def test_fresh_checked_context_precedes_reused_direct_port(self):
         direct = self.item('used-ship.mp4', ['port-logistics'], 'direct')
         context = self.item('unseen-warehouse.mp4', ['port-logistics'], 'context')
         selection = self.select_with_reused_candidate('seaport cargo cranes ships', direct, context)
-        self.assertEqual(direct.path, selection.item.path)
-        self.assertEqual('direct', selection.diagnostics['visual']['relation'])
-        self.assertTrue(selection.reused)
+        self.assertEqual(context.path, selection.item.path)
+        self.assertEqual('context', selection.diagnostics['visual']['relation'])
+        self.assertFalse(selection.reused)
 
     def test_reused_confirmed_person_beats_fresh_institution_context(self):
         query = 'Nikol Pashinyan official statement government briefing'
@@ -373,12 +373,13 @@ class WindowVisualQualityTests(unittest.TestCase):
             result = bridge.prepare_montage({'scenarioIndex': 0})
         return TimelineProject.load(Path(result['preparedProject']['path'])), context if fast_confirmed_escape else direct
 
-    def test_prepare_reuses_direct_port_before_fresh_warehouse_context(self):
+    def test_prepare_rotates_direct_port_to_fresh_checked_warehouse_context(self):
         project, direct = self.prepare_two_scene_project()
-        self.assertEqual([direct.path, direct.path], [clip.path for clip in project.clips])
-        self.assertEqual('SAFE_REUSE', project.clips[1].fallback_level)
+        self.assertEqual(direct.path, project.clips[0].path)
+        self.assertNotEqual(direct.path, project.clips[1].path)
+        self.assertEqual('SAFE_CONTEXT', project.clips[1].fallback_level)
 
-    def test_prepare_reservation_race_keeps_direct_material_before_context(self):
+    def test_prepare_reservation_race_keeps_first_action_then_rotates_to_fresh_context(self):
         usage = {'lock': threading.RLock(), 'claims': {}, 'placements': {}, 'windows': {}}
         prepare, claim = bridge.prepare_montage, bridge._claim_batch_family
         collided = []
@@ -397,7 +398,8 @@ class WindowVisualQualityTests(unittest.TestCase):
               patch.object(bridge, '_cached_or_probed_montage_duration', return_value=7)):
             project, direct = self.prepare_two_scene_project()
         self.assertEqual(['direct-family'], collided)
-        self.assertEqual([direct.path, direct.path], [clip.path for clip in project.clips])
+        self.assertEqual(direct.path, project.clips[0].path)
+        self.assertNotEqual(direct.path, project.clips[1].path)
         self.assertEqual('SAFE_REUSE', project.clips[0].fallback_level)
         self.assertEqual('direct', project.clips[0].selection_diagnostics['visual']['relation'])
 

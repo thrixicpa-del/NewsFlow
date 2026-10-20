@@ -16914,9 +16914,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
     """Select one valid clip without letting batch uniqueness become a hard failure.
 
     The candidate collections come from a bounded in-memory vector search.
-    All physical checks happen only after a clip is ranked, and an existing
-    timeline source is never reused by this helper (which prevents adjacent
-    duplicate footage as well as any accidental current-project duplicate).
+    All physical checks happen only after a clip is ranked. Within an equal
+    person-confidence tier, exhaust admissible unseen paths before current-
+    timeline reuse; one safe source may still complete a scarce-library video.
     """
     from .scene_intent import person_evidence, person_window
     assessment_duration = required_duration if assessment_duration is None else assessment_duration
@@ -17206,30 +17206,29 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
         person_priority = {"confirmed": 0, "probable": 1}.get(evidence["status"], 2)
         return person_priority, int(relation_for(item) != "direct")
 
-    # Exhaust stronger person/action evidence across both fresh and reused
-    # material before falling back to illustrative context. Each evidence
-    # tier retains the existing retrieval floors and diversity relaxation.
+    # Requested-person confidence remains absolute. Within that tier, a new
+    # admissible context path is preferable to replaying an already used direct
+    # path. Exact action still wins when both alternatives have equal novelty.
+    # Every retrieval rung retains its score floor and all hard constraints.
     priorities = sorted({intent_priority(hit.item) for hit in all_candidates})
-    rotate_portrait = bool(allow_safe_reuse and previous_path and _montage_requests_person_footage(scene_query))
-    groups = ([[value for value in priorities if value[0] == person]
-               for person in sorted({value[0] for value in priorities})]
-              if rotate_portrait else [[priority] for priority in priorities])
+    avoid_adjacent_reuse = bool(allow_safe_reuse and previous_path)
+    groups = [[value for value in priorities if value[0] == person]
+              for person in sorted({value[0] for value in priorities})]
     for group in groups:
-        # Within the same person-confidence tier, a checked meeting context
-        # beats replaying the immediately preceding portrait. Stronger identity
-        # evidence still wins; a sole safe source may still complete the video.
-        for avoid_previous in ((True, False) if rotate_portrait else (False,)):
-            for priority in group:
-                for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
-                    eligible = [hit for hit in pool if intent_priority(hit.item) == priority]
-                    if not eligible:
-                        continue
-                    selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
-                                      allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
-                                      avoid_recent=avoid_recent, level=level,
-                                      skip_previous=skip_previous or avoid_previous)
-                    if selected:
-                        return selected
+        for unseen_only in ((True, False) if allow_safe_reuse and project_used_paths else (False,)):
+            for avoid_previous in ((True, False) if avoid_adjacent_reuse else (False,)):
+                for priority in group:
+                    for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
+                        eligible = [hit for hit in pool if intent_priority(hit.item) == priority
+                                    and (not unseen_only or _montage_clip_key(hit.item.path) not in project_used_paths)]
+                        if not eligible:
+                            continue
+                        selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
+                                          allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
+                                          avoid_recent=avoid_recent, level=level,
+                                          skip_previous=skip_previous or avoid_previous)
+                        if selected:
+                            return selected
     raise MontageSelectionFailure(diagnostics)
 
 
@@ -17961,6 +17960,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
         source = ""
         selection = None
         political_context: dict = {}
+        deferred_primary: MontageCandidateSelection | None = None
         last_selection_failure: dict = {}
         broad_hits: list[SearchHit] = []
         continuity_items: list[FootageItem] = []
@@ -18074,10 +18074,17 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                 person = primary.diagnostics.get("person", {})
                 visual = primary.diagnostics.get("visual", {})
                 if person.get("status") in {"confirmed", "probable"} or visual.get("relation") == "direct":
-                    selection = _safe_reuse_after_reservation_race(
-                        primary, lambda item, family=primary.source_family, bucket=position_bucket:
-                        claim_batch_source(item, family, bucket),
-                    )
+                    if (_montage_clip_key(primary.item.path) in project_used
+                            and person.get("status") not in {"confirmed", "probable"}
+                            and political_context_queries[scene_number - 1]):
+                        # Do not consume a batch claim for a candidate that a
+                        # fresh authorized archive portrait may still replace.
+                        deferred_primary = primary
+                    else:
+                        selection = _safe_reuse_after_reservation_race(
+                            primary, lambda item, family=primary.source_family, bucket=position_bucket:
+                            claim_batch_source(item, family, bucket),
+                        )
             except MontageSelectionFailure as failure:
                 last_selection_failure = failure.diagnostics
 
@@ -18221,7 +18228,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             source = selected.source or "local"
             if selection.fallback_level != "STRICT_MATCH":
                 source = f"{source} · {selection.fallback_level}"
-        if selected is None:
+        if selected is None and deferred_primary is None:
             # This is deliberately rare: no bounded local candidate survived
             # validation. External search remains opt-in and does not change
             # the user's local-only montage configuration.
@@ -18301,8 +18308,15 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
         if selected is None and political_context_queries[scene_number - 1]:
             from .scene_intent import person_evidence, person_window
             context_query = political_context_queries[scene_number - 1][0]
+            # After new archive paths are exhausted, an already checked
+            # portrait may still break an otherwise adjacent exact replay.
+            # Strong requested-person candidates are never deferred here.
+            break_adjacent_replay = bool(deferred_primary is not None and clips
+                and _montage_clip_key(deferred_primary.item.path) == _montage_clip_key(clips[-1].path))
             political_hits = [hit for hit in [*safe_context_hits, *broad_hits]
-                              if person_evidence(context_query, hit.item,
+                              if (deferred_primary is None or break_adjacent_replay
+                                  or _montage_clip_key(hit.item.path) not in project_used)
+                              and person_evidence(context_query, hit.item,
                                   person_window(context_query, hit.item, assessment_duration),
                                   assessment_duration)["status"] in {"confirmed", "probable"}]
             reserved_paths, reserved_families, family_buckets, _windows = reservation_snapshot(position_bucket)
@@ -18351,6 +18365,14 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                     source = f"{selected.source or 'local'} · SAFE_CONTEXT · архивный контекст"
             except MontageSelectionFailure:
                 pass
+
+        if selected is None and deferred_primary is not None:
+            selection = _safe_reuse_after_reservation_race(
+                deferred_primary, lambda item, family=deferred_primary.source_family, bucket=position_bucket:
+                claim_batch_source(item, family, bucket),
+            )
+            selected, selected_duration, score = selection.item, selection.duration, selection.score
+            source = f"{selected.source or 'local'} · {selection.fallback_level}"
 
         # Topic-agnostic continuity comes before current-video reuse.
         # If semantic matching is exhausted, a new technically valid family is
