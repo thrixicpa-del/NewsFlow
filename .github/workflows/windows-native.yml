@@ -17,12 +17,23 @@ jobs:
         with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
       - run: pnpm install --frozen-lockfile
         working-directory: studio-ui-remotion-verify
-      - run: node node_modules/electron/install.js
+      - name: Install pinned Electron runtime for source UI acceptance
+        run: node node_modules/electron/install.js
         working-directory: studio-ui-remotion-verify
       - run: pnpm build:web
         working-directory: studio-ui-remotion-verify
       - run: pnpm build:desktop
         working-directory: studio-ui-remotion-verify
+      - name: Isolated production reset and real Electron restart
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'studio-ui-remotion-verify/node_modules/electron/dist/electron.exe')) {
+            throw 'Real Electron runtime required; UI acceptance must not skip'
+          }
+          python tests/run_isolated.py tests.test_production_reset tests.test_production_topic_reset_ui -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
       - name: Standalone cover topics and real UI restart
         shell: pwsh
         run: |
@@ -33,3 +44,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
+
