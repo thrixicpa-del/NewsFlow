@@ -146,3 +146,123 @@ into the held/background slot; it creates no new map or timing. **57related
 pipeline/continuity/VoiceMap tests PASS20.267s; outer guardFAIL/exit91**. Ruff
 and whitespace checks PASS. One final native UI rerender from existing caches
 checks the fix without deleting source/history or downloading new material.
+
+
+## Final continuity render acceptance (2026-10-20)
+
+This section supersedes the pending runtime checkpoint above. It does not
+waive any historical integrity, Frozen or release failure.
+
+### Root causes and minimal render changes
+
+Real UI outputs revealed that `-shortest` could finish video at897frames/29.9s
+while the MP3 narration still contained30s of decoded speech. Duration-only
+mux produced905frames; copied frame caps left a0.133333s presentation gap.
+These unsuccessful outputs, logs and projects are preserved. An intermediate
+mux change also produced five old timing regression failures; later related
+regressions pass, rather than deleting or weakening those assertions.
+
+Only projects containing continuity freeze/background slots now normalize the
+final video once, with an explicit narration duration/frame cap and output
+CFR30 synchronization. Ordinary projects retain stream-copy mux and their
+existing proxy keys/fast path. Normal FFmpeg export retries a failed final
+NVENC encode once with CPU, retaining the same timing/audio limits; explicit
+GPU mode remains strict. Proxy budgets for continuity projects use cumulative
+frame boundaries, with new keys and health checks rejecting overlong as well
+as short proxies. This removes the old extra proxy frame accumulating at cuts.
+
+A stateful final `fps` filter could still flush a buffered frame when color
+metadata changed: the next stock appeared at539 rather than540. Real preserved
+outputs reproduced this in both aspects (preceding hold MAE32.91/38.21). The
+final mux uses a stateless filter and output CFR synchronization instead.
+At539 the correct preceding hold remains (MAE0.255/0.183); stock starts at540.
+The same strict independent oracle now checks both sides of these boundaries.
+The synthetic old-filter injection did not reproduce this real-media defect;
+its PASS is retained as a non-reproducer, not mislabeled as a RED regression.
+The long mixed-parameter synthetic test remains useful related coverage.
+
+### Executed tests and real outputs
+
+- After metadata repair, normal UI queue: horizontal208.32s, vertical247.70s,
+  functional PASS with production guardFAIL. Existing native Story Map,
+  voice IDs, timings and beat indices1..5 are preserved.
+- On the final render implementation:47related render/continuity/pipeline/
+  timeline/proxy-cache/intro/GPU/Remotion tests PASS39.822s; guardFAIL/exit91.
+  Extending the mixed-color test to30s and checking eight pixels on both sides
+  of6/12/18/24s cuts: PASS17.873s; guardFAIL/exit91. These overlapping suites
+  are not added together as a count of unique tests.
+- Final saved-plan exports used the real renderer/preload/Electron/Python
+  `render-montage` IPC, then UI player/timeline; no new selection, downloads or
+  history events. There is no fabricated direct-export UI button. Render
+  commands took12.675s(horizontal) and9.053s(vertical); full UI test times
+  were18.67s/15.39s. Both functional PASS, outer guardFAIL.
+- Independent FFmpeg9/FFprobe encoded-media postflights PASS in both formats:
+  1920x1080 and1080x1920,902frames, CFR30, maximum gap0.033334s. Final video
+  duration30.066667s is frame rounding of MP3 container duration30.05s;
+  the original and final decoded voice both contain exactly720000 samples
+  at24kHz/30s. Whole-voice correlation0.9999400873, with independent beginning,
+  middle and ending checks; no sample dropping or offset correction.
+- All five native scene timings/beat indices remain intact; slots0/2/4 are
+  static holds through their boundaries and the terminal frame. Both actual
+  stock slots begin at native6s/18s. Source dimensions/SHA and licenses match.
+  Two accepted plans create exactly two history events/24000 selected-source
+  milliseconds; held slots add no source-window duration. Plain rerenders
+  add no new selection events.
+- Private final receipts: each profile's
+  `artifacts/independent-continuity-postflight-complete/receipt.json`,
+  `artifacts/human-final-review.json`, and
+  `continuity-hd/one-frame-boundary-RED-GREEN.json`. Failed intermediate
+  outputs remain in native-beat-index, terminal-video-tail, mux-duration-only,
+  copy-frame-cap, filter-only-CFR, proxy-boundary-drift and one-frame-early
+  FAIL directories. An attempted rerun correctly refused an existing evidence
+  directory; it did not export, and its old-output postflight is not counted
+  as fresh source acceptance. A new named directory was used afterward.
+- An initial vertical boundary oracle compared a center-cropped output with a
+  distorted full-width reference. That FAIL is retained. Matching source
+  crop geometry corrected the oracle; thresholds stayed unchanged, and the
+  stronger preceding-frame check was added. No media assertion was removed.
+
+Human sampling reviewed the final five-beat and boundary contact sheets in
+both aspects (15interior/eight boundary samples plus terminal checks), not
+continuous playback of every frame. Airport footage is generic illustrative
+context: the Vistara window is mostly runway/distant aircraft; the vertical
+center crop shows a partial aircraft. This deliberately scarce manual-query
+fixture is NOT automatic real-story, named airport/event or politician
+semantic acceptance. Earlier broad27-source and120s airport evidence and its
+limitations remain in the historical report.
+
+### Diversity, speed and outstanding gates
+
+The real fixture intentionally contains two licensed native1920x1080 originals
+and five slots. Actual family uniqueness is40%, with three explicit holds,
+not a false100%. No production library/source-pool cap was added. Across the
+two accepted plans, family positions rotate and the Vistara source window
+changes; the scarce Nippon window is reused. Holds never count as new footage.
+HD720p+ remains optional and persisted; autofill is always enabled. Exact,
+synonym and checked thematic selection, library reuse, source rights, identity
+checks and history remain in place. Disabling HD widens eligible resolution;
+it does not disable relevance or rights checks.
+
+Cold horizontal preparation187.429s versus later169.288s is not a controlled
+speed benchmark: histories/windows differ. Final9.053s/12.675s exports use warm
+saved plans and cannot be presented as search speedups. The continuity-only
+final normalization has one additional encoding cost; ordinary fast export
+is unchanged. No12-planner/4-render throughput claim is made.
+
+All27 original cache files were rehashed unchanged. Final precommit storage
+inventory18.14GiB/24GiB (all known roots/junction targets counted once); more
+than2GiB reserved. No old failed media was deleted. A separate three-second
+read-only control after owned tests stopped observed one settings hash;
+this does NOT explain or clear recurring guardFAIL during tests. Working
+NewsFlow processes exist, but the writer is UNKNOWN. Production settings,
+credentials and working libraries are not restored or edited to obtain PASS.
+
+Parent85854f3 Windows-native39489713872 SUCCESS; CI39489713762 FAIL at the known
+Frozen/source integrity lock gate. Earlier9756dfe source stock/UI/security/
+build checks passed before the same Frozen failure. Final pushed commit CI
+must be treated as PENDING until its own runs complete; parent results are not
+fresh-head acceptance. Docker remains BLOCKED (missing Desktop Linux engine).
+No Frozen/EXE build, lock rewrite, merge, main change or issue closure.
+Independent scoped reviews found no remaining material code findings; final
+Ruff and whitespace checks pass. This is a verified source change with known
+integrity/release blockers, not an all-green release declaration.

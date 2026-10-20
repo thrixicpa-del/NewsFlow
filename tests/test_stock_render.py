@@ -287,6 +287,123 @@ class StockRenderTests(unittest.TestCase):
             cases=[{"status": "PASS", "output": output.name, "sha256": self.digest(output),
                     "scene_durations": durations, "audio_duration": float(audio["duration"])}])
 
+    def test_mp3_narration_keeps_video_through_terminal_hold(self):
+        """AAC/MP3 packet timing must not remove the final video frames."""
+        from scriptor.stock_media import prepare_continuity_media
+        voice = self.root / 'three-second-voice.mp3'
+        self.run_media([self.ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            'sine=frequency=440:sample_rate=48000:duration=3', '-c:a', 'libmp3lame', str(voice)])
+        source = prepare_continuity_media(None, self.root / 'hold', duration=3.05)
+        project = TimelineProject('MP3 terminal hold', clips=[TimelineClip(str(source), 'Voice', 'Q',
+            duration=3.05, continuity={'mode': 'background'})], voiceover_path=str(voice))
+        output = self.evidence / 'mp3-terminal-hold.mp4'
+        render_project(project, output, renderer='ffmpeg')
+        metadata = self.probe(output)
+        video = next(s for s in metadata['streams'] if s['codec_type'] == 'video')
+        self.assertGreaterEqual(int(video['nb_frames']), 90)
+        self.assertEqual(int(video['nb_frames']), int(np.ceil(probe_media_duration(voice) * 30 - 1e-9)))
+        self.assertGreaterEqual(float(video['duration']), 3.0)
+        self.assertGreaterEqual(len(self.pcm(output)), 3 * 48000)
+        frames = json.loads(self.run_media([self.ffprobe, '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(output)]))['frames']
+        timestamps = np.asarray([float(frame['best_effort_timestamp_time']) for frame in frames])
+        self.assertLess(float(np.max(np.abs(np.diff(timestamps) - 1 / 30))), .000002)
+
+    def test_gpu_voice_mux_preserves_explicit_limit_with_and_without_intro(self):
+        from scriptor import timeline as timeline_module
+        source, voice, intro = (self.root / name for name in ('source.mp4', 'voice.mp3', 'intro.mp4'))
+        for path in (source, voice, intro):
+            path.write_bytes(b'isolated command contract fixture')
+        for with_intro in (False, True):
+            with self.subTest(with_intro=with_intro):
+                commands = []
+                def run(command, captured=commands, **_kwargs):
+                    captured.append(command)
+                    Path(command[-1]).write_bytes(b'x' * 2048)
+                project = TimelineProject('GPU mux', clips=[TimelineClip(str(source), 'N', 'Q', duration=3.05,
+                    continuity={'mode': 'background'})],
+                    voiceover_path=str(voice), intro_path=str(intro) if with_intro else '',
+                    intro_duration=1 if with_intro else 0)
+                with patch.object(timeline_module, '_run', side_effect=run), \
+                     patch.object(timeline_module, 'probe_media_duration',
+                                  side_effect=lambda path: 3.05 if Path(path) == voice else 10), \
+                     patch.object(timeline_module, 'probe_video_duration', return_value=10), \
+                     patch.object(timeline_module, 'gpu_timeline_encoder_args', return_value=['-c:v', 'h264_nvenc']), \
+                     patch.object(timeline_module, 'render_workspace_root', return_value=self.root):
+                    timeline_module._render_project_gpu_timeline(project, self.root / f'gpu-{with_intro}.mp4')
+                mux = commands[-1]
+                self.assertNotIn('-shortest', mux)
+                self.assertEqual(float(mux[mux.index('-t') + 1]), 4.05 if with_intro else 3.05)
+                self.assertEqual(int(mux[mux.index('-frames:v') + 1]), 122 if with_intro else 92)
+                self.assertIn('[audio]' if with_intro else '1:a:0', mux)
+
+    def test_normal_continuity_mux_retries_failed_nvenc_once_with_cpu(self):
+        from scriptor import timeline as timeline_module
+        source, voice = (self.root / name for name in ('source.mp4', 'voice.mp3'))
+        source.write_bytes(b'isolated video fixture')
+        voice.write_bytes(b'isolated voice fixture')
+        mux_commands = []
+        def run(command, **_kwargs):
+            if '1:a:0' in command:
+                mux_commands.append(command)
+                if 'h264_nvenc' in command:
+                    raise RuntimeError('NVENC session limit reached')
+            Path(command[-1]).write_bytes(b'x' * 2048)
+        project = TimelineProject('CPU retry', clips=[TimelineClip(str(source), 'N', 'Q', duration=3.05,
+            continuity={'mode': 'background'})], voiceover_path=str(voice))
+        # The proxy includes the existing .15s terminal technical margin.
+        health = SimpleNamespace(check=lambda _path: SimpleNamespace(state='valid', duration=3.2))
+        with patch.object(timeline_module, '_run', side_effect=run), \
+             patch.object(timeline_module, 'ffmpeg_executable', return_value='ffmpeg'), \
+             patch.object(timeline_module, 'gpu_timeline_capability', return_value={'available': True}), \
+             patch.object(timeline_module, 'video_encoder_args', return_value=[
+                 '-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '20', '-b:v', '0']), \
+             patch.object(timeline_module, 'render_source_for_proxy', side_effect=lambda path, *_args: path), \
+             patch.object(timeline_module, 'probe_video_duration', return_value=10), \
+             patch.object(timeline_module, 'probe_media_duration',
+                          side_effect=lambda path: 3.05 if Path(path) == voice else 10), \
+             patch.object(timeline_module, 'default_health_store', return_value=health), \
+             patch.object(timeline_module, 'proxy_cache_root', return_value=self.root / 'proxies'), \
+             patch.object(timeline_module, 'render_workspace_root', return_value=self.root), \
+             patch.dict(timeline_module._ENCODER_CACHE, {}, clear=True):
+            render_project(project, self.root / 'retry.mp4', renderer='ffmpeg')
+            self.assertIn('libx264', timeline_module._ENCODER_CACHE['ffmpeg'])
+        self.assertEqual(len(mux_commands), 2)
+        self.assertIn('h264_nvenc', mux_commands[0])
+        self.assertIn('libx264', mux_commands[1])
+        self.assertNotIn('h264_nvenc', mux_commands[1])
+        self.assertEqual(mux_commands[1][mux_commands[1].index('-fps_mode') + 1], 'cfr')
+
+    def test_mixed_stream_parameters_keep_continuous_cfr_through_holds(self):
+        from scriptor.stock_media import prepare_continuity_media
+        voice, moving = self.root / 'mixed-voice.mp3', self.root / 'bt709.mp4'
+        self.run_media([self.ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            'sine=frequency=440:sample_rate=48000:duration=30', '-c:a', 'libmp3lame', str(voice)])
+        self.run_media([self.ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i',
+            'color=c=blue:s=640x360:r=30:d=1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+            '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', str(moving)])
+        hold = prepare_continuity_media(None, self.root / 'mixed-hold', duration=6.05)
+        clips = [TimelineClip(str(hold if i % 2 == 0 else moving), str(i), 'Q',
+            duration=6.05 if i == 4 else 6.0,
+            continuity={'mode': 'background'} if i % 2 == 0 else {}) for i in range(5)]
+        project = TimelineProject('Mixed parameters', clips=clips, voiceover_path=str(voice))
+        output = self.evidence / 'mixed-parameters.mp4'
+        render_project(project, output, renderer='ffmpeg')
+        video = next(stream for stream in self.probe(output)['streams'] if stream['codec_type'] == 'video')
+        self.assertEqual(video['avg_frame_rate'], '30/1')
+        frames = json.loads(self.run_media([self.ffprobe, '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(output)]))['frames']
+        timestamps = np.asarray([float(frame['best_effort_timestamp_time']) for frame in frames])
+        self.assertEqual(len(timestamps), int(np.ceil(probe_media_duration(voice) * 30 - 1e-9)))
+        self.assertLess(float(np.max(np.abs(np.diff(timestamps) - 1 / 30))), .000002)
+        self.assertGreaterEqual(len(self.pcm(output)), 30 * 48000)
+        boundaries = self.run_media([self.ffmpeg, '-v', 'error', '-i', str(output), '-an',
+            '-vf', "select='eq(n,179)+eq(n,180)+eq(n,359)+eq(n,360)+eq(n,539)+eq(n,540)+eq(n,719)+eq(n,720)',scale=1:1",
+            '-fps_mode', 'passthrough', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'])
+        self.assertEqual(len(boundaries), 8 * 3)
+        self.assertEqual([boundaries[i + 2] > 150 for i in range(0, len(boundaries), 3)],
+                         [False, True, True, False, False, True, True, False])
+
 
 if __name__ == "__main__":
     unittest.main()
