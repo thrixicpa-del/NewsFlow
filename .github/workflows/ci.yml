@@ -1,7 +1,7 @@
 name: CI
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/covers-standalone-topics]
   push:
     branches: [main]
 permissions:
@@ -29,7 +29,7 @@ jobs:
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
-      - run: python tests/run_isolated.py tests.test_cover_standalone_topics tests.test_cover_prompt_pairs_import tests.test_cover_manual_prompt_readiness tests.test_cover_manual_no_paid_aux tests.test_cover_result_identity tests.test_cover_queue_tombstones tests.test_covers
+      - run: python tests/run_isolated.py tests.test_cover_prompt_blocks tests.test_cover_standalone_topics tests.test_cover_prompt_pairs_import tests.test_cover_manual_prompt_readiness tests.test_cover_manual_no_paid_aux tests.test_cover_result_identity tests.test_cover_queue_tombstones tests.test_covers
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio

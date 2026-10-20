@@ -3140,6 +3140,7 @@ def snapshot() -> dict:
             "provider": settings.cover_prompt_provider,
             "useCustomPrompt": settings.cover_use_custom_prompt,
             "useScriptContext": settings.cover_use_script_context,
+            "manualMissingOnly": settings.cover_manual_missing_only,
             "promptVariantCount": settings.cover_prompt_variant_count,
             "headlineProvider": settings.cover_headline_provider,
             "headlineTemplate": settings.cover_headline_template,
@@ -8251,6 +8252,8 @@ def save_cover_settings(payload: dict) -> dict:
         settings.cover_use_custom_prompt = bool(payload["useCustomPrompt"])
     if isinstance(payload.get("useScriptContext"), bool):
         settings.cover_use_script_context = bool(payload["useScriptContext"])
+    if isinstance(payload.get("manualMissingOnly"), bool):
+        settings.cover_manual_missing_only = payload["manualMissingOnly"]
     if "promptVariantCount" in payload:
         settings.cover_prompt_variant_count = max(1, min(10, int(payload["promptVariantCount"])))
     headline_provider = str(payload.get("headlineProvider", settings.cover_headline_provider)).strip().casefold()
@@ -9655,6 +9658,7 @@ def generate_cover_prompts(payload: dict) -> dict:
             # start; it is not merely an intermediate LLM progress label.
             _cover_step(target, "Промпты готовы", 100,
                         f"Подготовлено вариантов: {len(options)}")
+            _discard_manual_cover_variants(target)
             target.update(image_prompt_options=options, selected_prompt_index=chosen, image_prompt=options[chosen],
                           prompt_provider=provider, prompt_text_signature=_cover_text_revision(target), error="")
             target["prompt_revision_id"] = _cover_prompt_revision(target)
@@ -9692,6 +9696,7 @@ def generate_cover_prompts(payload: dict) -> dict:
                     else:
                         _cover_step(target, "Промпты готовы", 100,
                                     "Провайдер отклонил формулировку: создан безопасный локальный вариант")
+                        _discard_manual_cover_variants(target)
                         target.update(image_prompt_options=options, selected_prompt_index=0,
                                     image_prompt=options[0], prompt_provider="local-fallback",
                                     prompt_text_signature=_cover_text_revision(target), error="")
@@ -11462,8 +11467,14 @@ def _resolve_cover_prompt_import_ids(settings: Settings, records: list[tuple[str
     return resolved
 
 
+def _discard_manual_cover_variants(item: dict) -> None:
+    for key in ("manual_prompt_schema", "manual_prompt_variants", "manual_prompt_contracts", "accepted_manual_prompt_variant"):
+        item.pop(key, None)
+
+
 def _replace_manual_cover_prompt(item: dict, prompt: str) -> None:
     """Replace one visual brief without invoking a provider or changing topic-owned inputs."""
+    _discard_manual_cover_variants(item)
     old_options = [
         value for value in _cover_active_prompt_options(item)
         if _cover_prompt_key(value) != _cover_prompt_key(prompt)
@@ -11485,6 +11496,8 @@ def _replace_manual_cover_prompt(item: dict, prompt: str) -> None:
 
 def import_cover_prompt_pairs(payload: dict) -> dict:
     """Atomically import user-owned visual prompts by exact title then durable ID."""
+    if payload.get("mode") == "blocks":
+        return _import_cover_prompt_blocks(payload)
     records = _parse_cover_prompt_pairs(payload.get("text", ""))
     settings = load_settings()
     _hydrate_cover_library(settings)
@@ -11524,6 +11537,84 @@ def import_cover_prompt_pairs(payload: dict) -> dict:
         "message": f"Ручные промпты импортированы: {len(resolved)}.",
         "productionItemIds": [production_item_id for production_item_id, _prompt in resolved],
     }}
+
+
+def _import_cover_prompt_blocks(payload: dict) -> dict:
+    from .cover_prompt_blocks import append_variants, parse_blocks
+
+    # The same cross-process lock excludes an in-flight generation snapshot.
+    # A preview is read-only and can still be inspected while a batch runs.
+    preview_only = payload.get("previewOnly") is True
+    lock = None if preview_only else _claim_cover_generation_lock()
+    if not preview_only and lock is None:
+        raise ValueError("COVER_BATCH_ACTIVE: дождитесь завершения текущего пакета обложек; ввод сохранён")
+    try:
+        settings = load_settings()
+        _hydrate_cover_library(settings)
+        by_title, by_id = _cover_rows_by_title_and_production_id(settings)
+        selected_id = str(payload.get("productionItemId") or "").strip()
+        selected_title = ""
+        if selected_id:
+            if len(by_id.get(selected_id, [])) != 1:
+                raise ValueError("AMBIGUOUS_PRODUCTION_ITEM_ID: выбранная тема отсутствует или неоднозначна")
+            selected_title = str(by_id[selected_id][0]["title"])
+        records = parse_blocks(payload.get("text"), set(by_title), selected_title)
+        import_id = str(payload.get("importId") or "").strip()
+        if not import_id:
+            raise ValueError("IMPORT_ID_REQUIRED: повторите импорт через форму")
+        proposed = {identity: dict(rows[0]) for identity, rows in by_id.items() if len(rows) == 1}
+        new_items = []
+        topics: dict[str, dict] = {}
+        for title, prompts in records:
+            key = _normalise_cover_text_import_title(title)
+            candidates = [selected_id] if selected_id else by_title.get(key, [])
+            if len(candidates) > 1:
+                raise ValueError(f"AMBIGUOUS_TOPIC: тема «{title}» соответствует нескольким строкам")
+            if not candidates:
+                if payload.get("createMissingTopics") is not True:
+                    raise ValueError(f"UNKNOWN_TOPIC: тема «{title}» отсутствует в очереди")
+                identity = uuid.uuid5(uuid.NAMESPACE_URL, f"newsflow:cover-import:{import_id}:{key}").hex
+                if identity in by_id:
+                    raise ValueError("IMPORT_ID_CONFLICT: повторите импорт с новым ID операции")
+                new_items.append({"id": identity, "title": title, "manual": True, "origin": "covers"})
+                proposed[identity] = {"title": title, "production_item_id": identity, "script": "",
+                                      "origin": "covers", "manual": True, "scenario_index": 0,
+                                      "status": "Ожидает", "paths": []}
+                by_title[key] = [identity]
+            else:
+                identity = candidates[0]
+                if not identity or identity not in proposed:
+                    raise ValueError("AMBIGUOUS_PRODUCTION_ITEM_ID: у темы нет однозначного Product ID")
+            updated, variants = append_variants(proposed[identity], prompts)
+            proposed[identity] = updated
+            topic = topics.setdefault(identity, {"title": updated["title"], "productionItemId": identity, "variants": []})
+            known = {v["id"] for v in topic["variants"]}
+            topic["variants"].extend(v for v in variants if v["id"] not in known)
+        plan = list(topics.values())
+        token_data = [{"row": proposed[identity], "topic": topic} for identity, topic in topics.items()]
+        token = hashlib.sha256(json.dumps(token_data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if payload.get("previewToken") and payload["previewToken"] != token:
+            raise ValueError("STALE_PREVIEW: очередь изменилась; проверьте привязку ещё раз")
+        count = sum(v["added"] for topic in plan for v in topic["variants"])
+        if not preview_only:
+            # All parsing, identity, state and preview checks completed above.
+            for identity in topics:
+                row = proposed[identity]
+                row["prompt_text_signature"] = _cover_text_revision(row)
+                row["prompt_revision_id"] = _cover_prompt_revision(row)
+                _cover_step(row, "Ручные промпты сохранены", 0, f"Вариантов: {len(row['manual_prompt_variants'])}")
+            settings.cover_queue = [proposed.get(str(row.get("production_item_id")), row) for row in settings.cover_queue]
+            settings.cover_queue.extend(proposed[item["id"]] for item in new_items)
+            settings.idea_production_items.extend(new_items)
+            _save_cover_state(settings)
+        return {**snapshot(), "operationResult": {
+            "kind": "cover-prompt-blocks-preview" if preview_only else "cover-prompt-blocks-import",
+            "count": count, "topics": plan, "previewToken": token,
+            "productionItemIds": list(topics), "message": f"Новых промптов: {count}; тем: {len(plan)}.",
+        }}
+    finally:
+        if lock is not None:
+            _release_cover_generation_lock(lock)
 
 
 def save_cover_manual_prompt(payload: dict) -> dict:
@@ -11750,7 +11841,7 @@ def delete_cover_headline_preset(payload: dict) -> dict:
 def select_cover_prompt(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
-    index = int(payload.get("index", -1))
+    index = _cover_manual_text_index(settings, payload)
     option = int(payload.get("option", -1))
     if not 0 <= index < len(settings.cover_queue):
         raise ValueError("Сценарий обложки не найден")
@@ -11967,6 +12058,36 @@ def _cover_repeat_political_contract_error(item: dict, face_mode: str) -> str:
     )
 
 
+def _cover_pending_manual_variants(item: dict) -> list[dict]:
+    """Only durable variants with an existing, decodable result are complete."""
+    variants = item.get("manual_prompt_variants") or []
+    completed = set()
+    for result in item.get("prompt_image_paths") or []:
+        identity = result.get("promptVariantId")
+        # Bind an older result to its existing option without queue coordinates.
+        if not identity:
+            option = result.get("promptIndex")
+            if isinstance(option, int) and 0 <= option < len(variants):
+                identity = variants[option]["id"]
+        paths = result.get("paths") or []
+        if paths and all(cover_file_state(str(path))["state"] == "ready" for path in paths):
+            completed.add(identity)
+    return [variant for variant in variants if variant["id"] not in completed]
+
+
+def _check_manual_repeat_contract(item: dict) -> None:
+    contracts = item.get("manual_prompt_contracts") or {}
+    selected = [contracts[v["id"]] for v in item.get("manual_prompt_variants", []) if v["id"] in contracts]
+    if len({json.dumps([c["referencePaths"], c["renderProfile"]], sort_keys=True) for c in selected}) > 1:
+        raise ValueError("MANUAL_REPEAT_CONTRACT_MISMATCH: варианты созданы с разными референсами/режимами; повторите их обычным запуском без галочки")
+
+
+def _cover_needs_images(item: dict, *, manual_missing_only: bool = True) -> bool:
+    if item.get("manual_prompt_variants"):
+        return not manual_missing_only or bool(_cover_pending_manual_variants(item))
+    return not _cover_has_valid_image(item)
+
+
 def generate_covers(payload: dict) -> dict:
     """Start one bounded ten-worker cover batch; reject duplicate clicks."""
     if payload.get("_parallel_cover_worker"):
@@ -12049,19 +12170,21 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 "reason": "deleted" if identity in deleted_ids else "stale-or-not-current",
             })
     scope_requested = set(requested)
+    if any(settings.cover_queue[index].get("manual_prompt_variants") and settings.cover_queue[index].get("accepted_generation_id") for index in requested):
+        raise ValueError("ACCEPTED_MANUAL_GENERATION: FastGen уже принял вариант; сначала восстановите принятую задачу")
     if not payload.get("resumeOnly") and not payload.get("indices"):
         # The primary action is always missing-only. Keep the durable all-topic
         # ID scope resolved above instead of expanding back to unrelated rows.
         requested = {
             index for index in requested
             if 0 <= index < len(settings.cover_queue)
-            and not _cover_has_valid_image(settings.cover_queue[index])
+            and _cover_needs_images(settings.cover_queue[index], manual_missing_only=payload.get("manualMissingOnly", settings.cover_manual_missing_only))
         }
     if not payload.get("forceRegenerate"):
         requested = {
             index for index in requested
             if 0 <= index < len(settings.cover_queue)
-            and not _cover_has_valid_image(settings.cover_queue[index])
+            and _cover_needs_images(settings.cover_queue[index], manual_missing_only=payload.get("manualMissingOnly", settings.cover_manual_missing_only))
         }
     for index in sorted(scope_requested - requested):
         if not 0 <= index < len(settings.cover_queue):
@@ -12267,7 +12390,15 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 prompt = settings.cover_prompt_template.replace("{title}", title).replace("{excerpt}", excerpt)
                 item["image_prompt"] = prompt
             prompt_options = [prompt]
+        manual_append = bool(item.get("manual_prompt_variants")) and not repeat_current_contract and not payload.get("forceRegenerate")
+        render_variants = item.get("manual_prompt_variants") or []
+        if manual_append:
+            render_variants = _cover_pending_manual_variants(item) if payload.get("manualMissingOnly", settings.cover_manual_missing_only) else render_variants
+            prompt_options = [variant["prompt"] for variant in render_variants]
         saved_provider_prompts = _cover_saved_provider_prompts(item) if repeat_current_contract else []
+        if repeat_current_contract and item.get("manual_prompt_contracts"):
+            render_variants = [v for v in render_variants if v["id"] in item["manual_prompt_contracts"]]
+            _check_manual_repeat_contract(item)
         if repeat_current_contract and not saved_provider_prompts:
             detail = (
                 "Для этой темы не сохранён Final FastGen prompt. "
@@ -12539,8 +12670,15 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 _save_cover_state(settings)
                 continue
             item["prompt_sources"] = prompt_sources_debug()
-        item["final_provider_prompt_options"] = final_prompt_options
-        item["final_provider_prompt"] = final_prompt_options[0]
+        if render_variants:
+            contracts = dict(item.get("manual_prompt_contracts") or {})
+            for variant, provider_prompt in zip(render_variants, final_prompt_options):
+                contracts[variant["id"]] = {"prompt": provider_prompt, "referencePaths": list(references), "renderProfile": dict(render_profile)}
+            item["manual_prompt_contracts"] = contracts
+            item["final_provider_prompt_options"] = [contracts[v["id"]]["prompt"] for v in item["manual_prompt_variants"] if v["id"] in contracts]
+        else:
+            item["final_provider_prompt_options"] = final_prompt_options
+        item["final_provider_prompt"] = item["final_provider_prompt_options"][0]
         item["final_provider_reference_paths"] = list(references)
         item["reference_use_enabled"] = settings.cover_fastgen_use_references
         item["reference_uploaded_count"] = len(settings.cover_fastgen_reference_paths)
@@ -12566,8 +12704,11 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         item["face_composite_requested"] = False
         item["error"] = ""
         _save_cover_state(settings)
-        values: list[str] = []
-        prompt_image_paths: list[dict[str, object]] = []
+        render_run_id = uuid.uuid4().hex[:12]
+        retained_values = list(item.get("paths") or []) if manual_append else []
+        previous_selected_path = str(item.get("selected_path") or "") if manual_append else ""
+        values: list[str] = list(retained_values)
+        prompt_image_paths: list[dict[str, object]] = list(item.get("prompt_image_paths") or []) if manual_append else []
         try:
             def progress(label: str, percent: int, detail: str = "", *, _item=item):
                 _cover_step(_item, label, percent, detail)
@@ -12576,6 +12717,9 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             seed = int(settings.cover_seed) if settings.cover_seed.isdigit() else None
             generation_history: list[dict[str, object]] = []
             for prompt_index, final_provider_prompt in enumerate(final_prompt_options, 1):
+                variant = render_variants[prompt_index - 1] if prompt_index <= len(render_variants) else None
+                prompt_number = variant["number"] if variant else prompt_index
+                prompt_identity = {"productionItemId": item.get("production_item_id"), "promptVariantId": variant["id"], "promptNumber": prompt_number} if variant else {}
                 _cover_step(item, "Подготовка варианта", max(10, int((prompt_index - 1) / len(prompt_options) * 80) + 10),
                             f"Промпт {prompt_index}/{len(prompt_options)}")
                 paths = []
@@ -12605,14 +12749,14 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                     try:
                         paths = pool.generate_media(
                             retry_prompt,
-                            output, f"{index + 1:03d} — {title} — промпт {prompt_index:02d}", operation,
+                            output, (f"{item['production_item_id']} — {title} — промпт {prompt_number:02d} — {render_run_id}" if variant else f"{index + 1:03d} — {title} — промпт {prompt_index:02d}"), operation,
                             settings.cover_aspect_ratio, references=references, count=settings.cover_variant_count, seed=seed,
                             quality=settings.cover_quality or None, resolution=settings.cover_resolution or None,
                             upscale=settings.cover_upscale, progress_callback=progress,
                         )
                         successful_prompt = retry_prompt
                         generation_history.append({
-                            "promptIndex": prompt_index, "round": 1, "attempt": attempt,
+                            **prompt_identity, "promptIndex": prompt_number, "round": 1, "attempt": attempt,
                             "totalAttempt": attempt, "rewritten": False, "preBilling": True,
                             "status": "success", "at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         })
@@ -12626,7 +12770,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                         accepted_generation_id = _cover_accepted_generation_id(generation_error)
                         reason = _cover_provider_error_message(generation_error)
                         generation_history.append({
-                            "promptIndex": prompt_index, "round": 1, "attempt": attempt,
+                            **prompt_identity, "promptIndex": prompt_number, "round": 1, "attempt": attempt,
                             "totalAttempt": attempt, "rewritten": False,
                             "preBilling": not bool(accepted_generation_id),
                             "status": "failed", "error": reason,
@@ -12639,6 +12783,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                             error="",
                         )
                         if accepted_generation_id:
+                            if variant:
+                                item["accepted_manual_prompt_variant"] = {**prompt_identity, "prompt": retry_prompt}
                             item["accepted_generation_id"] = accepted_generation_id
                             _save_cover_state(settings)
                             raise
@@ -12655,10 +12801,10 @@ def _generate_covers_unlocked(payload: dict) -> dict:
                 if len(generated) != required:
                     raise RuntimeError(f"FastGen вернул {len(generated)} из {required} картинок для промпта {prompt_index}")
                 values.extend(generated)
-                prompt_image_paths.append({"promptIndex": prompt_index - 1, "prompt": successful_prompt, "paths": generated})
+                prompt_image_paths.append({**prompt_identity, "promptIndex": prompt_number - 1, "prompt": successful_prompt, "paths": generated})
             _cover_step(item, "Готово", 100)
-            item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
-                        selected_base_path=values[0], prompt_image_paths=prompt_image_paths,
+            item.update(raw_paths=values, paths=values, path=values[0], selected_path=previous_selected_path or values[0],
+                        selected_base_path=previous_selected_path or values[0], prompt_image_paths=prompt_image_paths,
                         face_composite_requested=bool(face_label and local_face_only), error="")
             item.pop("accepted_generation_id", None)
             item.pop("generation_last_rejection", None)
@@ -12673,8 +12819,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             detail = _cover_provider_error_message(exc)
             if values:
                 detail = f"{detail}. Получено вариантов: {len(values)} из {len(final_prompt_options) * settings.cover_variant_count}"
-                item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
-                            selected_base_path=values[0], prompt_image_paths=prompt_image_paths)
+                item.update(raw_paths=values, paths=values, path=values[0], selected_path=previous_selected_path or values[0],
+                            selected_base_path=previous_selected_path or values[0], prompt_image_paths=prompt_image_paths)
             accepted_generation_id = _cover_accepted_generation_id(exc)
             if isinstance(exc, _CoverPromptNeedsRewrite):
                 evidence = {
@@ -12712,7 +12858,7 @@ def _generate_covers_unlocked(payload: dict) -> dict:
             else:
                 _cover_step(item, "Ошибка FastGen", 100, detail)
                 item.update(error=detail)
-        staged_paths = [Path(value) for value in values]
+        staged_paths = [Path(value) for value in values if value not in retained_values]
         # A real FastGen response is synchronously materialized by the client.
         # Keep the established provider-contract behavior for a deferred/mock
         # response that names a path before the downloader has written it.
@@ -12729,8 +12875,8 @@ def _generate_covers_unlocked(payload: dict) -> dict:
         for prompt_paths in prompt_image_paths:
             prompt_paths["paths"] = [replacements.get(value, value) for value in prompt_paths["paths"]]
         if values:
-            item.update(raw_paths=values, paths=values, path=values[0], selected_path=values[0],
-                        selected_base_path=values[0], prompt_image_paths=prompt_image_paths)
+            item.update(raw_paths=values, paths=values, path=values[0], selected_path=previous_selected_path or values[0],
+                        selected_base_path=previous_selected_path or values[0], prompt_image_paths=prompt_image_paths)
         _save_cover_state(settings)
     # The face reference is not left to the image model alone.  When a topic
     # has a relevant portrait, apply it locally before putting typography over
@@ -12855,6 +13001,9 @@ def _advance_cover_revision(item: dict) -> None:
 
 def _cover_saved_provider_prompts(item: dict) -> list[str]:
     """Return the exact provider prompts previously sent for this row."""
+    if item.get("manual_prompt_variants") and item.get("manual_prompt_contracts"):
+        contracts = item["manual_prompt_contracts"]
+        return [contracts[v["id"]]["prompt"] for v in item["manual_prompt_variants"] if v["id"] in contracts]
     saved: list[str] = []
     values = item.get("final_provider_prompt_options")
     if isinstance(values, list):
@@ -12948,6 +13097,7 @@ def _commit_fresh_prompt_rewrite(
             item.update(error=reason)
             continue
         old_options = _cover_active_prompt_options(item)
+        _discard_manual_cover_variants(item)
         item.update(
             image_prompt_options=list(replacement["image_prompt_options"]),
             selected_prompt_index=int(replacement["selected_prompt_index"]),
@@ -13091,6 +13241,7 @@ def regenerate_covers(payload: dict) -> dict:
         missing_references: list[str] = []
         for index in sorted(requested):
             item = settings.cover_queue[index]
+            _check_manual_repeat_contract(item)
             label = str(item.get("title", "") or index + 1)
             profile = item.get("render_profile")
             if not isinstance(profile, dict):
@@ -13176,6 +13327,16 @@ _COVER_MANUAL_RETRY_STATUSES = {"Ошибка FastGen", "Нужен новый �
 
 def recover_cover_generation(payload: dict) -> dict:
     """Recover accepted FastGen jobs through GET only; never create here."""
+    lock = _claim_cover_generation_lock()
+    if lock is None:
+        raise ValueError("COVER_BATCH_ACTIVE: дождитесь текущей операции обложек")
+    try:
+        return _recover_cover_generation_unlocked(payload)
+    finally:
+        _release_cover_generation_lock(lock)
+
+
+def _recover_cover_generation_unlocked(payload: dict) -> dict:
     settings = load_settings()
     _hydrate_cover_library(settings)
     selected = _select_current_cover_generation_rows(settings, payload, lambda _item: True)
@@ -13203,10 +13364,21 @@ def recover_cover_generation(payload: dict) -> dict:
         )
         if status == "succeeded":
             paths = [str(path) for path in result.get("paths", [])]
+            variant = item.get("accepted_manual_prompt_variant")
+            selected_path = str(item.get("selected_path") or "")
+            if variant:
+                if not paths or not all(cover_file_state(p)["state"] == "ready" for p in paths):
+                    _cover_step(item, "Требуется восстановление FastGen", 100, "Восстановленные файлы ещё не готовы")
+                    continue
+                records = list(item.get("prompt_image_paths") or [])
+                records.append({**variant, "promptIndex": variant["promptNumber"] - 1, "paths": paths})
+                item["prompt_image_paths"] = records
+                paths = list(dict.fromkeys([*(item.get("paths") or []), *paths]))
             item.update(status="Готово", progress=100, error="", raw_paths=paths, paths=paths,
-                        path=paths[0] if paths else "", selected_path=paths[0] if paths else "",
-                        selected_base_path=paths[0] if paths else "")
+                        path=paths[0] if paths else "", selected_path=(selected_path if variant else "") or (paths[0] if paths else ""),
+                        selected_base_path=(selected_path if variant else "") or (paths[0] if paths else ""))
             item.pop("accepted_generation_id", None)
+            item.pop("accepted_manual_prompt_variant", None)
         elif status == "processing":
             _cover_step(item, "FastGen генерирует", max(30, int(item.get("progress", 30) or 30)), generation_id)
         else:
@@ -13394,6 +13566,7 @@ def remove_cover_prompts(payload: dict) -> dict:
             continue
         if item.get("image_prompt") or item.get("image_prompt_options"):
             _remember_cover_prompt_history(item, _cover_active_prompt_options(item))
+            _discard_manual_cover_variants(item)
             item.pop("image_prompt", None)
             item.pop("image_prompt_options", None)
             item.pop("selected_prompt_index", None)

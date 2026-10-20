@@ -1,7 +1,7 @@
 name: Windows native
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/covers-standalone-topics]
 jobs:
   source-electron:
     runs-on: windows-latest
@@ -29,7 +29,7 @@ jobs:
           if (!(Test-Path 'studio-ui-remotion-verify/node_modules/electron/dist/electron.exe')) {
             throw 'Real Electron runtime required; UI acceptance must not skip'
           }
-          python tests/run_isolated.py tests.test_cover_standalone_topics tests.test_cover_standalone_ui -v
+          python tests/run_isolated.py tests.test_cover_prompt_blocks tests.test_cover_prompt_blocks_ui tests.test_cover_standalone_topics tests.test_cover_standalone_ui -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
