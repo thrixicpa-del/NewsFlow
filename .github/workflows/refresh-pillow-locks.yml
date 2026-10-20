@@ -1,0 +1,41 @@
+name: Refresh Pillow locks
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  locks:
+    if: github.head_ref == 'security/pillow-13'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - run: python -m pip install pip-tools==7.5.1
+      - name: Refresh production lock
+        run: python -m piptools compile --generate-hashes --upgrade-package pillow --output-file requirements.lock requirements.txt
+      - name: Refresh test lock
+        run: python -m piptools compile --generate-hashes --upgrade-package pillow --output-file requirements-test.lock requirements-test.in
+      - name: Print Pillow hashes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for name in ("requirements.lock","requirements-test.lock"):
+              lines=Path(name).read_text().splitlines()
+              start=next(i for i,x in enumerate(lines) if x.lower().startswith("pillow=="))
+              end=start+1
+              while end<len(lines) and (lines[end].startswith("    ") or lines[end].startswith("        ")):
+                  end+=1
+              print(f"=== {name} PILLOW ===")
+              print("\n".join(lines[start:end]))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pillow13-locks
+          path: |
+            requirements.lock
+            requirements-test.lock
