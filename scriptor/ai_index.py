@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import os
@@ -7,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -280,6 +282,8 @@ class ClipIndex:
         self.screen_text_progress = screen_text_progress
         self._image_embedder = None
         self._text_embedder = None
+        self._preview_image_model = None
+        self._preview_vectors: OrderedDict[str, object] = OrderedDict()
         self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
         self._lock = threading.RLock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1072,14 +1076,47 @@ class ClipIndex:
     def search(self, visual_query_en: str, limit: int = 20, exclude: set[str] | None = None) -> list[SearchHit]:
         return self.search_many([visual_query_en], limit=limit, exclude=exclude)[0]
 
+    @staticmethod
+    def _preview_signature(path: Path) -> tuple[str, int, int, int] | None:
+        """Hash bytes on every preview lookup, including preserved-mtime edits."""
+        try:
+            before = path.stat()
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            after = path.stat()
+        except OSError:
+            # Hashing is optional; preserve the decoder's normal error policy.
+            return None
+        before_state = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        after_state = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        return (digest.hexdigest(), *after_state) if before_state == after_state else None
+
     def score_file(self, path: str | Path, visual_query_en: str) -> float:
         """Score an unindexed preview clip against the same CLIP text space."""
         import numpy as np
         image_model, text_model = self._models()
-        sampled = self._sample_frames(Path(path))
-        images = sampled[0]
-        image_vectors = list(image_model.embed(images, batch_size=len(images)))
-        clip_vector = self._normalize(np.mean(image_vectors, axis=0))
+        path = Path(path)
+        with self._lock:
+            # Keep a strong model reference: object ids alone can be reused.
+            if self._preview_image_model is not image_model:
+                self._preview_vectors.clear()
+                self._preview_image_model = image_model
+            signature = self._preview_signature(path)
+            key = signature[0] if signature is not None else None
+            clip_vector = self._preview_vectors.get(key) if key is not None else None
+            if clip_vector is None:
+                images = self._sample_frames(path)[0]
+                image_vectors = list(image_model.embed(images, batch_size=len(images)))
+                clip_vector = self._normalize(np.mean(image_vectors, axis=0))
+                # A clip replaced while decoding must not poison later queries.
+                if signature is not None and self._preview_signature(path) == signature:
+                    self._preview_vectors[key] = clip_vector
+                    while len(self._preview_vectors) > 64:
+                        self._preview_vectors.popitem(last=False)
+            else:
+                self._preview_vectors.move_to_end(key)
         query_vector = self._normalize(next(iter(text_model.query_embed(visual_query_en))))
         return float(np.dot(clip_vector, query_vector))
 

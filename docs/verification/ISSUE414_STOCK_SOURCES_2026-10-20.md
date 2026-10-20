@@ -473,3 +473,65 @@ unresolved live UI refresh/production-guard evidence. Docker remains unavailable
 The corrected no-overlay sample passes CFR checks; the old legacy-overlay VFR
 defect is not declared fixed. No Frozen/EXE, main merge, issue closure or edits
 to working NewsFlow data were performed.
+
+### Follow-up: measured scene timing and 100% uniqueness
+
+The owner rejected the repeated maritime sample and requested a different ready
+MP3 with 100% uniqueness. The previous 20% result and its failures remain above;
+they are not evidence for the new setting.
+
+Root causes reproduced RED before fixes:
+
+- Aviation nouns were missing from the fallback query dictionary. An aircraft
+  over the sea could inherit maritime footage, and a military aircraft could
+  receive the generic ground-vehicle query. Aviation/control/radar terms now
+  retain their object domain; railway dispatchers remain distinct.
+- The existing six-second VoiceMap projection spread words uniformly within
+  aligned segments even when measured word observations were available. It now
+  assigns each canonical word to the beat in which its measured start occurs.
+  Generated visual queries use those spoken words; custom queries and maps
+  without measured words retain their existing behavior. The map, timing grid,
+  narration length and existing planner are preserved.
+- Repeated CLIP preview queries decoded and image-embedded an unchanged file
+  again. A per-index 64-entry image-vector cache uses content SHA256 and model
+  identity, checks mutation during decoding and preserves original error
+  behavior. Text scoring, thresholds and persistent index schema are unchanged.
+
+Targeted timing/query regression: **81 tests PASS/1.980s**, production guard
+PASS. Preview/index regression: **73 tests PASS/44.678s**, production guard
+PASS. Real preview benchmark on one unchanged six-second original and three
+queries: **3.196074 -> 0.789913s**, frame sampling **3 -> 1**, maximum score
+delta **0.0**; four CPU cores, 4 GiB cap, measured peak 1.026 GB. This is a
+preview-scoring benchmark, not a whole-montage speed claim.
+
+New private input: another original ready MP3 (voice output 013), unchanged
+SHA256 `7bd63a6372e5accd93d8b572f8b1006444d3a3791434c29bec480f0a531f0102`.
+A copied 120-second excerpt produced 277 positive-duration actual ASR word
+observations through the same QA-only alignment interface described above.
+The native map contains 27 segments and projects to 20 beats/120s. Independent
+audit verifies all 277 words occur exactly once in measured order, with no time
+alterations and no cargo-ship/harbor/ground-military queries. This verifies
+projection, not the relevance of media that has not yet been selected.
+
+Evidence: private `airport-100/aviation-timing-red.log`,
+`aviation-timing-green.log`, `preview-cache-probe/evidence.json` and
+`profile-a449706a0d/artifacts/twenty-beat-word-query-audit.json`.
+The new 100% UI/MP4 acceptance is recorded separately after the actual run;
+no successful output is claimed by this checkpoint.
+
+Combined related regression after all source changes: **340 tests/204.851s**,
+functional PASS with one opt-in UI test skipped; production-write guard
+**FAIL(settings.json)**, exit91. The earlier read-only control already showed
+external settings changes without tests; this observation is not sufficient to
+waive the guard. FAST (Ruff and secret scan) and diff checks PASS. Independent
+read-only review found no new material defects; ten focused tests independently
+PASS with guardPASS. One compatibility limitation is explicit: older saved
+generated queries have no reliable provenance distinguishing them from manual
+overrides. They are preserved, and can retain an old query until normal
+VoiceMap rebuild; the fresh map used here contains the corrected queries.
+
+Previous HEAD3ff independent CI is no longer pending: CI39464424331 FAIL on the
+known stale Frozen/source lock; Windows-native39464424218 did not execute its
+steps (source-electron job cancelled), so it provides no successful native
+acceptance for that revision. The older c2 Windows success remains historical.
+No Frozen rebuild or lock rewrite is used to turn these gates green.

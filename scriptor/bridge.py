@@ -196,6 +196,7 @@ from .voice_map import (
     VoiceMapStatus,
     ensure_voice_map,
     remove_voice_map,
+    timed_text_for_interval,
 )
 from .voicer import (
     ChromeSecretVoicer,
@@ -5832,9 +5833,21 @@ def _voice_map_scenes(status: VoiceMapStatus) -> tuple[list[dict], dict]:
             ),
         )
         duration = beat_end - beat_start
+        measured_narration = timed_text_for_interval(payload, beat_start, beat_end)
+        narration = measured_narration if measured_narration is not None else " ".join(narration_parts).strip()
+        visual_query = resolved_query(dominant)
+        # Respect explicit/custom visual queries. For generated queries, use
+        # the words actually spoken in this existing beat rather than words
+        # spread uniformly across a longer aligned speech segment.
+        if measured_narration is not None and (
+                not concrete_query(dominant)
+                or concrete_query(dominant) == _normalized_montage_visual_query(
+                    fallback_visual_query(str(dominant.get("text", ""))))):
+            visual_query = (_normalized_montage_visual_query(fallback_visual_query(narration))
+                            or visual_query)
         scenes.append({
-            "narration": " ".join(narration_parts).strip(),
-            "visual_query_en": resolved_query(dominant),
+            "narration": narration,
+            "visual_query_en": visual_query,
             "duration": duration,
             "minimum_footage_duration": min(
                 duration, _VOICE_MAP_CUTTER_TARGET_SECONDS,

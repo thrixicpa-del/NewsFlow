@@ -6,6 +6,32 @@ from scriptor.footage import FootageItem
 from scriptor.timeline import GENERIC_VISUAL_QUERY, fallback_visual_query
 
 
+class AviationSceneQueryTests(unittest.TestCase):
+    def test_airport_objects_are_concrete_without_a_maritime_substitution(self):
+        cases = (
+            ('Диспетчер аэропорта увидел самолет на взлетной полосе.', 'aircraft'),
+            ('Пассажирский самолёт продолжал лететь над морем.', 'aircraft'),
+            ('Воздушное судно направили на запасную полосу.', 'aircraft'),
+            ('На радаре возникла движущаяся отметка.', 'radar'),
+            ('В диспетчерской башне не горел свет.', 'control'),
+        )
+        for text, subject in cases:
+            with self.subTest(text=text):
+                query = fallback_visual_query(text)
+                self.assertIn(subject, query)
+                self.assertNotIn('cargo ship', query)
+                self.assertNotIn('harbor', query)
+
+    def test_dispatcher_and_terminal_are_not_automatically_airports(self):
+        self.assertNotIn('aircraft', fallback_visual_query('Диспетчер железной дороги проверил грузовой терминал.'))
+
+    def test_military_aircraft_are_not_ground_vehicles_or_civilian_passenger_planes(self):
+        query = fallback_visual_query('Военный самолёт поднялся с аэродрома.')
+        self.assertIn('military aircraft', query)
+        self.assertNotIn('military vehicles', query)
+        self.assertNotIn('passenger', query)
+
+
 class MaritimeSceneQueryTests(unittest.TestCase):
     def test_civilian_harbor_actions_produce_concrete_queries(self):
         cases = [

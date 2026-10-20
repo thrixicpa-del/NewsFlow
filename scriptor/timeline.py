@@ -221,6 +221,10 @@ VISUAL_TERMS = {
     "железнодорожн": "freight railway cargo tracks", "портальн": "cargo gantry crane terminal",
     "пожар": "fire smoke firefighters emergency", "эсмин": "navy destroyer warship",
     "фрегат": "navy frigate warship",
+    "аэропорт": "airport runway terminal aircraft", "аэродром": "airfield runway aircraft",
+    "самол": "aircraft flight airport runway", "радар": "radar antenna monitoring equipment",
+    "радиолокац": "radar antenna tracking equipment",
+    "взлетно-посадочн": "airport runway landing strip",
     "завод": "industrial factory workers", "переговор": "diplomatic negotiations leaders journalists cameras",
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
     "азербайдж": "Azerbaijan Baku", "израил": "Israel military border", "ливан": "Lebanon Beirut",
@@ -253,7 +257,13 @@ GENERIC_VISUAL_QUERY = "international news, documentary footage"
 
 
 def fallback_visual_query(text: str) -> str:
-    lowered = text.casefold()
+    lowered = text.casefold().replace("ё", "е")
+    aviation = bool(re.search(
+        r"\b(?:самол\w*|аэропорт\w*|аэродром\w*|авиадиспетчер\w*)"
+        r"|\bвоздушн\w*\s+(?:судн\w*|движен\w*)"
+        r"|\bдиспетчерск\w*\s+(?:башн\w*|вышк\w*)"
+        r"|\bдежурн\w*\s+борт\w*", lowered,
+    ))
     naval = bool(re.search(
         r"\b(?:эсмин\w*|фрегат\w*|вмф)\b|\bвоенно-мор\w*"
         r"|\b(?:военн|боев)\w*\s+(?:кораб|судн)\w*", lowered,
@@ -265,7 +275,18 @@ def fallback_visual_query(text: str) -> str:
     if naval:
         terms = ["navy warship" if term in (VISUAL_TERMS["кораб"], VISUAL_TERMS["судн"])
                  else term for term in terms]
-    if maritime and not naval:
+    if aviation:
+        terms = ["aircraft flight" if term == VISUAL_TERMS["судн"] else term for term in terms]
+        if not any("aircraft" in term for term in terms):
+            terms.append("aircraft flight")
+        if re.search(r"\bвоенн\w*\s+самол\w*", lowered):
+            terms = ["military aircraft airbase flight" if term == VISUAL_TERMS["самол"]
+                     else term for term in terms]
+        if not re.search(r"\b(?:танк|брон|солдат|пехот|назем|машин)\w*", lowered):
+            terms = [term for term in terms if term != VISUAL_TERMS["военн"]]
+    if "диспетч" in lowered:
+        terms.append("air traffic control tower operators" if aviation else "operations control room operators")
+    if maritime and not naval and not aviation:
         terms.append("civilian maritime cargo ship harbor")
     # A legal court/manifest is not a vessel/shipping manifest. Require the
     # surrounding visible cargo/harbor context for these ambiguous words.

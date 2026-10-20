@@ -132,6 +132,27 @@ def _segment_text(script: str, tokens: list[tuple[str, int, int]], start: int, e
     return script[start_char:end_char].strip(), start_char, end_char
 
 
+def timed_text_for_interval(payload: dict, start: float, end: float) -> str | None:
+    """Read measured word ownership without inventing times or changing the map.
+
+    A word belongs to the interval where it starts, including a boundary-crossing
+    word only once. Maps without word observations retain the approximate path.
+    """
+    alignment = payload.get("alignment")
+    if alignment is None:
+        return None
+    words = alignment.get("words") if isinstance(alignment, dict) else None
+    script = " ".join(str(segment.get("text", "")).strip() for segment in payload["segments"])
+    spans = _token_spans(script)
+    if (not isinstance(words, list) or len(words) != len(spans)
+            or any(not isinstance(word, dict)
+                   or _normalise_token(str(word.get("text", ""))) != _normalise_token(token[0])
+                   for word, token in zip(words, spans))):
+        raise ValueError("VoiceMap measured words do not cover the canonical transcript")
+    indices = [index for index, word in enumerate(words) if start <= float(word["start"]) < end]
+    return _segment_text(script, spans, indices[0], indices[-1])[0] if indices else ""
+
+
 def _boundary_score(script: str, left_end: int, right_start: int) -> int:
     punctuation = script[left_end:right_start]
     if re.search(r"[.!?…]", punctuation):
