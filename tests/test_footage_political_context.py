@@ -102,6 +102,41 @@ class PoliticalContextTests(unittest.TestCase):
                     f'{wanted} peaceful protest placards', item,
                     visual_assessment={'relation': 'direct', 'dominant_kind': 'peaceful_protest'}))
 
+    def test_shared_person_hint_cannot_hide_an_unrelated_foreign_politician(self):
+        for query, title in (
+            ('Nikol Pashinyan, Azerbaijan Baku', 'Pashinyan_Lukashenko_Minsk.mp4'),
+            ('Nikol Pashinyan, Azerbaijan Baku negotiations', 'Pashinyan_Lukashenko_Minsk_meeting.mp4'),
+            ('Volodymyr Zelensky Ukraine', 'Zelensky_Putin_Moscow.mp4'),
+            ('Vladimir Putin Russia', 'Putin_Macron_Paris.mp4'),
+        ):
+            item = self.item(title)
+            del item._visual_assessor
+            for visual in (None, {'relation': 'direct', 'dominant_kind': 'official'}):
+                with self.subTest(query=query, checked_role=visual is not None):
+                    self.assertFalse(bridge._semantic_clip_ok(query, item, visual_assessment=visual))
+
+    def test_scene_related_bilateral_person_hints_remain_available(self):
+        item = self.item('Pashinyan_Aliyev_Armenia_Azerbaijan.mp4')
+        self.assertTrue(bridge._semantic_clip_ok(
+            'Nikol Pashinyan, Armenia Azerbaijan negotiations', item,
+            visual_assessment={'relation': 'context', 'dominant_kind': 'meeting'}))
+        item = self.item('Pashinyan_Lukashenko_meeting.mp4')
+        self.assertTrue(bridge._semantic_clip_ok(
+            'Nikol Pashinyan Alexander Lukashenko meeting', item,
+            visual_assessment={'relation': 'direct', 'dominant_kind': 'meeting'}))
+
+    def test_checked_target_window_corrects_a_mixed_person_filename(self):
+        item = self.item('Pashinyan_Lukashenko_meeting.mp4')
+        stat = Path(item.path).stat()
+        item.person_evidence = {
+            'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns,
+            'observations': [{'person_id': 'pashinyan', 'source': 'manual',
+                              'complete': True, 'start': 0., 'end': 8.}],
+        }
+        self.assertTrue(bridge._semantic_clip_ok(
+            'Nikol Pashinyan Armenia press conference', item, source_start=0., duration=6.,
+            visual_assessment={'relation': 'direct', 'dominant_kind': 'official'}))
+
     def test_cis_geography_cannot_be_cancelled_by_an_unrelated_title_mention(self):
         for requested, actual in (('Georgia Tbilisi', 'Russia Moscow'),
                                   ('Moldova Chisinau', 'Belarus Minsk'),

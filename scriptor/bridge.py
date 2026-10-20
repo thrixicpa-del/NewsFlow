@@ -16325,6 +16325,24 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
     evidence = person_evidence(scene_query, item, start, duration)
     if evidence["status"] in {"contradiction", "contradiction_hint"}:
         return False
+    if evidence["source"] == "unverified-metadata":
+        # One shared name in a mixed title cannot excuse a different country's
+        # politician. A checked target interval can correct these weak hints;
+        # scene-related bilateral context remains eligible.
+        requested_places = _montage_entity_groups(scene_query)
+        extra_people = set(evidence["visible"]) - set(evidence["targets"])
+        if any(_montage_entity_groups(person_name(person)) - requested_places for person in extra_people):
+            target_places = _montage_entity_groups(" ".join(person_name(person) for person in evidence["targets"]))
+            requested_topic = query_topic(scene_query)
+            candidate_topic = query_topic(" ".join((item.name, " ".join(item.tags or []))))
+            # An unspecified counterpart in a requested joint meeting is
+            # legitimate context. A different country explicitly requested
+            # by the scene still excludes an unrelated meeting partner.
+            open_joint_meeting = (requested_topic and requested_topic[0] == "meeting"
+                                  and candidate_topic and candidate_topic[0] == "meeting"
+                                  and requested_places == target_places)
+            if not open_joint_meeting:
+                return False
     if (evidence["status"] == "unknown" and _montage_requests_person_footage(scene_query)
             and set(evidence["targets"]).intersection(named_people(
                 _montage_explicit_metadata(item).replace("_", " ")))):
