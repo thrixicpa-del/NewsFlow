@@ -53,7 +53,12 @@ jobs:
       - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-scenario-story-planner
-      - run: python tests/run_isolated.py tests.test_browser_topic_scenarios tests.test_chatgpt_browser scriptor.test_command_contract
+      - run: python -m playwright install --with-deps chromium
+      - run: >-
+          python tests/run_isolated.py tests.test_browser_topic_scenarios
+          tests.test_chatgpt_browser tests.test_chatgpt_document_readiness
+          tests.test_chatgpt_documents_settings tests.test_browser_documents_pipeline
+          scriptor.test_command_contract
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-browser-topics
       - run: pnpm typecheck

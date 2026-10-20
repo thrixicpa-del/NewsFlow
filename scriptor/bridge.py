@@ -59,6 +59,7 @@ from .chatgpt_browser import (
     ChatGPTBrowserClient,
     validate_chatgpt_project_url,
 )
+from .chatgpt_documents import read_requirements, requirement_paths
 from .claude import chrome_path, open_login_window
 from .command_contract import (
     COMMAND_CONTRACT,
@@ -3104,6 +3105,8 @@ def snapshot() -> dict:
             "requirementsMode": str(settings.browser_topic_scenarios.get("requirements_mode", "text") or "text"),
             "requirementsText": str(settings.browser_topic_scenarios.get("requirements_text", "") or ""),
             "requirementsFile": str(settings.browser_topic_scenarios.get("requirements_file", "") or ""),
+            "requirementsFiles": requirement_paths(settings.browser_topic_scenarios.get("requirements_files"), str(settings.browser_topic_scenarios.get("requirements_file", "") or "")),
+            "running": _browser_topic_queue_is_running(),
             "companionPrompt": str(settings.browser_topic_scenarios.get("companion_prompt", "") or ""),
             "minimumChars": max(0, int(settings.browser_topic_scenarios.get("minimum_chars", 0) or 0)),
             "maximumChars": max(0, int(settings.browser_topic_scenarios.get("maximum_chars", 0) or 0)),
@@ -3350,12 +3353,14 @@ def save_browser_topic_scenario_settings(payload: dict) -> dict:
     maximum = max(0, int(payload.get("maximumChars", 0) or 0))
     if (minimum or maximum) and (not minimum or not maximum or minimum > maximum):
         raise ValueError("Укажите корректный диапазон символов")
+    files = requirement_paths(payload.get("requirementsFiles"), str(payload.get("requirementsFile", "") or ""))
     settings.browser_topic_scenarios = {
         "project_url": project_url,
         "session_id": str(payload.get("sessionId", "")).strip(),
         "requirements_mode": requirements_mode,
         "requirements_text": str(payload.get("requirementsText", "")),
-        "requirements_file": str(payload.get("requirementsFile", "")).strip(),
+        "requirements_file": files[0] if files else "",
+        "requirements_files": files,
         "companion_prompt": str(payload.get("companionPrompt", "")),
         "minimum_chars": minimum,
         "maximum_chars": maximum,
@@ -7262,11 +7267,13 @@ def _project_story_plan_face_resolution(settings: Settings, title: str, job: Job
 
 def _browser_topic_settings(settings: Settings) -> BrowserScenarioSettings:
     raw = dict(getattr(settings, "browser_topic_scenarios", {}) or {})
+    files = requirement_paths(raw.get("requirements_files"), str(raw.get("requirements_file", "") or ""))
     return BrowserScenarioSettings(
         project_url=str(raw.get("project_url", "") or "").strip(),
         requirements_mode=str(raw.get("requirements_mode", "text") or "text").strip(),
         requirements_text=str(raw.get("requirements_text", "") or ""),
-        requirements_file=str(raw.get("requirements_file", "") or "").strip(),
+        requirements_file=files[0] if files else "",
+        requirements_files=tuple(files),
         companion_prompt=str(raw.get("companion_prompt", "") or ""),
         minimum_chars=max(0, int(raw.get("minimum_chars", 0) or 0)),
         maximum_chars=max(0, int(raw.get("maximum_chars", 0) or 0)),
@@ -7454,7 +7461,60 @@ def _browser_topic_process_is_running(pid: object) -> bool:
         return False
 
 
-def _claim_browser_topic_queue_lock() -> Path | None:
+def _browser_topic_queue_is_running() -> bool:
+    try:
+        owner = json.loads(_browser_topic_queue_lock_path().read_text(encoding="utf-8"))
+        return _browser_topic_process_is_running(owner.get("pid"))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _browser_topic_batch_id(payload: dict) -> str:
+    identity = str(payload.get("batchId", "") or "")
+    if identity and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identity):
+        raise ValueError("Некорректный идентификатор запуска ChatGPT")
+    return identity
+
+
+def _browser_topic_pending_cancellations(lock_path: Path) -> dict:
+    try:
+        values = json.loads(lock_path.with_name("browser-topic-cancellations.json").read_text(encoding="utf-8"))
+        # Only in-flight launches need a tombstone. Old IDs never match a new
+        # UI UUID; prune abandoned launch records after a day.
+        cutoff = datetime.now().astimezone().timestamp() - 86_400
+        return {key: value for key, value in values.items() if isinstance(value, (int, float)) and value > cutoff}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _save_browser_topic_pending_cancellations(lock_path: Path, values: dict) -> None:
+    target = lock_path.with_name("browser-topic-cancellations.json")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(values), encoding="utf-8")
+    temporary.replace(target)
+
+
+def cancel_browser_topic_scenarios(payload: dict) -> dict:
+    lock_path = _browser_topic_queue_lock_path()
+    batch_id = _browser_topic_batch_id(payload)
+    with _exclusive_settings_write(lock_path.with_name("browser-topic-scenarios-owner.json")):
+        cancelled_owner = False
+        if lock_path.is_file():
+            owner = json.loads(lock_path.read_text(encoding="utf-8"))
+            if _browser_topic_process_is_running(owner.get("pid")) and (not batch_id or owner.get("batchId") == batch_id):
+                temporary = lock_path.with_suffix(".cancel.tmp")
+                temporary.write_text(json.dumps({**owner, "cancelled": True}), encoding="utf-8")
+                temporary.replace(lock_path)
+                cancelled_owner = True
+        if batch_id and not cancelled_owner:
+            pending = _browser_topic_pending_cancellations(lock_path)
+            pending[batch_id] = datetime.now().astimezone().timestamp()
+            _save_browser_topic_pending_cancellations(lock_path, pending)
+    return {**snapshot(), "operationResult": {"kind": "browser-topic-cancel", "count": 0, "message": "Отмена запрошена; закрываются только вкладки текущего пакета"}}
+
+
+def _claim_browser_topic_queue_lock(batch_id: str = "") -> Path | None:
     """Claim the one browser-topic batch across desktop/Core processes."""
     lock_path = _browser_topic_queue_lock_path()
     with _exclusive_settings_write(lock_path.with_name("browser-topic-scenarios-owner.json")):
@@ -7473,9 +7533,14 @@ def _claim_browser_topic_queue_lock() -> Path | None:
             except OSError:
                 return None
         try:
+            pending = _browser_topic_pending_cancellations(lock_path)
+            cancelled = bool(batch_id and pending.pop(batch_id, None))
+            _save_browser_topic_pending_cancellations(lock_path, pending)
             with lock_path.open("x", encoding="utf-8") as stream:
                 json.dump({
                     "pid": os.getpid(),
+                    "batchId": batch_id,
+                    "cancelled": cancelled,
                     "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }, stream)
         except FileExistsError:
@@ -7500,7 +7565,7 @@ def _release_browser_topic_queue_lock(lock_path: Path) -> None:
 
 def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPTBrowserClient) -> dict:
     """Run one process-owned browser-topic batch and reject overlapping starts."""
-    lock_path = _claim_browser_topic_queue_lock()
+    lock_path = _claim_browser_topic_queue_lock(_browser_topic_batch_id(payload))
     if lock_path is None:
         return {**snapshot(), "operationResult": {
             "kind": "browser-topic-scenarios-already-running",
@@ -7508,6 +7573,11 @@ def generate_browser_topic_scenarios(payload: dict, *, transport_factory=ChatGPT
             "message": "Очередь ChatGPT через браузер уже выполняется; повторный запуск отклонён.",
         }}
     try:
+        if json.loads(lock_path.read_text(encoding="utf-8")).get("cancelled"):
+            return {**snapshot(), "operationResult": {
+                "kind": "browser-topic-scenarios-cancelled", "count": 0,
+                "message": "Запуск ChatGPT отменён до открытия вкладок",
+            }}
         return _generate_browser_topic_scenarios_unlocked(
             payload, transport_factory=transport_factory,
         )
@@ -7532,8 +7602,11 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
     # per-topic URL remains valid even when the optional global URL is empty.
     if browser_settings.requirements_mode not in {"text", "file"}:
         raise ValueError("Выберите источник требований: текст или файл")
-    if browser_settings.requirements_mode == "file" and not Path(browser_settings.requirements_file).is_file():
-        raise ValueError("Файл требований не найден. Выберите его заново.")
+    if browser_settings.requirements_mode == "file":
+        files = list(browser_settings.requirements_files) or ([browser_settings.requirements_file] if browser_settings.requirements_file else [])
+        if not files:
+            raise ValueError("Выберите документы требований")
+        read_requirements(files)
     session = _browser_topic_session(settings, str(settings.browser_topic_scenarios.get("session_id", "")))
     tasks, jobs_by_index = _select_browser_topic_tasks(settings, titles, jobs, payload)
     if not tasks:
@@ -7563,8 +7636,9 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
     save_session(titles, list(jobs_by_index.values()))
 
     completed = 0
+    exported_by_id: dict[str, Path] = {}
 
-    def publish_outcome(outcome: BrowserTopicCompletion | BrowserTopicFailure) -> None:
+    def publish_outcome(outcome: BrowserTopicCompletion | BrowserTopicFailure) -> bool:
         nonlocal completed
         export_attempted = False
         export_error = ""
@@ -7575,15 +7649,17 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
             matching = [job for job in current_jobs
                         if str(job.request.production_item_id or "").strip() == outcome.production_item_id]
             if len(matching) != 1:
-                return
+                return True  # explicit deletion ends ownership without recreating the topic
             job = matching[0]
             if str(job.result or "").strip():
-                return  # manual/ready result always wins, including after a conflict
+                retry_export = isinstance(outcome, BrowserTopicCompletion) and job.result == outcome.text and job.state is RunState.ERROR and str(job.error).startswith("ChatGPT вернул сценарий, но TXT")
+                if not retry_export:
+                    return True  # manual/ready result always wins, including after a conflict
             if isinstance(outcome, BrowserTopicCompletion) and outcome.text:
                 job.result = outcome.text
                 job.actual_chars = len(outcome.text)
                 job.length_status = ""
-                if not export_attempted:
+                if not export_attempted and outcome.production_item_id not in exported_by_id:
                     export_attempted = True
                     try:
                         target = _browser_topic_export_path(
@@ -7592,6 +7668,7 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
                         # Exclusive creation protects a concurrent file creator.
                         with target.open("xb") as stream:
                             stream.write(outcome.text.encode("utf-8"))
+                        exported_by_id[outcome.production_item_id] = target
                     except OSError as exc:
                         export_error = f"ChatGPT вернул сценарий, но TXT не удалось сохранить: {exc}"
                 job.state = RunState.ERROR if export_error else RunState.DONE
@@ -7607,10 +7684,38 @@ def _generate_browser_topic_scenarios_unlocked(payload: dict, *, transport_facto
                 continue
             if job.state is RunState.DONE:
                 completed += 1
+            return job.state is RunState.DONE
+        return False
+
+    latest_progress: dict[str, str] = {}
+
+    def progress(task, message: str) -> None:
+        if task is None or latest_progress.get(task.production_item_id) == message:
             return
+        for _attempt in range(3):
+            current_titles, current_jobs = load_session()
+            for job in current_jobs:
+                if job.request.production_item_id == task.production_item_id and job.state is RunState.RUNNING:
+                    job.error = message
+            try:
+                save_session(current_titles, current_jobs)
+                latest_progress[task.production_item_id] = message
+                return
+            except SessionWriteConflictError:
+                continue
+
+    def cancelled() -> bool:
+        try:
+            owner = json.loads(_browser_topic_queue_lock_path().read_text(encoding="utf-8"))
+            return owner.get("pid") != os.getpid() or owner.get("cancelled") is True or not _production_generation_is_current(settings)
+        except (OSError, ValueError, TypeError):
+            return False  # an unreadable status file is not an owner cancellation
 
     async def run() -> list[BrowserTopicCompletion | BrowserTopicFailure]:
         async with transport_factory(session) as transport:
+            if hasattr(transport, "is_cancelled"):
+                transport.is_cancelled = cancelled
+                transport.on_status = progress
             return await run_browser_topic_tasks(
                 browser_settings, tasks, transport, on_outcome=publish_outcome,
             )
@@ -21637,6 +21742,8 @@ def main() -> None:
             result = save_settings_patch(payload if isinstance(payload, dict) else {})
         elif command == "save-browser-topic-scenario-settings":
             result = save_browser_topic_scenario_settings(payload if isinstance(payload, dict) else {})
+        elif command == "cancel-browser-topic-scenarios":
+            result = cancel_browser_topic_scenarios(payload)
         elif command == "generate-browser-topic-scenarios":
             result = generate_browser_topic_scenarios(payload if isinstance(payload, dict) else {})
         elif command == "save-obsidian-settings":
