@@ -69,6 +69,60 @@ class StockSelectionTests(unittest.TestCase):
                     self.assertIsNone(choice)
                     self.assertTrue(self.calls)
 
+    def test_library_without_query_words_is_scored_before_provider_discovery(self):
+        import hashlib
+        import json
+
+        from scriptor.stock_sources import StockCandidate, StockService
+
+        query = 'operations control room operators'
+        for score in (.8, .1):
+            with self.subTest(score=score):
+                service = StockService(self.root / f'library-{score}', keys={}, enabled=['pexels'])
+                candidate = StockCandidate('pexels', '42', 'File:AirTraffic-8.jpg', '',
+                    'https://www.pexels.com/video/42/', 'Pexels License',
+                    'https://www.pexels.com/license/', 'Creator', kind='image')
+                contents = f'isolated image fixture {score}'.encode()
+                digest = hashlib.sha256(contents).hexdigest()
+                filename = digest + '.jpg'
+                (service.originals / filename).write_bytes(contents)
+                with service._db() as db:
+                    db.execute('INSERT INTO assets VALUES (?,?,?,?)',
+                        (service._identity(candidate), digest, filename, json.dumps(candidate.to_dict())))
+                self.assertEqual(service.cached(query, kind='image'), [])
+                selector = self.selector('hybrid', score=score, candidates=[])
+                selector.service = service
+                scored_queries = []
+                selector.index.score_file = (
+                    lambda _path, value, score=score, recorded=scored_queries: recorded.append(value) or score
+                )
+                with (patch.object(service, 'search', return_value=[]) as search,
+                      patch.object(service, '_open', side_effect=AssertionError('Offline regression')) as network,
+                      patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source)):
+                    choice = selector.select({**self.scene, 'visual_query_en': query}, {}, [query], used_families=set())
+                if score >= selector.threshold:
+                    self.assertIsNotNone(choice, 'An eligible downloaded image must not require matching filename words')
+                    search.assert_not_called()
+                else:
+                    self.assertIsNone(choice, 'Library fallback must retain the original CLIP threshold')
+                self.assertTrue(scored_queries, 'The unmatched library asset must reach visual validation')
+                self.assertEqual(set(scored_queries), {query}, 'Discovery must never replace the original visual gate')
+                self.assertTrue(all(call.args[0] for call in search.call_args_list), 'Empty queries are library-only')
+                network.assert_not_called()
+
+    def test_query_matched_library_wins_before_unmatched_library_scan(self):
+        selector = self.selector('stock', candidates=[])
+        visited = []
+        def cached(query, *, kind='video'):
+            visited.append(query)
+            return [self.candidate] if query == 'cargo train' and kind == 'video' else []
+        selector.service.cached = cached
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            choice = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+        self.assertIsNotNone(choice)
+        self.assertNotIn('', visited)
+        self.assertEqual(self.calls, [])
+
     def test_recent_but_suitable_library_material_avoids_provider_search(self):
         selector = self.selector("stock", candidates=[])
         selector.service.cached = lambda *_a, **_k: [self.candidate]

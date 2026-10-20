@@ -191,7 +191,10 @@ class StockSceneSelector:
             # ladder before any provider call. Allowed-source and visual gates
             # still apply; disabling library reuse does not delete originals.
             if self.use_library:
-                for query in queries:
+                # A relevant original may have a generic or foreign-language
+                # title. After lexical matches, scan the remaining library
+                # once; this empty query never reaches provider discovery.
+                for query in dict.fromkeys([*queries, ""]):
                     self.checkpoint()
                     cached_batches = getattr(self.service, "cached_batches", None)
                     if cached_batches is not None:

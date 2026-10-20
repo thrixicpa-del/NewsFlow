@@ -535,3 +535,36 @@ known stale Frozen/source lock; Windows-native39464424218 did not execute its
 steps (source-electron job cancelled), so it provides no successful native
 acceptance for that revision. The older c2 Windows success remains historical.
 No Frozen rebuild or lock rewrite is used to turn these gates green.
+
+Runtime follow-up reproduced a further discovery defect: downloaded files with
+generic/foreign-language titles were discarded before visual validation.
+After query-matched cached batches are exhausted, selection now traverses the
+remaining library once per media kind. The original scene query still gates
+CLIP; allowed providers, text checks, source families and uniqueness remain
+mandatory. The empty query is cache-only and never reaches provider discovery.
+Real disposable SQLite regressions proved RED (eligible AirTraffic-8 image
+never scored), then GREEN; negative-score rejection and matched-cache priority
+are covered. **38 related tests PASS/14.095s, guardPASS**.
+
+Final combined regression with this fix: **342 tests/231.643s**, functional
+PASS with one opt-in UI test skipped, **production guardPASS**. This later
+unchanged-storage observation does not erase the earlier guard failures or
+establish their cause. Source380b4dc Windows-native39470930996 SUCCESS; its
+CI39470932744 FAIL is the explained stale Frozen/source lock (11tests,1failure,
+guardPASS). The subsequent library fix needs its own pushed-revision CI status.
+
+The first real 12-original UI attempt correctly saved an incomplete project
+with **8 accepted clips and 12 manual-replacement markers**, and produced no
+MP4. Its private observer failed waiting for nonexistent MP4 metadata; evidence
+is preserved, not treated as a successful render. A subsequent observer also
+briefly mistook the preceding terminal state for the new queue run. The private
+observer now requires the new task timestamp/PID before terminal acceptance;
+no product queue code was changed to mask that test-harness race.
+
+Commons returned actual Retry-After600, which was honored. A finite continuation
+and two explicit final video downloads yielded **24 distinct licensed originals
+(8 videos,16 photos)**, **262529557 new bytes**, below the unchanged300MB private
+download budget. One earlier429 asset was retried once only after expiry; no
+cooldown was cleared. License/hash receipts and initial failures remain private
+under `airport-100/pool-recovery`. This inventory is not itself a claim that
+all24 files are suitable for all20 scenes; native selection and MP4 review follow.
