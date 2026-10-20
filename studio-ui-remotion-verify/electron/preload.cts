@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('newsflowDesktop', {
   chooseJson: () => ipcRenderer.invoke('newsflow:choose-json'),
   choosePromptText: () => ipcRenderer.invoke('newsflow:choose-prompt-text'),
   chooseBrowserScenarioRequirements: () => ipcRenderer.invoke('newsflow:choose-browser-scenario-requirements'),
+  chooseBrowserScenarioRequirementsFiles: () => ipcRenderer.invoke('newsflow:choose-browser-scenario-requirements-files'),
   chooseCoverTextTriples: () => ipcRenderer.invoke('newsflow:choose-cover-text-triples'),
   chooseCoverPromptPairs: () => ipcRenderer.invoke('newsflow:choose-cover-prompt-pairs'),
   chooseScenarioTexts: () => ipcRenderer.invoke('newsflow:choose-scenario-texts'),

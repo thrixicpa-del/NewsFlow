@@ -34,6 +34,7 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "save-browser-topic-scenario-settings": CommandRegistration(
         "save_browser_topic_scenario_settings", "scriptor.browser_topic_scenarios", _NO_LEGACY,
     ),
+    "cancel-browser-topic-scenarios": CommandRegistration("cancel_browser_topic_scenarios", "scriptor.bridge browser queue cancellation", _NO_LEGACY),
     "generate-browser-topic-scenarios": CommandRegistration(
         "generate_browser_topic_scenarios", "scriptor.browser_topic_scenarios", _NO_LEGACY,
     ),

@@ -206,6 +206,7 @@ export const fallback: NewsFlowSnapshot = {
     requirementsMode: "text",
     requirementsText: "",
     requirementsFile: "",
+    requirementsFiles: [],
     companionPrompt: "",
     minimumChars: 12000,
     maximumChars: 18000,
@@ -3092,7 +3093,7 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
   const [sessionId, setSessionId] = useState(saved.sessionId);
   const [requirementsMode, setRequirementsMode] = useState<'text' | 'file'>(saved.requirementsMode);
   const [requirementsText, setRequirementsText] = useState(saved.requirementsText);
-  const [requirementsFile, setRequirementsFile] = useState(saved.requirementsFile);
+  const [requirementsFiles, setRequirementsFiles] = useState(saved.requirementsFiles ?? (saved.requirementsFile ? [saved.requirementsFile] : []));
   const [companionPrompt, setCompanionPrompt] = useState(saved.companionPrompt);
   const [minimumChars, setMinimumChars] = useState(String(saved.minimumChars || 12000));
   const [maximumChars, setMaximumChars] = useState(String(saved.maximumChars || 18000));
@@ -3107,14 +3108,18 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
   const [rangeAdditionalPrompt, setRangeAdditionalPrompt] = useState("");
   const [rangeError, setRangeError] = useState("");
   const [launching, setLaunching] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const cancelRequested = useRef(false);
+  const currentLaunchId = useRef<string | undefined>(undefined);
   const [lengthOverrides, setLengthOverrides] = useState(saved.lengthOverrides || {});
   const [additionalPromptOverrides, setAdditionalPromptOverrides] = useState(saved.additionalPromptOverrides || {});
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>(saved.promptOverrides);
   const [urlOverrides, setUrlOverrides] = useState<Record<string, string>>(saved.urlOverrides);
-  const savedRevision = JSON.stringify(saved);
+  const queueRunning = launching || Boolean(saved.running);
+  const savedRevision = JSON.stringify({ ...saved, running: undefined });
 
   useEffect(() => {
-    if (!launching || !refresh) return;
+    if (!queueRunning || !refresh) return;
     let stopped = false;
     let timer: number | undefined;
     const poll = async () => {
@@ -3130,14 +3135,14 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
     };
     timer = window.setTimeout(() => void poll(), 900);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [launching, refresh]);
+  }, [queueRunning, refresh]);
 
   useEffect(() => {
     setProjectUrl(saved.projectUrl);
     setSessionId(saved.sessionId);
     setRequirementsMode(saved.requirementsMode);
     setRequirementsText(saved.requirementsText);
-    setRequirementsFile(saved.requirementsFile);
+    setRequirementsFiles(saved.requirementsFiles ?? (saved.requirementsFile ? [saved.requirementsFile] : []));
     setCompanionPrompt(saved.companionPrompt);
     setMinimumChars(String(saved.minimumChars || 12000));
     setMaximumChars(String(saved.maximumChars || 18000));
@@ -3160,9 +3165,9 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
       ? current.filter((value) => value !== productionItemId)
       : [...current, productionItemId],
   );
-  const chooseRequirementsFile = async () => {
-    const selected = await window.newsflowDesktop?.chooseBrowserScenarioRequirements();
-    if (selected) setRequirementsFile(selected);
+  const chooseRequirementsFiles = async () => {
+    const selected = await window.newsflowDesktop?.chooseBrowserScenarioRequirementsFiles();
+    if (selected?.length) setRequirementsFiles((current) => [...new Set([...current, ...selected])]);
   };
   const applyOverrides = () => {
     if (!selectedIds.length) return;
@@ -3229,7 +3234,8 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
       sessionId,
       requirementsMode,
       requirementsText,
-      requirementsFile,
+      requirementsFile: requirementsFiles[0] || "",
+      requirementsFiles,
       companionPrompt,
       minimumChars: Number(minimumChars),
       maximumChars: Number(maximumChars),
@@ -3252,17 +3258,32 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
     await command("save-browser-topic-scenario-settings", settingsPayload());
   };
   const runSelected = async () => {
-    if (launching || !validateConcurrency()) return;
+    if (queueRunning || !validateConcurrency()) return;
+    const batchId = crypto.randomUUID();
+    currentLaunchId.current = batchId;
+    cancelRequested.current = false;
     setLaunching(true);
     try {
       const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
-      if (!savedState || !selectedTopics.length) return;
+      if (cancelRequested.current || !savedState || !selectedTopics.length) return;
       await command("generate-browser-topic-scenarios", {
+        batchId,
         indices: selectedTopics.map((topic) => topic.index),
         productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
       });
     } finally {
+      currentLaunchId.current = undefined;
       setLaunching(false);
+    }
+  };
+  const cancel = async () => {
+    if (!queueRunning || cancelling) return;
+    cancelRequested.current = true;
+    setCancelling(true);
+    try {
+      await command("cancel-browser-topic-scenarios", currentLaunchId.current ? { batchId: currentLaunchId.current } : {});
+    } finally {
+      setCancelling(false);
     }
   };
   const sessionIndex = data.chromeSessions.findIndex((session) => session.id === sessionId);
@@ -3286,14 +3307,19 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
         {concurrencyError ? <div role="alert">{concurrencyError}</div> : null}
       </section>
       <section className="panel scenario-add">
-        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённый файл или текст. NewsFlow добавляет только точные строки «ТЕМА» и «ОБЪЁМ» из текущей темы и таблицы.</small></div></div>
-        <Select label="Источник требований" value={requirementsMode} onChange={(event) => setRequirementsMode(event.target.value as 'text' | 'file')} options={[{ value: "text", label: "Вставить текст в сообщение" }, { value: "file", label: "Прикрепить файл к ChatGPT" }]} />
-        {requirementsMode === "text" ? <Textarea label="Требования к стилю и структуре" value={requirementsText} onChange={(event) => setRequirementsText(event.target.value)} placeholder="Вставьте требования…" /> : <div className="form-row"><Input label="Файл требований" value={requirementsFile} readOnly placeholder="Выберите TXT или Markdown" /><Button onClick={() => void chooseRequirementsFile()}><FolderOpen size={16} />Выбрать файл</Button></div>}
+        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённые файлы или текст. NewsFlow добавляет только точные строки «ТЕМА» и «ОБЪЁМ» из текущей темы и таблицы.</small></div></div>
+        <Select label="Источник требований" value={requirementsMode} onChange={(event) => setRequirementsMode(event.target.value as 'text' | 'file')} options={[{ value: "text", label: "Вставить текст в сообщение" }, { value: "file", label: "Прикрепить файлы к ChatGPT" }]} />
+        {requirementsMode === "text" ? <Textarea label="Требования к стилю и структуре" value={requirementsText} onChange={(event) => setRequirementsText(event.target.value)} placeholder="Вставьте требования…" /> : <div>
+          {requirementsFiles.map((file, index) => <div className="form-row" key={file}><Input label={`Файл требований ${index + 1}`} value={file} readOnly /><Button ariaLabel={`Удалить файл: ${file}`} onClick={() => setRequirementsFiles((current) => current.filter((value) => value !== file))}>Удалить</Button></div>)}
+          <Button onClick={() => void chooseRequirementsFiles()}><FolderOpen size={16} />Добавить файлы</Button>
+          <p className="shortcut-tip">TXT или Markdown. Пока вложения не готовы, отправка приостановлена. Можно прикрепить файлы вручную в открытом чате; NewsFlow повторно проверит вложения и текст перед отправкой.</p>
+        </div>}
         <Textarea label="Сопроводительное письмо" value={companionPrompt} onChange={(event) => setCompanionPrompt(event.target.value)} placeholder="Укажите требования, общие для каждого сценария. Тему и объём сюда писать не нужно." />
       </section>
       <section className="panel scenario-add">
         <div className="panel-title"><div><b>Темы для запуска</b><small>Привязка выполняется только по ProductionItem ID. Фильтрация, сортировка и положение строки не меняют назначение.</small></div><span className="status">Выбрано: {selectedTopics.length}</span></div>
-        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length || launching} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length || queueRunning} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><Button disabled={!queueRunning || cancelling} onClick={() => void cancel()}>Отменить генерацию</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <p className="shortcut-tip">Генерация не ограничена 15 минутами: NewsFlow ждёт завершения ответа и сохранённого TXT. Если готовый файл не удаётся скачать после повторных попыток, тема получает ошибку, её вкладка закрывается, очередь продолжается. Отмена останавливает очередь и закрывает созданные ею вкладки.</p>
         <div className="form-row">
           <Textarea label="Prompt для выбранных тем (необязательно)" value={overridePrompt} onChange={(event) => setOverridePrompt(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий prompt" />
           <Input label="URL для выбранных тем (необязательно)" value={overrideUrl} onChange={(event) => setOverrideUrl(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий URL" />
@@ -3307,7 +3333,7 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
           <Button onClick={applyRangeOverrides}>Применить диапазон</Button>
         </div>
         {rangeError ? <p className="error" role="alert">{rangeError}</p> : null}
-        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning || launching} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && !launching && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult ? "Готово" : isRunning ? "В работе" : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
+        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const exportFailed = topic.state === "Ошибка" && topic.error.startsWith("ChatGPT вернул сценарий, но TXT"); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning || launching} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && !launching && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult && !exportFailed ? "Готово" : isRunning ? (topic.error || "В работе") : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
         {!topics.length ? <EmptyState title="Нет тем с ProductionItem ID" description="Добавьте темы в очередь сценариев или выполните восстановление состояния проекта." /> : null}
       </section>
     </div>

@@ -44,6 +44,7 @@ class BrowserScenarioSettings:
     requirements_mode: str = "text"
     requirements_text: str = ""
     requirements_file: str = ""
+    requirements_files: tuple[str, ...] = ()
     companion_prompt: str = ""
     minimum_chars: int = 0
     maximum_chars: int = 0
@@ -95,7 +96,7 @@ class BrowserTopicFailure:
 
 
 class BrowserTopicTransport(Protocol):
-    async def generate(self, *, project_url: str, message: str, requirements_file: str,
+    async def generate(self, *, project_url: str, message: str, requirements_file: str | list[str],
                        task: BrowserTopicTask) -> str: ...
 
 
@@ -141,7 +142,7 @@ def build_browser_message(settings: BrowserScenarioSettings, task: BrowserTopicT
     if settings.requirements_mode == "text" and _clean_text(settings.requirements_text):
         sections.append("Требования к стилю и структуре:\n" + _clean_text(settings.requirements_text))
     elif settings.requirements_mode == "file":
-        sections.append("Используй прикреплённый файл как шаблон требований к стилю и структуре.")
+        sections.append("Используй все прикреплённые документы как требования к стилю и структуре.")
 
     sections.extend((
         route.companion_prompt,
@@ -161,7 +162,7 @@ async def run_browser_topic_tasks(
     tasks: list[BrowserTopicTask],
     transport: BrowserTopicTransport,
     *,
-    on_outcome: Callable[[BrowserTopicCompletion | BrowserTopicFailure], None] | None = None,
+    on_outcome: Callable[[BrowserTopicCompletion | BrowserTopicFailure], bool | None] | None = None,
 ) -> list[BrowserTopicCompletion | BrowserTopicFailure]:
     """Run topic-bound browser work with slots, never queue-index routing.
 
@@ -171,6 +172,7 @@ async def run_browser_topic_tasks(
     """
     concurrency = browser_tab_concurrency(settings.concurrency)
     slots = asyncio.Semaphore(concurrency)
+    published: set[str] = set()
 
     async def run_one(task: BrowserTopicTask) -> BrowserTopicCompletion:
         route = resolve_topic_route(settings, task)
@@ -180,15 +182,19 @@ async def run_browser_topic_tasks(
             text = await transport.generate(
                 project_url=route.project_url,
                 message=build_browser_message(settings, task),
-                requirements_file=(settings.requirements_file
+                requirements_file=((list(settings.requirements_files) if len(settings.requirements_files) > 1 else (settings.requirements_files[0] if settings.requirements_files else settings.requirements_file))
                                    if settings.requirements_mode == "file" else ""),
                 task=task,
             )
-        return BrowserTopicCompletion(
-            production_item_id=_clean_text(task.production_item_id),
-            title=task.browser_input_title,
-            text=normalize_browser_response(text),
-        )
+            outcome = BrowserTopicCompletion(
+                production_item_id=_clean_text(task.production_item_id),
+                title=task.browser_input_title,
+                text=normalize_browser_response(text),
+            )
+            if hasattr(transport, "finish_task"):
+                await transport.finish_task(task, lambda: on_outcome(outcome) if on_outcome else False)
+                published.add(task.production_item_id)
+            return outcome
 
     async def run_and_publish(task: BrowserTopicTask) -> BrowserTopicCompletion | BrowserTopicFailure:
         try:
@@ -201,7 +207,7 @@ async def run_browser_topic_tasks(
             )
         # Persist as soon as this tab completes, not after the slowest tab.
         # Persistence errors propagate; they must not resubmit the browser task.
-        if on_outcome is not None:
+        if on_outcome is not None and task.production_item_id not in published:
             on_outcome(outcome)
         return outcome
 
