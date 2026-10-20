@@ -136,6 +136,8 @@ class TimelineClip:
     # used by legacy/manual project constructors.
     voice_segment_ids: list[int] = field(default_factory=list)
     stock_provenance: dict = field(default_factory=dict)
+    # A materialized still-frame gap is continuity, not newly selected footage.
+    continuity: dict = field(default_factory=dict)
 
 
 @dataclass

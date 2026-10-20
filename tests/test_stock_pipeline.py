@@ -38,13 +38,16 @@ class StockPipelineTests(unittest.TestCase):
                         "voice_segment_id": 17, "voice_segment_ids": [17],
                         "narration_start": 0.0, "narration_end": 3.0}]
 
-    def prepare(self, mode, *, local_score=.9, empty=False, fast_reuse=False):
+    def prepare(self, mode, *, local_score=.9, empty=False, fast_reuse=False, hd_only=False):
         settings = Settings(montage_renderer="ffmpeg", montage_source_mode=mode,
             montage_stock_sources=["pexels"], montage_stock_trim=False,
             footage_folders=[str(self.root)], voice_scenario_outputs={"1": str(self.voice)},
             montage_project_folder=str(self.root / "projects"), montage_output_folder=str(self.root / "outputs"),
             footage_download_folder=str(self.root / "downloads"), montage_export_davinci_xml=False)
         settings.montage_fast_reuse_enabled = fast_reuse
+        # Byte fixtures exercise routing, not decoded source dimensions. Real
+        # 360p/720p acceptance has its own source-quality media regressions.
+        settings.montage_stock_hd_only = hd_only
         settings.montage_unique_footage_percent = 40
         save_settings(settings)
         save_session(["Logistics"], [Job(ScenarioRequest(0, "Logistics", "", "product-1"), state=RunState.DONE, result="Грузовой поезд")])
@@ -110,10 +113,9 @@ class StockPipelineTests(unittest.TestCase):
         project = self.prepare("hybrid", local_score=.01)
         self.assertEqual(project.clips[0].path, str(self.stock))
 
-    def test_exhausted_stock_scene_is_saved_for_manual_replacement(self):
+    def test_exhausted_stock_scene_automatically_preserves_narration_on_background(self):
         project = self.prepare("stock", empty=True)
-        self.assertEqual(project.manual_replacements[0]["voiceSegmentIds"], [17])
-        self.assertEqual(project.manual_replacements[0]["sceneIndex"], 0)
-        self.assertFalse(project.clips)
-        with self.assertRaisesRegex(ValueError, "ручн"):
-            bridge.render_montage({"projectPath": self.project_path})
+        self.assertFalse(project.manual_replacements)
+        self.assertEqual(project.clips[0].voice_segment_ids, [17])
+        self.assertEqual(project.clips[0].fallback_level, 'CONTINUITY_BACKGROUND')
+        self.assertEqual(project.duration, 3)

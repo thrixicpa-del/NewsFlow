@@ -19,6 +19,37 @@ const openSettings = (data: NewsFlowSnapshot = snapshot(), command = vi.fn().moc
 };
 
 describe("Montage stock source settings", () => {
+  it("shows only the HD quality preference with automatic continuity described", () => {
+    const data = snapshot();
+    openSettings({ ...data, montageSettings: { ...data.montageSettings, stockHdOnly: undefined } });
+    expect(screen.queryByRole("checkbox", { name: "Автозаполнение пропусков" })).toBeNull();
+    expect((screen.getByRole("checkbox", { name: "HD 720p+" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText("Если материалов не хватает, используем тематические перебивки или удерживаем кадр; озвучка продолжается.")).toBeTruthy();
+  });
+
+  it("saves the HD draft across background refresh without a continuity toggle", async () => {
+    const data = snapshot();
+    const { command, rerender } = openSettings(data);
+    fireEvent.click(screen.getByRole("checkbox", { name: "HD 720p+" }));
+    rerender(<Editor data={{ ...data, montageSettings: { ...data.montageSettings } }} command={command} refresh={async () => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ stockHdOnly: false })));
+    expect(command.mock.calls[0][1]).not.toHaveProperty("autoFillGaps");
+  });
+
+  it("loads the saved HD preference before launching the queue", async () => {
+    const base = snapshot();
+    const data = { ...base, montageSettings: { ...base.montageSettings, stockHdOnly: false }, scenarios: [{ index: 1, title: "Synthetic", state: "Готово", result: "Text", error: "" }], voiceItems: [{ index: 1, title: "Synthetic", state: "Готово", path: "D:/synthetic.mp3" }] };
+    const { command } = openSettings(data);
+    expect((screen.getByRole("checkbox", { name: "HD 720p+" }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ stockHdOnly: false })));
+    expect(command.mock.calls[0][1]).not.toHaveProperty("autoFillGaps");
+    await waitFor(() => expect(command).toHaveBeenCalledWith("run-montage-queue", { indices: [1], replaceOutput: false }));
+    expect(command.mock.calls.findIndex(([name]) => name === "save-montage-settings")).toBeLessThan(command.mock.calls.findIndex(([name]) => name === "run-montage-queue"));
+  });
+
   it.each([
     { autoWeb: false, externalOnly: false, mode: "local" },
     { autoWeb: true, externalOnly: false, mode: "hybrid" },

@@ -15,6 +15,9 @@ def stage_stock_credits(project, staged_output: Path, final_output: Path) -> lis
             materials[key] = {field: record.get(field, "") for field in fields}
             materials[key].update({"scenes": [], "changes": "Selected interval; scaling/cropping and optional silent video/image animation in montage"})
         materials[key]["scenes"].append(position)
+        if (getattr(clip, 'continuity', {}).get('mode') == 'freeze'
+                and 'Freeze-frame' not in materials[key]['changes']):
+            materials[key]['changes'] += '; Freeze-frame hold for visual continuity'
     if (not materials and not project.source_policy
             and not final_output.with_suffix(".stocks.json").exists()
             and not final_output.with_suffix(".stocks.txt").exists()):

@@ -37,6 +37,7 @@ export interface CriticalCommandPayloads {
   "rebuild-voice-map": { scenarioIndex: number; productionItemId: string };
   "generate-covers": { indices?: number[]; provider?: "agent" | "openai"; force?: boolean };
   "run-montage-queue": { indices?: number[]; missingOnly?: boolean; replaceOutput?: boolean };
+  "save-montage-settings": { stockHdOnly?: boolean };
   "save-montage-stock-keys": { provider: "pexels" | "pixabay" | "coverr"; keys: string[] } | { id: string; active: boolean } | { id: string; remove: true };
   "generate-seo": { indices?: number[]; provider?: "agent" | "openai" };
   "generate-tags": { indices?: number[]; provider?: "agent" | "openai" };

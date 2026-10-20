@@ -31,6 +31,35 @@ class StockSettingsTests(unittest.TestCase):
                 bridge.save_montage_settings(payload)
             self.assertEqual((self.root / "NewsFlow/settings.json").read_bytes(), before)
 
+    def test_hd_defaults_and_retired_continuity_setting_for_new_and_legacy_settings(self):
+        path = self.root / "NewsFlow/settings.json"
+        legacy = json.loads(path.read_text(encoding="utf-8"))
+        legacy["montage_auto_fill_gaps"] = False
+        legacy.pop("montage_stock_hd_only", None)
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        for settings in (config.Settings(), config.load_settings()):
+            self.assertFalse(hasattr(settings, "montage_auto_fill_gaps"))
+            self.assertTrue(settings.montage_stock_hd_only)
+
+    def test_hd_preference_roundtrip_without_retired_continuity_setting(self):
+        for hd in (False, True):
+            settings = config.load_settings()
+            settings.montage_stock_hd_only = hd
+            config.save_settings(settings)
+            restarted = config.load_settings()
+            self.assertEqual(restarted.montage_stock_hd_only, hd)
+            self.assertNotIn("montage_auto_fill_gaps", json.loads((self.root / "NewsFlow/settings.json").read_text(encoding="utf-8")))
+
+    def test_stale_worker_preserves_hd_operator_changes(self):
+        stale = config.load_settings()
+        edited = config.load_settings()
+        edited.montage_stock_hd_only = False
+        config.save_settings(edited)
+        stale.montage_task_statuses["1"] = {"status": "Рендер"}
+        config.save_settings(stale)
+        restarted = config.load_settings()
+        self.assertFalse(restarted.montage_stock_hd_only)
+
     def test_library_checkbox_roundtrip_path_and_validation(self):
         result = bridge.save_montage_settings({"stockUseLibrary": False})
         self.assertFalse(result["montageSettings"]["stockUseLibrary"])

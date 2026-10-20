@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .footage import FootageItem
 from .stock_history import StockUsageHistory
-from .stock_media import prepare_stock_media
+from .stock_media import prepare_stock_media, source_is_hd
 from .stock_sources import StockSourceError
 
 STOCK_PROVIDERS = {"pexels", "pixabay", "coverr", "wikimedia", "commons", "nasa"}
@@ -69,6 +69,8 @@ class StockChoice:
     provenance: dict | None = None
     reused: bool = False
     position_bucket: str = ""
+    context_query: str = ""
+    context_score: float = 0.0
 
 
 @dataclass
@@ -80,7 +82,8 @@ class StockReplacementItem(FootageItem):
 
 class StockSceneSelector:
     def __init__(self, *, mode, service, index, cache_root, threshold, trim,
-                 aspect_ratio, semantic_ok, source_allowed, duration_probe, checkpoint, download_semaphore=None, use_library=True):
+                 aspect_ratio, semantic_ok, source_allowed, duration_probe, checkpoint, download_semaphore=None, use_library=True,
+                 hd_only=False):
         if mode not in {"local", "hybrid", "stock"}:
             raise ValueError("Неподдерживаемый режим источников")
         self.mode, self.service, self.index = mode, service, index
@@ -91,6 +94,8 @@ class StockSceneSelector:
         self.duration_probe, self.checkpoint = duration_probe, checkpoint
         self.download_semaphore = download_semaphore
         self.use_library = bool(use_library)
+        self.hd_only = bool(hd_only)
+        self._hd_sources: dict[tuple[str, str], bool] = {}
         self.pool: list[StockChoice] = []
         self.plan_uses = Counter()
         self.last_family = ""
@@ -136,7 +141,8 @@ class StockSceneSelector:
             db.execute("INSERT OR REPLACE INTO scores VALUES (?,?)", (identity, score))
         return score
 
-    def _local(self, scene, hits, used, *, strict=False, allow_reuse=False, history_families=()):
+    def _local(self, scene, hits, used, *, strict=False, allow_reuse=False, history_families=(),
+               guard_query=None, score_query=None):
         levels = ("STRICT_MATCH",) if strict else ("STRICT_MATCH", "RELAXED_SEMANTIC", "CATEGORY_MATCH", "SAFE_CONTEXT")
         candidates = []
         for level in levels:
@@ -148,12 +154,22 @@ class StockSceneSelector:
                 if family in used and not allow_reuse:
                     continue
                 # No below-threshold/random continuity escape for the new modes.
-                if hit.score < self.threshold or not self.semantic_ok(scene["visual_query_en"], item) or not self.source_allowed(item):
+                if ((score_query is None and hit.score < self.threshold)
+                        or not self.semantic_ok(guard_query if guard_query is not None else scene["visual_query_en"], item)
+                        or not self.source_allowed(item)):
+                    continue
+                try:
+                    score = float(hit.score) if score_query is None else self._score(Path(item.path), score_query)
+                except InterruptedError:
+                    raise
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                if score < self.threshold:
                     continue
                 duration = self.duration_probe(Path(item.path))
                 if duration + .01 < float(scene.get("minimum_footage_duration", scene["duration"])):
                     continue
-                candidates.append(StockChoice(item, duration, float(hit.score), family, level=level, reused=family in used))
+                candidates.append(StockChoice(item, duration, score, family, level=level, reused=family in used))
         return self._best(candidates, history_families)
 
     def _best(self, choices, history_families=()):
@@ -184,12 +200,14 @@ class StockSceneSelector:
             if len(found) < limit:
                 break
 
-    def _stock(self, scene, queries, used, *, kind, cached_only=False, history_families=(), broad_only=False):
+    def _stock(self, scene, queries, used, *, kind, cached_only=False, history_families=(), broad_only=False,
+               guard_query=None):
         if not self.service.enabled:
             return None
         seen = set()
         needed = max(float(scene["duration"]), float(scene.get("minimum_footage_duration", 0)))
-        original_query = scene["visual_query_en"]
+        visual_query = scene["visual_query_en"]
+        original_query = visual_query if guard_query is None else guard_query
         def batches():
             # Exhaust relevant downloaded candidates across the full synonym
             # ladder before any provider call. Allowed-source and visual gates
@@ -227,6 +245,12 @@ class StockSceneSelector:
                     family = f"stock-sha256::{_digest(source)}"
                     if family in used:
                         continue
+                    if self.hd_only:
+                        hd_key = (family, kind)
+                        if hd_key not in self._hd_sources:
+                            self._hd_sources[hd_key] = source_is_hd(source, kind)
+                        if not self._hd_sources[hd_key]:
+                            continue
                     length = needed if kind == "image" else self.duration_probe(source)
                     if length + .01 < needed:
                         continue
@@ -236,7 +260,7 @@ class StockSceneSelector:
                         try:
                             window = prepare_stock_media(source, self.root, duration=needed, trim=True,
                                 kind=kind, aspect_ratio=self.aspect_ratio, source_start=start)
-                            score = self._score(window, original_query)
+                            score = self._score(window, visual_query)
                             checked = FootageItem(str(window), candidate.title, candidate.provider, candidate.source_url,
                                                   candidate.license, list(candidate.tags))
                             if score < self.threshold or not self.source_allowed(checked):
@@ -244,6 +268,7 @@ class StockSceneSelector:
                             path = window if self.trim or kind == "image" else source
                             metadata = {**candidate.to_dict(), "kind": kind, "originalSha256": family.split("::", 1)[1],
                                         "clipScore": score, "originalPath": str(source), "originalStart": start,
+                                        "originalHdVerified": self.hd_only,
                                         "selectedDuration": needed}
                             item = FootageItem(str(path), candidate.title, candidate.provider, candidate.source_url,
                                                candidate.license, list(candidate.tags))
@@ -262,6 +287,51 @@ class StockSceneSelector:
             best = self._best(choices, history_families)
             if best:
                 return best
+        return None
+
+    def select_context(self, scene, local_hits, queries, *, used_families, history_families=(), position_bucket=None):
+        """Explicit thematic fallback; the original scene still owns hard guards."""
+        if position_bucket is not None:
+            self.position_bucket = position_bucket
+        self.checkpoint()
+        queries = list(dict.fromkeys(query.strip() for query in queries if isinstance(query, str) and query.strip()))
+        original_query = scene["visual_query_en"]
+
+        def remember(choice, query):
+            choice.level = "THEMATIC_CONTEXT"
+            choice.context_query, choice.context_score = query, choice.score
+            if choice.provenance is not None:
+                choice.provenance = {**choice.provenance, "contextQuery": query, "contextScore": choice.score}
+                choice.provenance.pop("clipScore", None)
+            self.pool.append(choice)
+            return self._remember_choice(choice)
+
+        if self.mode != "stock":
+            for query in queries:
+                self.checkpoint()
+                choice = self._local(scene, local_hits, used_families, history_families=history_families,
+                    guard_query=original_query, score_query=query)
+                if choice is not None:
+                    return remember(choice, query)
+        if self.mode == "local":
+            return None
+        # All allowed cached kinds/queries precede the first provider request.
+        if self.use_library:
+            for broad_only in (False, True):
+                for kind in ("video", "image"):
+                    for query in queries:
+                        choice = self._stock({**scene, "visual_query_en": query}, [query], used_families,
+                            kind=kind, cached_only=True, history_families=history_families,
+                            broad_only=broad_only, guard_query=original_query)
+                        if choice is not None:
+                            return remember(choice, query)
+        for kind in ("video", "image"):
+            for query in queries:
+                for excluded in (used_families | set(history_families), used_families) if history_families else (used_families,):
+                    choice = self._stock({**scene, "visual_query_en": query}, [query], excluded,
+                        kind=kind, history_families=history_families, guard_query=original_query)
+                    if choice is not None:
+                        return remember(choice, query)
         return None
 
     def select(self, scene, local_hits, queries, *, used_families, allow_reuse=False, history_families=(), position_bucket=None):

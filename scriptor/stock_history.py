@@ -69,6 +69,9 @@ class StockUsageHistory:
     def record(self, project_key: str, clips):
         records = set()
         for clip in clips:
+            if getattr(clip, 'continuity', {}).get('mode') in {'freeze', 'background'}:
+                # A held frame does not consume more seconds of its original.
+                continue
             if not clip.source_family:
                 continue
             start = float((clip.stock_provenance or {}).get('originalStart', clip.source_start))

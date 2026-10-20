@@ -1,12 +1,27 @@
 """Civilian maritime narration must retain scene objects, not a topic portrait."""
 import unittest
 
-from scriptor.bridge import _semantic_clip_ok
+from scriptor.bridge import (
+    _montage_query_ladder,
+    _montage_query_variants,
+    _semantic_clip_ok,
+)
 from scriptor.footage import FootageItem
 from scriptor.timeline import GENERIC_VISUAL_QUERY, fallback_visual_query
 
 
 class AviationSceneQueryTests(unittest.TestCase):
+    def test_airport_context_is_not_invented_from_port_substring(self):
+        for query in ('empty airport terminal', 'aircraft flight airport runway'):
+            with self.subTest(query=query):
+                ladder = _montage_query_ladder(query)
+                contexts = ' '.join(ladder['CATEGORY_MATCH'] + ladder['SAFE_CONTEXT'])
+                self.assertIn('airport', contexts)
+                self.assertNotIn('oil', contexts)
+                self.assertNotIn('cargo port', contexts)
+                self.assertNotIn('oil tanker', ' '.join(_montage_query_variants(query)))
+        self.assertNotIn('oil tanker', ' '.join(_montage_query_ladder('agricultural soil harvest')['CATEGORY_MATCH']))
+
     def test_empty_terminal_does_not_accept_an_explicit_aircraft_action(self):
         for name in ('Plane Spotting FedEx Air Cargo Takeoff Runway',
                      'AirBridgeCargo Boeing 747 landing at airport',

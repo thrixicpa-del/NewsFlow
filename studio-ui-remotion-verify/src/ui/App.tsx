@@ -367,6 +367,7 @@ export const fallback: NewsFlowSnapshot = {
     sourceMode: "hybrid",
     stockSources: ["pexels", "pixabay", "coverr", "wikimedia", "nasa"],
     stockTrim: true,
+    stockHdOnly: true,
     stockKeys: [],
     useScriptText: true,
     excludeEnglishText: true,
@@ -10887,6 +10888,7 @@ export function Editor({
   const [stockSources, setStockSources] = useState(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
   const [stockTrim, setStockTrim] = useState(data.montageSettings.stockTrim !== false);
   const [stockUseLibrary, setStockUseLibrary] = useState(data.montageSettings.stockUseLibrary !== false);
+  const [stockHdOnly, setStockHdOnly] = useState(data.montageSettings.stockHdOnly !== false);
   const stockSourcesValid = sourceMode === "local" || stockSources.length > 0;
   const autoWeb = sourceMode !== "local";
   const externalOnly = sourceMode === "stock";
@@ -10940,6 +10942,7 @@ export function Editor({
     setStockSources(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
     setStockTrim(data.montageSettings.stockTrim !== false);
     setStockUseLibrary(data.montageSettings.stockUseLibrary !== false);
+    setStockHdOnly(data.montageSettings.stockHdOnly !== false);
     setUseScriptText(data.montageSettings.useScriptText !== false);
     setExcludeEnglishText(data.montageSettings.excludeEnglishText !== false);
     setScenePlanner(data.montageSettings.scenePlanner);
@@ -10980,6 +10983,12 @@ export function Editor({
       (project) =>
         project.path === selectedProjects[selectedProjects.length - 1],
     ) || data.montageProjects[0];
+  const projectBackgroundCount = Math.max(0, Number(selectedProject?.selectionSummary?.background || 0));
+  const projectHeldCount = Math.max(0, Number(selectedProject?.selectionSummary?.held || 0));
+  const projectContinuitySummary = [
+    projectHeldCount > 0 ? `удержание ${projectHeldCount}` : "",
+    projectBackgroundCount > 0 ? `нейтральный фон ${projectBackgroundCount}` : "",
+  ].filter(Boolean).join(" · ");
   const localMediaUrl = (path?: string) =>
     path ? encodeURI(`file:///${path.replace(/\\/g, "/")}`) : "";
   useEffect(() => {
@@ -11021,6 +11030,7 @@ export function Editor({
       stockSources,
       stockTrim,
       stockUseLibrary,
+      stockHdOnly,
       useScriptText,
       excludeEnglishText,
       scenePlanner,
@@ -11052,6 +11062,7 @@ export function Editor({
         stockSources,
         stockTrim,
         stockUseLibrary,
+        stockHdOnly,
         useScriptText,
         excludeEnglishText,
         scenePlanner,
@@ -11206,6 +11217,7 @@ export function Editor({
         ]} />
         <label className="check-row"><input type="checkbox" checked={sourceMode === "hybrid"} onChange={(event) => setSourceMode(event.target.checked ? "hybrid" : "local")} />Использовать стоки с моими футажами</label>
         <small className="workflow-note">Сначала точное совпадение в вашей библиотеке, затем разрешённые стоки. Снятая галочка выбирает только ваши футажи; режим «Только стоки» остаётся в списке выше.</small>
+        <small className="workflow-note">Если материалов не хватает, используем тематические перебивки или удерживаем кадр; озвучка продолжается.</small>
         <fieldset disabled={sourceMode === "local"}>
           <legend>Стоковые источники</legend>
           <label className="check-row"><input type="checkbox" checked={montageStockProviders.every(({ id }) => stockSources.includes(id))} onChange={(event) => setStockSources(event.target.checked ? montageStockProviders.map(({ id }) => id) : [])} />Все вместе</label>
@@ -11214,6 +11226,8 @@ export function Editor({
           ))}
         </fieldset>
         <small className="workflow-note">Материалы предоставлены <a href="https://www.pexels.com/" target="_blank" rel="noopener noreferrer">Pexels</a>, <a href="https://pixabay.com/" target="_blank" rel="noopener noreferrer">Pixabay</a>, <a href="https://coverr.co/" target="_blank" rel="noopener noreferrer">Coverr</a>, Wikimedia Commons и NASA. Источники и лицензии использованных файлов сохраняются рядом с MP4.</small>
+        <label className="check-row"><input type="checkbox" checked={stockHdOnly} onChange={(event) => setStockHdOnly(event.target.checked)} />HD 720p+</label>
+        <small className="workflow-note">Отбираются стоки с исходным качеством не ниже HD 720p. Размер готового MP4 1080p сам по себе не повышает детализацию исходника.</small>
         {!stockSourcesValid ? <small role="alert">Выберите хотя бы один стоковый источник.</small> : null}
         <label className="check-row"><input type="checkbox" checked={stockUseLibrary} onChange={(event) => setStockUseLibrary(event.target.checked)} />Использовать библиотеку скачанных стоков</label>
         <small className="workflow-note">Сначала проверяются подходящие скачанные материалы. История использования сохраняется, чтобы чередовать источники и фрагменты в следующих роликах.</small>
@@ -12295,6 +12309,7 @@ export function Editor({
               {selectedProject.selectionSummaryText}
             </p>
           ) : null}
+          {projectContinuitySummary ? <p className="project-duration">{projectContinuitySummary}</p> : null}
           {selectedProject.outputPath ? (
             <video
               className="project-video"

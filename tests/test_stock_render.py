@@ -73,10 +73,10 @@ class StockRenderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-4000:])
         return result.stdout
 
-    def make_video(self, path, color):
+    def make_video(self, path, color, size='320x180'):
         self.run_media([
             self.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
-            f"color=c={color}:s=320x180:r=30:d=4", "-f", "lavfi", "-i",
+            f"color=c={color}:s={size}:r=30:d=4", "-f", "lavfi", "-i",
             "sine=frequency=880:sample_rate=48000:duration=4", "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path),
         ])
@@ -109,7 +109,9 @@ class StockRenderTests(unittest.TestCase):
         profile.mkdir()
         local, stock, voice = (profile / name for name in ("cargo-local.mp4", "cargo-stock.mp4", "voice.wav"))
         self.make_video(local, "red")
-        self.make_video(stock, "blue")
+        # Keep the native HD gate enabled: the positive stock fixture must be
+        # actual720p rather than a360p/180p source later upscaled by the renderer.
+        self.make_video(stock, "blue", size='1280x720')
         self.run_media([self.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
                         "sine=frequency=440:sample_rate=48000:duration=2", str(voice)])
         originals = {str(path): self.digest(path) for path in (local, stock, voice)}

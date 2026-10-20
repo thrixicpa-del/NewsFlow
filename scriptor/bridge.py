@@ -3036,6 +3036,7 @@ def snapshot() -> dict:
                             "stockSources": settings.montage_stock_sources,
                             "stockTrim": settings.montage_stock_trim,
                             "stockUseLibrary": settings.montage_stock_use_library,
+                            "stockHdOnly": settings.montage_stock_hd_only,
                             "stockLibraryFolder": str(Path(settings.footage_download_folder) / "Стоки"),
                             "stockKeys": [{"id": key.id, "provider": key.provider, "label": key.label, "active": key.active} for key in settings.stock_api_keys],
                             "useScriptText": settings.montage_use_script_text,
@@ -15433,6 +15434,11 @@ def save_montage_settings(payload: dict) -> dict:
         if not isinstance(payload["stockUseLibrary"], bool):
             raise ValueError("Укажите режим использования библиотеки стоков")
         settings.montage_stock_use_library = payload["stockUseLibrary"]
+    for key, field in (("stockHdOnly", "montage_stock_hd_only"),):
+        if key in payload:
+            if not isinstance(payload[key], bool):
+                raise ValueError("Режим монтажа должен быть включён или выключен")
+            setattr(settings, field, payload[key])
     if "gpuChunkSize" in payload:
         settings.montage_gpu_chunk_size = validate_gpu_chunk_size(payload["gpuChunkSize"])
     ratio = str(payload.get("aspectRatio", settings.montage_aspect_ratio)).strip()
@@ -15519,6 +15525,7 @@ def save_montage_settings(payload: dict) -> dict:
             ("stockSources", "montage_stock_sources"),
             ("stockTrim", "montage_stock_trim"),
             ("stockUseLibrary", "montage_stock_use_library"),
+            ("stockHdOnly", "montage_stock_hd_only"),
             ("fastReuseEnabled", "montage_fast_reuse_enabled"),
             ("uniqueFootagePercent", "montage_unique_footage_percent"),
             ("fastReuseRanges", "montage_fast_reuse_ranges"),
@@ -15913,7 +15920,7 @@ def _montage_query_variants(value: str) -> list[str]:
     variants.extend(parts)
     joined = normalized.casefold()
     category_terms: list[str] = []
-    if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
+    if re.search(r"\b(?:tanker|refinery|oil|energy|port|seaport)\b", joined):
         category_terms.extend(["oil tanker port", "oil refinery industrial infrastructure", "cargo port cranes ships"])
     if _montage_has_war_action(joined):
         category_terms.extend(["explosion aftermath damaged buildings emergency services", "military equipment smoke city aerial"])
@@ -15933,9 +15940,26 @@ def _montage_query_ladder(value: str) -> dict[str, list[str]]:
     joined = normalized.casefold()
     categories: list[str] = []
     contexts: list[str] = []
-    if _has_any(joined, ("tanker", "refinery", "oil terminal", "oil", "energy", "port", "seaport")):
+    if re.search(r"\b(?:tanker|refinery|oil|energy|port|seaport)\b", joined):
         categories.extend(["oil tanker port", "oil refinery industrial infrastructure"])
         contexts.extend(["cargo port cranes ships", "energy infrastructure documentary"])
+    if re.search(r"\b(?:airport|airfield|aircraft|runway|air traffic control)\b", joined):
+        if re.search(r"\b(?:empty|deserted|vacant)\s+airport\s+terminal\b", joined):
+            categories.append("airport terminal interior departure hall")
+            contexts.append("airport check-in hall passenger concourse")
+        else:
+            categories.extend(["airport aircraft runway", "air traffic control tower operators"])
+            contexts.append("airport runway terminal aviation infrastructure")
+    elif re.search(r"\bradar\b", joined):
+        categories.append("radar antenna monitoring equipment")
+        contexts.append("radar electronics communications equipment")
+    if re.search(r"\b(?:protest|rally|picket|strike|demonstration)\b", joined):
+        categories.append("peaceful protest demonstration crowd")
+        contexts.append("public rally placards peaceful crowd")
+    if re.search(r"\b(?:railway|train|truck|warehouse|logistics)\b", joined):
+        categories.append("railway freight cargo logistics" if re.search(r"\b(?:railway|train)\b", joined)
+                          else "warehouse road cargo logistics")
+        contexts.append("freight transport logistics infrastructure")
     if _montage_has_war_action(joined):
         categories.extend(["military equipment smoke city aerial", "emergency aftermath damaged buildings"])
         contexts.extend(["civilian evacuation emergency services", "damaged city documentary aerial"])
@@ -15999,10 +16023,16 @@ def _montage_selection_summary(clips: list[TimelineClip]) -> dict[str, object]:
         "scenes": len(clips),
         "strict": levels.get("STRICT_MATCH", 0),
         "semantic": sum(levels.get(level, 0) for level in (
-            "RELAXED_SEMANTIC", "CATEGORY_MATCH", "SAFE_CONTEXT", "EXTERNAL_FALLBACK",
+            "RELAXED_SEMANTIC", "CATEGORY_MATCH", "SAFE_CONTEXT", "EXTERNAL_FALLBACK", "THEMATIC_CONTEXT",
         )),
-        "continuity": levels.get("VISUAL_CONTINUITY_FALLBACK", 0),
-        "reuse": levels.get("SAFE_REUSE", 0),
+        "continuity": sum(levels.get(level, 0) for level in (
+            "VISUAL_CONTINUITY_FALLBACK", "CONTINUITY_HOLD", "CONTINUITY_BACKGROUND")),
+        "background": levels.get("CONTINUITY_BACKGROUND", 0),
+        "held": levels.get("CONTINUITY_HOLD", 0),
+        "continuitySeconds": round(sum(clip.duration for clip in clips
+            if clip.continuity.get("mode") in {"freeze", "background"}), 3),
+        "uniqueActualFamilies": len({clip.source_family for clip in clips if clip.source_family}),
+        "reuse": levels.get("SAFE_REUSE", 0) + levels.get("CONTINUITY_HOLD", 0),
         "levels": levels,
     }
 
@@ -16992,6 +17022,7 @@ def prepare_montage(payload: dict) -> dict:
             cache_root=stock_root / "prepared", threshold=settings.montage_match_threshold,
             trim=settings.montage_stock_trim, aspect_ratio=settings.montage_aspect_ratio,
             use_library=settings.montage_stock_use_library,
+            hd_only=settings.montage_stock_hd_only,
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
             duration_probe=lambda path: verified_duration(FootageItem(str(path), path.name)), checkpoint=stock_checkpoint,
             download_semaphore=download_semaphore)
@@ -17012,6 +17043,16 @@ def prepare_montage(payload: dict) -> dict:
                     used_families=project_used_families | denied_families,
                     allow_reuse=fast_reuse and scene_number > unique_scene_count,
                     history_families=historical_families, position_bucket=position_bucket)
+                if choice is None:
+                    ladder = scene_query_ladders[scene_number - 1]
+                    # Generic city/news filler is not a meaningful context for
+                    # every topic. Unknown domains hold a frame instead.
+                    context_queries = [query for query in dict.fromkeys(
+                        [*ladder["CATEGORY_MATCH"], *ladder["SAFE_CONTEXT"]])
+                        if query != "contextual news documentary city infrastructure"]
+                    choice = stock_selector.select_context(scene, hits_by_level, context_queries,
+                        used_families=project_used_families | denied_families,
+                        history_families=historical_families, position_bucket=position_bucket)
                 if choice is None or choice.family in denied_families:
                     break
                 if ((choice.reused and choice.family in project_used_families)
@@ -17028,7 +17069,8 @@ def prepare_montage(payload: dict) -> dict:
                     "voiceSegmentIds": list(scene.get("voice_segment_ids", [scene.get("voice_segment_id", 0)])),
                     "reason": "Подходящие разрешённые материалы исчерпаны; требуется ручная замена"})
                 if progress:
-                    progress("Нужна ручная замена", f"Сцена {scene_number}/{len(scenes)}: {scene['visual_query_en']}")
+                    progress("Автозаполнение",
+                        f"Сцена {scene_number}/{len(scenes)}: {scene['visual_query_en']}")
                 continue
             # Keep a verified stock interval exactly as scored, including when
             # trim is off and the timeline references the full original.
@@ -17044,7 +17086,9 @@ def prepare_montage(payload: dict) -> dict:
                 voice_segment_id=int(scene.get("voice_segment_id", 0)),
                 voice_segment_ids=list(scene.get("voice_segment_ids", [])),
                 narration_start=float(scene.get("narration_start", 0)), narration_end=float(scene.get("narration_end", 0)),
-                stock_provenance=choice.provenance or {})
+                stock_provenance=choice.provenance or {},
+                continuity={"mode": "thematic", "contextQuery": choice.context_query,
+                            "contextScore": choice.context_score} if choice.context_query else {})
             clips.append(clip)
             project_used.add(_montage_clip_key(clip.path))
             project_used_families.add(choice.family)
@@ -17549,8 +17593,12 @@ def prepare_montage(payload: dict) -> dict:
                               voice_map_provenance=voice_map_provenance)
     if explicit_sources:
         project.source_policy = {"mode": settings.montage_source_mode, "sources": settings.montage_stock_sources,
-            "trim": settings.montage_stock_trim, "useLibrary": settings.montage_stock_use_library, "uniquePercent": int(fast_reuse_percent or 100)}
+            "trim": settings.montage_stock_trim, "useLibrary": settings.montage_stock_use_library,
+            "autoFillGaps": True, "stockHdOnly": settings.montage_stock_hd_only,
+            "uniquePercent": int(fast_reuse_percent or 100)}
         project.manual_replacements = manual_replacements
+        _apply_montage_continuity(project, settings, index=index,
+            checkpoint=stock_checkpoint if stock_selector is not None else None)
     # Use each selected source in full and close a residual tail with more
     # real footage.  There is no FFmpeg looping or cloned final frame here;
     # only the final source that crosses the MP3 boundary is trimmed.
@@ -17566,15 +17614,18 @@ def prepare_montage(payload: dict) -> dict:
     selection_summary = _montage_selection_summary(clips)
     if fast_reuse:
         distinct_paths = len({_montage_clip_key(clip.path) for clip in clips})
+        distinct_families = len({clip.source_family for clip in clips if clip.source_family})
         selection_summary.update({
             "uniqueTargetPercent": int(fast_reuse_percent or 100),
             "uniqueTargetScenes": int(unique_scene_count),
             "uniqueActualPaths": distinct_paths,
-            "uniqueActualPercent": round(distinct_paths / max(1, len(clips)) * 100.0, 1),
+            "uniqueActualPercent": round((distinct_families if explicit_sources else distinct_paths)
+                / max(1, len(clips)) * 100.0, 1),
         })
     summary_text = (
         f"{selection_summary['scenes']} сцен · strict {selection_summary['strict']} · "
         f"semantic {selection_summary['semantic']} · reuse {selection_summary['reuse']}"
+        f" · удержание {selection_summary['continuity']}"
     )
     preparation_metrics["total"] = (time.perf_counter() - preparation_started) * 1000
     project.selection_summary = selection_summary
@@ -17630,6 +17681,7 @@ def render_montage(payload: dict) -> dict:
     if not project_path.is_file():
         raise ValueError("Сначала подготовьте или выберите проект монтажа")
     project = TimelineProject.load(project_path)
+    _apply_montage_continuity(project, settings)
     if project.manual_replacements:
         raise ValueError("Требуется ручная замена отмеченных сцен в сохранённом проекте")
     output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
@@ -18193,7 +18245,44 @@ def _project_repair_settings(settings: Settings, project: TimelineProject) -> Se
         scoped.montage_stock_sources = list(project.source_policy.get("sources", []))
         scoped.montage_stock_trim = bool(project.source_policy.get("trim", True))
         scoped.montage_stock_use_library = bool(project.source_policy.get("useLibrary", True))
+        scoped.montage_stock_hd_only = bool(project.source_policy.get("stockHdOnly", True))
     return scoped
+
+
+def _apply_montage_continuity(project: TimelineProject, settings: Settings, *, index=None,
+                              missing_paths=(), checkpoint=None) -> int:
+    """One persisted policy for prepare, direct export, queue and cache repair."""
+    from .montage_continuity import resolve_project_continuity
+    from .stock_media import source_is_hd
+    check_index = index
+    def allowed_frame(path, anchor, slot):
+        nonlocal check_index
+        if check_index is None:
+            check_index = ClipIndex(app_data_root() / "footage-index.sqlite3")
+        provenance = anchor.stock_provenance
+        item = FootageItem(str(path), provenance.get("title", Path(anchor.path).name), anchor.source,
+            provenance.get("source_url", ""), provenance.get("license", ""), list(provenance.get("tags", [])))
+        if not _semantic_clip_ok(slot.visual_query_en, item):
+            return False
+        if provenance and project.source_policy.get("stockHdOnly", True):
+            original = Path(provenance.get("originalPath", ""))
+            if original.is_file():
+                if not source_is_hd(original, provenance.get("kind", "video")):
+                    return False
+            elif not provenance.get("originalHdVerified", False):
+                return False
+        if not _montage_screen_text_safe(check_index, item):
+            return False
+        scorer = getattr(type(check_index), "score_stock_file", None)
+        anchor_query = anchor.continuity.get("contextQuery") or anchor.visual_query_en
+        return not callable(scorer) or float(scorer(check_index, path, anchor_query)) >= 0
+    changed = resolve_project_continuity(project,
+        Path(settings.footage_download_folder) / "Стоки" / "prepared",
+        missing_paths=missing_paths, checkpoint=checkpoint,
+        duration_probe=lambda path: _cached_or_probed_montage_duration(index, path), source_allowed=allowed_frame)
+    if changed:
+        project.selection_summary = _montage_selection_summary(project.clips)
+    return changed
 
 
 def _repair_missing_project_clips(project: TimelineProject, candidate_provider) -> int:
@@ -18230,6 +18319,7 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider) 
                 fallback_level="SAFE_CONTEXT",
                 source_family=getattr(item, "source_family", "") or source_family_identity_text(item.path, item.source_url),
                 stock_provenance=getattr(item, "stock_provenance", {}) or {},
+                continuity={},
                 reused=False,
                 position_rotation_reason="восстановление отсутствующего или повреждённого футажа",
                 strict_rejection_reason=(
@@ -18268,6 +18358,7 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
             cache_root=stock_root / "prepared", threshold=settings.montage_match_threshold,
             trim=settings.montage_stock_trim, aspect_ratio=settings.montage_aspect_ratio,
             use_library=settings.montage_stock_use_library,
+            hd_only=settings.montage_stock_hd_only,
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
             duration_probe=lambda path: _cached_or_probed_montage_duration(index, path, {}), checkpoint=lambda: None,
             download_semaphore=download_semaphore)
@@ -18275,6 +18366,16 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
                  "minimum_footage_duration": clip.minimum_source_duration}
         choice = selector.select(scene, {"STRICT_MATCH": hits}, stock_query_variants(scene, _montage_query_ladder(query)),
             used_families=excluded_families or set())
+        if choice is None:
+            ladder = _montage_query_ladder(query)
+            contexts = [value for value in dict.fromkeys([*ladder["CATEGORY_MATCH"], *ladder["SAFE_CONTEXT"]])
+                        if value != "contextual news documentary city infrastructure"]
+            try:
+                context_hits = index.search_many(contexts, limit=96) if contexts else []
+            except (OSError, RuntimeError, ValueError):
+                context_hits = []
+            choice = selector.select_context(scene, {"SAFE_CONTEXT": [hit for group in context_hits for hit in group]},
+                contexts, used_families=excluded_families or set())
         if choice:
             # Repair receives a prepared verified interval. It resets source
             # start to zero, so materialize the selected window even trim-off.
@@ -18692,6 +18793,9 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         _montage_task_update(settings, index, status="Рендер", phase="Подготовка рендера", progress=60)
         project = TimelineProject.load(Path(project_path))
         if project.manual_replacements:
+            _apply_montage_continuity(project, settings,
+                checkpoint=lambda: _montage_wait_if_paused(settings, index))
+        if project.manual_replacements:
             raise ValueError("Требуется ручная замена отмеченных сцен в сохранённом проекте")
         repair_settings = _project_repair_settings(settings, project)
         project_index = ClipIndex(app_data_root() / "footage-index.sqlite3")
@@ -18723,6 +18827,10 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 if not changed:
                     break
             remaining = _montage_project_missing_clips(project, project_index)
+            if remaining:
+                replaced += _apply_montage_continuity(project, settings, index=project_index,
+                    missing_paths=remaining, checkpoint=lambda: _montage_wait_if_paused(settings, index))
+                remaining = _montage_project_missing_clips(project, project_index)
             if remaining:
                 raise FileNotFoundError(
                     f"Не удалось восстановить футаж после 3 попыток: {remaining[0]}"

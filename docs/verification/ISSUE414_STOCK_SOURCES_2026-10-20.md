@@ -743,3 +743,12 @@ legacy-overlay VFR limitations remain; the stale renderStartedAt field in the
 replacement snapshot is not used as the new render-duration measurement.
 The final evidence-only documentation commit has unchanged executable sources;
 its own new CI must not be inferred from the validated source parent.
+
+### Subsequent owner-authorized continuity / HD follow-up
+
+After the requested stop/delivery, the owner authorized automatic shortage
+filling and an original-quality filter. The latest clarification requires
+only `HD 720p+` as a checkbox; automatic filling is always enabled. Scope,
+REDs, gate failures and new real runtime evidence are recorded separately in
+`ISSUE414_CONTINUITY_HD_2026-10-20.md`. The prior delivered artifact and its
+acceptance limits above remain unchanged historical evidence.
