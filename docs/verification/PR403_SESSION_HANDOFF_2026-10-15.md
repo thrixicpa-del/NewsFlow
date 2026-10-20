@@ -1,5 +1,22 @@
 # Combined verification closed — 20 October
 
+## Checkpoint разнообразия — 20 октября / source d795c63
+
+Продуктовый source HEAD `d795c63d83b19313ff16f2648e6e6b0bf5c397bd`, перед ним `b3e3175`. Та же ветка/draft PR403; main/Frozen/EXE/lock/merge/issue close запрещены. Финальный отчёт — верхний раздел `PR403_REAL_QUALITY_2026-10-15.md`. Все локальные owned jobs завершены, survivors 0; фонового продолжения нет.
+
+Исправлены повторы DIRECT раньше свежего CONTEXT, преждевременная резервация перед архивным fallback, соседние повторы и предпочтение исторических файлов перед свежими sibling cuts из известных семейств. Уверенность в нужном человеке и жёсткие смысловые/географические/физические ограничения сохранены. RED доказаны, диагностика отклонений восстановлена без ослабления старого теста.
+
+Итог: 802 PASS / 5 SKIP / 1 Frozen FAIL, 208,52 с / guard PASS. Новый source build/security/FAST/scoped Ruff PASS. Windows CI39394861701 PASS; Linux39394861702 FAIL исключительно Frozen lock (10 PASS / 1 FAIL / guard PASS), CodeQL/dependency SKIP. Сборку Frozen владелец отложил, обхода нет.
+
+Синтетический matched selector: 96 путей → два ролика × 50 разных файлов, 4 общих (минимум), 0 соседних повторов; BASE использовал по2. Медиана 0,623692→1,181202 с на100сцен; это не real end-to-end performance. Реальные пять коротких UI/MP4 PASS: 148,257 с / guard/all9endingsPASS; generated review23,68с / guard/allendingsPASS; 73 sampledframes/17PCMbins/mincorr.999432908/lag0. Два похожих реальных сюжета по3пути, 2/3семейства, разные открытия, 2общихпути/51,562%sourceoverlap; все5MP4равныстарымбайтам. Это scoped regression, не новая широкая приёмка.
+
+Новый длинный ARM/RU2×300s UI BLOCKED/FAIL до проектов/MP4: хук запретил uncached original media-health. Семь endingsPASS; auditFAIL/guardUNKNOWN сохранены; outer70,813с/0survivors. Путь кандидата прежний hook не записал. Для продолжения нужен отдельный bounded diagnostic с записью кандидата, оценка оставшихся квот, затем реальный длинный монтаж. Не менять product guards ради cache-only PASS и не выдавать короткие/synthetic результаты за длинные.
+
+Тестовая квота64B51spent/13remain(2health11visual), 0unfinished; новые3visual/9frames/0health в отдельной копии, raw2948/25566clips/564health; старые4ledgers неизменны. UI/review0cold. Сохранять22GiBALLQ+DROOT+2GiBpreUIreserve/4CPUhard4GiB/finitejobs и всеFAILs/квитанции. Новые источники не загружать/не менять. Пользователь явно принял посторонние субтитры и Aliyev meeting cutaways как nonblocking20Oct; фильтр не менять. География/лица/чужие флаги/события не ослабляются. Старые integrity writerUNKNOWN, реальные protestsBLOCKED, длинные grain23/14FAIL, внеобластной Ruff и FrozenFAIL открыты; agri/grainDEFERRED.
+
+Private resume: `test-data/footage-v3/quality-pass/RESUME_POLITICAL_CONTEXT_20261019.md`. Текущие MP4: `D:/NewsFlow_PR403_Test_Temp_20261015/diversity-final-five-20261020-attempt1/outputs/`. Следующий сеанс должен проверить актуальные HEAD/dirty/PR/CI и квитанции, не перезапускать неизменные успешные экспорты.
+
+
 Owner resumed once with "прогони все вместе", then authorized removal of old test videos on C. That finite combined cycle is now complete; older STOP/RUNNING checkpoints below are historical. Tested HEAD `b2ae9a8fc7445cabadcb9dcdd438bbfd676764f6`, product source still `abf483ac3935f9fcba784984cdff03c8d0d45485`. This update changes only these two verification documents. Inspect actual branch/HEAD/status before later work; do not infer a new unlimited continuation from this checkpoint.
 
 Current authoritative results are the newest section of [PR403_REAL_QUALITY_2026-10-15.md](PR403_REAL_QUALITY_2026-10-15.md): source781PASS/5SKIP/1FrozenFAIL207.02s guardPASS; security+web/desktopbuild+Vitest410PASS/55files; actual five-case UI1PASS137.333s guardPASS/all9endingsPASS; generated-output review1PASS21.39s guardPASS/allendingsPASS. Five short MP4s have full PCM17bins/mincorr0.999432908/lag0 and unchanged history/queue after reload. ROOT actually viewed eight new contacts/73frames/9scenes; full semantic acceptance remains partial due ARM caption conflict and illustrative rather than exact-event context.
