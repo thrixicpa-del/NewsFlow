@@ -27,6 +27,8 @@
 | Независимый CI source d795 | [Windows native PASS](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39394861701). [Linux CI FAIL](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39394861702) только на Frozen lock: 10 PASS / 1 FAIL, 0,493 с, guard PASS; предшествующие steps PASS. CodeQL/dependency review SKIP. |
 | Docker | NOT RUN: свежая проверка снова не нашла `dockerDesktopLinuxEngine`. |
 
+Отдельный диагностический запуск воспроизвёл первую длинную сцену через `prepare_montage` в новой копии тестового профиля и записал конкретный запрос и путь первого заблокированного кандидата. **1 PASS, 13,44 с / guard PASS**, 0 новых health/visual работ; все immutable inputs и ledgers сохранены. Это PASS диагностики причины, не UI/MP4 или смысловой допуск кандидата. Частная квитанция: `diversity-long-block-candidate-20261020-attempt1/blocked-candidate-private.json`. Последующий анализ этого кандидата и завершение длинного монтажа остаются отдельной незавершённой проверкой.
+
 ### Реальные материалы и границы результата
 
 Для трёх ранее проверенных политических файлов добавлены ровно три актуальных окна `[0,6)` с девятью сохранёнными кадрами того же анализа. Новых health-проверок 0, visual работ 3; старые 25 566 строк, 2945 raw rows и 564 health rows сохранены, новый raw count 2948. Квота 64B: **51 потрачена, 13 осталось (2 health + 11 visual)**, незавершённых квитанций 0; четыре прежних ledger не изменялись. UI/reviewer дополнительных оригинальных анализов не выполняли. Не добавлялись положительные аннотации лиц; сохранён ранее раскрытый MANUAL-ASSISTED TEST с тремя отрицательными UNKNOWN hints в собственной копии.
