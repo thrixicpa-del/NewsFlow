@@ -216,3 +216,36 @@ class FreshContextDiversityTests(unittest.TestCase):
             self.assertEqual(only.item.path, selected.item.path)
             paths.add(self.key(only))
             families.add(only.source_family)
+
+    def test_similar_stories_use_unseen_siblings_before_replaying_history(self):
+        hits = [self.hit(f"logistics_{n}.mp4", relation="direct" if n < 2 else "context",
+                         score=.9 if n < 2 else .4, family=f"source-{n // 2}")
+                for n in range(12)]
+        history_paths, history_families, stories = set(), set(), []
+        for story in range(2):
+            paths, families, sequence = set(), set(), []
+            for scene in range(6):
+                selected = self.select(hits, paths=paths, families=families,
+                    history_paths=history_paths, history_families=history_families,
+                    previous=sequence[-1] if sequence else "",
+                    diversity_seed=f"similar-story-{story}",
+                    position_bucket=bridge._montage_position_bucket(scene, 6))
+                key = bridge._montage_clip_key(selected.item.path)
+                self.assertNotIn(key, paths)
+                self.assertNotIn(key, history_paths, "unused safe siblings remain in known families")
+                paths.add(key)
+                families.add(selected.source_family)
+                sequence.append(key)
+            stories.append(paths)
+            history_paths.update(paths)
+            history_families.update(families)
+        self.assertFalse(stories[0] & stories[1])
+
+    def test_historical_confirmed_person_beats_fresh_unknown_person(self):
+        checked = self.hit("historical_statement.mp4", relation="direct", person="pashinyan",
+                           dominant_kind="official")
+        unknown = self.hit("fresh_delegation.mp4", score=.95, dominant_kind="meeting")
+        selected = self.select([checked, unknown], query="Nikol Pashinyan official statement",
+            history_paths={self.key(checked)}, history_families={checked.source_family})
+        self.assertEqual(checked.item.path, selected.item.path)
+        self.assertEqual("confirmed", selected.diagnostics["person"]["status"])

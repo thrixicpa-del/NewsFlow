@@ -17000,7 +17000,7 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
 
     def choose(pool, *, minimum_score: float | None, allow_historical: bool,
                allow_reserved: bool, allow_project_reuse: bool, avoid_recent: bool,
-               level: str, skip_previous: bool = False):
+               level: str, skip_previous: bool = False, unseen_history: bool = False):
         seen: set[str] = set()
 
         def rank_value(value: SearchHit) -> tuple[int, int, int, float, str]:
@@ -17116,6 +17116,9 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
                 continue
             reserved = _reservation_contains(reserved_paths, key) or _reservation_contains(reserved_families, family)
             historical = key in used_paths or family in used_families
+            if unseen_history and (key in used_paths or _reservation_contains(reserved_paths, key)):
+                reject("diversity", key)
+                continue
             if reserved and not allow_reserved:
                 reject("reservation", key)
                 continue
@@ -17217,18 +17220,25 @@ def _select_montage_candidate(scene_query: str, *, strict_hits, fallback_hits,
     for group in groups:
         for unseen_only in ((True, False) if allow_safe_reuse and project_used_paths else (False,)):
             for avoid_previous in ((True, False) if avoid_adjacent_reuse else (False,)):
-                for priority in group:
-                    for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
-                        eligible = [hit for hit in pool if intent_priority(hit.item) == priority
-                                    and (not unseen_only or _montage_clip_key(hit.item.path) not in project_used_paths)]
-                        if not eligible:
-                            continue
-                        selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
-                                          allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
-                                          avoid_recent=avoid_recent, level=level,
-                                          skip_previous=skip_previous or avoid_previous)
-                        if selected:
-                            return selected
+                # Once prior videos have covered every family, their unseen
+                # sibling cuts still provide fresh material. Prefer those paths
+                # before replaying history, within the same person-confidence,
+                # current-video uniqueness and nonadjacency tier.
+                history_passes = ((True, False) if allow_safe_reuse and (used_paths or reserved_paths)
+                                  else (False,))
+                for unseen_history in history_passes:
+                    for priority in group:
+                        for pool, minimum, old_allowed, reserved_allowed, project_reuse_allowed, avoid_recent, level, skip_previous in ladder:
+                            eligible = [hit for hit in pool if intent_priority(hit.item) == priority
+                                        and (not unseen_only or _montage_clip_key(hit.item.path) not in project_used_paths)]
+                            if not eligible:
+                                continue
+                            selected = choose(eligible, minimum_score=minimum, allow_historical=old_allowed,
+                                              allow_reserved=reserved_allowed, allow_project_reuse=project_reuse_allowed,
+                                              avoid_recent=avoid_recent, level=level,
+                                              skip_previous=skip_previous or avoid_previous, unseen_history=unseen_history)
+                            if selected:
+                                return selected
     raise MontageSelectionFailure(diagnostics)
 
 
