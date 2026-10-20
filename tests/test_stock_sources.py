@@ -75,6 +75,34 @@ class StockSourcesTests(unittest.TestCase):
     def service(self, enabled=('pexels',), keys=None):
         return StockService(self.root, keys=keys or {'pexels': ['one']}, enabled=list(enabled))
 
+    def test_all_sources_without_keys_still_searches_and_downloads_keyless_material(self):
+        service = StockService(self.root, keys={}, enabled=['pexels', 'pixabay', 'coverr', 'wikimedia', 'nasa'])
+        requested = []
+        def transport(request, **kwargs):
+            requested.append(request.full_url)
+            self.assertIsNone(request.get_header('Authorization'))
+            if 'commons.wikimedia.org' in request.full_url:
+                return Response({'query': {'pages': [{'pageid': 12, 'title': 'File:Moon.webm', 'imageinfo': [{
+                    'url': 'https://upload.wikimedia.org/wikipedia/commons/a/moon.webm',
+                    'descriptionurl': 'https://commons.wikimedia.org/wiki/File:Moon.webm', 'mime': 'video/webm',
+                    'extmetadata': {'LicenseShortName': {'value': 'CC BY 4.0'},
+                        'LicenseUrl': {'value': 'https://creativecommons.org/licenses/by/4.0/'},
+                        'Artist': {'value': 'Lunar Artist'}}}]}]}})
+            if 'images-api.nasa.gov' in request.full_url:
+                return Response({'collection': {'items': []}})
+            if 'upload.wikimedia.org' in request.full_url:
+                return Response(b'synthetic offline original')
+            self.fail('A keyed provider must not receive an unauthenticated request')
+        with patch.object(service, '_open', side_effect=transport):
+            found = service.search('moon')
+            self.assertEqual([item.provider for item in found], ['wikimedia'])
+            original = service.fetch(found[0])
+            self.assertEqual(original.read_bytes(), b'synthetic offline original')
+            self.assertEqual(service.fetch(found[0]), original)
+        self.assertEqual(len(requested), 3)
+        self.assertTrue(any('images-api.nasa.gov' in url for url in requested))
+        self.assertFalse(any(host in url for url in requested for host in ('pexels.com', 'pixabay.com', 'coverr.co')))
+
     def test_all_keys_rotate_without_cap_and_persist_without_secrets(self):
         keys = ['unique-secret-' + str(i) for i in range(40)]
         service = self.service(keys={'pexels': keys + [keys[0]]})

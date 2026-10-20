@@ -72,7 +72,7 @@ tests do not call real stock APIs. Private logs are in the worktree's ignored
 | Independent provider and integrated diff review | Findings reproduced and fixed; final review found no additional material issue |
 | Docker | NOT RUN/BLOCKED: Desktop engine pipe unavailable, `docker.log` |
 | Frozen/source integrity | **FAIL**, preserved; see below |
-| Independent GitHub CI / Windows-native | PENDING until run on the pushed PR head; local Windows is not independent CI |
+| Independent CI on f94f166 | All quality stages through build PASS; final Frozen/source guard FAIL. Windows synthetic renders PASS; native UI blocked by absent Electron binary. Explicit pinned runtime install added for next run; independent GREEN not yet established. |
 
 The six synthetic MP4s prove routing, silence, dimensions, CFR and voice timing,
 using an audible 880 Hz stock contamination fixture and a 440 Hz voice fixture.
@@ -143,12 +143,23 @@ snapshot synchronization and a GPU screenshot; the harness now waits for the
 real loaded snapshot and disables GPU for stable evidence capture.
 
 `storage-security1.log` has 69 tests and one **FAIL**:
-`test_repository_lock_matches_current_source_and_package_revision`, stale
-Frozen bridge source (`e09b189...` lock versus base `ea2ce8a...` source). The
-tracked lock already differed from the branch baseline bridge; this feature
-also changes that source. No lock was rewritten to conceal the mismatch.
-Frozen build remains explicitly forbidden. Source success does not clear this
-integrity FAIL or establish packaged-runtime/release readiness.
+`test_repository_lock_matches_current_source_and_package_revision`: local
+working source blob `e09b189...` versus locked source `ea2ce8a...`. Correction to
+the earlier report: this was not proof of a pre-existing canonical baseline
+mismatch. The base 43dd070 bridge blob is `ea2ce8a...`, matching the lock.
+The feature changes that source; independent CI on f94f166 confirms actual
+committed source `fae4e74...` versus locked `ea2ce8a...`. No lock was rewritten
+to conceal the mismatch. Frozen build remains explicitly forbidden. Source
+success does not clear this integrity FAIL or establish packaged readiness.
+
+Independent quality run 39447294287 passed every stage through source build,
+then failed only the existing Frozen/source integrity guard. Windows run
+39447294486 passed both synthetic render tests but failed the UI prerequisite:
+`electron/dist/electron.exe` was absent because pnpm blocks its install lifecycle.
+The workflow now explicitly runs the pinned `electron/install.js` before source
+UI E2E. This installs the test runtime, not a NewsFlow package or Frozen build.
+The original failed runs and logs are retained. Next-head independent results
+must be inspected; no claim of all CI GREEN.
 
 Live keyed Pexels/Pixabay/Coverr acceptance: NOT RUN (operator keys were neither
 requested nor read). Live NASA acceptance: NOT RUN; only explicit public-domain
@@ -162,3 +173,36 @@ runtime, clean Windows and full publication pipeline are not claimed here.
 MoneyPrinterTurbo MIT was read as an architectural reference; no implementation
 was copied. Official API references and limits are recorded in the source module
 and [operator guide](../MONTAGE_STOCK_SOURCES.md).
+
+
+## All enabled sources, zero keys — requested follow-up
+
+26 provider contracts including an explicit all-sources/no-key regression, plus
+settings/selection/pipeline: **44 PASS**, 12.625 s, production guard PASS,
+`all-no-keys-offline.log`. The test proves missing-key providers receive no
+unauthenticated requests while Commons/NASA discovery and Commons transfer
+remain usable.
+
+A separate fresh live profile enabled all five sources with an empty key pool.
+Actual request trace: Commons search 200, NASA search 200, Commons download 200.
+Pexels/Pixabay/Coverr received no HTTP requests. NASA returned no eligible material
+for this query; Commons provided the licensed Yerevan video. No keys, working
+settings or private footage were accessed. CLIP, screen checks, window selection
+and FFmpeg were real; scene input and local TTS were authored for the demo.
+
+Output: `D:/NewsFlow-AllSources-NoKeys-20261020/Yerevan-all-sources-no-keys.mp4`.
+19.13 s, 1920×1080/30fps, one real archival source, Captain Spilet / CC BY 3.0;
+credits/receipt/project accompany MP4. The chosen original interval contains an
+approximately 1.13 s opening fade, retained in the automatic output; it is not a
+blank whole scene. Visual frame near the end inspected as Yerevan/Ararat.
+
+- Discovery 0.640 s; 70,853,094-byte download 3.137 s (~22.6 MB/s in this run).
+- Selection with actual CLIP 11.149 s, score 0.31191 > unchanged 0.22.
+- Render 5.729 s; decoded voice correlation 0.999968; source voice 19.1261 s,
+  output decoded audio 19.1333 s; montage validation PASS; original hash unchanged.
+- Output SHA-256 `95fe74b89361018f86129ad249fba138ffc5acb9696df91424b7ebc6c7eb6fcf`.
+
+This verifies graceful use of available keyless sources, not access to keyed
+providers without their keys, universal NASA eligibility, or continuous real
+UI-provider E2E. Issue 416 (local-video zoom checkbox) was postponed by the owner;
+its uncommitted work and failed media checks remain in its separate worktree.
