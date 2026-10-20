@@ -1,5 +1,15 @@
 # PR403 verification checkpoint — 20 October
 
+## Последний ограниченный цикл — 20 октября
+
+Владелец попросил прекратить бесконечные итерации. Root подтвердил: только generic story-person scope + reporting-reference actor, общая регрессия, **ОДИН новый фактический UI**, затем отчёт/STOP даже FAIL. Не запускать следующий круг доработок после этого UI.
+
+Source 0f actual UI CLOSED FAIL: ARM12 / RU6, 0 MP4, inner 251,391 / outer 261,797 с / 0 survivors, все 9 ending PASS включая canonical guard/audit/8 ledger/signatures. Метаданные общих official-сцен допустили пути посторонних политиков; реальные лица ещё не проверены. Новый фикс привязывает story к per-job returned copy и проверяет generic selected window по свежей curated identity либо отрицательным явным метаданным, сохраняя legacy/named joint meetings/neutral context. Reporting-анафора берёт ближайшего явно названного автора, 6 сцен/64 слова, gap/physical/geography boundaries, original query/eventfalse сохранены.
+
+RED 10 FAIL/11 PASS 3,29 с; replacement RED1/1,35 с; reviewer-country-boundary RED1/0,99 с; все guard PASS. Связанный final GREEN165/10,61 с/guard PASS. Предварительный общий839 PASS/5 SKIP/1 Frozen FAIL/219,65 с/guard PASS относится к варианту до country-boundary fix. **Финальный общий840 PASS/5 SKIP/1 Frozen FAIL/221,23 с/guard PASS**, supervisor 221,906 с/0 survivors; новый build/UI пока NOT RUN. FAST/scoped Ruff/secret/diff PASS. Независимое полное review и поправка закрыты без оставшихся замечаний, новые tests wired CI. Старые FAIL/UNKNOWN не снимать.
+
+Свежий последний контур `story-reporting-final-long-ui-20261020-harness` подготовлен без manifest, PIN pending; отдельные final snapshot/storage24 derivation/build receipts нужны после source commit. All8 ledgers immutable, raw2993/health989/catalog25566, 0 новых анализов. После одного UI проверить имеющиеся output MP4/generated contacts/PCM, если есть; отсутствие MP4 = NOT RUN. Дальше samebranch/draft PR report/currentHEAD/CI и STOP. Никаких Frozen/EXE/lock/main/merge/issue-close/production edits.
+
 ## Локальный архивный fallback — 20 октября, перед повторным UI
 
 Исходный прогон 6d теперь CLOSED FAIL: ARM сцена 3 / RU сцена 1, 0 готовых MP4, inner 191,219 с / outer 201,281 с / 0 survivors. Все 9 ending checks PASS, включая canonical guard/audit/восемь ledger/сигнатуры оригиналов; cold work не запускался. Сохранены оба partial проекта и причины отказа. Главная причина: fallback не использовал текущую narrated geography при общем query и терял локальные Ереван/Баку в продолжении фразы.

@@ -16194,6 +16194,58 @@ def _montage_archive_local_places(scene: dict, previous_scenes: list[dict]) -> s
     return set()
 
 
+def _montage_reporting_context_people(scene: dict, story: str, previous_scenes: list[dict]) -> list[str]:
+    """Resolve a reporting reference to its nearby explicit actor, not a leader inferred from country."""
+    from .scene_intent import _SPEECH_VERBS, named_people, visual_intent
+    from .timeline import VISUAL_TERMS
+    from .visual_evidence import query_topic
+
+    intent = scene.get("scene_intent") or {}
+    text = str(intent.get("text") or scene.get("narration", ""))
+    reference = r"\b(?:премьер\w*|президент\w*|его|её|ее|их|заявлен\w*|формулиров\w*|решени\w*|услови\w*)\b"
+    if not re.search(reference, text, re.IGNORECASE):
+        return []
+
+    def local(value):
+        return re.split(r"[.!?;](?=\s*\w)|\b(?:затем|после этого|тем временем)\b", value, flags=re.IGNORECASE)[-1]
+
+    def physical(value):
+        current = visual_intent(local(value), VISUAL_TERMS)
+        topic = query_topic(current["visual_query"])
+        return bool(topic and topic[0] not in {
+            "official", "meeting", "interview", "political_context", "finance", "institutional_context"})
+
+    if physical(text):
+        return []
+    mentioned = set(named_people(story))
+    current_places = _montage_entity_groups(str(scene.get("visual_query_en", "")) + " " + local(text))
+    neighbor_places = set(current_places)
+    words = len(str(scene.get("narration", text)).split())
+    following = scene
+    for previous in reversed(previous_scenes[-6:]):
+        if ("narration_start" in following and "narration_end" in previous
+                and abs(float(following["narration_start"]) - float(previous["narration_end"])) > .02):
+            break
+        narration = str(previous.get("narration", ""))
+        words += len(narration.split())
+        if words > 64 or physical(narration):
+            break
+        text = local(narration)
+        previous_intent = previous.get("scene_intent") or {}
+        previous_places = _montage_entity_groups(" ".join((
+            text, local(str(previous_intent.get("text", ""))), str(previous.get("visual_query_en", "")))))
+        if neighbor_places and previous_places and neighbor_places.isdisjoint(previous_places):
+            return []
+        if previous_places:
+            neighbor_places = set(previous_places)
+        parsed = visual_intent(text, VISUAL_TERMS)
+        actors = parsed["target_people"]
+        if actors and re.search(_SPEECH_VERBS, text, re.IGNORECASE):
+            return [person for person in actors if person in mentioned]
+        following = previous
+    return []
+
+
 def _montage_political_context_queries(scene: dict, story: str,
                                      *, previous_scenes: list[dict] | None = None) -> list[str]:
     """Bounded archive fallback, anchored to mentioned people and local topic.
@@ -16212,6 +16264,10 @@ def _montage_political_context_queries(scene: dict, story: str,
     if not primary and places:
         people = [identity for identity in mentioned
                   if places & _montage_entity_groups(person_name(identity))]
+    if not primary:
+        reporting_people = _montage_reporting_context_people(scene, story, previous_scenes or [])
+        if reporting_people:
+            people = reporting_people
     if not people:
         return []
     names = ", ".join(person_name(identity) for identity in people[:2])
@@ -16372,7 +16428,8 @@ def _montage_requests_person_footage(scene_query: str) -> bool:
 
 
 def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: float | None = None,
-                      duration: float = 6, visual_assessment: dict | None = None) -> bool:
+                      duration: float = 6, visual_assessment: dict | None = None,
+                      story_context: str | None = None) -> bool:
     from .scene_intent import (
         _SPEECH_VERBS,
         PERSON_ALIASES,
@@ -16462,7 +16519,7 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
             for _identity, _name, expression in PERSON_ALIASES:
                 haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
             haystack += " " + " ".join(person_name(identity).casefold() for identity in evidence["visible"])
-        if visual.get("dominant_kind") in {"official", "meeting", "government_building"}:
+        if visual.get("dominant_kind") in {"official", "meeting", "government_building", "interview"}:
             # A government discussing another country is not that country's
             # institution. Prefer fresh curated identity over catalog names;
             # incidental country words in a title cannot erase this conflict.
@@ -16470,6 +16527,24 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
                                          item, start, duration)
             people = (identities["visible"] if identities["status"] == "confirmed"
                       else named_people(haystack))
+            story = story_context if story_context is not None else getattr(item, "_montage_story_context", None)
+            if story is not None and not evidence["targets"]:
+                allowed_people = set(named_people(story))
+                if set(people) - allowed_people:
+                    return False
+                # A full target annotation cannot conceal an unmentioned
+                # politician entering partway through this generic beat.
+                all_names = " ".join(name for _, name, _ in PERSON_ALIASES)
+                for observation in (getattr(item, "person_evidence", None) or {}).get("observations", []):
+                    if (observation.get("person_id") in allowed_people
+                            or observation.get("source") not in {"manual", "curated"}):
+                        continue
+                    first = max(start, float(observation.get("start", 0)))
+                    last = min(start + duration, float(observation.get("end", 0)))
+                    if last - first > .001:
+                        overlap = person_evidence(all_names, item, first, last - first)
+                        if overlap["source"] == "curated-interval" and set(overlap["visible"]) - allowed_people:
+                            return False
             if identities["status"] == "confirmed" and evidence["status"] != "confirmed":
                 for _identity, _name, expression in PERSON_ALIASES:
                     haystack = re.sub(rf"(?<!\w)(?:{expression})(?!\w)", " ", haystack, flags=re.IGNORECASE)
@@ -17738,7 +17813,10 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
     indexed_count = 0 if settings.montage_external_only else index.count(True)
     local_items = []
     if not settings.montage_external_only and not indexed_count:
-        local_items = scan_folders(settings.footage_folders)
+        from copy import copy
+        local_items = [copy(item) for item in scan_folders(settings.footage_folders)]
+        for item in local_items:
+            item._montage_story_context = story_context
     local_continuity_keys = {_montage_clip_key(item.path) for item in local_items}
 
     def current_continuity_candidate(item):
@@ -18337,7 +18415,8 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             external_family = source_family_identity_text(selected.path, selected.source_url) if selected else ""
             if (selected and _montage_story_candidate_allowed(story_context, selected)
                     and _semantic_clip_ok(scene["visual_query_en"], selected,
-                                          source_start=0, duration=assessment_duration)
+                                          source_start=0, duration=assessment_duration,
+                                          story_context=story_context)
                     and _montage_screen_text_safe(index, selected, allow_uncertain=True)
                     and not batch_is_reserved(selected, external_family, position_bucket)
                     and claim_batch_source(selected, external_family, position_bucket)):
@@ -19547,7 +19626,8 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
             required = max(float(clip.minimum_source_duration), float(clip.duration))
             start = _montage_recovery_window_start(query, item, required)
             if (start is None or available - start + 1e-6 < required
-                    or not _semantic_clip_ok(query, item, source_start=start, duration=required)):
+                    or not _semantic_clip_ok(query, item, source_start=start, duration=required,
+                                             story_context=story)):
                 continue
             person = person_evidence(query, item, start, required)
             replacement = replace(
@@ -19617,7 +19697,8 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
         duration = _montage_recovery_window_limit(query, item, required) if allow_shorter else required
         start = _montage_recovery_window_start(query, item, duration)
         return (duration > 1e-6 and start is not None
-                and _semantic_clip_ok(query, item, source_start=start, duration=duration))
+                and _semantic_clip_ok(query, item, source_start=start, duration=duration,
+                                      story_context=story_context))
 
     candidates = []
     for hit in ranked:
@@ -19732,7 +19813,8 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
         if start is None:
             continue
         duration = min(requested, max(0.0, available - start))
-        if duration <= 1e-6 or not _semantic_clip_ok(last.visual_query_en, item, source_start=start, duration=duration):
+        if duration <= 1e-6 or not _semantic_clip_ok(last.visual_query_en, item, source_start=start, duration=duration,
+                                                  story_context=story):
             continue
         family = source_family_identity_text(item.path, item.source_url)
         reused = (_montage_clip_key(item.path) in existing_paths or family in existing_families)

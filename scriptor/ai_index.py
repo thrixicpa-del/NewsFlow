@@ -879,6 +879,8 @@ class ClipIndex:
         for attribute in ("visual_evidence", "metadata_provenance"):
             if hasattr(item, attribute):
                 setattr(copied, attribute, getattr(item, attribute))
+        if hasattr(self, "montage_story_context"):
+            copied._montage_story_context = self.montage_story_context
         if ((vector_dim == EMBEDDING_DIM and (self.embedder_factory is None or self._visual_models_available()))
                 or getattr(item, "visual_evidence", None)):
             path = item.path
