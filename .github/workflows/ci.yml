@@ -50,6 +50,13 @@ jobs:
       - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice
+      - name: Offline stock adapters, scene routing, protected keys and media
+        run: >-
+          python -B tests/run_isolated.py tests.test_stock_sources
+          tests.test_stock_settings tests.test_stock_selection tests.test_stock_pipeline
+          tests.test_stock_review_regressions tests.test_stock_credits tests.test_stock_media
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-stock-boundary
       - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-scenario-story-planner

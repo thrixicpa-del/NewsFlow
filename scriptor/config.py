@@ -407,6 +407,15 @@ class OpenAIKey:
 
 
 @dataclass
+class StockKey:
+    provider: str
+    secret: str = field(repr=False)
+    label: str = ""
+    active: bool = True
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+
+@dataclass
 class SecretVoicerKey:
     label: str
     secret: str
@@ -483,6 +492,11 @@ class Settings:
     montage_auto_youtube: bool = False
     # Short external-only news cuts may deliberately skip the local library.
     montage_external_only: bool = False
+    # Empty retains the legacy route until the operator saves the new controls.
+    montage_source_mode: str = ""
+    montage_stock_sources: list[str] = field(default_factory=lambda: ["wikimedia", "nasa"])
+    montage_stock_trim: bool = True
+    stock_api_keys: list[StockKey] = field(default_factory=list)
     # The narration gives the planner the best semantic context. It can be
     # switched off for fast title+MP3 assembly when a text file is unavailable.
     montage_use_script_text: bool = True
@@ -523,6 +537,7 @@ class Settings:
     # Keep recent selections between runs. A re-render first tries unused
     # footage so the same topic does not turn into the same visual loop.
     montage_recent_clip_paths: list[str] = field(default_factory=list)
+    montage_stock_recent_families: list[str] = field(default_factory=list)
     # Publication is a separate persistent final-production queue.  The
     # records are plain metadata only; OAuth refresh tokens are stored by the
     # publisher in DPAPI-protected local token files, never in these lists.
@@ -1219,6 +1234,14 @@ def load_settings() -> Settings:
             # would make upgraded projects silently behave differently.
             montage_auto_youtube=False,
             montage_external_only=bool(data.get("montage_external_only", False)),
+            montage_source_mode=str(data.get("montage_source_mode", "")),
+            montage_stock_sources=list(data.get("montage_stock_sources", ["wikimedia", "nasa"])),
+            montage_stock_trim=bool(data.get("montage_stock_trim", True)),
+            stock_api_keys=[StockKey(
+                provider=str(row.get("provider", "")), secret=unprotect(row.get("secret_protected", "")),
+                label=str(row.get("label", "")), active=bool(row.get("active", True)),
+                id=str(row.get("id") or uuid.uuid4().hex),
+            ) for row in data.get("stock_api_keys", []) if isinstance(row, dict)],
             montage_use_script_text=bool(data.get("montage_use_script_text", True)),
             # Core Montage policy: English/Latin on-screen text is never accepted.
             # Ignore stale legacy false values from older settings files.
@@ -1241,6 +1264,7 @@ def load_settings() -> Settings:
             montage_queue_paused=bool(data.get("montage_queue_paused", False)),
             montage_task_statuses=data.get("montage_task_statuses", {}),
             montage_recent_clip_paths=data.get("montage_recent_clip_paths", []),
+            montage_stock_recent_families=data.get("montage_stock_recent_families", []),
             youtube_publication_jobs=[item for item in data.get("youtube_publication_jobs", []) if isinstance(item, dict)],
             youtube_publication_presets=[item for item in data.get("youtube_publication_presets", []) if isinstance(item, dict)],
             youtube_publication_activity=[item for item in data.get("youtube_publication_activity", []) if isinstance(item, dict)][-5000:],
@@ -1469,6 +1493,7 @@ def load_settings() -> Settings:
             settings.voice_profiles, settings.voice_ranges, settings.voice_default_profile_id,
         )
         # Memory-only baseline: an old worker must not resurrect a replaced key.
+        settings._observed_stock_keys = deepcopy(data.get("stock_api_keys", []))
         settings._observed_api_keys = {
             name: data.get(name, []) for name in _API_KEY_FIELDS
         }
@@ -1519,6 +1544,23 @@ def _merge_montage_task_statuses(persisted: object, incoming: object) -> dict[st
     return merged
 
 
+def _merge_stock_keys(persisted: list, incoming: list, observed: list | None) -> list[dict]:
+    """Three-way merge by stable row ID; stale workers cannot revive deletions."""
+    def semantic(row):
+        return (row.get("provider"), row.get("label"), row.get("active", True),
+                unprotect(row.get("secret_protected", "")))
+
+    disk = {str(row["id"]): dict(row) for row in persisted if isinstance(row, dict) and row.get("id")}
+    memory = {str(row["id"]): dict(row) for row in incoming if isinstance(row, dict) and row.get("id")}
+    baseline = {str(row["id"]): row for row in (observed or []) if isinstance(row, dict) and row.get("id")}
+    for identity in baseline.keys() - memory.keys():
+        disk.pop(identity, None)
+    for identity, row in memory.items():
+        if identity not in baseline or semantic(row) != semantic(baseline[identity]):
+            disk[identity] = row
+    return list(disk.values())
+
+
 def _api_key_record_identity(record: dict, position: int) -> str:
     """Identify encrypted key rows without exposing a secret in the JSON file."""
     protected = str(record.get("secret_protected", "") or "")
@@ -1537,6 +1579,7 @@ _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
 
 
 _MONTAGE_REUSE_PREFERENCES = (
+    "montage_source_mode", "montage_stock_sources", "montage_stock_trim",
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
     # Render/pause controls also belong to the operator, not stale progress writers.
     "montage_gpu_chunk_size", "montage_queue_paused",
@@ -1924,6 +1967,12 @@ def save_settings(settings: Settings):
         "montage_auto_web": settings.montage_auto_web,
         "montage_auto_youtube": settings.montage_auto_youtube,
         "montage_external_only": settings.montage_external_only,
+        "montage_source_mode": settings.montage_source_mode,
+        "montage_stock_sources": settings.montage_stock_sources,
+        "montage_stock_trim": settings.montage_stock_trim,
+        "stock_api_keys": [{"id": item.id, "provider": item.provider, "label": item.label,
+                            "active": item.active, "secret_protected": protect(item.secret)}
+                           for item in settings.stock_api_keys],
         "montage_use_script_text": settings.montage_use_script_text,
         "montage_exclude_english_text": settings.montage_exclude_english_text,
         "montage_scene_planner": settings.montage_scene_planner,
@@ -1943,6 +1992,7 @@ def save_settings(settings: Settings):
         "montage_queue_paused": settings.montage_queue_paused,
         "montage_task_statuses": settings.montage_task_statuses,
         "montage_recent_clip_paths": settings.montage_recent_clip_paths[-3000:],
+        "montage_stock_recent_families": settings.montage_stock_recent_families[-3000:],
         "youtube_publication_jobs": settings.youtube_publication_jobs,
         "youtube_publication_presets": settings.youtube_publication_presets,
         "youtube_publication_activity": settings.youtube_publication_activity[-5000:],
@@ -2206,6 +2256,13 @@ def save_settings(settings: Settings):
                     on_disk.get(key_name), data.get(key_name),
                     allow_empty=key_name in allowed_empty_fields,
                 )
+        data["stock_api_keys"] = _merge_stock_keys(
+            on_disk.get("stock_api_keys", []), data.get("stock_api_keys", []),
+            getattr(settings, "_observed_stock_keys", None),
+        )
+        data["montage_stock_recent_families"] = list(dict.fromkeys([
+            *on_disk.get("montage_stock_recent_families", []), *data["montage_stock_recent_families"],
+        ]))[-3000:]
         for key_name in _API_KEY_FIELDS:
             if replacement and replacement["field"] == key_name:
                 rows = [dict(row) for row in on_disk.get(key_name, [])]

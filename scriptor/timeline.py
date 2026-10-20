@@ -135,6 +135,7 @@ class TimelineClip:
     # Appended at the end to preserve the positional TimelineClip contract
     # used by legacy/manual project constructors.
     voice_segment_ids: list[int] = field(default_factory=list)
+    stock_provenance: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -153,6 +154,8 @@ class TimelineProject:
     selection_summary: dict = field(default_factory=dict)
     preparation_metrics_ms: dict = field(default_factory=dict)
     voice_map_provenance: dict = field(default_factory=dict)
+    source_policy: dict = field(default_factory=dict)
+    manual_replacements: list[dict] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -1085,6 +1088,8 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                    remotion_parallel_jobs: int = 1,
                    heartbeat: Callable[[int | None], None] | None = None,
                    gpu_chunk_size: int = GPU_TIMELINE_CHUNK_SIZE):
+    if project.manual_replacements:
+        raise ValueError("Требуется ручная замена отмеченных сцен")
     if not project.clips:
         raise ValueError("Таймлайн пуст")
     # FAST NEWS uses the direct, cached FFmpeg pipeline by default.  Remotion

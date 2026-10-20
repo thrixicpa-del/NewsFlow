@@ -62,6 +62,9 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
         "save_cover_manual_prompt", "scriptor.bridge manual cover-prompt editor", _NO_LEGACY,
     ),
     "run-montage-queue": CommandRegistration("run_montage_queue", "scriptor.timeline canonical montage path", _NO_LEGACY),
+    "save-montage-stock-keys": CommandRegistration(
+        "save_montage_stock_keys", "scriptor.bridge montage stock credentials", _NO_LEGACY,
+    ),
     "run-proxy-cache-warmup": CommandRegistration(
         "warm_proxy_cache", "scriptor.timeline source-proxy warm-up", _NO_LEGACY,
     ),
