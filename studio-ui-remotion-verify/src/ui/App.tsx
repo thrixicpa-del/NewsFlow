@@ -4415,6 +4415,8 @@ export function Covers({
   const [coverPromptImportError, setCoverPromptImportError] = useState("");
   const [coverPromptImporting, setCoverPromptImporting] = useState(false);
   const coverPromptImportLock = useRef(false);
+  const [standaloneCoverOpen, setStandaloneCoverOpen] = useState(false);
+  const [standaloneCoverPairs, setStandaloneCoverPairs] = useState("");
   const [textMode, setTextMode] = useState<"overlay" | "fastgen">(
     data.coverSettings.textMode,
   );
@@ -4999,17 +5001,26 @@ export function Covers({
       setCoverTextImporting(false);
     }
   };
-  const importCoverPromptPairs = async () => {
+  const importCoverPromptPairs = async (options?: { text?: string; createMissingTopics?: boolean; draftOnly?: boolean }) => {
     if (coverPromptImportLock.current) return;
     coverPromptImportLock.current = true;
     setCoverPromptImporting(true);
     setCoverPromptImportError("");
     try {
-      const text = await window.newsflowDesktop?.chooseCoverPromptPairs();
+      const text = options?.text ?? await window.newsflowDesktop?.chooseCoverPromptPairs();
       if (!text) return;
-      const result = await command("import-cover-prompt-pairs", { text });
+      if (options?.draftOnly) {
+        setStandaloneCoverPairs(text);
+        return;
+      }
+      const result = await command("import-cover-prompt-pairs", {
+        text, ...(options?.createMissingTopics ? { createMissingTopics: true } : {}),
+      });
       if (!result) {
         setCoverPromptImportError("Не удалось импортировать промпты. Существующие промпты не изменены.");
+      } else if (options?.createMissingTopics) {
+        setStandaloneCoverPairs("");
+        setStandaloneCoverOpen(false);
       }
     } catch (error) {
       setCoverPromptImportError(
@@ -5372,11 +5383,10 @@ export function Covers({
       <section className="panel cover-studio-hero">
         <div>
           <span className="eyebrow">FASTGEN · THUMBNAIL LAB</span>
-          <h2>Обложки по сценарию</h2>
+          <h2>Обложки по темам и промптам</h2>
           <p>
-            Сначала выберите сценарии, затем получите два разных визуальных хода
-            от агента или ChatGPT. Выбираете лучший промпт — FastGen делает
-            столько картинок, сколько зададите.
+            Добавьте свои темы и промпты или передайте готовые сценарии.
+            Для каждой темы можно выбрать промпт и запустить FastGen.
           </p>
         </div>
         <div className="cover-hero-metrics">
@@ -5495,11 +5505,17 @@ export function Covers({
               {" всем"}
             </Button>
             <Button
-              onClick={coverPromptImporting ? undefined : importCoverPromptPairs}
+              onClick={coverPromptImporting ? undefined : () => void importCoverPromptPairs()}
               aria-busy={coverPromptImporting}
             >
               <Upload size={16} />
               Импортировать промпты TXT
+            </Button>
+            <Button onClick={coverPromptImporting ? undefined : () => {
+              setCoverPromptImportError("");
+              setStandaloneCoverOpen(true);
+            }}>
+              Добавить темы и промпты
             </Button>
             <Button
               kind="primary"
@@ -5922,8 +5938,33 @@ export function Covers({
             </Button>
           </article>
         </div>
-        {coverPromptImportError ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
+        {coverPromptImportError && !standaloneCoverOpen ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
       </section>
+      <Sheet
+        open={standaloneCoverOpen}
+        onOpenChange={(open) => { if (!coverPromptImporting) setStandaloneCoverOpen(open); }}
+        title="Темы и промпты для обложек"
+        description="Можно начать с пустого производства. Каждая новая тема получит свой ID; сценарий не требуется."
+      >
+        <Textarea
+          label="Темы и промпты"
+          value={standaloneCoverPairs}
+          onChange={(event) => setStandaloneCoverPairs(event.target.value)}
+          placeholder={"Тема первой обложки\nПромпт первой обложки\nТема второй обложки\nПромпт второй обложки"}
+          disabled={coverPromptImporting}
+        />
+        <p>Одна строка — тема, следующая — её промпт. Повторите пары для остальных обложек. Для существующей темы промпт будет обновлён. Генерация запускается отдельно кнопкой «Запустить».</p>
+        <div className="form-row">
+          <Button onClick={coverPromptImporting ? undefined : () => void importCoverPromptPairs({ draftOnly: true })}>
+            Загрузить пары из TXT
+          </Button>
+          <Button kind="primary" aria-busy={coverPromptImporting}
+            onClick={coverPromptImporting || !standaloneCoverPairs.trim() ? undefined : () => void importCoverPromptPairs({ text: standaloneCoverPairs, createMissingTopics: true })}>
+            Добавить в обложки
+          </Button>
+        </div>
+        {coverPromptImportError ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
+      </Sheet>
       <section className="panel cover-settings-launcher">
         <div>
           <span className="eyebrow">STUDIO CONFIGURATION</span>

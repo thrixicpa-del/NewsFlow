@@ -10,6 +10,44 @@ const responsiveStyles = readFileSync(resolve(process.cwd(), "src/ui/layout/app-
 const componentStyles = readFileSync(resolve(process.cwd(), "src/ui/components/components.css"), "utf8");
 
 describe("Covers Light view", () => {
+  it("adds standalone topic/prompt pairs from an empty cover queue with an explicit create command", async () => {
+    let finish: (value: typeof fallback) => void = () => undefined;
+    const command = vi.fn(() => new Promise<typeof fallback>((resolve) => { finish = resolve; }));
+    render(<Covers data={{ ...fallback, covers: [], scenarios: [] }} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Добавить темы и промпты" }));
+    const source = "Сад: теплица\nA greenhouse\nХлеб\nFresh bread";
+    fireEvent.change(screen.getByLabelText("Темы и промпты"), { target: { value: source } });
+    const add = screen.getByRole("button", { name: "Добавить в обложки" });
+    fireEvent.click(add);
+    fireEvent.click(add);
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command).toHaveBeenCalledWith("import-cover-prompt-pairs", { text: source, createMissingTopics: true });
+    finish(fallback);
+    await waitFor(() => expect(screen.queryByLabelText("Темы и промпты")).toBeNull());
+  });
+
+  it("keeps standalone input for retry if the backend rejects the batch", async () => {
+    const command = vi.fn(async () => undefined);
+    render(<Covers data={{ ...fallback, covers: [] }} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Добавить темы и промпты" }));
+    fireEvent.change(screen.getByLabelText("Темы и промпты"), { target: { value: "Тема\nПромпт\nБез пары" } });
+    fireEvent.click(screen.getByRole("button", { name: "Добавить в обложки" }));
+    await screen.findByRole("alert");
+    expect(screen.getByLabelText("Темы и промпты")).toHaveProperty("value", "Тема\nПромпт\nБез пары");
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads a TXT into the standalone editor without starting generation", async () => {
+    const chooseCoverPromptPairs = vi.fn(async () => "Тема\nReady prompt");
+    Object.assign(window, { newsflowDesktop: { chooseCoverPromptPairs } });
+    const command = vi.fn();
+    render(<Covers data={{ ...fallback, covers: [] }} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Добавить темы и промпты" }));
+    fireEvent.click(screen.getByRole("button", { name: "Загрузить пары из TXT" }));
+    await waitFor(() => expect(screen.getByLabelText("Темы и промпты")).toHaveProperty("value", "Тема\nReady prompt"));
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("keeps the Visual Production Studio sheet bounded when a setting has a long value", () => {
     expect(componentStyles).toMatch(/\.nf-sheet-content\{[^}]*min-width:0[^}]*overflow:hidden/);
     expect(componentStyles).toMatch(/\.nf-sheet-body\{[^}]*min-width:0[^}]*overflow:auto/);
