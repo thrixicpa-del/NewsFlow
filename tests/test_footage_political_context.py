@@ -92,6 +92,66 @@ class PoliticalContextTests(unittest.TestCase):
         self.assertEqual(exact.path, project.clips[0].path)
         self.assertNotIn('political_context', project.clips[0].selection_diagnostics)
 
+    def test_missing_indexed_verdict_does_not_reactivate_filename_acceptance(self):
+        item = self.item('government_meeting_unchecked.mp4')
+        item._visual_assessor = lambda *_args, **_kwargs: None
+        query = 'diplomatic negotiations delegations meeting consultations'
+        self.assertFalse(bridge._semantic_clip_ok(query, item))
+
+    def test_legacy_metadata_and_supplied_checked_verdict_remain_available(self):
+        item = self.item('government_meeting_legacy.mp4')
+        del item._visual_assessor
+        query = 'diplomatic negotiations delegations meeting consultations'
+        self.assertTrue(bridge._semantic_clip_ok(query, item))
+        item._visual_assessor = lambda *_args, **_kwargs: None
+        self.assertTrue(bridge._semantic_clip_ok(query, item, visual_assessment={
+            'relation': 'context', 'dominant_kind': 'meeting'}))
+
+    def test_unchecked_candidate_never_probes_health_ahead_of_checked_context(self):
+        from scriptor.ai_index import SearchHit
+        unchecked = self.item('Nikol_Pashinyan_meeting_unchecked.mp4')
+        unchecked._visual_assessor = lambda *_args, **_kwargs: None
+        checked = self.item('Nikol_Pashinyan_meeting_checked.mp4')
+        checked._visual_assessor = lambda _query, start, duration, **_kwargs: {
+            'relation': 'context', 'dominant_kind': 'meeting',
+            'source_start': start, 'duration': duration, 'source': 'synthetic-contract'}
+        probed = []
+
+        def duration(item):
+            probed.append(item.path)
+            self.assertNotEqual(unchecked.path, item.path,
+                                'Unchecked indexed candidate reached physical verification')
+            return 8.
+
+        result = bridge._select_montage_candidate(
+            'Nikol Pashinyan diplomatic negotiations meeting',
+            strict_hits=[SearchHit(unchecked, .95, 8.)], fallback_hits=[],
+            safe_context_hits=[SearchHit(checked, .5, 8.)], required_duration=6.,
+            match_threshold=.22, used_paths=set(), used_families=set(),
+            project_used_paths=set(), project_used_families=set(),
+            reserved_paths=set(), reserved_families=set(),
+            source_exists=lambda _: True, source_duration=duration)
+        self.assertEqual(checked.path, result.item.path)
+        self.assertEqual([checked.path], probed)
+
+    def test_missing_indexed_meeting_uses_checked_script_mentioned_archive(self):
+        unchecked = self.item('Nikol_Pashinyan_meeting_unchecked.mp4')
+        unchecked._visual_assessor = lambda *_args, **_kwargs: None
+        checked = self.item('Nikol_Pashinyan_address_checked.mp4')
+
+        def assess(query, start, duration, **_kwargs):
+            return {'relation': 'context' if query.startswith('archival political context,') else 'contradiction',
+                    'dominant_kind': 'official', 'source_start': start,
+                    'duration': duration, 'source': 'synthetic-contract'}
+
+        checked._visual_assessor = assess
+        project = self.prepare('Пашинян обсуждает переговоры Армении.',
+                               ['Nikol Pashinyan diplomatic negotiations meeting'], [unchecked, checked])
+        clip = project.clips[0]
+        self.assertEqual(checked.path, clip.path)
+        self.assertTrue(clip.selection_diagnostics['political_context']['archival_context'])
+        self.assertFalse(clip.selection_diagnostics['political_context']['event_confirmed'])
+
     def test_checked_role_cannot_hide_explicit_foreign_flags(self):
         for wanted, foreign in (('Armenia', 'Azerbaijani'), ('Belarus', 'Russian'),
                                 ('Ukraine', 'Belarusian'), ('Georgia', 'Russian'),

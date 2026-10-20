@@ -16369,6 +16369,10 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
     query = str(scene_query or "").casefold()
     haystack = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
     visual = visual_assessment or _montage_window_visual(query, item, start, duration)
+    if visual is None and callable(getattr(item, "_visual_assessor", None)):
+        # Missing indexed evidence must not reopen filename-only acceptance
+        # ahead of checked thematic or script-mentioned political context.
+        return False
     if query.startswith("archival political context,") and visual is None:
         return False
     requested_role = query_topic(query)
