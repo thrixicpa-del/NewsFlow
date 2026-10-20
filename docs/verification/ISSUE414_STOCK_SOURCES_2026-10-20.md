@@ -683,3 +683,63 @@ the source suite itself completed independently with exit0. Combined job peak
 advertisement and preview-cache suites are also wired into the existing CI stock
 step (YAML parsePASS). The corrected explicit-replacement UI run is in progress;
 the draft remains pending actual MP4 review.
+
+### Corrected MP4 delivered as a contextual example; no release claim
+
+Source **8dbf3910811a15342d8b47a4a19505be5b8aa7ab** completed the normal
+source-Electron explicit replacement queue: **654.014s** to terminal state,
+pytest **659.54s/PASS, production guardPASS**. Saved-project reload,20clip timeline
+and native MP4 metadata/seek were exercised. No state reset, manual clip edit,
+new download or working-data change was used. The existing history changed
+ordering/windows automatically. The prepared output contains **20different
+original source families,6videos+14animated photos**, zero reuse/manual markers.
+
+Actual native v2 score rows reject both earlier advertisement windows with-1;
+AirBridge now uses a clean74.12s middle interval. Scene3 uses the visually
+verified empty check-in hall92569342, not an active aircraft. All20 centres and
+60encoded frames at0.9/3/5.1s per beat were reviewed. No full-screen software ad,
+added lower caption, unrequested politician, explosion or exterior war action
+appears in that reviewed sample. This is not a continuous human watch of all
+3600frames or footage of the narrated event.
+
+**Contextual limitation remains explicit:** scene16 uses an aircraft weather-radar
+bench, scene19 a real ATC VR-training portrait. These are aviation cutaways,
+not literal shots of a closed runway/unlit tower. Other international airport/
+controller shots are illustrative; fourteen stills retain their aspect ratios
+with pillarboxing and animation. The sample is accepted within the owner's
+thematic-fallback allowance, not presented as100% literal scene-by-scene or
+named-location/event acceptance. No further selection loop is started after
+delivery, as requested by the owner.
+
+Independent postflight: **120.0s,1920x1080,3600CFR30frames**, maxgap0.033334s;
+all **2880000 voice samples**, whole correlation **0.9999408505**, first/middle/
+last windows each>0.99993; all27 licensed original hashes unchanged. Two private
+postflight tests pass together **26.47s, guardPASS**. Their initial auxiliary
+oracle failed because it assumed the word `terminal` in the filename. The real
+empty hall is titled `Empty airport,Covid-19`; the oracle now checks its stable
+provider ID/image kind, supported by the reviewed frames. That FAIL remains;
+audio, timing, uniqueness, source SHA and advertisement assertions are unchanged.
+
+Final MP4 **86622647bytes**, SHA256
+`93bad2e0c2a3dff42c351a256ce33c2c04f1c9afb8ddcf955a0fd52d1f612f4c`.
+Private delivery `airport-100/Airport-120s-unique100.mp4` includes copied native
+`.stocks.txt/.stocks.json` attribution. Complete project/UI/technical/human
+receipts remain under `profile-a449706a0d/artifacts/mp4-postflight-ad-fixed`.
+
+Preparation **617.039s** vs the preceding rejected sample's **453.657s**; wall
+**654.014s** vs **509.26s**. New v2 scoring, fresh safety validation and history
+rotation change the workload; this is not a controlled overall speedup. The
+earlier unchanged-preview3query benchmark3.196→0.790s remains separately scoped.
+
+Independent source8db Windows-native **39480667161SUCCESS**. CI stock step
+(including the new regressions), type/security/UI/build stages passed; overall
+**39480667145FAIL** at the known stale Frozen/source lock: source bridge blob
+2355ac60c8c927f5b68c26dffdd4a83f93e97d5d vs locked
+ea2ce8a818d4ddc224b260323ce7e1423851221c,11guard tests/onefailure/production
+guardPASS. CodeQL/dependency review draftSKIPPED. Docker recheck remains
+**BLOCKED** (missing Desktop Linux-engine pipe). No Frozen/EXE/lock rewrite,
+merge/main change or issue closure. Prior working-guard, live-refresh and
+legacy-overlay VFR limitations remain; the stale renderStartedAt field in the
+replacement snapshot is not used as the new render-duration measurement.
+The final evidence-only documentation commit has unchanged executable sources;
+its own new CI must not be inferred from the validated source parent.
