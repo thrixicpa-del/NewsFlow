@@ -1,5 +1,13 @@
 # PR403 verification checkpoint — 20 October
 
+## Локальный архивный fallback — 20 октября, перед повторным UI
+
+Исходный прогон 6d теперь CLOSED FAIL: ARM сцена 3 / RU сцена 1, 0 готовых MP4, inner 191,219 с / outer 201,281 с / 0 survivors. Все 9 ending checks PASS, включая canonical guard/audit/восемь ledger/сигнатуры оригиналов; cold work не запускался. Сохранены оба partial проекта и причины отказа. Главная причина: fallback не использовал текущую narrated geography при общем query и терял локальные Ереван/Баку в продолжении фразы.
+
+Новый helper ограничен архивным fallback: текущая доминирующая фраза, либо незавершённый локальный контекст до 6 сцен / 64 слов. Смена страны, законченная фраза, gap, смена действия и физический сюжет прекращают перенос. Query/target_people и hard visual/person/flag gates прежние; только упомянутые связанные люди, архив eventfalse. RED 3 FAIL / 1 PASS плюс четыре независимых граничных RED по 1 FAIL; ошибочный первый old-k 4 PASS не засчитан RED. Последний GREEN 47 PASS / 7,29 с, полный прогон **817 PASS / 5 SKIP / 1 Frozen FAIL / 221,49 с / guard PASS**, supervisor 223,187 с / 0 survivors. FAST/scoped Ruff/secret/diff PASS; независимое полное review без замечаний.
+
+Следующий шаг — commit, свежая source-сборка и новый `local-archive-context` UI/MP4, пока NOT RUN. Старый executed `indexed-none-context` контур/manifest/receipts не менять. Новый контур сохраняет owner24 storage grant через отдельную derivation-квитанцию со ссылкой/SHA на прежнее разрешение; DATA source cdd / исторические 22 ГиБ отдельно от нового source / 24 ГиБ. Все 8 ledger immutable, новых original health/visual работ нет. Дальше нужны actual UI, timeline, generated MP4/PCM и ручной просмотр; готовность не заявлена. Main/merge/issue/Frozen/EXE/lock не менять. Исторические FAIL/UNKNOWN остаются, полный журнал ниже сохранён.
+
 ## Индексированный кандидат без оценки — 20 октября
 
 Общий прогон после минимального исправления: **809 PASS / 5 SKIP / 1 прежний Frozen FAIL, 221,61 с, PRODUCTION_WRITE_GUARD=PASS**, supervisor 223,453 с, 0 survivors. RED: 3 FAIL / 1 PASS, 2,69 с; связанный GREEN: 39 PASS, 5,94 с. Scoped Ruff, secret scan, diff/FAST PASS; независимое ревью полного source/test diff без actionable замечаний.

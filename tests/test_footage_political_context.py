@@ -32,7 +32,7 @@ class PoliticalContextTests(unittest.TestCase):
         item._visual_assessor = assess
         return item
 
-    def prepare(self, story, queries, items):
+    def prepare(self, story, queries, items, *, scene_rows=None):
         voice = self.root / 'voice.mp3'
         voice.write_bytes(b'synthetic audio; never decoded')
         settings = Settings(footage_folders=[str(self.root)], montage_auto_web=False,
@@ -40,7 +40,8 @@ class PoliticalContextTests(unittest.TestCase):
                             montage_output_folder=str(self.root / 'outputs'), montage_use_script_text=True)
         settings.voice_scenario_outputs = {'1': str(voice)}
         job = Job(ScenarioRequest(0, story, ''), RunState.DONE, story, '')
-        scenes = [{'narration': query, 'visual_query_en': query, 'duration': 6.} for query in queries]
+        scenes = scene_rows if scene_rows is not None else [
+            {'narration': query, 'visual_query_en': query, 'duration': 6.} for query in queries]
         with (patch.object(bridge, 'load_settings', return_value=settings),
               patch.object(bridge, 'load_session', return_value=([story], [job])),
               patch.object(bridge, 'save_settings'), patch.object(bridge, 'snapshot', return_value={}),
@@ -151,6 +152,104 @@ class PoliticalContextTests(unittest.TestCase):
         self.assertEqual(checked.path, clip.path)
         self.assertTrue(clip.selection_diagnostics['political_context']['archival_context'])
         self.assertFalse(clip.selection_diagnostics['political_context']['event_confirmed'])
+
+    def test_archive_generic_query_uses_current_narrated_country(self):
+        from scriptor.scene_intent import named_people
+        scene = {'visual_query_en': 'contextual news footage',
+                 'narration': 'Российская база в Гюмри внезапно оказалась в центре вопроса, который ещё'}
+        queries = bridge._montage_political_context_queries(
+            scene, 'Пашинян обсуждает российскую базу. Путин прокомментировал вопрос.')
+        self.assertTrue(queries)
+        self.assertTrue(all(named_people(query) == ['putin'] for query in queries))
+        self.assertEqual('contextual news footage', scene['visual_query_en'])
+
+    def test_archive_unfinished_local_sentence_keeps_checked_person_fallback(self):
+        rows = [
+            {'narration': 'Ереван говорит о мире с Баку, обсуждает границы,',
+             'visual_query_en': 'Armenia Azerbaijan regional context', 'duration': 6.,
+             'narration_start': 0., 'narration_end': 6.},
+            {'narration': 'дороги и торговлю, а люди, чьего освобождения ждут семьи, остаются в заключении.',
+             'visual_query_en': 'trade cargo logistics markets business, border checkpoint guards fence',
+             'duration': 6., 'narration_start': 6., 'narration_end': 12.},
+        ]
+        project = self.prepare('Пашинян обсуждает мир Армении с Азербайджаном.', [],
+            [self.item('Nikol_Pashinyan_address_checked_a.mp4'),
+             self.item('Nikol_Pashinyan_address_checked_b.mp4')], scene_rows=rows)
+        clip = project.clips[1]
+        context = clip.selection_diagnostics['political_context']
+        self.assertEqual(rows[1]['visual_query_en'], context['requested_visual_query'])
+        self.assertIn('Nikol Pashinyan', context['context_visual_query'])
+        self.assertTrue(context['archival_context'])
+        self.assertFalse(context['event_confirmed'])
+
+    def test_archive_local_continuation_stops_at_boundaries(self):
+        story = 'Пашинян обсуждает мир Армении с Азербайджаном.'
+        for previous, narration, extra in (
+            ('Ереван обсуждает границы.', 'дороги и торговля остаются темой.', {}),
+            ('Ереван обсуждает границы,', 'Затем порт возобновил погрузку.', {}),
+            ('Ереван обсуждает границы,', 'а порт начал погрузку судов.', {}),
+            ('Ереван обсуждает границы,', 'Порт возобновил погрузку судов.', {}),
+            ('Ереван ' + 'обсуждает ' * 64, 'дороги остаются темой.', {}),
+            ('Ереван обсуждает границы,', 'дороги остаются темой.', {'narration_start': 7.}),
+        ):
+            with self.subTest(previous=previous, narration=narration, extra=extra):
+                rows = [
+                    {'narration': previous, 'visual_query_en': 'Armenia regional context',
+                     'duration': 6., 'narration_start': 0., 'narration_end': 6.},
+                    {'narration': narration, 'visual_query_en': 'seaport cargo cranes ships',
+                     'duration': 6., 'narration_start': 6., 'narration_end': 12., **extra},
+                ]
+                with self.assertRaisesRegex(RuntimeError, 'Нет допустимого тематического'):
+                    self.prepare(story, [], [self.item('Nikol_Pashinyan_address.mp4')], scene_rows=rows)
+
+    def test_archive_dominant_clause_does_not_borrow_earlier_beat_country(self):
+        story = 'Пашинян выступил в Армении. Путин выступил в России.'
+        scene = {'visual_query_en': 'seaport cargo cranes ships',
+                 'narration': 'Пашинян выступил в Армении. Порт возобновил погрузку судов.',
+                 'scene_intent': {'target_people': [], 'text': 'Порт возобновил погрузку судов.'}}
+        self.assertEqual([], bridge._montage_political_context_queries(scene, story))
+        scene['scene_intent']['text'] = 'Российская база стала темой обсуждения.'
+        from scriptor.scene_intent import named_people
+        queries = bridge._montage_political_context_queries(scene, story)
+        self.assertTrue(queries)
+        self.assertTrue(all(named_people(query) == ['putin'] for query in queries))
+
+    def test_archive_without_intent_does_not_import_an_earlier_completed_sentence(self):
+        scene = {'visual_query_en': 'seaport cargo cranes ships',
+                 'narration': 'Пашинян выступил в Армении. Порт возобновил погрузку судов.'}
+        self.assertEqual([], bridge._montage_political_context_queries(
+            scene, 'Пашинян выступил в Армении.'))
+
+    def test_archive_lookback_cannot_cross_an_independent_physical_action(self):
+        current = {'visual_query_en': 'contextual news footage',
+                   'narration': 'при этом загрузка продолжает расти.'}
+        previous = [{'narration': 'Ереван обсуждает границы,'},
+                    {'narration': 'а порт начал погрузку судов,'}]
+        self.assertEqual([], bridge._montage_political_context_queries(
+            current, 'Пашинян обсуждает мир Армении.', previous_scenes=previous))
+
+    def test_archive_action_switch_in_whole_intent_or_previous_beat_stops_geography(self):
+        from scriptor.scene_intent import visual_intent
+        from scriptor.timeline import VISUAL_TERMS
+        story = 'Пашинян выступил в Армении.'
+        text = 'Пашинян выступил в Армении, затем порт возобновил погрузку судов.'
+        intent = visual_intent(text, VISUAL_TERMS)
+        self.assertEqual([], intent['target_people'])
+        with self.subTest(current_intent=True):
+            self.assertEqual([], bridge._montage_political_context_queries(
+                {'visual_query_en': intent['visual_query'], 'narration': text, 'scene_intent': intent}, story))
+        with self.subTest(previous_beat=True):
+            self.assertEqual([], bridge._montage_political_context_queries(
+                {'visual_query_en': 'contextual news footage', 'narration': 'при этом загрузка растёт.'},
+                story, previous_scenes=[{'narration': text.rstrip('.') + ','}]))
+
+    def test_archive_physical_role_boundary_includes_warehouses_and_trucks(self):
+        for text in ('а склад начал погрузку грузовиков.', 'грузовики отправились на склад.'):
+            with self.subTest(text=text):
+                self.assertEqual([], bridge._montage_political_context_queries(
+                    {'visual_query_en': 'contextual news footage', 'narration': text},
+                    'Пашинян обсуждает мир Армении.',
+                    previous_scenes=[{'narration': 'Ереван обсуждает границы,'}]))
 
     def test_checked_role_cannot_hide_explicit_foreign_flags(self):
         for wanted, foreign in (('Armenia', 'Azerbaijani'), ('Belarus', 'Russian'),

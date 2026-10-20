@@ -16134,7 +16134,68 @@ def _montage_explicit_flag_countries(candidate_metadata: str) -> frozenset[str]:
                      if re.search(rf"(?<!\w)(?:(?:{names}){following}|{preceding}(?:{names}))(?!\w)", metadata))
 
 
-def _montage_political_context_queries(scene: dict, story: str) -> list[str]:
+def _montage_archive_local_places(scene: dict, previous_scenes: list[dict]) -> set[str]:
+    """Local archive geography only; never change the requested visual action.
+
+    A dominant VoiceMap clause wins over other sentences sharing its beat.
+    Lowercase unfinished-sentence continuations may borrow geography across
+    at most six adjacent beats/64 words, never a completed sentence or gap.
+    """
+    from .visual_evidence import query_topic
+
+    cut = r"[.!?;][\"'»”)]*\s*|\b(?:затем|после этого|тем временем|then|next|meanwhile|after that)\b"
+
+    def local_clause(value):
+        cuts = [match for match in re.finditer(cut, value, re.IGNORECASE)
+                if re.search(r"\w", value[match.end():])]
+        return (value[cuts[-1].end():].strip(), True) if cuts else (value.strip(), False)
+
+    def physical_scene(value):
+        topic = query_topic(value)
+        return bool(topic and topic[0] not in {
+            "official", "meeting", "interview", "political_context", "finance", "institutional_context"})
+
+    intent = scene.get("scene_intent")
+    text = str(intent.get("text", "") if isinstance(intent, dict) else "").strip()
+    narration = str(scene.get("narration", ""))
+    text, action_cut = local_clause(text or narration)
+    places = set(_montage_entity_groups(text))
+    if places or not text:
+        return places
+    local_offset = narration.rfind(text)
+    if action_cut or local_offset > 0 and re.search(cut, narration[:local_offset], re.IGNORECASE):
+        return set()
+    first = re.search(r"\w", text)
+    if not first or not first.group().islower():
+        return set()
+    switch = r"^(?:(?:а|но|и)\s+)?(?:затем|после этого|тем временем|теперь|далее|then|next|meanwhile)\b"
+    if re.search(switch, text, re.IGNORECASE) or physical_scene(text):
+        return set()
+    words = len(text.split())
+    following = scene
+    for previous in reversed(previous_scenes[-6:]):
+        if ("narration_start" in following and "narration_end" in previous
+                and abs(float(following["narration_start"]) - float(previous["narration_end"])) > .02):
+            break
+        previous_text = str(previous.get("narration", ""))
+        if re.search(r"[.!?;][\"'»”)]*\s*$", previous_text):
+            break
+        tail, action_cut = local_clause(previous_text)
+        words += len(tail.split())
+        if (not tail or words > 64 or re.search(switch, tail, re.IGNORECASE)
+                or physical_scene(tail)):
+            break
+        places = set(_montage_entity_groups(tail))
+        if places:
+            return places
+        if action_cut:
+            break
+        following = previous
+    return set()
+
+
+def _montage_political_context_queries(scene: dict, story: str,
+                                     *, previous_scenes: list[dict] | None = None) -> list[str]:
     """Bounded archive fallback, anchored to mentioned people and local topic.
 
     No country-to-president inference. An explicit speaker wins over other
@@ -16146,7 +16207,7 @@ def _montage_political_context_queries(scene: dict, story: str) -> list[str]:
     primary = (list(intent.get("target_people", [])) if isinstance(intent, dict)
                else named_people(query))
     mentioned = named_people(story)
-    places = _montage_entity_groups(query)
+    places = _montage_entity_groups(query) or _montage_archive_local_places(scene, previous_scenes or [])
     people = [identity for identity in primary if identity in mentioned]
     if not primary and places:
         people = [identity for identity in mentioned
@@ -17821,11 +17882,12 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
     scene_query_ladders: list[dict[str, list[str]]] = []
     political_context_queries: list[list[str]] = []
     all_search_queries: list[str] = []
-    for scene in scenes:
+    for scene_index, scene in enumerate(scenes):
         original_query = str(scene.get("visual_query_en", ""))
         ladder = _montage_query_ladder(original_query)
         scene["visual_query_en"] = ladder["STRICT_MATCH"][0]
-        political_queries = _montage_political_context_queries(scene, story_context)
+        political_queries = _montage_political_context_queries(
+            scene, story_context, previous_scenes=scenes[max(0, scene_index - 6):scene_index])
         political_context_queries.append(political_queries)
         # Share the existing batched retrieval/cache instead of rescanning the
         # library per failed scene. Original-query validation stays unchanged
