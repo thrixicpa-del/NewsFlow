@@ -31,6 +31,19 @@ class StockSettingsTests(unittest.TestCase):
                 bridge.save_montage_settings(payload)
             self.assertEqual((self.root / "NewsFlow/settings.json").read_bytes(), before)
 
+    def test_library_checkbox_roundtrip_path_and_validation(self):
+        result = bridge.save_montage_settings({"stockUseLibrary": False})
+        self.assertFalse(result["montageSettings"]["stockUseLibrary"])
+        self.assertFalse(config.load_settings().montage_stock_use_library)
+        expected = str(Path(config.load_settings().footage_download_folder) / "Стоки")
+        self.assertEqual(result["montageSettings"]["stockLibraryFolder"], expected)
+        stale = config.load_settings()
+        bridge.save_montage_settings({"stockUseLibrary": True})
+        config.save_settings(stale)
+        self.assertTrue(config.load_settings().montage_stock_use_library)
+        with self.assertRaises(ValueError):
+            bridge.save_montage_settings({"stockUseLibrary": "false"})
+
     def test_many_keys_are_protected_deduplicated_and_never_in_snapshot(self):
         secrets = [f"test-pexels-secret-{i:03d}" for i in range(130)]
         result = bridge.save_montage_stock_keys({"provider": "pexels", "keys": secrets + secrets[:1]})

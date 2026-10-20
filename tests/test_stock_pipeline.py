@@ -23,7 +23,7 @@ class StockPipelineTests(unittest.TestCase):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        environment = patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)})
+        environment = patch.dict(os.environ, {"LOCALAPPDATA": str(self.root), "NEWSFLOW_TEST_ROOT": str(self.root)})
         environment.start()
         self.addCleanup(environment.stop)
         self.voice = self.root / "voice.wav"

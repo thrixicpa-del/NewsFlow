@@ -5,11 +5,14 @@ import hashlib
 import math
 import re
 import sqlite3
+from collections import Counter
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from pathlib import Path
 
 from .footage import FootageItem
+from .stock_history import StockUsageHistory
 from .stock_media import prepare_stock_media
 from .stock_sources import StockSourceError
 
@@ -24,18 +27,22 @@ _SYNONYMS = {
 
 
 def stock_query_variants(scene: dict, ladder: dict, topic: str = "") -> list[str]:
-    """Extend existing planner clauses with bounded concrete word substitutions."""
+    """Extend the existing planner clauses with finite, deduplicated synonyms."""
     original = str(scene.get("visual_query_en") or topic).strip()
-    queries = [original]
-    queries.extend(value for values in ladder.values() for value in values if value)
-    for word, synonyms in _SYNONYMS.items():
+    synonyms = []
+    for word, alternatives in _SYNONYMS.items():
         if re.search(rf"\b{word}\b", original, re.IGNORECASE):
-            queries.extend(re.sub(rf"\b{word}\b", synonym, original, flags=re.IGNORECASE) for synonym in synonyms)
+            synonyms.extend(re.sub(rf"\b{word}\b", synonym, original, flags=re.IGNORECASE) for synonym in alternatives)
     # The scenario topic is context, never permission to replace a scene with
     # generic unrelated news. The original query remains the CLIP/safety gate.
-    if topic and original and len(topic) < 160:
-        queries.append(f"{original} {topic}")
-    return list(dict.fromkeys(query.strip() for query in queries if query.strip()))[:10]
+    contextual = [f"{original} {topic}"] if topic and original and len(topic) < 160 else []
+    groups = [synonyms, ladder.get('RELAXED_SEMANTIC', []), ladder.get('CATEGORY_MATCH', []),
+              ladder.get('SAFE_CONTEXT', []), contextual]
+    # Interleave aliases and context without dropping the planner clauses.
+    # Expansion is finite; selection stops as soon as an eligible batch wins.
+    queries = [original, *ladder.get('STRICT_MATCH', [])]
+    queries.extend(value for row in zip_longest(*groups) for value in row if value)
+    return list(dict.fromkeys(query.strip() for query in queries if query.strip()))
 
 
 def _digest(path: Path) -> str:
@@ -61,6 +68,7 @@ class StockChoice:
     level: str = "STRICT_MATCH"
     provenance: dict | None = None
     reused: bool = False
+    position_bucket: str = ""
 
 
 @dataclass
@@ -72,7 +80,7 @@ class StockReplacementItem(FootageItem):
 
 class StockSceneSelector:
     def __init__(self, *, mode, service, index, cache_root, threshold, trim,
-                 aspect_ratio, semantic_ok, source_allowed, duration_probe, checkpoint, download_semaphore=None):
+                 aspect_ratio, semantic_ok, source_allowed, duration_probe, checkpoint, download_semaphore=None, use_library=True):
         if mode not in {"local", "hybrid", "stock"}:
             raise ValueError("Неподдерживаемый режим источников")
         self.mode, self.service, self.index = mode, service, index
@@ -82,8 +90,28 @@ class StockSceneSelector:
         self.semantic_ok, self.source_allowed = semantic_ok, source_allowed
         self.duration_probe, self.checkpoint = duration_probe, checkpoint
         self.download_semaphore = download_semaphore
+        self.use_library = bool(use_library)
         self.pool: list[StockChoice] = []
+        self.plan_uses = Counter()
         self.last_family = ""
+        self.position_bucket = ""
+        self.history = StockUsageHistory(self.root)
+
+    def record_project_usage(self, project_key, clips):
+        self.history.record(project_key, clips)
+
+    def reject_unclaimed(self, family):
+        # Selection is provisional until the batch reservation succeeds. A
+        # rejected source must not become this project's safe-reuse footage.
+        self.pool = [choice for choice in self.pool if choice.family != family]
+        self.plan_uses.pop(family, None)
+        self.last_family = self.pool[-1].family if self.pool else ""
+
+    def _remember_choice(self, choice):
+        choice.position_bucket = self.position_bucket
+        self.plan_uses[choice.family] += 1
+        self.last_family = choice.family
+        return choice
 
     def _score(self, path: Path, query: str) -> float:
         # Content keys survive restarts and do not accept a differently named
@@ -104,7 +132,7 @@ class StockSceneSelector:
             db.execute("INSERT OR REPLACE INTO scores VALUES (?,?)", (identity, score))
         return score
 
-    def _local(self, scene, hits, used, *, strict=False, allow_reuse=False):
+    def _local(self, scene, hits, used, *, strict=False, allow_reuse=False, history_families=()):
         levels = ("STRICT_MATCH",) if strict else ("STRICT_MATCH", "RELAXED_SEMANTIC", "CATEGORY_MATCH", "SAFE_CONTEXT")
         candidates = []
         for level in levels:
@@ -122,49 +150,84 @@ class StockSceneSelector:
                 if duration + .01 < float(scene.get("minimum_footage_duration", scene["duration"])):
                     continue
                 candidates.append(StockChoice(item, duration, float(hit.score), family, level=level, reused=family in used))
-        return self._best(candidates)
+        return self._best(candidates, history_families)
 
-    def _best(self, choices):
+    def _best(self, choices, history_families=()):
         if not choices:
             return None
-        return max(choices, key=lambda choice: (not choice.reused, choice.family != self.last_family, choice.score))
+        counts, windows = self.history.snapshot(choice.family for choice in choices)
+        positions = self.history.position_snapshot((choice.family for choice in choices), self.position_bucket)
+        recent = set(history_families)
+        def rank(choice):
+            uses, last = counts.get(choice.family, (0, 0))
+            position_uses, position_last = positions.get(choice.family, (0, 0))
+            provenance = choice.provenance or {}
+            start = float(provenance.get('originalStart', choice.source_start))
+            end = start + float(provenance.get('selectedDuration', choice.duration))
+            window_uses, window_last = windows.get((choice.family, round(start*1000), round(end*1000)), (0, 0))
+            return (not choice.reused, choice.family not in recent, choice.family != self.last_family,
+                    -self.plan_uses[choice.family], -uses, -position_uses, -position_last, -last, -window_uses, -window_last, choice.score)
+        return max(choices, key=rank)
 
-    def _stock(self, scene, queries, used, *, kind):
+    def _search_batches(self, query, kind):
+        # Discovery responses already contain/cache up to 40 items. Widen only
+        # after the initial candidates are exhausted; short/failed results stop
+        # here, so an unavailable provider is not hammered repeatedly.
+        for limit in (10, 20, 40):
+            self.checkpoint()
+            found = self.service.search(query, kind=kind, limit=limit)
+            yield found
+            if len(found) < limit:
+                break
+
+    def _stock(self, scene, queries, used, *, kind, cached_only=False, history_families=()):
         if not self.service.enabled:
             return None
         seen = set()
         needed = max(float(scene["duration"]), float(scene.get("minimum_footage_duration", 0)))
         original_query = scene["visual_query_en"]
-        for query in queries:
-            self.checkpoint()
-            cached = self.service.cached(query, kind=kind)
-            # Search only after cached eligible candidates are exhausted. The
-            # provider handles its own mandatory response cache/cooldowns.
-            for fetch_candidates in (lambda values=cached: values, lambda value=query: self.service.search(value, kind=kind, limit=10)):
-                choices = []
-                for candidate in fetch_candidates():
+        def batches():
+            # Exhaust relevant downloaded candidates across the full synonym
+            # ladder before any provider call. Allowed-source and visual gates
+            # still apply; disabling library reuse does not delete originals.
+            if self.use_library:
+                for query in queries:
                     self.checkpoint()
-                    if candidate.provider not in self.service.enabled or candidate.kind != kind:
+                    cached_batches = getattr(self.service, "cached_batches", None)
+                    if cached_batches is not None:
+                        yield from cached_batches(query, kind=kind)
+                    else:
+                        yield self.service.cached(query, kind=kind)
+            if not cached_only:
+                for query in queries:
+                    yield from self._search_batches(query, kind)
+
+        for candidates in batches():
+            choices = []
+            for candidate in candidates:
+                self.checkpoint()
+                if candidate.provider not in self.service.enabled or candidate.kind != kind:
+                    continue
+                identity = (candidate.provider, candidate.asset_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                metadata = FootageItem("", candidate.title, candidate.provider, candidate.source_url, candidate.license, list(candidate.tags))
+                if not self.semantic_ok(original_query, metadata):
+                    continue
+                try:
+                    with self.download_semaphore or nullcontext():
+                        source = self.service.fetch(candidate)
+                    family = f"stock-sha256::{_digest(source)}"
+                    if family in used:
                         continue
-                    identity = (candidate.provider, candidate.asset_id)
-                    if identity in seen:
+                    length = needed if kind == "image" else self.duration_probe(source)
+                    if length + .01 < needed:
                         continue
-                    seen.add(identity)
-                    metadata = FootageItem("", candidate.title, candidate.provider, candidate.source_url, candidate.license, list(candidate.tags))
-                    if not self.semantic_ok(original_query, metadata):
-                        continue
-                    try:
-                        with self.download_semaphore or nullcontext():
-                            source = self.service.fetch(candidate)
-                        family = f"stock-sha256::{_digest(source)}"
-                        if family in used:
-                            continue
-                        length = needed if kind == "image" else self.duration_probe(source)
-                        if length + .01 < needed:
-                            continue
-                        starts = [0.0] if kind == "image" else list(dict.fromkeys((0.0, max(0.0, (length-needed)/2), max(0.0, length-needed))))
-                        for start in starts:
-                            self.checkpoint()
+                    starts = [0.0] if kind == "image" else list(dict.fromkeys((0.0, max(0.0, (length-needed)/2), max(0.0, length-needed))))
+                    for start in starts:
+                        self.checkpoint()
+                        try:
                             window = prepare_stock_media(source, self.root, duration=needed, trim=True,
                                 kind=kind, aspect_ratio=self.aspect_ratio, source_start=start)
                             score = self._score(window, original_query)
@@ -174,21 +237,30 @@ class StockSceneSelector:
                                 continue
                             path = window if self.trim or kind == "image" else source
                             metadata = {**candidate.to_dict(), "kind": kind, "originalSha256": family.split("::", 1)[1],
-                                        "clipScore": score, "originalPath": str(source), "originalStart": start}
+                                        "clipScore": score, "originalPath": str(source), "originalStart": start,
+                                        "selectedDuration": needed}
                             item = FootageItem(str(path), candidate.title, candidate.provider, candidate.source_url,
                                                candidate.license, list(candidate.tags))
                             choices.append(StockChoice(item, self.duration_probe(path), score, family,
                                 source_start=0.0 if path == window else start, level="EXTERNAL_FALLBACK", provenance=metadata))
-                    except InterruptedError:
-                        raise
-                    except (OSError, ValueError, RuntimeError, StockSourceError):
-                        continue
-                best = self._best(choices)
-                if best:
-                    return best
+                        except InterruptedError:
+                            raise
+                        except (OSError, ValueError, RuntimeError, StockSourceError):
+                            # A damaged/unpreparable interval says nothing
+                            # about the remaining windows of this original.
+                            continue
+                except InterruptedError:
+                    raise
+                except (OSError, ValueError, RuntimeError, StockSourceError):
+                    continue
+            best = self._best(choices, history_families)
+            if best:
+                return best
         return None
 
-    def select(self, scene, local_hits, queries, *, used_families, allow_reuse=False, history_families=()):
+    def select(self, scene, local_hits, queries, *, used_families, allow_reuse=False, history_families=(), position_bucket=None):
+        if position_bucket is not None:
+            self.position_bucket = position_bucket
         self.checkpoint()
         # After the existing percentage's pool boundary, reuse only an already
         # accepted semantically suitable window. Never let slider override CLIP.
@@ -214,11 +286,16 @@ class StockSceneSelector:
                     continue
             choice = self._best(pooled)
             if choice:
-                self.last_family = choice.family
-                return choice
+                return self._remember_choice(choice)
         choice = None
         if self.mode != "stock":
-            choice = self._local(scene, local_hits, used_families, strict=self.mode == "hybrid")
+            choice = self._local(scene, local_hits, used_families, strict=self.mode == "hybrid", history_families=history_families)
+        if choice is None and self.mode != "local" and self.use_library:
+            choice = self._stock(scene, queries, used_families, kind="video",
+                                 cached_only=True, history_families=history_families)
+            if choice is None and self.mode == "stock":
+                choice = self._stock(scene, queries, used_families, kind="image",
+                                     cached_only=True, history_families=history_families)
         if choice is None and self.mode != "local":
             # History is a preference across videos, never a bypass of this
             # video's uniqueness. Try fresh families before recent ones.
@@ -226,13 +303,13 @@ class StockSceneSelector:
             if choice is None and history_families:
                 choice = self._stock(scene, queries, used_families, kind="video")
         if choice is None and self.mode == "hybrid":
-            choice = self._local(scene, local_hits, used_families)
+            choice = self._local(scene, local_hits, used_families, history_families=history_families)
         if choice is None and self.mode == "stock":
             choice = self._stock(scene, queries, used_families, kind="image")
         if choice is None and allow_reuse and self.mode != "stock":
-            choice = self._local(scene, local_hits, used_families, allow_reuse=True)
+            choice = self._local(scene, local_hits, used_families, allow_reuse=True, history_families=history_families)
         if choice:
             if not choice.reused:
                 self.pool.append(choice)
-            self.last_family = choice.family
-        return choice
+            return self._remember_choice(choice)
+        return None

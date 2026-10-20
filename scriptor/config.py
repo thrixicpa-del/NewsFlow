@@ -496,6 +496,7 @@ class Settings:
     montage_source_mode: str = ""
     montage_stock_sources: list[str] = field(default_factory=lambda: ["wikimedia", "nasa"])
     montage_stock_trim: bool = True
+    montage_stock_use_library: bool = True
     stock_api_keys: list[StockKey] = field(default_factory=list)
     # The narration gives the planner the best semantic context. It can be
     # switched off for fast title+MP3 assembly when a text file is unavailable.
@@ -1237,6 +1238,7 @@ def load_settings() -> Settings:
             montage_source_mode=str(data.get("montage_source_mode", "")),
             montage_stock_sources=list(data.get("montage_stock_sources", ["wikimedia", "nasa"])),
             montage_stock_trim=bool(data.get("montage_stock_trim", True)),
+            montage_stock_use_library=bool(data.get("montage_stock_use_library", True)),
             stock_api_keys=[StockKey(
                 provider=str(row.get("provider", "")), secret=unprotect(row.get("secret_protected", "")),
                 label=str(row.get("label", "")), active=bool(row.get("active", True)),
@@ -1579,7 +1581,7 @@ _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
 
 
 _MONTAGE_REUSE_PREFERENCES = (
-    "montage_source_mode", "montage_stock_sources", "montage_stock_trim",
+    "montage_source_mode", "montage_stock_sources", "montage_stock_trim", "montage_stock_use_library",
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
     # Render/pause controls also belong to the operator, not stale progress writers.
     "montage_gpu_chunk_size", "montage_queue_paused",
@@ -1970,6 +1972,7 @@ def save_settings(settings: Settings):
         "montage_source_mode": settings.montage_source_mode,
         "montage_stock_sources": settings.montage_stock_sources,
         "montage_stock_trim": settings.montage_stock_trim,
+        "montage_stock_use_library": settings.montage_stock_use_library,
         "stock_api_keys": [{"id": item.id, "provider": item.provider, "label": item.label,
                             "active": item.active, "secret_protected": protect(item.secret)}
                            for item in settings.stock_api_keys],

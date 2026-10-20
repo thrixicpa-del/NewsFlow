@@ -542,31 +542,51 @@ class StockService:
         return replace(item, local_path=self._local(row[0], row[1]) if row else None)
 
     def cached(self, query: str, kind: str = 'video') -> list[StockCandidate]:
+        # Keep the small list contract for existing callers. Selection consumes
+        # every lazy page, so ineligible recent entries cannot hide older files.
+        return next(self.cached_batches(query, kind), [])
+
+    def cached_batches(self, query: str, kind: str = 'video'):
         query = self._query(query, kind)
         tokens = set(re.findall(r'\w+', query))
-        with self._db() as db:
-            rows = db.execute('SELECT filename,digest,metadata FROM assets ORDER BY rowid DESC LIMIT 5000').fetchall()
-        ranked = []
-        for filename, digest, raw in rows:
-            data = json.loads(raw)
-            if data.get('kind') != kind:
-                continue
-            words = set(re.findall(r'\w+', (' '.join(data.get('tags', [])) + ' ' + data.get('title', '')).casefold()))
-            score = len(tokens & words)
-            if score or not tokens:
-                ranked.append((score, filename, digest, data))
-        ranked.sort(key=lambda item: -item[0])
-        result = []
-        for _, filename, digest, data in ranked:
-            try:
-                path = self._local(filename, digest)
-            except StockSourceError:
-                continue
-            if path:
-                result.append(_candidate_from(data, path))
-                if len(result) == _MAX_RESULTS:
-                    break
-        return result
+        before = None
+        while True:
+            self.checkpoint()
+            # Release the DB connection before yielding/decoding media. A
+            # descending rowid cursor is stable when concurrent downloads add
+            # newer assets, and does not accumulate the whole library in RAM.
+            with self._db() as db:
+                rows = db.execute(
+                    'SELECT rowid,filename,digest,metadata FROM assets '
+                    'WHERE (? IS NULL OR rowid < ?) ORDER BY rowid DESC LIMIT 500',
+                    (before, before)).fetchall()
+            if not rows:
+                return
+            before = rows[-1][0]
+            ranked = []
+            for _, filename, digest, raw in rows:
+                data = json.loads(raw)
+                if data.get('kind') != kind:
+                    continue
+                words = set(re.findall(r'\w+', (' '.join(data.get('tags', [])) + ' ' + data.get('title', '')).casefold()))
+                score = len(tokens & words)
+                if score or not tokens:
+                    ranked.append((score, filename, digest, data))
+            ranked.sort(key=lambda item: -item[0])
+            result = []
+            for _, filename, digest, data in ranked:
+                self.checkpoint()
+                try:
+                    path = self._local(filename, digest)
+                except StockSourceError:
+                    continue
+                if path:
+                    result.append(_candidate_from(data, path))
+                    if len(result) == _MAX_RESULTS:
+                        yield result
+                        result = []
+            if result:
+                yield result
 
     def _check_cooldown(self, provider: str):
         with self._db() as db:

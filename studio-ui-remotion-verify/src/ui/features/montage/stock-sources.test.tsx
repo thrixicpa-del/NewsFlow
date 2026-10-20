@@ -40,6 +40,39 @@ describe("Montage stock source settings", () => {
     })));
   });
 
+  it("shows the downloaded library path and saves its opt-out", async () => {
+    const data = snapshot();
+    const folder = "D:/Test stocks/Стоки";
+    const { command } = openSettings({ ...data, montageSettings: { ...data.montageSettings, stockLibraryFolder: folder } });
+    const checkbox = screen.getByRole("checkbox", { name: "Использовать библиотеку скачанных стоков" });
+    expect((checkbox as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(folder)).toBeTruthy();
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ stockUseLibrary: false })));
+  });
+
+  it("accepts a manually entered download worker count above eight without a maximum", async () => {
+    const { command } = openSettings();
+    const input = screen.getByLabelText("Скачивание и нарезка") as HTMLInputElement;
+    expect(input.max).toBe("");
+    fireEvent.change(input, { target: { value: "64" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ downloadWorkers: 64 })));
+  });
+
+  it("offers an explicit local plus stocks checkbox bound to the existing source mode", async () => {
+    const { command } = openSettings({ ...snapshot(), montageSettings: { ...snapshot().montageSettings, sourceMode: "local" } });
+    const toggle = screen.getByRole("checkbox", { name: "Использовать стоки с моими футажами" });
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(toggle);
+    expect((screen.getByLabelText("Источники футажей") as HTMLSelectElement).value).toBe("hybrid");
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-montage-settings", expect.objectContaining({ sourceMode: "hybrid", autoWeb: true, externalOnly: false })));
+    fireEvent.click(toggle);
+    expect((screen.getByLabelText("Источники футажей") as HTMLSelectElement).value).toBe("local");
+  });
+
   it("selects all providers visibly and allows removing just one afterwards", async () => {
     const { command } = openSettings();
     fireEvent.click(screen.getByRole("checkbox", { name: "Все вместе" }));

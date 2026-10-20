@@ -206,3 +206,145 @@ This verifies graceful use of available keyless sources, not access to keyed
 providers without their keys, universal NASA eligibility, or continuous real
 UI-provider E2E. Issue 416 (local-video zoom checkbox) was postponed by the owner;
 its uncommitted work and failed media checks remain in its separate worktree.
+
+
+## Synonyms, reusable library and cross-project rotation follow-up
+
+Owner requested removal of the ten-formulation cap, use of appropriate older
+stock when exact footage is unavailable, a persisted library checkbox/path and
+rotation of scarce suitable sources between early/middle/late scenes. Scope is
+still issue414 / draftPR415; issue416 and PR403 remain separate and stopped.
+
+Root causes and RED evidence retained in `.superpowers/stock-sources/`:
+
+- Long multi-clause queries truncated aliases at10; the finite deduplicated
+  ladder now retains all variants and still scores against the original scene.
+- Discovery considered only10 of up to40 cached provider candidates. Exhaustion
+  now widens10/20/40 without bypassing source/CLIP/uniqueness checks.
+- Recent-history exhaustion selected the highest-score source repeatedly:
+  three-source/ten-project fixture was8/1/1; persistent least-used/window history
+  yields4/3/3. An additive, versioned SQLite ledger records accepted publications
+  transactionally with idempotent receipts, without rewriting original cache.
+- A long plan's safe-reuse pool was1/7/7 across15 scenes/3 suitable families;
+  per-plan counts now yield5/5/5. Cross-project position history rotates scarce
+  sources among all three parts where semantic eligibility allows it.
+- Eight failed batch claims hid later available sources; retries now stop on
+  exhaustion/repeated denial/cancellation, not a fixed eight. Failed claims
+  are removed from the provisional safe-reuse pool.
+- One invalid prepared window hid later valid windows of the same original;
+  each interval now fails independently without weakening media validation.
+- Library reuse tried new discovery for recent but suitable files, and its
+  first40 results could hide a suitable downloaded41st source. Library-first
+  traversal now exhausts finite lazy pages before discovery; SQL metadata
+  reads are500 rows, media candidate pages40, no total5000-library cutoff.
+
+The checkbox defaults on, persists via React→IPC→Core→settings and queue commands,
+and is frozen into saved project source policy for repairs. Disabled sources
+remain excluded from downloaded material. Turning library preference off does
+not deliberately redownload a sound immutable original from a provider result.
+The actual folder is visible/copyable in UI; no cleanup command was introduced.
+Stale background settings cannot overwrite the operator's checkbox edit.
+
+Offline ten-project evidence:30 available library sources yield30 different
+selected families across10×3 scenes, zero searches/downloads after seeding,
+including service/selector restarts. With library preference off, discovery
+widens to30 distinct sources with30 first-time transfers and one cached API
+search. These are synthetic transport fixtures, not30 real stock selections.
+The scarce-source position fixture visits all3 position buckets and at least3
+orders; clips remain subject to original scene matching and uniqueness.
+
+Independent read-only review reproduced/fixed41-source starvation. Re-review
+also checked501 cached assets/newest500 unavailable: the older eligible file
+was selected with zero discovery calls. SQLite BEGIN IMMEDIATE succeeded while
+pagination was suspended; no read connection remained held across media work.
+No remaining material findings were reported in that reviewed source diff.
+
+Verification/results are completed below; previous failed logs remain intact.
+
+
+### Final source/runtime evidence for follow-up
+
+- Corrected combined backend/media/timeline/story/voice/fast-reuse regression:
+  **169 tests pass /109.077s**, `library-combined-corrected.log`.
+- After real UI revealed the staging-path defect below: **124 queue/review
+  tests pass /35.493s**, `library-output-queue-regression.log`.
+- Four dedicated configured-worker/reservation tests pass /.494s, guardPASS.
+  The queue retains independent planning/render pools and submitted values;
+  this is not a real12-plan/4-render load benchmark.
+- Complete React regression: **426 tests/56 files pass /13.30s**. New explicit
+  hybrid checkbox uses existing sourceMode; no second conflicting preference.
+  The download input's max8 attribute was removed (Core already accepted any
+  positive integer). RED→GREEN covers64; real source Electron cold restart
+  validates64 and the library opt-out, **1 test pass /12.743s**.
+- Source web/desktop build, typecheck, Ruff, secret and Electron security gates
+  pass. Existing bundle-size warning retained. No dependency changed.
+- Root tests used a shared outer TEST_ROOT folder in one initial combined
+  attempt, so history count was7 instead of1; per-test pipeline fixture now owns
+  its TEST_ROOT as well as LOCALAPPDATA. That first attempt also named two
+  nonexistent test modules. Logs are preserved; corrected169-test run is above.
+- Local production guard is **FAIL(settings.json)** on the long combined,
+  native and real-media runs. This is not waived or reported as full PASS.
+  Read-only control with no test invocation observed the working settings hash
+  change over12s (`production-readonly-control.json`); multiple working NewsFlow
+  processes were present. All test app-data/settings/sessions/credentials/output
+  paths were disposable. Working NewsFlow was not stopped, written or restored.
+  Clean independent CI remains required to remove ambiguity about those runs.
+- Docker remains **BLOCKED**: dockerDesktopLinuxEngine named pipe absent.
+  Frozen/source lock **FAIL** remains exactly as explained above; no Frozen
+  build, lock rewrite, main update, merge or issue close was performed.
+
+Real library replay uses a copied licensed Commons original and existing local
+TTS demo voice: 19.13s MP4, actualCLIP .3112/.3047, selected original intervals
+0/46.475/0 seconds across three restarted selectors, zero provider calls and
+zero transfers. Cold selection10.393s; subsequent4.091/4.113s. Voice correlation
+.999968; original hash unchanged. Only two of three sampled intervals were
+eligible/preparable; no threshold/media tolerance was weakened. The failed
+5-second probe is retained (first-windowCLIP .2026 below.22; middle preparation
+failed), not claimed as a semantic success. Private `library-real-final.log` and
+`real-library-1b3a7f41/receipt.json` contain receipts. These timings are not a
+comparable before/after throughput benchmark.
+
+Requested longer sample: `two-minute-demo/Aliyev-archive-demo-120s.mp4`, actual
+120-second excerpt of owner's ready voice, six real local videos from three
+Aliyev source families plus two licensed Commons portraits. Each of8files is
+used3times; all5families occur in early/middle/late thirds,20%uniqueness for24
+five-second beats. ActualCLIP .247–.368; selection48.2s/render47.186s on4CPUs;
+voice correlation.999970, copied original/source voice hashes unchanged.
+Archive marking is visible. This is an **authored/manual demonstration**:
+portraits are explicit manual inserts, not automatic hybrid image fallback or a
+new automatic StoryMap. The existing hybrid route falls back to suitable local
+context; automatic stock-image fallback remains stock-only.
+
+**New remaining media FAIL:** the existing legacy overlay path produced variable
+frame intervals (up to.300s) despite r_frame_rate30. The sample is not certified
+CFR30. A controlled20s reproduction with/without overlay and full PTS postflight
+are preserved in `two-minute-demo/framerate-probe/` and `postflight.json`;
+original MP4/receipt remain unchanged. No claim of all media gatesGREEN.
+
+Separate actual source Electron profile reproduced a second real issue:
+render-montage created the120s MP4, but project.output_path pointed to its moved
+staging file, so UI hid the output. RED regressions cover direct and queue
+rendering; both now save the final output path into the staged project before
+atomic publication. The old UI FAIL profile is retained. Fresh UI replay result
+is recorded below when complete; this invokes the public renderer bridge for
+an existing authored project, not a queue button/new automated StoryMap.
+
+
+Fresh source UI replay: `isolated-real-ui/profile-1e20772535` passed UI selection,
+public renderer bridge→Core→FFmpeg→published output, project/player reload and
+native video seek/play readiness. **1 functional test passes /83.80s**;
+render56.802s,120.0s,24timeline clips; MP4 SHA256
+`5683457bfe883d1f30175d4d1778898485b0d231ff5273a530522fd543bdbb91`.
+Decoded voice has identical2,880,000sample counts; overall correlation.999970,
+beginning/middle/end each>.99996. Screenshot04-after-render-timeline.png was
+visually inspected; player shows Aliyev/archival caption and0:02/2:00 with the
+timeline. Test-owned Electron exited normally. The unchanged source demo project
+and original input hashes remain verified.
+
+**Overall remains BLOCKED**, not full PASS: runner exits1 because production
+settings hash changed again, and the known legacy-overlayVFR and Frozen/source
+integrity failures remain. The receipt and separate verification-summary.json
+explicitly distinguish functional UI/render/audio success from those failures.
+Old failed profile `profile-ac29fb436d` and original CFRFAIL sample are retained.
+No full automatic UI→provider→StoryMap→queue acceptance or12×4real-load result is
+claimed. New-head independent CI is required; draftPR is not merged.

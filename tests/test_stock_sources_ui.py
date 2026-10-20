@@ -75,6 +75,8 @@ class StockSourcesUISmokeTests(unittest.TestCase):
         self.assertEqual(restarted["finalSettings"]["sourceMode"], "stock")
         self.assertEqual(restarted["finalSettings"]["stockSources"], ["pexels", "wikimedia", "nasa"])
         self.assertFalse(restarted["finalSettings"]["stockTrim"])
+        self.assertFalse(restarted["finalSettings"]["stockUseLibrary"])
+        self.assertTrue(Path(restarted["finalSettings"]["stockLibraryFolder"]).is_relative_to(self.root))
         rows = restarted["finalSettings"]["stockKeys"]
         self.assertEqual(len(rows), 3)
         self.assertEqual(sum(key["active"] for key in rows), 2)

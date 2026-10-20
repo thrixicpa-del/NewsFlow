@@ -3034,6 +3034,8 @@ def snapshot() -> dict:
                             "sourceMode": settings.montage_source_mode or ("stock" if settings.montage_external_only else "hybrid" if settings.montage_auto_web else "local"),
                             "stockSources": settings.montage_stock_sources,
                             "stockTrim": settings.montage_stock_trim,
+                            "stockUseLibrary": settings.montage_stock_use_library,
+                            "stockLibraryFolder": str(Path(settings.footage_download_folder) / "Стоки"),
                             "stockKeys": [{"id": key.id, "provider": key.provider, "label": key.label, "active": key.active} for key in settings.stock_api_keys],
                             "useScriptText": settings.montage_use_script_text,
                             "excludeEnglishText": settings.montage_exclude_english_text,
@@ -15414,6 +15416,10 @@ def save_montage_settings(payload: dict) -> dict:
         if not isinstance(payload["stockTrim"], bool):
             raise ValueError("Укажите режим нарезки стоков")
         settings.montage_stock_trim = payload["stockTrim"]
+    if "stockUseLibrary" in payload:
+        if not isinstance(payload["stockUseLibrary"], bool):
+            raise ValueError("Укажите режим использования библиотеки стоков")
+        settings.montage_stock_use_library = payload["stockUseLibrary"]
     if "gpuChunkSize" in payload:
         settings.montage_gpu_chunk_size = validate_gpu_chunk_size(payload["gpuChunkSize"])
     ratio = str(payload.get("aspectRatio", settings.montage_aspect_ratio)).strip()
@@ -15499,6 +15505,7 @@ def save_montage_settings(payload: dict) -> dict:
             ("sourceMode", "montage_source_mode"),
             ("stockSources", "montage_stock_sources"),
             ("stockTrim", "montage_stock_trim"),
+            ("stockUseLibrary", "montage_stock_use_library"),
             ("fastReuseEnabled", "montage_fast_reuse_enabled"),
             ("uniqueFootagePercent", "montage_unique_footage_percent"),
             ("fastReuseRanges", "montage_fast_reuse_ranges"),
@@ -16942,6 +16949,7 @@ def prepare_montage(payload: dict) -> dict:
         stock_selector = StockSceneSelector(mode=settings.montage_source_mode, service=service, index=index,
             cache_root=stock_root / "prepared", threshold=settings.montage_match_threshold,
             trim=settings.montage_stock_trim, aspect_ratio=settings.montage_aspect_ratio,
+            use_library=settings.montage_stock_use_library,
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
             duration_probe=lambda path: verified_duration(FootageItem(str(path), path.name)), checkpoint=stock_checkpoint,
             download_semaphore=download_semaphore)
@@ -16955,18 +16963,20 @@ def prepare_montage(payload: dict) -> dict:
         if stock_selector is not None:
             denied_families = set()
             choice = None
-            for _claim_attempt in range(8):
+            while True:
+                stock_checkpoint()
                 choice = stock_selector.select(scene, hits_by_level,
                     stock_query_variants(scene, scene_query_ladders[scene_number - 1], titles[scenario_index]),
                     used_families=project_used_families | denied_families,
                     allow_reuse=fast_reuse and scene_number > unique_scene_count,
-                    history_families=historical_families)
-                if choice is None:
+                    history_families=historical_families, position_bucket=position_bucket)
+                if choice is None or choice.family in denied_families:
                     break
                 if ((choice.reused and choice.family in project_used_families)
                         or claim_batch_source(choice.item, choice.family, position_bucket, allow_cross_bucket_reuse=True)):
                     break
                 denied_families.add(choice.family)
+                stock_selector.reject_unclaimed(choice.family)
                 choice = None
             if choice is None:
                 manual_replacements.append({"sceneIndex": scene_number - 1,
@@ -17497,7 +17507,7 @@ def prepare_montage(payload: dict) -> dict:
                               voice_map_provenance=voice_map_provenance)
     if explicit_sources:
         project.source_policy = {"mode": settings.montage_source_mode, "sources": settings.montage_stock_sources,
-            "trim": settings.montage_stock_trim, "uniquePercent": int(fast_reuse_percent or 100)}
+            "trim": settings.montage_stock_trim, "useLibrary": settings.montage_stock_use_library, "uniquePercent": int(fast_reuse_percent or 100)}
         project.manual_replacements = manual_replacements
     # Use each selected source in full and close a residual tail with more
     # real footage.  There is no FFmpeg looping or cloned final frame here;
@@ -17558,6 +17568,8 @@ def prepare_montage(payload: dict) -> dict:
             project.save(staged_path)
         if len(_publish_staged_paths(settings, staged_targets)) != len(staged_targets):
             raise RuntimeError("Подготовка монтажа отменена: производство было очищено")
+        if stock_selector is not None and not project.manual_replacements:
+            stock_selector.record_project_usage(str(path.resolve()), project.clips)
     except OSError as exc:
         # Do not hide the target path behind a generic "Permission denied".
         # The user can then immediately see which folder is locked or unavailable.
@@ -17604,6 +17616,7 @@ def render_montage(payload: dict) -> dict:
         project.davinci_xml_path = str(project_path.with_suffix(".fcpxml"))
         staged_targets.append((staged_xml, project_path.with_suffix(".fcpxml")))
     staged_project = project_staging / project_path.name
+    project.output_path = str(output)
     project.save(staged_project)
     staged_remotion = output_staging / output.with_suffix(".remotion.json").name
     staged_remotion.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -18137,6 +18150,7 @@ def _project_repair_settings(settings: Settings, project: TimelineProject) -> Se
         scoped.montage_source_mode = project.source_policy["mode"]
         scoped.montage_stock_sources = list(project.source_policy.get("sources", []))
         scoped.montage_stock_trim = bool(project.source_policy.get("trim", True))
+        scoped.montage_stock_use_library = bool(project.source_policy.get("useLibrary", True))
     return scoped
 
 
@@ -18211,6 +18225,7 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
         selector = StockSceneSelector(mode=settings.montage_source_mode, service=service, index=index,
             cache_root=stock_root / "prepared", threshold=settings.montage_match_threshold,
             trim=settings.montage_stock_trim, aspect_ratio=settings.montage_aspect_ratio,
+            use_library=settings.montage_stock_use_library,
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
             duration_probe=lambda path: _cached_or_probed_montage_duration(index, path, {}), checkpoint=lambda: None,
             download_semaphore=download_semaphore)
@@ -18725,6 +18740,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
             project.davinci_xml_path = str(Path(project_path).with_suffix(".fcpxml"))
             staged_targets.append((staged_xml, Path(project_path).with_suffix(".fcpxml")))
         staged_project = project_staging / Path(project_path).name
+        project.output_path = str(output)
         project.save(staged_project)
         staged_remotion = output_staging / output.with_suffix(".remotion.json").name
         staged_remotion.write_text(json.dumps(remotion_payload(project), ensure_ascii=False, indent=2), encoding="utf-8")

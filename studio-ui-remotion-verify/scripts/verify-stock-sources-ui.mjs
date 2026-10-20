@@ -82,7 +82,7 @@ const click = async (name) => until(`click ${name}`, () => evaluate((label) => {
 }, name));
 const field = (name, value) => evaluate(({ name, value }) => {
   const labels = [...document.querySelectorAll('label')];
-  const control = labels.find((label) => label.querySelector('span')?.textContent === name)?.querySelector('input,select,textarea');
+  const control = labels.find((label) => label.querySelector('span')?.textContent === name || label.textContent.trim() === name)?.querySelector('input,select,textarea');
   if (!control) throw Error(`Missing field ${name}`);
   const prototype = control.tagName === 'SELECT' ? HTMLSelectElement.prototype : control.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(prototype, 'value').set.call(control, value);
@@ -102,11 +102,15 @@ const waitCommand = async (name, action) => {
   return response.result;
 };
 const snapshot = () => evaluate(() => window.newsflowDesktop.snapshot());
-const safeSettings = (settings) => ({ sourceMode: settings.sourceMode, stockSources: settings.stockSources, stockTrim: settings.stockTrim, stockKeys: settings.stockKeys });
+const safeSettings = (settings) => ({ sourceMode: settings.sourceMode, stockSources: settings.stockSources, stockTrim: settings.stockTrim, stockUseLibrary: settings.stockUseLibrary, downloadWorkers: settings.downloadWorkers, stockLibraryFolder: settings.stockLibraryFolder, stockKeys: settings.stockKeys });
 const checkFinal = (settings) => {
   assert.equal(settings.sourceMode, 'stock');
   assert.deepEqual(settings.stockSources, ['pexels', 'wikimedia', 'nasa']);
   assert.equal(settings.stockTrim, false);
+  assert.equal(settings.stockUseLibrary, false);
+  assert.equal(settings.downloadWorkers, 64);
+  assert(path.isAbsolute(settings.stockLibraryFolder));
+  assert(settings.stockLibraryFolder.startsWith(root));
   assert.equal(settings.stockKeys.length, 3);
   assert.equal(settings.stockKeys.filter((key) => key.active).length, 2);
   assert.equal(settings.stockKeys.filter((key) => key.provider === 'pexels').length, 2);
@@ -137,6 +141,11 @@ async function main() {
         const state = await save();
         assert.equal(state.montageSettings.sourceMode, mode);
       }
+      await checkbox('Использовать стоки с моими футажами', true);
+      assert.equal((await save()).montageSettings.sourceMode, 'hybrid');
+      await checkbox('Использовать стоки с моими футажами', false);
+      assert.equal((await save()).montageSettings.sourceMode, 'local');
+      await field('Источники футажей', 'stock');
       await checkbox('Все вместе', true);
       await checkbox('Все вместе', false);
       assert.equal(await evaluate(() => [...document.querySelectorAll('fieldset input')].filter((input) => input.checked).length), 0);
@@ -146,6 +155,8 @@ async function main() {
       await checkbox('Pixabay', false);
       await checkbox('Coverr', false);
       await checkbox('Обрезать стоковые видео', false);
+      await checkbox('Использовать библиотеку скачанных стоков', false);
+      await field('Скачивание и нарезка', '64');
       assert.deepEqual((await save()).montageSettings.stockSources, ['pexels', 'wikimedia', 'nasa']);
       await field('Новые API-ключи стоков', secrets.slice(0, 2).join('\n'));
       assert.equal(await evaluate(() => getComputedStyle(document.querySelector('#nf-textarea-новые-api-ключи-стоков')).webkitTextSecurity), 'disc');
@@ -166,6 +177,8 @@ async function main() {
     const visible = await evaluate(() => ({ mode: document.querySelector('#nf-select-источники-футажей').value, trim: [...document.querySelectorAll('label')].find((label) => label.textContent.trim() === 'Обрезать стоковые видео').querySelector('input').checked, raw: document.body.innerText }));
     assert.equal(visible.mode, 'stock');
     assert.equal(visible.trim, false);
+    assert(visible.raw.includes(final.stockLibraryFolder));
+    assert.equal(await evaluate(() => [...document.querySelectorAll('label')].find((label) => label.textContent.trim() === 'Использовать библиотеку скачанных стоков').querySelector('input').checked), false);
     assertSafe(visible);
     assert.deepEqual(evidence.unexpectedCommands, []);
     assert.deepEqual(evidence.externalRequests, []);

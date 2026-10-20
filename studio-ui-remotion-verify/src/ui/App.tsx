@@ -10886,6 +10886,7 @@ export function Editor({
   const [sourceMode, setSourceMode] = useState(montageSourceMode(data.montageSettings));
   const [stockSources, setStockSources] = useState(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
   const [stockTrim, setStockTrim] = useState(data.montageSettings.stockTrim !== false);
+  const [stockUseLibrary, setStockUseLibrary] = useState(data.montageSettings.stockUseLibrary !== false);
   const stockSourcesValid = sourceMode === "local" || stockSources.length > 0;
   const autoWeb = sourceMode !== "local";
   const externalOnly = sourceMode === "stock";
@@ -10938,6 +10939,7 @@ export function Editor({
     setSourceMode(montageSourceMode(data.montageSettings));
     setStockSources(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
     setStockTrim(data.montageSettings.stockTrim !== false);
+    setStockUseLibrary(data.montageSettings.stockUseLibrary !== false);
     setUseScriptText(data.montageSettings.useScriptText !== false);
     setExcludeEnglishText(data.montageSettings.excludeEnglishText !== false);
     setScenePlanner(data.montageSettings.scenePlanner);
@@ -11018,6 +11020,7 @@ export function Editor({
       sourceMode,
       stockSources,
       stockTrim,
+      stockUseLibrary,
       useScriptText,
       excludeEnglishText,
       scenePlanner,
@@ -11048,6 +11051,7 @@ export function Editor({
         sourceMode,
         stockSources,
         stockTrim,
+        stockUseLibrary,
         useScriptText,
         excludeEnglishText,
         scenePlanner,
@@ -11200,6 +11204,8 @@ export function Editor({
           { value: "hybrid", label: "Библиотека + стоки" },
           { value: "stock", label: "Только стоки" },
         ]} />
+        <label className="check-row"><input type="checkbox" checked={sourceMode === "hybrid"} onChange={(event) => setSourceMode(event.target.checked ? "hybrid" : "local")} />Использовать стоки с моими футажами</label>
+        <small className="workflow-note">Сначала точное совпадение в вашей библиотеке, затем разрешённые стоки. Снятая галочка выбирает только ваши футажи; режим «Только стоки» остаётся в списке выше.</small>
         <fieldset disabled={sourceMode === "local"}>
           <legend>Стоковые источники</legend>
           <label className="check-row"><input type="checkbox" checked={montageStockProviders.every(({ id }) => stockSources.includes(id))} onChange={(event) => setStockSources(event.target.checked ? montageStockProviders.map(({ id }) => id) : [])} />Все вместе</label>
@@ -11209,6 +11215,9 @@ export function Editor({
         </fieldset>
         <small className="workflow-note">Материалы предоставлены <a href="https://www.pexels.com/" target="_blank" rel="noopener noreferrer">Pexels</a>, <a href="https://pixabay.com/" target="_blank" rel="noopener noreferrer">Pixabay</a>, <a href="https://coverr.co/" target="_blank" rel="noopener noreferrer">Coverr</a>, Wikimedia Commons и NASA. Источники и лицензии использованных файлов сохраняются рядом с MP4.</small>
         {!stockSourcesValid ? <small role="alert">Выберите хотя бы один стоковый источник.</small> : null}
+        <label className="check-row"><input type="checkbox" checked={stockUseLibrary} onChange={(event) => setStockUseLibrary(event.target.checked)} />Использовать библиотеку скачанных стоков</label>
+        <small className="workflow-note">Сначала проверяются подходящие скачанные материалы. История использования сохраняется, чтобы чередовать источники и фрагменты в следующих роликах.</small>
+        <small className="workflow-note">Папка библиотеки: <span style={{ overflowWrap: "anywhere", userSelect: "text" }}>{data.montageSettings.stockLibraryFolder || "Путь появится после подключения NewsFlow"}</span>. Перед ручной очисткой завершите задачи: сохранённые проекты могут ссылаться на эти файлы.</small>
         <label className="check-row"><input type="checkbox" checked={stockTrim} onChange={(event) => setStockTrim(event.target.checked)} />Обрезать стоковые видео</label>
         <small className="workflow-note">Исходный файл не меняется. При включённой обрезке готовится короткий фрагмент. При выключенной предварительной обрезки нет, но таймлайн по-прежнему ограничивает показ границами озвучки.</small>
       </section>
@@ -11495,7 +11504,6 @@ export function Editor({
             <input
               type="number"
               min="1"
-              max="8"
               value={downloadWorkers}
               onChange={(event) => setDownloadWorkers(event.target.value)}
             />

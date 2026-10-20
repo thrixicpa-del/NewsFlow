@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -55,9 +56,11 @@ class StockReviewRegressionTests(unittest.TestCase):
         self.assertTrue(callable(helper), 'Project repair needs an independent settings copy')
         settings = config.Settings(montage_source_mode='hybrid', montage_stock_sources=['pexels'], montage_stock_trim=True)
         project = TimelineProject('Saved stock project', source_policy={
-            'mode': 'stock', 'sources': ['nasa'], 'trim': False, 'uniquePercent': 40})
+            'mode': 'stock', 'sources': ['nasa'], 'trim': False, 'useLibrary': False, 'uniquePercent': 40})
         repaired_settings = helper(settings, project)
         self.assertIsNot(repaired_settings, settings)
+        self.assertFalse(repaired_settings.montage_stock_use_library)
+        self.assertTrue(settings.montage_stock_use_library)
         self.assertEqual((repaired_settings.montage_source_mode, repaired_settings.montage_stock_sources,
                           repaired_settings.montage_stock_trim), ('stock', ['nasa'], False))
         repaired_settings.montage_stock_sources.append('wikimedia')
@@ -86,6 +89,32 @@ class StockReviewRegressionTests(unittest.TestCase):
             project = pipeline_fixture.StockPipelineTests.prepare(self, 'stock', fast_reuse=True)
         self.assertEqual(len(project.clips), 3)
         self.assertFalse(project.manual_replacements)
+
+    def test_tenth_batch_project_can_skip_nine_claimed_sources(self):
+        item = FootageItem(str(self.stock), 'Cargo train', 'pexels')
+        choices = [stock_selection.StockChoice(item, 10, .8, f'family-{i}', provenance={'provider': 'pexels'}) for i in range(10)]
+        with patch.object(bridge, '_claim_batch_family', side_effect=lambda _usage, family, *_a, **_k: family == 'family-9'), \
+             patch.object(stock_selection.StockSceneSelector, 'select', side_effect=choices):
+            project = pipeline_fixture.StockPipelineTests.prepare(self, 'stock')
+        self.assertEqual(len(project.clips), 1)
+        self.assertFalse(project.manual_replacements)
+        self.assertEqual(project.clips[0].source_family, 'family-9')
+
+    def test_saved_stock_render_references_published_output_instead_of_staging(self):
+        pipeline_fixture.StockPipelineTests.prepare(self, 'stock')
+        def render(project, output, **_kwargs):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b'isolated render boundary fixture')
+            project.output_path = str(output)
+            return output
+        with patch.object(bridge, 'render_project', side_effect=render), \
+             patch.object(bridge, 'validate_rendered_montage', return_value=3.):
+            bridge.render_montage({'projectPath': self.project_path})
+        project = TimelineProject.load(Path(self.project_path))
+        output = Path(config.load_settings().montage_output_folder) / 'Logistics.mp4'
+        self.assertEqual(project.output_path, str(output))
+        self.assertTrue(output.is_file())
+        self.assertNotIn('.newsflow-staging', project.output_path)
 
     def test_provider_fetch_cancellation_propagates_instead_of_becoming_exhaustion(self):
         def cancelled(_item):
