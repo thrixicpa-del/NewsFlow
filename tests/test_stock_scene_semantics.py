@@ -7,6 +7,24 @@ from scriptor.timeline import GENERIC_VISUAL_QUERY, fallback_visual_query
 
 
 class AviationSceneQueryTests(unittest.TestCase):
+    def test_empty_terminal_does_not_accept_an_explicit_aircraft_action(self):
+        for name in ('Plane Spotting FedEx Air Cargo Takeoff Runway',
+                     'AirBridgeCargo Boeing 747 landing at airport',
+                     "Crossing Gibraltar's Airport Runway.webm",
+                     'Landing and taking off at the most dangerous airport in the world',
+                     'Самолёт взлетает с полосы аэропорта'):
+            with self.subTest(name=name):
+                self.assertFalse(_semantic_clip_ok('empty airport terminal', FootageItem('', name, 'wikimedia')))
+
+    def test_empty_terminal_keeps_terminal_context_and_generic_files(self):
+        for name in ('Empty airport terminal during COVID-19',
+                     'Passenger terminal airport check-in hall', 'slice18.mp4'):
+            with self.subTest(name=name):
+                self.assertTrue(_semantic_clip_ok('empty airport terminal', FootageItem(
+                    'D:/old/aircraft/takeoff/' + name, name, 'wikimedia')))
+        self.assertTrue(_semantic_clip_ok('aircraft flight airport runway', FootageItem(
+            '', 'Plane Spotting FedEx Air Cargo Takeoff Runway', 'wikimedia')))
+
     def test_empty_airport_terminal_does_not_request_aircraft_in_flight(self):
         query = fallback_visual_query('Прибрежный аэропорт давно не принимал пассажиров, терминал опустел.')
         self.assertIn('empty airport terminal', query)

@@ -118,14 +118,18 @@ class StockSceneSelector:
         # or overwritten file's cached verdict. Model identity is part of key.
         from .ai_index import IMAGE_MODEL, TEXT_MODEL
         model = f"{IMAGE_MODEL}|{TEXT_MODEL}|frames-v1|{type(self.index).__module__}.{type(self.index).__qualname__}"
-        identity = hashlib.sha256(f"{_digest(path)}|{query}|{model}|stock-score-v1".encode()).hexdigest()
+        identity = hashlib.sha256(f"{_digest(path)}|{query}|{model}|stock-score-v2-ad-frames".encode()).hexdigest()
         self.root.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.root / "visual-verdicts.sqlite3", timeout=30)) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS scores (id TEXT PRIMARY KEY, score REAL NOT NULL)")
             row = db.execute("SELECT score FROM scores WHERE id=?", (identity,)).fetchone()
             if row:
                 return float(row[0])
-        score = float(self.index.score_file(path, query))
+        # Dynamic test/legacy adapters may manufacture missing attributes.
+        # Use the stock guard only when the concrete index declares it.
+        stock_scorer = getattr(type(self.index), "score_stock_file", None)
+        score = float(stock_scorer(self.index, path, query) if callable(stock_scorer)
+                      else self.index.score_file(path, query))
         if not math.isfinite(score):
             raise ValueError("CLIP не вернул достоверную оценку")
         with closing(sqlite3.connect(self.root / "visual-verdicts.sqlite3", timeout=30)) as db, db:

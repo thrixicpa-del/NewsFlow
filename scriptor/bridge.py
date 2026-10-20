@@ -15821,6 +15821,14 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     # statements/meetings and people actually requested by this scene remain
     # eligible. Old parent-folder names alone are not portrait evidence.
     metadata = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
+    # An explicitly empty terminal is an interior/location request, not an
+    # aircraft-action request. Shared "airport" metadata and a marginal visual
+    # score must not turn it into takeoff/landing footage. Keep anonymous clips
+    # eligible for visual validation; old directory names are not scene evidence.
+    if (re.search(r"\b(?:empty|deserted|vacant)\s+airport\s+terminal\b", query)
+            and re.search(r"\b(?:take\s?off|taking off|landing|runway|plane spotting)\b|взл[её]т|посадк", metadata)
+            and not re.search(r"\b(?:terminal|check[ -]?in|concourse)\b|терминал", metadata)):
+        return False
     if (_MARITIME_OBJECT_PATTERN.search(query)
             and not _has_any(query, (*_POLITICIAN_IDENTITY_TERMS, *_POLITICAL_SCENE_TERMS))
             and _has_any(metadata, (*_POLITICIAN_IDENTITY_TERMS, "political-office", "portrait", "портрет"))

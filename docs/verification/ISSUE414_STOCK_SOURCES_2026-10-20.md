@@ -607,3 +607,79 @@ merely to fill a slot. Only native scene-specific checks may select them.
 Final source1020ce0 independent Windows-native39473556731SUCCESS; its
 CI39473556907FAIL remains the known stale Frozen/source lock. Final source
 follow-up validation and actual completed MP4 evidence are recorded below.
+
+### Completed 100% run: technical PASS, semantic FAIL preserved
+
+Source3c2fc05 actual source-Electron queue completed in509.26s with guardPASS:
+20clips,20different original SHA256 families, no reuse/manual markers,120s.
+The UI timeline and native MP4 player were exercised. Independent FFmpeg9/
+FFprobe checks passed1920x1080/3600CFRframes,120s, exactly2880000 voice samples,
+whole-voice correlation0.99994085 and beginning/middle/end correlations>0.9999.
+All27 original hashes held. This technical success did **not** pass visual
+acceptance: all20 scene-centre frames exposed Freemake full-screen advertisements
+in scenes2/12 and an active FedEx aircraft in the explicitly empty-terminal
+scene3. The failed MP4 SHA256 is
+`805d8671fc5f82e76c341b8ce0c7572d6750edc8d9b8aaf5c40830f7454ed5c0`.
+It and the project, credits, screenshots and receipts are preserved privately
+under `airport-100/profile-a449706a0d/artifacts/unique100-semantic-FAIL`.
+
+Readonly source/prepared/output comparisons prove the ads were already present
+in the original AirBridge/Atlas videos, not injected by render. Mean CLIP scores
+0.273/0.230 accepted mixed ad/airplane windows; individual ad frames have scene
+scores around0.17 and generic software-advertisement scores0.28–0.30. The existing
+English-text classifier returned UNCERTAIN rather than blocked. Native middle
+windows74.12s/86.74s contain real aircraft and score0.244/0.259 without an ad
+dominating any of11 densely inspected frames. No text filter is disabled and no
+original is altered. A stock-only per-frame interstitial rejection is being
+regression-tested separately from default/local mean scoring.
+
+The empty-terminal query was already correct, but shared airport metadata and
+CLIP0.2275 allowed a takeoff video. New regressions prove RED for the actual
+FedEx title and other explicit runway/landing footage, then GREEN after a narrow
+metadata contradiction guard. Actual terminal context, anonymous filenames,
+old parent folders and ordinary aircraft requests stay eligible.
+**67related tests/1.682s PASS, guardPASS**.
+
+One strict postflight initially failed exact audio sample count using bundled
+FFmpeg7.1:2880512 decoded samples vs2880000 input. The same unchanged MP4 with
+independent FFmpeg9.0.1 decodes exactly2880000, consistent with stream timestamps;
+the shared2880000-sample prefix is identical and correlation0.99994085 for both.
+The oracle now explicitly uses the independent decoder alongside FFprobe and
+retains the exact-count assertion. The paired versions/counts and original FAIL
+are preserved; this does not claim that the bundled decoder discrepancy is fixed.
+
+Independent source3c2fc05 Windows-native39477985086SUCCESS; CI39477985110FAIL is
+still the stale Frozen/source lock. CodeQL/dependency review are draftSKIPPED.
+No Frozen rebuild or lock rewrite is authorized. Corrected MP4 acceptance follows
+only after a new native UI run and visual review.
+
+The advertisement regression first reproduced five assertion failures (old
+positive persistent cache and mixed-frame mean approvals included). GREEN:
+**36targeted tests/0.563s, guardPASS**. Stock previews now retain the same original
+mean plus three individual frame vectors in the existing64-entry content/model
+cache. Only stock scoring rejects a sampled frame when the generic software-ad
+prompt scores>=0.26 and exceeds the original scene prompt by>=0.06. The ordinary
+local/index preview score is unchanged; night/sky, weak scores, ordinary logos
+and subtitles retain their previous mean score. Content/model invalidation,
+legacy adapters and persisted v1-score invalidation have regression coverage.
+No old cache rows, usage history, originals or licenses are deleted. Independent
+read-only review found no material defect and separately passed33 focused tests
+with guardPASS. Ruff/diff checks PASS.
+
+The next UI observer initially tried missing-only launch on an already completed
+sample and correctly found no enabled action; its33.64sFAIL/guardPASS is preserved
+under `unique100-ad-fixed`. The private harness now uses the existing explicit
+"Повторить монтаж всех:1" replacement action for a completed sample. It does not
+reset task state, delete the preceding output or change product queue behavior.
+Storage inventory before the attempt:17.594GiB across all known test roots out of
+24GiB,6.406GiB remaining; junction targets counted once. Quality/resource limits
+remain unchanged.
+
+Final combined source regression after both fixes: **356tests/191.916s,
+PASS(skip1 opt-in UI), production guardPASS**. The concurrent private UI launch
+failure above makes the aggregate cycle FAIL, not a product regression PASS;
+the source suite itself completed independently with exit0. Combined job peak
+996974592bytes under the shared4GiB cap/four-core affinity. The new semantic,
+advertisement and preview-cache suites are also wired into the existing CI stock
+step (YAML parsePASS). The corrected explicit-replacement UI run is in progress;
+the draft remains pending actual MP4 review.
