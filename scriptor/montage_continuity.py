@@ -23,6 +23,7 @@ def _manual_slot(marker):
     ids = list(marker.get('voiceSegmentIds', []))
     return TimelineClip('', str(marker.get('narration', '')), str(marker.get('visualQuery', '')),
         duration=duration, voice_segment_id=int(ids[0]) if ids else 0,
+        visual_beat_index=int(marker.get('visualBeatIndex', 0) or 0),
         voice_segment_ids=ids, narration_start=float(marker.get('narrationStart', 0)),
         narration_end=float(marker.get('narrationEnd', 0)), minimum_source_duration=duration)
 

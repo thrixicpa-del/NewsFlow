@@ -17067,6 +17067,7 @@ def prepare_montage(payload: dict) -> dict:
                     "duration": scene["duration"], "narrationStart": scene.get("narration_start", 0),
                     "narrationEnd": scene.get("narration_end", 0),
                     "voiceSegmentIds": list(scene.get("voice_segment_ids", [scene.get("voice_segment_id", 0)])),
+                    "visualBeatIndex": int(scene.get("visual_beat_index", 0) or 0),
                     "reason": "Подходящие разрешённые материалы исчерпаны; требуется ручная замена"})
                 if progress:
                     progress("Автозаполнение",
@@ -17084,6 +17085,7 @@ def prepare_montage(payload: dict) -> dict:
                 fallback_level=choice.level, position_bucket=position_bucket,
                 minimum_source_duration=required_source_duration,
                 voice_segment_id=int(scene.get("voice_segment_id", 0)),
+                visual_beat_index=int(scene.get("visual_beat_index", 0) or 0),
                 voice_segment_ids=list(scene.get("voice_segment_ids", [])),
                 narration_start=float(scene.get("narration_start", 0)), narration_end=float(scene.get("narration_end", 0)),
                 stock_provenance=choice.provenance or {},

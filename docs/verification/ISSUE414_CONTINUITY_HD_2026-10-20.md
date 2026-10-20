@@ -131,3 +131,18 @@ never represented as five unique originals. Preparation187.429s in this cold
 scarce-library fixture is not a controlled comparison with the prior120s demo.
 The vertical UI and independent encoded-media postflights are pending at this
 source checkpoint, and must not be inferred from the horizontal UI PASS.
+
+Both first complete UI outputs succeeded (horizontal227.79s, vertical251.24s),
+with the guard still FAIL. Before independent media acceptance, a read-only
+map/project comparison found an adjacent contract defect: the explicit-source
+constructor and missing-slot marker omitted `visual_beat_index`, leaving0 for
+all five clips although narration, segment IDs/order and timing were retained.
+Both outputs/projects/credits are preserved under each test profile's
+`artifacts/native-beat-index-FAIL`. They are not full contract acceptance.
+
+Two real regression assertions reproduced0!=7 (RED). The minimal fix carries
+the existing native beat index into selected clips and missing markers, then
+into the held/background slot; it creates no new map or timing. **57related
+pipeline/continuity/VoiceMap tests PASS20.267s; outer guardFAIL/exit91**. Ruff
+and whitespace checks PASS. One final native UI rerender from existing caches
+checks the fix without deleting source/history or downloading new material.

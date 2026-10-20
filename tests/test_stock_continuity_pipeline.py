@@ -75,6 +75,17 @@ class StockContinuityPipelineTests(unittest.TestCase):
         self.assertFalse(scoped.montage_stock_hd_only)
         self.assertTrue(settings.montage_stock_hd_only)
 
+    def test_selected_stock_retains_native_visual_beat_index(self):
+        self.scenes[0]['visual_beat_index'] = 7
+        project = self.prepare('stock')
+        self.assertEqual(project.clips[0].visual_beat_index, 7)
+
+    def test_automatic_gap_retains_native_visual_beat_index(self):
+        self.scenes[0]['visual_beat_index'] = 7
+        with patch.object(montage_continuity, 'prepare_continuity_media', side_effect=self.fake_hold):
+            project = self.prepare('stock', empty=True)
+        self.assertEqual(project.clips[0].visual_beat_index, 7)
+
     def test_real_replacement_clears_previous_hold_metadata(self):
         missing = self.root / 'deleted-hold.mp4'
         replacement = self.root / 'replacement.mp4'
