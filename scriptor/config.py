@@ -753,6 +753,7 @@ class Settings:
     # only the topic, selected text and the built-in news-thumbnail rules.
     cover_use_custom_prompt: bool = False
     cover_use_script_context: bool = True
+    cover_manual_missing_only: bool = True
     cover_prompt_variant_count: int = 2
     cover_headline_provider: str = "agent"
     cover_text_mode: str = "overlay"
@@ -1377,6 +1378,7 @@ def load_settings() -> Settings:
             cover_use_custom_prompt=bool(data.get("cover_use_custom_prompt", False)),
             cover_use_script_context=bool(data.get("cover_use_script_context", True)),
             # Up to ten visual approaches per topic; one remains a valid fast workflow.
+            cover_manual_missing_only=bool(data.get("cover_manual_missing_only", True)),
             cover_prompt_variant_count=max(1, min(10, int(data.get("cover_prompt_variant_count", 2) or 2))),
             cover_headline_provider=data.get("cover_headline_provider", "agent") if data.get("cover_headline_provider", "agent") in {"agent", "openai"} else "agent",
             cover_text_mode=data.get("cover_text_mode", "overlay") if data.get("cover_text_mode", "overlay") in {"overlay", "fastgen"} else "overlay",
@@ -2080,6 +2082,7 @@ def save_settings(settings: Settings):
         "cover_prompt_provider": settings.cover_prompt_provider,
         "cover_use_custom_prompt": settings.cover_use_custom_prompt,
         "cover_use_script_context": settings.cover_use_script_context,
+        "cover_manual_missing_only": settings.cover_manual_missing_only,
         "cover_prompt_variant_count": settings.cover_prompt_variant_count,
         "cover_headline_provider": settings.cover_headline_provider,
         "cover_text_mode": settings.cover_text_mode,

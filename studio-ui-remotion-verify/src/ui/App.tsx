@@ -4415,8 +4415,46 @@ export function Covers({
   const [coverPromptImportError, setCoverPromptImportError] = useState("");
   const [coverPromptImporting, setCoverPromptImporting] = useState(false);
   const coverPromptImportLock = useRef(false);
+  const [manualMissingOnly, setManualMissingOnly] = useState(data.coverSettings.manualMissingOnly ?? true);
+  useEffect(() => {
+    setManualMissingOnly(data.coverSettings.manualMissingOnly ?? true);
+  }, [data.coverSettings.manualMissingOnly]);
   const [standaloneCoverOpen, setStandaloneCoverOpen] = useState(false);
   const [standaloneCoverPairs, setStandaloneCoverPairs] = useState("");
+  const [manualImportMode, setManualImportMode] = useState("pairs");
+  const [manualImportTopic, setManualImportTopic] = useState("");
+  const [manualImportPreview, setManualImportPreview] = useState<NewsFlowSnapshot["operationResult"]>();
+  const manualImportId = useRef(crypto.randomUUID());
+  const invalidateManualPreview = () => { setManualImportPreview(undefined); };
+  const importManualBlocks = async (previewOnly: boolean) => {
+    if (coverPromptImportLock.current) return;
+    coverPromptImportLock.current = true;
+    setCoverPromptImporting(true);
+    setCoverPromptImportError("");
+    try {
+      const result = await command("import-cover-prompt-pairs", {
+        text: standaloneCoverPairs, mode: "blocks", createMissingTopics: true,
+        importId: manualImportId.current,
+        ...(manualImportMode === "selected" ? { productionItemId: manualImportTopic } : {}),
+        ...(previewOnly ? { previewOnly: true } : { previewToken: manualImportPreview?.previewToken }),
+      });
+      if (previewOnly && result?.operationResult?.kind === "cover-prompt-blocks-preview") {
+        setManualImportPreview(result.operationResult);
+      } else if (!previewOnly && result) {
+        setStandaloneCoverPairs(""); setStandaloneCoverOpen(false); invalidateManualPreview();
+        manualImportId.current = crypto.randomUUID();
+      } else {
+        invalidateManualPreview();
+        setCoverPromptImportError("Не удалось сохранить или проверить привязку. Ввод сохранён; проверьте его ещё раз.");
+      }
+    } catch (error) {
+      invalidateManualPreview();
+      setCoverPromptImportError(error instanceof Error ? error.message : "Ошибка импорта; ввод сохранён.");
+    } finally {
+      coverPromptImportLock.current = false;
+      setCoverPromptImporting(false);
+    }
+  };
   const [textMode, setTextMode] = useState<"overlay" | "fastgen">(
     data.coverSettings.textMode,
   );
@@ -4784,6 +4822,7 @@ export function Covers({
   const removeBuildModeRange = (index: number) =>
     setBuildModeRanges((current) => current.filter((_range, row) => row !== index));
   const coverSettingsPayload = () => ({
+    manualMissingOnly,
     operation,
     aspectRatio: ratio,
     variantCount: Math.max(1, Math.min(10, Number(count) || 1)),
@@ -5011,6 +5050,7 @@ export function Covers({
       if (!text) return;
       if (options?.draftOnly) {
         setStandaloneCoverPairs(text);
+        invalidateManualPreview();
         return;
       }
       const result = await command("import-cover-prompt-pairs", {
@@ -5058,6 +5098,7 @@ export function Covers({
       });
       await command("generate-covers", {
         ...coverSelectionPayload(),
+        manualMissingOnly,
         // This is the primary explicit start action. It must resume a queue
         // previously paused by the operator before the core dispatches workers.
         resumeGeneration: true,
@@ -5513,10 +5554,16 @@ export function Covers({
             </Button>
             <Button onClick={coverPromptImporting ? undefined : () => {
               setCoverPromptImportError("");
+              setManualImportMode("pairs");
+              invalidateManualPreview();
               setStandaloneCoverOpen(true);
             }}>
               Добавить темы и промпты
             </Button>
+            <Button onClick={coverPromptImporting ? undefined : () => {
+              setCoverPromptImportError(""); setManualImportMode("blocks");
+              invalidateManualPreview(); setStandaloneCoverOpen(true);
+            }}>Добавить несколько промптов</Button>
             <Button
               kind="primary"
               onClick={selected.length ? () => void generatePrompts(selected) : undefined}
@@ -5938,6 +5985,13 @@ export function Covers({
             </Button>
           </article>
         </div>
+        <Checkbox label="Только недостающие варианты — готовые сохранить"
+          checked={manualMissingOnly}
+          onCheckedChange={(checked) => {
+            setManualMissingOnly(checked);
+            void command("save-cover-settings", { manualMissingOnly: checked });
+          }} />
+        <p>Для ручных вариантов: с галочкой — только без готовой картинки; без галочки — все промпты. Прежние файлы сохраняются в обоих случаях.</p>
         {coverPromptImportError && !standaloneCoverOpen ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
       </section>
       <Sheet
@@ -5946,20 +6000,45 @@ export function Covers({
         title="Темы и промпты для обложек"
         description="Можно начать с пустого производства. Каждая новая тема получит свой ID; сценарий не требуется."
       >
+        <Select label="Формат импорта" value={manualImportMode}
+          disabled={coverPromptImporting}
+          onChange={(event) => { setManualImportMode(event.target.value); invalidateManualPreview(); }}
+          options={[
+            { value: "blocks", label: "Тема → несколько промптов → следующая тема" },
+            { value: "selected", label: "Только промпты одной выбранной темы" },
+            { value: "pairs", label: "Прежние пары: тема → один промпт (замена)" },
+          ]} />
+        {manualImportMode === "selected" ? <Select label="Тема для списка промптов" value={manualImportTopic}
+          disabled={coverPromptImporting} onChange={(event) => { setManualImportTopic(event.target.value); invalidateManualPreview(); }}
+          options={[{ value: "", label: "Выберите тему" }, ...data.covers.filter(row => row.production_item_id).map(row => ({ value: row.production_item_id!, label: row.title }))]} /> : null}
         <Textarea
           label="Темы и промпты"
           value={standaloneCoverPairs}
-          onChange={(event) => setStandaloneCoverPairs(event.target.value)}
-          placeholder={"Тема первой обложки\nПромпт первой обложки\nТема второй обложки\nПромпт второй обложки"}
+          onChange={(event) => { setStandaloneCoverPairs(event.target.value); invalidateManualPreview(); }}
+          placeholder={manualImportMode === "pairs" ? "Тема А\nОдин промпт\nТема Б\nОдин промпт" : "Тема: Сад\n\nПервый готовый промпт\n\nВторой готовый промпт\n\nТема: Хлеб\n\nСледующий готовый промпт"}
           disabled={coverPromptImporting}
         />
-        <p>Одна строка — тема, следующая — её промпт. Повторите пары для остальных обложек. Для существующей темы промпт будет обновлён. Генерация запускается отдельно кнопкой «Запустить».</p>
+        {manualImportMode === "pairs" ? <p>Одна строка — тема, следующая — её промпт. Этот прежний режим заменяет активный промпт. Для добавления вариантов выберите формат с несколькими промптами.</p> : <p>Начните блок строкой «Тема: название», затем разделяйте готовые промпты пустой строкой. Следующая строка «Тема: название» начинает другую тему. Точные названия существующих тем тоже распознаются. В режиме выбранной темы вставляйте только промпты. Новые варианты добавляются с продолжением номеров, сохранённые картинки остаются. Число 1–10 в настройках относится только к созданию промптов ИИ. Генерация запускается отдельно.</p>}
+        {manualImportPreview?.topics ? <div role="region" aria-label="Предпросмотр привязки промптов">
+          {manualImportPreview.topics.map(topic => <article key={topic.productionItemId}>
+            <b>{topic.title}</b> · Product ID: <code>{topic.productionItemId}</code>
+            <p>Промптов в блоке: {topic.variants.length}</p>
+            <ol>{topic.variants.map(variant => <li key={variant.id} value={variant.number}>№{variant.number} · {variant.added ? "новый" : "уже сохранён"}: {variant.prompt}</li>)}</ol>
+          </article>)}
+        </div> : null}
         <div className="form-row">
           <Button onClick={coverPromptImporting ? undefined : () => void importCoverPromptPairs({ draftOnly: true })}>
-            Загрузить пары из TXT
+            {manualImportMode === "pairs" ? "Загрузить пары из TXT" : "Загрузить из TXT"}
           </Button>
+          {manualImportMode !== "pairs" ? <Button
+            onClick={coverPromptImporting || !standaloneCoverPairs.trim() || (manualImportMode === "selected" && !manualImportTopic) ? undefined : () => void importManualBlocks(true)}>
+            Проверить привязку
+          </Button> : null}
           <Button kind="primary" aria-busy={coverPromptImporting}
-            onClick={coverPromptImporting || !standaloneCoverPairs.trim() ? undefined : () => void importCoverPromptPairs({ text: standaloneCoverPairs, createMissingTopics: true })}>
+            onClick={coverPromptImporting || !standaloneCoverPairs.trim() || (manualImportMode !== "pairs" && !manualImportPreview?.previewToken) ? undefined : () => {
+              if (manualImportMode === "pairs") void importCoverPromptPairs({ text: standaloneCoverPairs, createMissingTopics: true });
+              else void importManualBlocks(false);
+            }}>
             Добавить в обложки
           </Button>
         </div>
@@ -8014,13 +8093,12 @@ export function Covers({
                           cover.selected_prompt_index === option ? "chosen" : ""
                         }
                         onClick={() =>
-                          void command("select-cover-prompt", { index, option })
+                          void command("select-cover-prompt", { index, option, ...(cover.manual_prompt_variants ? { productionItemId: cover.production_item_id } : {}) })
                         }
                       >
                         <span>
-                          {cover.selected_prompt_index === option
-                            ? "✓ Выбран ИИ / вручную"
-                            : `Вариант ${option + 1}`}
+                          {`№${cover.manual_prompt_variants?.find(v => v.prompt === prompt)?.number ?? option + 1} · `}
+                          {cover.selected_prompt_index === option ? "✓ Выбран ИИ / вручную" : "Вариант"}
                         </span>
                         <p>{prompt}</p>
                       </button>
