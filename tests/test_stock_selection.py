@@ -125,6 +125,24 @@ class StockSelectionTests(unittest.TestCase):
                 counts[choice.family] += 1
         self.assertEqual(sorted(counts.values()), [5, 5, 5])
 
+    def test_hybrid_can_use_a_relevant_stock_image_after_video_exhaustion(self):
+        selector = self.selector('hybrid', candidates=[])
+        image = SimpleNamespace(**{**vars(self.candidate), 'kind': 'image'})
+        selector.service.search = lambda _query, *, kind='video', **_k: [image] if kind == 'image' else []
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            choice = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice.provenance['kind'], 'image')
+
+    def test_hybrid_cached_image_does_not_require_new_video_discovery(self):
+        selector = self.selector('hybrid', candidates=[])
+        image = SimpleNamespace(**{**vars(self.candidate), 'kind': 'image'})
+        selector.service.cached = lambda _query, *, kind='video': [image] if kind == 'image' else []
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            choice = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+        self.assertIsNotNone(choice)
+        self.assertEqual(self.calls, [])
+
     def test_stock_excludes_local_and_checks_actual_window_with_clip(self):
         with patch("scriptor.stock_selection.prepare_stock_media", side_effect=lambda source, *_args, **_kwargs: source):
             choice = self.selector("stock").select(self.scene, self.hits, ["cargo train"], used_families=set())

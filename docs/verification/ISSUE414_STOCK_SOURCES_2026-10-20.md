@@ -348,3 +348,128 @@ explicitly distinguish functional UI/render/audio success from those failures.
 Old failed profile `profile-ac29fb436d` and original CFRFAIL sample are retained.
 No full automatic UI→provider→StoryMap→queue acceptance or12×4real-load result is
 claimed. New-head independent CI is required; draftPR is not merged.
+
+## User-rejected example and semantic correction
+
+The owner correctly rejected the two-minute Aliyev example above. Its narration
+describes a fictional civilian port incident, manifests, floating piers and
+tugboats, without mentioning Aliyev in those120seconds. The authored portrait
+sequence was selected against a general Aliyev query instead of each narrated
+scene. Identity scores and intact audio do **not** prove semantic relevance.
+Both previous MP4s and their technical receipts remain preserved, but their
+visual semantic acceptance is **FAIL**, superseding any implied quality approval
+above. The added archival lower caption is disabled in the corrected test
+profile at the owner's request; existing user footage/text-filter settings are
+unchanged. No archive footage is evidence that the fictional incident occurred.
+
+Related source defects reproduced before fixes:
+
+- Missing civilian maritime terms caused generic queries; `корабль` injected
+  navy and `склад` injected fire/emergency without those events in narration.
+  Concrete pier/tugboat/pontoon/mooring/cargo queries now retain the objects;
+  transport/court ambiguities do not become ports/ships. Explicit naval vessels
+  retain navy context without an invented civilian cargo action.
+- Maritime object queries accepted explicitly titled politician portraits.
+  The metadata guard rejects these unless the scene actually requests the
+  person/political statement. Old parent-directory names alone are insufficient.
+  A port-opening photo whose event title mentions Aliyev remains eligible for
+  actual CLIP evaluation; this does not claim that the picture depicts him.
+- Hybrid mode could not use appropriate stock stills after video exhaustion.
+  It now uses the same licensed/CLIP-checked image preparation as stock-only,
+  preserving exact-local priority, downloaded-library preference and uniqueness.
+
+RED receipts: `semantic-correction/scene-queries-red.log`,
+`portrait-guard-red.log`, `hybrid-image-red.log`, and independent-review
+`review-red.log`. These are isolated private evidence; no production data edits.
+Targeted GREEN:73tests/2.004s with production guardPASS; subsequent review
+regressions:70functional tests/.267s with guardFAIL(settings.json).
+Combined preliminary regression:294functional tests/93.383s; guardFAIL on the
+active working settings remains visible and is not waived. Final rerun and
+actual UI queue results are recorded below once observed.
+
+The original native alignment engine is unavailable on this machine. A separate
+QA-only faster-whisper base runtime measured the preserved120-second audio
+(295positive-duration word observations, one raw zero-length observation
+excluded and documented). Existing `ensure_voice_map` accepts these real word
+observations through its engine interface: aligned map25segments, normal
+VoiceMap projection20six-second scenes. No replacement scene planner or
+fabricated timing is introduced. Raw ASR errors and transcript are preserved;
+this is not proof of automatic native-whisper availability in the product.
+
+Bounded real keyless discovery:6queries,6downloaded licensed originals/6.72MB,
+4visually reviewed Baku port object photos; one known Charleston/USA floating
+pier is conditional generic context, not Azerbaijan footage; one RO-RO opening
+portrait is visually rejected. All six remain in the cache/evidence. Actual
+port-query CLIP rejects that portrait at.1183<.22 (portrait query.2236).
+Other object scores.285–.341 do not replace per-scene and geography review.
+Five local candidates were inspected in15frames and rejected as oil/factory
+context rather than ordinary cargo-port coverage; originals hashes held.
+Provider rejection/429/cooldown is preserved, without bypass or endless retry.
+
+Previous exact-head c2 CI: Windows native run39458008676SUCCESS;
+CI39458008637FAIL at the stale Frozen Core source lock (11tests,1failure,
+production guardPASS). The feature bridge differs from the locked core source;
+the canonical base matched the lock. Frozen/EXE rebuild remains prohibited by
+the owner, and no lock rewrite, merge or issue closure is performed.
+
+### Corrected actual queue/MP4 checkpoint
+
+Owner clarified that neutral illustrative objects may come from any filming
+country; match the narrated objects/actions rather than requiring local footage.
+This is persisted in `AGENTS.md` and the stock-source user guide. Exact named
+people, flags and recognizable places/events remain distinct from illustrations.
+For pumps/water treatment the owner explicitly accepts suitable provider results
+without seeking an exact equipment model. Licensing and CLIP gates remain.
+
+Final source regression: **298 functional tests PASS/85.387s**, isolated
+`combined-reviewed-final.log`; production-write guard **FAIL(settings.json)**.
+Ruff over all changed Python files, secret scan and whitespace checks PASS.
+Independent reviewers' four semantic findings were reproduced RED and fixed;
+the final two were re-reviewed without outstanding findings in that scope.
+
+Actual UI button `Собрать незавершённые` launched source Core in isolated
+`semantic-correction/profile-a90480d619`. The existing aligned VoiceMap yielded
+20six-second scenes. No manual visual plan/forced candidate list or threshold
+override: hybrid mode, all5providers selected, no keys, downloaded library on,
+CLIP.22, uniqueness20%, existing text filter on, overlay/intro off. Eight real
+licensed originals were available, including the preserved negative portrait.
+The final plan has **20scenes,4source families,16safe reuses,20%actual uniqueness**
+and no manual-replacement markers. Family counts7/6/5/2, no adjacent duplicate
+family. These are animated stock photos; this does not claim20distinct videos
+or real twelve-planner/four-render load acceptance.
+
+Real result: `semantic-correction/Port-120s-no-caption.mp4`, SHA256
+`1ec7e33902c754822c9faadad7bbc6b3c8ab983c2aef9e76cd724e0c6a060802`,
+100750397bytes. FFprobe/decoded media PASS: **120.0s,1920×1080,3600frames,CFR30**,
+maxPTSgap.033334s; one audio stream; all2880000resampled voice samples retained,
+correlation.999970, first/middle/last windows each>.99996. All20scene-centre
+frames were visually inspected: piers, port, floating platforms and water
+equipment, no unrequested Aliyev and no added lower caption. Railway-branch and
+customs-paper clauses receive thematic port cutaways, not literal train/paper
+closeups; acceptance is illustrative context, not exact incident evidence.
+An additional real freight-train still is retained for future library use;
+customs-document discovery returned0. No extra rerender is claimed for it.
+
+Measured preparation284.284s, render about20s, terminal Core response309.921s
+under four-CPU test affinity, with real CLIP/text screening. The earlier run
+hit its private240s observer deadline at scene10 and is preserved. This is not
+a comparable before/after benchmark against the rejected authored montage;
+no speedup percentage is claimed. Network discovery/downloads were separately
+real and bounded; the UI replay used the downloaded cache with outbound network
+blocked through a test proxy, not five authenticated live-provider acceptance. Used files came from
+Commons, including NASA-origin equipment, not keyed Pexels/Pixabay/Coverr.
+
+**Remaining UI limitation:** Core completed and saved MP4, but the running
+renderer retained an old progress snapshot; the observer timed out selecting
+the newly created project. That FAIL is preserved in `water-replay/ui-queue.json`.
+Cold source-app restart then passed actual project selection,20clip timeline,
+native MP4 metadata/seek at9s and playback readiness in **4.18s, guardPASS**;
+`player-restart/04-player.png` was visually inspected. The restart does not clear
+the live auto-refresh issue or earlier guard failures. It is a separate remaining
+queue-start/polling investigation; no additional render was needed.
+
+Overall draft acceptance remains **BLOCKED** by Frozen/source integrity and the
+unresolved live UI refresh/production-guard evidence. Docker remains unavailable.
+The corrected no-overlay sample passes CFR checks; the old legacy-overlay VFR
+defect is not declared fixed. No Frozen/EXE, main merge, issue closure or edits
+to working NewsFlow data were performed.

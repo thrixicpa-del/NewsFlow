@@ -15790,9 +15790,30 @@ def _montage_semantic_bonus(scene_query: str, item: FootageItem) -> float:
     return min(0.30, bonus)
 
 
+_MARITIME_OBJECT_PATTERN = re.compile(
+    r"\b(?:port|seaport|harbou?r|pier|quay|pontoon|tugboat|mooring|cargo ship|bulk carrier)\b"
+    r"|\b(?:причал|буксир|понтон|сухогруз|швартов)\w*", re.IGNORECASE,
+)
+_POLITICIAN_IDENTITY_TERMS = (
+    "aliyev", "pashinyan", "lukashenko", "putin", "zelensk", "trump",
+    "алиев", "пашинян", "лукашенко", "путин", "зеленск", "трамп",
+)
+
+
 def _semantic_clip_ok(scene_query: str, item: FootageItem) -> bool:
     query = str(scene_query or "").casefold()
     haystack = " ".join((str(item.name or ""), str(item.path or ""), " ".join(item.tags or []))).casefold()
+    # A scene describing a physical harbor object cannot be fulfilled by a
+    # portrait just because the story title names that politician. Explicit
+    # statements/meetings and people actually requested by this scene remain
+    # eligible. Old parent-folder names alone are not portrait evidence.
+    metadata = " ".join((str(item.name or ""), " ".join(item.tags or []))).casefold()
+    if (_MARITIME_OBJECT_PATTERN.search(query)
+            and not _has_any(query, (*_POLITICIAN_IDENTITY_TERMS, *_POLITICAL_SCENE_TERMS))
+            and _has_any(metadata, (*_POLITICIAN_IDENTITY_TERMS, "political-office", "portrait", "портрет"))
+            and (_has_any(metadata, ("portrait", "портрет"))
+                 or not _MARITIME_OBJECT_PATTERN.search(metadata))):
+        return False
     # Never let a generic Kremlin / politician / cabinet shot illustrate a
     # concrete military action.  The exception keeps legitimate scenes such
     # as "Putin comments on strikes" usable when the political subject was

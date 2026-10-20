@@ -293,7 +293,7 @@ class StockSceneSelector:
         if choice is None and self.mode != "local" and self.use_library:
             choice = self._stock(scene, queries, used_families, kind="video",
                                  cached_only=True, history_families=history_families)
-            if choice is None and self.mode == "stock":
+            if choice is None:
                 choice = self._stock(scene, queries, used_families, kind="image",
                                      cached_only=True, history_families=history_families)
         if choice is None and self.mode != "local":
@@ -304,7 +304,7 @@ class StockSceneSelector:
                 choice = self._stock(scene, queries, used_families, kind="video")
         if choice is None and self.mode == "hybrid":
             choice = self._local(scene, local_hits, used_families, history_families=history_families)
-        if choice is None and self.mode == "stock":
+        if choice is None and self.mode != "local":
             choice = self._stock(scene, queries, used_families, kind="image")
         if choice is None and allow_reuse and self.mode != "stock":
             choice = self._local(scene, local_hits, used_families, allow_reuse=True, history_families=history_families)

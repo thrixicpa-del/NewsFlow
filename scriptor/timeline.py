@@ -212,11 +212,19 @@ VISUAL_TERMS = {
     "гибрид": "cybersecurity network operations military command Europe",
     "кибер": "cybersecurity operations computer networks servers monitoring",
     "хакер": "cybersecurity computer network operations monitoring screens",
-    "одесс": "Odesa port Black Sea", "порт": "seaport cargo cranes ships", "кораб": "ship navy cargo vessel",
+    "одесс": "Odesa port Black Sea", "порт": "seaport cargo cranes ships", "кораб": "ship cargo vessel maritime navigation",
+    "причал": "harbor pier quay moored cargo ships", "буксир": "harbor tugboat towing cargo vessel",
+    "понтон": "floating pontoon dock harbor", "сухогруз": "bulk carrier cargo ship",
+    "швартов": "mooring ropes cargo ship quay", "судн": "cargo ship vessel",
+    "пристань": "harbor pier quay", "тамож": "customs cargo inspection documents",
+    "насос": "industrial water pumps equipment", "очистки воды": "water purification treatment equipment",
+    "железнодорожн": "freight railway cargo tracks", "портальн": "cargo gantry crane terminal",
+    "пожар": "fire smoke firefighters emergency", "эсмин": "navy destroyer warship",
+    "фрегат": "navy frigate warship",
     "завод": "industrial factory workers", "переговор": "diplomatic negotiations leaders journalists cameras",
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
     "азербайдж": "Azerbaijan Baku", "израил": "Israel military border", "ливан": "Lebanon Beirut",
-    "энерг": "energy infrastructure power plant", "склад": "warehouse fire emergency workers",
+    "энерг": "energy infrastructure power plant", "склад": "warehouse storage logistics workers",
     # Military reports must request the visible action, not the abstract word
     # "war".  This separates an offensive/frontline from a Kremlin office or
     # an unrelated politician shot in a large mixed footage library.
@@ -246,7 +254,23 @@ GENERIC_VISUAL_QUERY = "international news, documentary footage"
 
 def fallback_visual_query(text: str) -> str:
     lowered = text.casefold()
-    terms = [english for stem, english in VISUAL_TERMS.items() if stem in lowered]
+    naval = bool(re.search(
+        r"\b(?:эсмин\w*|фрегат\w*|вмф)\b|\bвоенно-мор\w*"
+        r"|\b(?:военн|боев)\w*\s+(?:кораб|судн)\w*", lowered,
+    ))
+    port = bool(re.search(r"\bпорт(?:[ауеы]|ом|ов|ам|ами|ах|ов\w*)?\b", lowered))
+    terms = [english for stem, english in VISUAL_TERMS.items()
+             if (port if stem == "порт" else stem in lowered)]
+    maritime = bool(re.search(r"\bмор(?:е|я|ю|ем|ск\w*)\b|\bсудн\w*", lowered))
+    if naval:
+        terms = ["navy warship" if term in (VISUAL_TERMS["кораб"], VISUAL_TERMS["судн"])
+                 else term for term in terms]
+    if maritime and not naval:
+        terms.append("civilian maritime cargo ship harbor")
+    # A legal court/manifest is not a vessel/shipping manifest. Require the
+    # surrounding visible cargo/harbor context for these ambiguous words.
+    if "манифест" in lowered and (maritime or port or re.search(r"\b(?:груз|причал)\w*", lowered)):
+        terms.append("cargo shipping manifest documents")
     return ", ".join(dict.fromkeys(terms)) or GENERIC_VISUAL_QUERY
 
 
