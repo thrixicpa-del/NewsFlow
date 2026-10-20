@@ -106,6 +106,19 @@ from .footage import (
     search_youtube_videos,
     tokenize,
 )
+from .footage_block_bridge import (
+    assign_footage_block,
+    delete_footage_block,
+    import_footage_block_pairs,
+    preview_footage_block_import,
+    save_footage_block,
+)
+from .footage_block_bridge import (
+    montage_project_stem as _montage_project_stem,
+)
+from .footage_block_bridge import (
+    projection as footage_block_projection,
+)
 from .mixer import make_mix_plans, render_mixes
 from .observability import start_action_trace
 from .openai_client import HybridTextPool, OpenAIAPIError
@@ -2822,7 +2835,7 @@ def snapshot() -> dict:
         try:
             project = TimelineProject.load(path)
             output_path = Path(project.output_path) if project.output_path else (
-                Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+                Path(settings.montage_output_folder) / f"{_montage_project_stem(project)}.mp4"
             )
             remotion_path = output_path.with_suffix(".remotion.json")
             fcpxml_path = Path(project.davinci_xml_path) if project.davinci_xml_path else path.with_suffix(".fcpxml")
@@ -3001,6 +3014,7 @@ def snapshot() -> dict:
                 "voiceMapConfidence", 0.0
             ) or 0.0),
         } for scenario in scenarios],
+        **footage_block_projection(settings),
         "footageFolders": settings.footage_folders,
         "footageIndex": {
             "total": footage_total,
@@ -3037,6 +3051,7 @@ def snapshot() -> dict:
                             "stockTrim": settings.montage_stock_trim,
                             "stockUseLibrary": settings.montage_stock_use_library,
                             "stockHdOnly": settings.montage_stock_hd_only,
+                            "useFootageBlocks": settings.montage_use_footage_blocks,
                             "stockLibraryFolder": str(Path(settings.footage_download_folder) / "Стоки"),
                             "stockKeys": [{"id": key.id, "provider": key.provider, "label": key.label, "active": key.active} for key in settings.stock_api_keys],
                             "useScriptText": settings.montage_use_script_text,
@@ -15434,7 +15449,8 @@ def save_montage_settings(payload: dict) -> dict:
         if not isinstance(payload["stockUseLibrary"], bool):
             raise ValueError("Укажите режим использования библиотеки стоков")
         settings.montage_stock_use_library = payload["stockUseLibrary"]
-    for key, field in (("stockHdOnly", "montage_stock_hd_only"),):
+    for key, field in (("stockHdOnly", "montage_stock_hd_only"),
+                       ("useFootageBlocks", "montage_use_footage_blocks")):
         if key in payload:
             if not isinstance(payload[key], bool):
                 raise ValueError("Режим монтажа должен быть включён или выключен")
@@ -16698,6 +16714,12 @@ def prepare_montage(payload: dict) -> dict:
         raise ValueError("Выберите сценарий для монтажа")
     job = next((item for item in jobs if item.request.index == scenario_index and item.state == RunState.DONE), None)
     narration = job.result if job else ""
+    from .footage_blocks import get_block_snapshot
+    block_policy = payload.get("_blockPolicy") if callable(payload.get("_progress")) else None
+    if not isinstance(block_policy, dict):
+        block_policy = get_block_snapshot(settings, str(job.request.production_item_id if job else ""))
+    if block_policy.get("enabled") and str(block_policy.get("productionItemId", "")) != str(job.request.production_item_id if job else ""):
+        raise ValueError("Снимок блока не соответствует Product ID текущего сценария")
     voice_path = settings.voice_scenario_outputs.get(str(scenario_index + 1), "")
     if not voice_path or not Path(voice_path).is_file():
         raise ValueError("Добавьте MP3 к этому сценарию: он задаёт точную длину ролика")
@@ -16739,11 +16761,11 @@ def prepare_montage(payload: dict) -> dict:
     # index is the source of truth after indexing; scanning 20–30k files here
     # made parallel montage planning mostly disk-bound.  We only fall back to
     # a folder scan when there is no usable indexed footage at all.
-    indexed_count = 0 if stock_only else index.count(True)
+    indexed_count = 0 if stock_only or block_policy.get("enabled") else index.count(True)
     local_items = []
-    if not stock_only and not indexed_count:
+    if not stock_only and not indexed_count and not block_policy.get("enabled"):
         local_items = scan_folders(settings.footage_folders)
-    if not explicit_sources and not indexed_count and not local_items and not settings.montage_auto_web:
+    if not block_policy.get("enabled") and not explicit_sources and not indexed_count and not local_items and not settings.montage_auto_web:
         raise ValueError("Подключите папку с футажами или включите внешний поиск")
     if progress:
         progress("Планирование сцен", "Разбиваем текст под длительность озвучки")
@@ -16837,6 +16859,18 @@ def prepare_montage(payload: dict) -> dict:
     if not used_voice_map:
         scenes = fit_scene_plan_to_voice_duration(scenes, voice_duration, max_clip_duration=6.0)
     preparation_metrics["planning"] = (time.perf_counter() - preparation_started) * 1000
+    if block_policy.get("enabled"):
+        from .footage_block_bridge import prepare_block_project
+        def block_checkpoint():
+            if not _production_generation_is_current(settings):
+                raise InterruptedError("Монтаж отменён: производство было очищено")
+            _montage_wait_if_paused(settings, scenario_index)
+        return prepare_block_project(settings, scenes, block_policy, title=titles[scenario_index],
+            voice_path=voice_path, aspect_ratio=str(payload.get("aspectRatio", settings.montage_aspect_ratio)),
+            index=index, scenario_index=scenario_index, batch_usage=batch_usage,
+            checkpoint=block_checkpoint, progress=progress, voice_map_provenance=voice_map_provenance,
+            preparation_metrics=preparation_metrics, preparation_started=preparation_started)
+
     # Fast visual loop treats the slider as a target for how much of the
     # narration receives newly prepared footage.  After that target is reached
     # the selector first reuses the already prepared pool (including the same
@@ -17686,7 +17720,7 @@ def render_montage(payload: dict) -> dict:
     _apply_montage_continuity(project, settings)
     if project.manual_replacements:
         raise ValueError("Требуется ручная замена отмеченных сцен в сохранённом проекте")
-    output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+    output = Path(settings.montage_output_folder) / f"{_montage_project_stem(project)}.mp4"
     output_staging = _production_staging_folder(
         output.parent, settings.production_reset_generation, "montage",
     )
@@ -18242,6 +18276,11 @@ def _project_repair_settings(settings: Settings, project: TimelineProject) -> Se
     scoped = copy(settings)
     scoped.montage_aspect_ratio = project.aspect_ratio
     scoped.montage_stock_sources = list(settings.montage_stock_sources)
+    if project.source_policy.get("mode") == "block":
+        scoped.montage_source_mode = "block"
+        scoped._footage_block_policy = dict(project.source_policy["footageBlock"])
+        scoped.footage_folders = [scoped._footage_block_policy["root"]]
+        return scoped
     if project.source_policy:
         scoped.montage_source_mode = project.source_policy["mode"]
         scoped.montage_stock_sources = list(project.source_policy.get("sources", []))
@@ -18254,6 +18293,15 @@ def _project_repair_settings(settings: Settings, project: TimelineProject) -> Se
 def _apply_montage_continuity(project: TimelineProject, settings: Settings, *, index=None,
                               missing_paths=(), checkpoint=None) -> int:
     """One persisted policy for prepare, direct export, queue and cache repair."""
+    if project.source_policy.get("mode") == "block":
+        from .montage_blocks import fill_block_continuity
+        check_index = index or ClipIndex(app_data_root() / "footage-index.sqlite3")
+        changed = fill_block_continuity(project, app_data_root(), checkpoint=checkpoint,
+            duration_probe=lambda path: _cached_or_probed_montage_duration(check_index, path),
+            source_allowed=lambda item: _montage_screen_text_safe(check_index, item))
+        if changed:
+            project.selection_summary = _montage_selection_summary(project.clips)
+        return changed
     from .montage_continuity import resolve_project_continuity
     from .stock_media import source_is_hd
     check_index = index
@@ -18345,6 +18393,17 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
                                      created_paths: list[Path] | None = None,
                                      excluded_families: set[str] | None = None) -> list[FootageItem]:
     """Find a bounded, semantically relevant replacement for one broken slot."""
+    block_policy = getattr(settings, "_footage_block_policy", None)
+    if block_policy is not None:
+        from .footage_blocks import block_files
+        try:
+            candidates = block_files(block_policy["root"])
+        except (OSError, ValueError):
+            return []
+        random.Random(str(block_policy.get("seed", "")) + clip.narration).shuffle(candidates)
+        return [item for item in candidates
+                if _montage_clip_family_key(item.path) not in (excluded_families or set())
+                and _montage_screen_text_safe(index, item)]
     query = str(clip.visual_query_en or clip.narration or "news footage").strip()
     try:
         hits = index.search_many([query], limit=96)[0]
@@ -18774,7 +18833,11 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                     value = max(value, min(55, 42 + int(13 * current / total)))
             last_progress["value"] = value
             _montage_task_update(settings, index, status=stage, phase=stage, progress=value, detail=detail)
+        from .footage_blocks import get_block_snapshot
+        current_policy = get_block_snapshot(load_settings(), str(jobs_by_index[index].request.production_item_id or ""))
+        _montage_task_update(settings, index, footageBlock=current_policy)
         prepared = prepare_montage({"scenarioIndex": index, "aspectRatio": settings.montage_aspect_ratio,
+                                    "_blockPolicy": current_policy,
                                     "_progress": progress, "_downloadSemaphore": download_semaphore,
                                     "_batchFootageUsage": batch_footage_usage})
         project = prepared.get("preparedProject", {})
@@ -18856,7 +18919,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 settings, index, status="Рендер", phase="Завершаем видеоряд", progress=58,
                 detail=f"Добавлено футажей для хвоста: {tail_added}", projectPath=project_path,
             )
-        output = Path(settings.montage_output_folder) / f"{safe_filename(project.title)}.mp4"
+        output = Path(settings.montage_output_folder) / f"{_montage_project_stem(project)}.mp4"
         output_staging = _production_staging_folder(
             output.parent, settings.production_reset_generation, "montage",
         )
@@ -19768,6 +19831,14 @@ def _reset_cleanup_preflight(settings: Settings, folders: set[str]) -> None:
     footage_paths = {
         Path(value).expanduser().resolve() for value in settings.footage_folders if str(value).strip()
     }
+    # Manually declared blocks are original libraries even if their paths
+    # happen to overlap generated/download folders. Never apply the legacy
+    # generated-media exception to these explicitly protected roots.
+    block_roots = {Path(row["root"]).expanduser().resolve() for row in settings.footage_blocks}
+    for target in targets:
+        for root in block_roots:
+            if root == target or root.is_relative_to(target) or target.is_relative_to(root):
+                raise ValueError(f"Производственная папка «{target}» пересекается с блоком футажей «{root}».")
     generated_footage = {
         value for value in footage_paths
         if any(value == root or value.is_relative_to(root) for root in generated_roots)
@@ -19883,6 +19954,7 @@ def _clear_production_queue_locked(payload: dict) -> dict:
     settings.idea_raw_signals = []
     settings.idea_events = []
     settings.idea_production_items = []
+    settings.footage_block_assignments = {}
     settings.idea_rejected_items = []
     settings.idea_portfolio_summary = {}
     settings.idea_scenario_context = {}
@@ -19896,7 +19968,7 @@ def _clear_production_queue_locked(payload: dict) -> dict:
         "idea_plan", "youtube_suggested_topics", "idea_title_memory", "idea_raw_signals", "idea_events",
         "idea_rejected_items", "idea_portfolio_summary", "idea_suggested_topics",
         "idea_results", "idea_result_sources", "idea_title_metadata", "idea_scenario_context",
-        "idea_production_items", "voice_scenario_outputs", "voice_task_statuses", "voice_tts_jobs",
+        "idea_production_items", "footage_block_assignments", "voice_scenario_outputs", "voice_task_statuses", "voice_tts_jobs",
         "voice_tts_batches", "voice_active_tts_batch_id", "voice_import_summary",
         "pipeline_montage_outputs", "video_result_packages", "montage_task_statuses", "seo_queue",
         "youtube_publication_jobs", "youtube_publication_items", "youtube_publication_snapshots",
@@ -22303,6 +22375,16 @@ def main() -> None:
             result = apply_voice_range_preset(payload if isinstance(payload, dict) else {})
         elif command == "delete-voice-range-preset":
             result = delete_voice_range_preset(payload if isinstance(payload, dict) else {})
+        elif command == "save-footage-block":
+            result = save_footage_block(payload if isinstance(payload, dict) else {})
+        elif command == "delete-footage-block":
+            result = delete_footage_block(payload if isinstance(payload, dict) else {})
+        elif command == "preview-footage-block-import":
+            result = preview_footage_block_import(payload if isinstance(payload, dict) else {})
+        elif command == "import-footage-block-pairs":
+            result = import_footage_block_pairs(payload if isinstance(payload, dict) else {})
+        elif command == "assign-footage-block":
+            result = assign_footage_block(payload if isinstance(payload, dict) else {})
         elif command == "add-footage-folder":
             result = add_footage_folder(payload if isinstance(payload, dict) else {})
         elif command == "remove-footage-folder":

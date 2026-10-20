@@ -21,14 +21,23 @@ export function readStrictUtf8CoverText(path: string, io: StrictTextIo = DEFAULT
   if (bytes.byteLength > MAX_COVER_TEXT_IMPORT_BYTES) {
     throw new Error('TXT с текстами обложек больше 1 МБ. Разделите его на несколько файлов.');
   }
+  return decodeStrictUtf8(bytes, 'TXT с текстами обложек');
+}
+
+/** Block pair files have no arbitrary pair/size cap and are never truncated. */
+export function readStrictUtf8FootageBlockText(path: string): string {
+  return decodeStrictUtf8(readFileSync(path), 'TXT с назначениями блоков');
+}
+
+function decodeStrictUtf8(bytes: Buffer, label: string): string {
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
   } catch {
-    throw new Error('TXT с текстами обложек должен быть корректным UTF-8. ANSI/legacy-кодировки не поддерживаются.');
+    throw new Error(`${label} должен быть корректным UTF-8. ANSI/legacy-кодировки не поддерживаются.`);
   }
   if (FORBIDDEN_CONTROL_CHARACTERS.test(text)) {
-    throw new Error('TXT с текстами обложек содержит недопустимые управляющие символы. Используйте обычный UTF-8 текст.');
+    throw new Error(`${label} содержит недопустимые управляющие символы. Используйте обычный UTF-8 текст.`);
   }
   return text;
 }
