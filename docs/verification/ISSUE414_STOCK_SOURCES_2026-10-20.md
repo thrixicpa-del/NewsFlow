@@ -568,3 +568,42 @@ download budget. One earlier429 asset was retried once only after expiry; no
 cooldown was cleared. License/hash receipts and initial failures remain private
 under `airport-100/pool-recovery`. This inventory is not itself a claim that
 all24 files are suitable for all20 scenes; native selection and MP4 review follow.
+
+The 24-original normal UI attempt saved **19 accepted clips and one missing
+scene (90–96s)**, so correctly refused export at100% uniqueness. No repeated
+source or lower threshold was substituted. Its guardPASS and full failure
+receipt remain under `unique100-long`; the earlier600s observer timeout remains
+separate evidence. The private observer budget was enlarged to1800s solely to
+allow native screening to finish, retaining4CPU/4GiB and every quality gate.
+
+Two further concrete defects were reproduced RED and corrected:
+
+- Broad-title cached video could precede an exact-query cached image. Cache
+  selection now exhausts lexical video/image before broad video/image. The
+  original query still determines CLIP relevance; matched video retains its
+  priority when present. A matching radar image therefore precedes an unmatched
+  airplane video, without disabling whole-library recovery.39related testsPASS.
+- Explicitly empty airport terminals still generated aircraft-flight queries.
+  The actual phrase `терминал опустел` now generates `empty airport terminal`;
+  negated emptiness and non-aviation cargo terminals are regression negatives.
+  The new actual word map keeps all277words, identity, audio/script hashes,
+  segment boundaries and timings unchanged; the native scene3 query is corrected.
+
+Combined final source regression: **344tests/355.136s, functionalPASS(skip1),
+production guardPASS**. Runtime was shared with the real UI run on the same
+four CPU cores; it is not a comparable montage performance regression metric.
+The focused combined104tests/15.536s alsoPASS with guardPASS. No settings,
+threshold, uniqueness, source licensing or text eligibility was relaxed.
+
+Three specifically discovered licensed photos were subsequently fetched for
+the remaining coverage and radar/terminal context: no new search queries,
+**27originals and269579445newbytes**, still under300MB/24GiB storage budgets.
+This adapts the private candidate-count plan based on observed coverage; it
+does not change the user's montage uniqueness or quality limits. Previous24
+original hashes and receipts remain unchanged. `final-three.json` records
+real CLIP negatives for their aircraft query; none is promoted to eligible
+merely to fill a slot. Only native scene-specific checks may select them.
+
+Final source1020ce0 independent Windows-native39473556731SUCCESS; its
+CI39473556907FAIL remains the known stale Frozen/source lock. Final source
+follow-up validation and actual completed MP4 evidence are recorded below.

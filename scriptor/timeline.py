@@ -284,6 +284,10 @@ def fallback_visual_query(text: str) -> str:
                      else term for term in terms]
         if not re.search(r"\b(?:танк|брон|солдат|пехот|назем|машин)\w*", lowered):
             terms = [term for term in terms if term != VISUAL_TERMS["военн"]]
+        if re.search(r"\bтерминал\w*\s+(?:(?:совсем|полностью)\s+)?опустел\w*\b", lowered):
+            terms = [term for term in terms if term not in (
+                VISUAL_TERMS["аэропорт"], VISUAL_TERMS["аэродром"], VISUAL_TERMS["самол"], "aircraft flight")]
+            terms.append("empty airport terminal")
     if "диспетч" in lowered:
         terms.append("air traffic control tower operators" if aviation else "operations control room operators")
     if maritime and not naval and not aviation:

@@ -123,6 +123,33 @@ class StockSelectionTests(unittest.TestCase):
         self.assertNotIn('', visited)
         self.assertEqual(self.calls, [])
 
+    def test_query_matched_image_precedes_only_broad_video_but_not_matched_video(self):
+        query = 'radar antenna monitoring equipment'
+        image_path = self.root / 'radar.jpg'
+        image_path.write_bytes(b'isolated radar image')
+        image = SimpleNamespace(**{**vars(self.candidate), 'asset_id': 'radar-image',
+            'kind': 'image', 'title': 'Radar antenna', 'local_path': image_path})
+        self.candidate.title = 'Airplane spotting'
+        for matched_video in (False, True):
+            with self.subTest(matched_video=matched_video):
+                selector = self.selector('hybrid', candidates=[])
+                selector.index.score_file = lambda path, _query: .8 if path == self.original else .7
+                cached_calls = []
+                def cached(value, *, kind='video', matched=matched_video, calls=cached_calls):
+                    calls.append((value, kind))
+                    if kind == 'image' and value == query:
+                        return [image]
+                    if kind == 'video' and (value == '' or matched and value == query):
+                        return [self.candidate]
+                    return []
+                selector.service.cached = cached
+                with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+                    choice = selector.select({**self.scene, 'visual_query_en': query}, {}, [query], used_families=set())
+                self.assertIsNotNone(choice)
+                self.assertEqual(choice.provenance['kind'], 'video' if matched_video else 'image')
+                self.assertNotIn(('', 'video'), cached_calls, 'Lexical matches must be tried before either broad scan')
+                self.assertEqual(self.calls, [])
+
     def test_recent_but_suitable_library_material_avoids_provider_search(self):
         selector = self.selector("stock", candidates=[])
         selector.service.cached = lambda *_a, **_k: [self.candidate]

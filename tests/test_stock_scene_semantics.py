@@ -7,6 +7,13 @@ from scriptor.timeline import GENERIC_VISUAL_QUERY, fallback_visual_query
 
 
 class AviationSceneQueryTests(unittest.TestCase):
+    def test_empty_airport_terminal_does_not_request_aircraft_in_flight(self):
+        query = fallback_visual_query('Прибрежный аэропорт давно не принимал пассажиров, терминал опустел.')
+        self.assertIn('empty airport terminal', query)
+        self.assertNotIn('aircraft', query)
+        self.assertNotIn('empty airport terminal', fallback_visual_query('Грузовой терминал опустел.'))
+        self.assertNotIn('empty airport terminal', fallback_visual_query('Аэропорт работает, терминал не опустел.'))
+
     def test_airport_objects_are_concrete_without_a_maritime_substitution(self):
         cases = (
             ('Диспетчер аэропорта увидел самолет на взлетной полосе.', 'aircraft'),

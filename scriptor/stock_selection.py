@@ -180,7 +180,7 @@ class StockSceneSelector:
             if len(found) < limit:
                 break
 
-    def _stock(self, scene, queries, used, *, kind, cached_only=False, history_families=()):
+    def _stock(self, scene, queries, used, *, kind, cached_only=False, history_families=(), broad_only=False):
         if not self.service.enabled:
             return None
         seen = set()
@@ -191,10 +191,9 @@ class StockSceneSelector:
             # ladder before any provider call. Allowed-source and visual gates
             # still apply; disabling library reuse does not delete originals.
             if self.use_library:
-                # A relevant original may have a generic or foreign-language
-                # title. After lexical matches, scan the remaining library
-                # once; this empty query never reaches provider discovery.
-                for query in dict.fromkeys([*queries, ""]):
+                # The caller exhausts lexical video/image matches before a
+                # generic-title library scan. Empty queries stay cache-only.
+                for query in dict.fromkeys([""] if broad_only else queries):
                     self.checkpoint()
                     cached_batches = getattr(self.service, "cached_batches", None)
                     if cached_batches is not None:
@@ -294,11 +293,14 @@ class StockSceneSelector:
         if self.mode != "stock":
             choice = self._local(scene, local_hits, used_families, strict=self.mode == "hybrid", history_families=history_families)
         if choice is None and self.mode != "local" and self.use_library:
-            choice = self._stock(scene, queries, used_families, kind="video",
-                                 cached_only=True, history_families=history_families)
-            if choice is None:
-                choice = self._stock(scene, queries, used_families, kind="image",
-                                     cached_only=True, history_families=history_families)
+            for broad_only in (False, True):
+                for kind in ("video", "image"):
+                    choice = self._stock(scene, queries, used_families, kind=kind,
+                        cached_only=True, history_families=history_families, broad_only=broad_only)
+                    if choice is not None:
+                        break
+                if choice is not None:
+                    break
         if choice is None and self.mode != "local":
             # History is a preference across videos, never a bypass of this
             # video's uniqueness. Try fresh families before recent ones.
