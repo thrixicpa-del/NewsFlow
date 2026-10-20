@@ -454,14 +454,19 @@ class ChatGPTBrowserDomTests(unittest.IsolatedAsyncioTestCase):
             await self.client._wait_for_answer(self.page, baseline_count=1, download_baseline_count=1)
         self.assertEqual(self.downloads, [])
 
-    async def test_completed_response_without_file_is_not_reported_as_no_answer(self):
+    async def test_completed_prose_without_file_cannot_release_the_browser_slot(self):
+        from scriptor.chatgpt_browser import ChatGPTBrowserError
+
         await self.page.set_content(self.response(button=False))
         responses = []
-        text = await self.client._wait_for_answer(self.page, baseline_count=0,
-            download_baseline_count=0, on_response=responses.append)
-        self.assertIn("ChatGPT", text)
-        self.assertEqual(len(responses), 1)
-        self.assertEqual(await responses[0].locator("button").count(), 0)
+        # Explicit finite diagnostic deadline keeps this negative test bounded;
+        # the production client waits until a real file or user cancellation.
+        self.client.timeout_seconds = 0.2
+        with self.assertRaisesRegex(ChatGPTBrowserError, "новый готовый ответ"):
+            await self.client._wait_for_answer(self.page, baseline_count=0,
+                download_baseline_count=0, on_response=responses.append)
+        self.assertEqual(responses, [])
+        self.assertFalse(self.page.is_closed())
 
     async def test_ambiguous_response_files_are_rejected_without_downloading(self):
         from scriptor.chatgpt_browser import _ASSISTANT_SELECTOR, ChatGPTBrowserError

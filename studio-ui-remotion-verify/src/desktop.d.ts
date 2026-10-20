@@ -25,6 +25,8 @@ interface NewsFlowSnapshot {
     requirementsMode: 'text' | 'file';
     requirementsText: string;
     requirementsFile: string;
+    requirementsFiles?: string[];
+    running?: boolean;
     companionPrompt: string;
     minimumChars: number;
     maximumChars: number;
@@ -179,6 +181,7 @@ interface Window {
     chooseJson: () => Promise<string>;
     choosePromptText: () => Promise<string>;
     chooseBrowserScenarioRequirements: () => Promise<string>;
+    chooseBrowserScenarioRequirementsFiles: () => Promise<string[]>;
     chooseCoverTextTriples: () => Promise<string>;
     chooseCoverPromptPairs: () => Promise<string>;
     chooseScenarioTexts: () => Promise<Array<{ title: string; text: string }>>;

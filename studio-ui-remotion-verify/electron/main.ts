@@ -499,6 +499,13 @@ handleTrusted('newsflow:choose-browser-scenario-requirements', async () => {
   });
   return result.canceled ? '' : result.filePaths[0] || '';
 });
+handleTrusted('newsflow:choose-browser-scenario-requirements-files', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Требования TXT / Markdown', extensions: ['txt', 'md', 'markdown'] }],
+  });
+  return result.canceled ? [] : result.filePaths;
+});
 handleTrusted('newsflow:choose-cover-text-triples', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],

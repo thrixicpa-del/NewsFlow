@@ -1,8 +1,135 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserTopicScenarios, fallback } from "../../App";
 
 describe("browser topic scenarios", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("shows the current TXT export failure while protecting the completed text and preserving historical manual results", () => {
+    const exportError = "ChatGPT вернул сценарий, но TXT не удалось сохранить: диск недоступен";
+    const data = { ...fallback, scenarios: [{
+      index: 0, productionItemId: "export-failure", title: "Export failure", state: "Ошибка",
+      result: "Completed browser text retained in the queue", error: exportError,
+    }, {
+      index: 1, productionItemId: "manual-result", title: "Manual result", state: "Ошибка",
+      result: "Historical manually saved text", error: "Старый технический статус",
+    }] };
+    const command = vi.fn(async () => data);
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    const failedRow = screen.getByText("Export failure").closest("tr")!;
+    expect(within(failedRow).getByText(`Ошибка: ${exportError}`)).toBeTruthy();
+    expect(within(failedRow).queryByText("Готово")).toBeNull();
+    expect((screen.getByLabelText("Выбрать: Export failure") as HTMLInputElement).disabled).toBe(true);
+    const manualRow = screen.getByText("Manual result").closest("tr")!;
+    expect(within(manualRow).getByText("Готово")).toBeTruthy();
+    expect(within(manualRow).queryByText(/Старый технический статус/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Выбрать все новые темы" }));
+    expect((screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(command).not.toHaveBeenCalled();
+  });
+
+  it("adds all selected requirement files without a count cap and removes only the requested file", async () => {
+    const files = Array.from({ length: 24 }, (_, index) => `C:/disposable/requirements-${index}.txt`);
+    const choose = vi.fn().mockResolvedValueOnce(files).mockResolvedValueOnce([files[0], "C:/disposable/style.md"]);
+    vi.stubGlobal("newsflowDesktop", { chooseBrowserScenarioRequirementsFiles: choose });
+    const data = { ...fallback, browserTopicScenarios: { ...fallback.browserTopicScenarios, requirementsMode: "file" as const } };
+    const command = vi.fn(async () => data);
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    fireEvent.click(screen.getByRole("button", { name: "Добавить файлы" }));
+    await waitFor(() => expect(screen.getByDisplayValue(files[23])).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Добавить файлы" }));
+    await waitFor(() => expect(screen.getByDisplayValue("C:/disposable/style.md")).toBeTruthy());
+    expect(screen.getAllByDisplayValue(files[0])).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: `Удалить файл: ${files[0]}` }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-browser-topic-scenario-settings", expect.objectContaining({
+      requirementsFiles: [...files.slice(1), "C:/disposable/style.md"], requirementsFile: files[1],
+    })));
+  });
+
+  it("loads the legacy single path and allows clearing it without reviving the fallback", async () => {
+    const data = { ...fallback, browserTopicScenarios: { ...fallback.browserTopicScenarios,
+      requirementsMode: "file" as const, requirementsFiles: undefined, requirementsFile: "C:/disposable/legacy.md" } };
+    const command = vi.fn(async () => data);
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    expect(screen.getByDisplayValue("C:/disposable/legacy.md")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Удалить файл: C:/disposable/legacy.md" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить настройки" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("save-browser-topic-scenario-settings", expect.objectContaining({
+      requirementsFiles: [], requirementsFile: "",
+    })));
+  });
+
+  it("keeps selected files when the native chooser is cancelled", async () => {
+    vi.stubGlobal("newsflowDesktop", { chooseBrowserScenarioRequirementsFiles: vi.fn().mockResolvedValue([]) });
+    const data = { ...fallback, browserTopicScenarios: { ...fallback.browserTopicScenarios,
+      requirementsMode: "file" as const, requirementsFiles: ["C:/disposable/retained.txt"] } };
+    render(<BrowserTopicScenarios data={data} command={vi.fn(async () => data)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Добавить файлы" }));
+    await waitFor(() => expect(screen.getByDisplayValue("C:/disposable/retained.txt")).toBeTruthy());
+  });
+
+  it("can cancel a restored active queue without selecting a topic and shows attachment progress", async () => {
+    const data = { ...fallback, browserTopicScenarios: { ...fallback.browserTopicScenarios, running: true }, scenarios: [{
+      index: 0, productionItemId: "pending", title: "Pending", state: "В работе", result: "",
+      error: "Ожидается готовность вложений. Можно прикрепить файлы вручную.",
+    }] };
+    const command = vi.fn(async () => data);
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    expect(screen.getByText(data.scenarios[0].error)).toBeTruthy();
+    const cancel = screen.getByRole("button", { name: "Отменить генерацию" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    fireEvent.click(cancel);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("cancel-browser-topic-scenarios", {}));
+  });
+
+  it("does not reset draft settings when only the running snapshot changes", () => {
+    const data = { ...fallback };
+    const command = vi.fn(async () => data);
+    const { rerender } = render(<BrowserTopicScenarios data={data} command={command} />);
+    fireEvent.change(screen.getByLabelText("Сопроводительное письмо"), { target: { value: "Unsaved draft" } });
+    rerender(<BrowserTopicScenarios data={{ ...data, browserTopicScenarios: { ...data.browserTopicScenarios, running: true } }} command={command} />);
+    expect((screen.getByLabelText("Сопроводительное письмо") as HTMLTextAreaElement).value).toBe("Unsaved draft");
+  });
+
+  it("does not dispatch generation if cancellation occurs while launch settings are saving", async () => {
+    const data = { ...fallback, scenarios: [{ index: 0, productionItemId: "pending-save", title: "Pending save", state: "Ожидает", result: "", error: "" }] };
+    let release!: () => void;
+    const saving = new Promise<void>((resolve) => { release = resolve; });
+    const command = vi.fn(async (name: string) => {
+      if (name === "save-browser-topic-scenario-settings") await saving;
+      return data;
+    });
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    fireEvent.click(screen.getByLabelText("Выбрать: Pending save"));
+    fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }));
+    fireEvent.click(screen.getByRole("button", { name: "Отменить генерацию" }));
+    await waitFor(() => expect(command).toHaveBeenCalledWith("cancel-browser-topic-scenarios", { batchId: expect.any(String) }));
+    await act(async () => { release(); });
+    expect(command.mock.calls.filter(([name]) => name === "generate-browser-topic-scenarios")).toHaveLength(0);
+  });
+
+  it("cancels the same launch ID after generation dispatch before Core has claimed its queue", async () => {
+    const data = { ...fallback, scenarios: [{ index: 0, productionItemId: "startup-race", title: "Startup race", state: "Ожидает", result: "", error: "" }] };
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const command = vi.fn(async (name: string, _payload?: Record<string, unknown>) => {
+      if (name === "generate-browser-topic-scenarios") await pending;
+      return data;
+    });
+    render(<BrowserTopicScenarios data={data} command={command} />);
+    fireEvent.click(screen.getByLabelText("Выбрать: Startup race"));
+    fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" }));
+    try {
+      await waitFor(() => expect(command.mock.calls.some(([name]) => name === "generate-browser-topic-scenarios")).toBe(true));
+      const generation = command.mock.calls.find(([name]) => name === "generate-browser-topic-scenarios")![1];
+      expect(generation?.batchId).toEqual(expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i));
+      fireEvent.click(screen.getByRole("button", { name: "Отменить генерацию" }));
+      await waitFor(() => expect(command).toHaveBeenCalledWith("cancel-browser-topic-scenarios", { batchId: generation!.batchId }));
+    } finally {
+      await act(async () => { release(); });
+    }
+  });
   it("refreshes completed topics while another tab is pending without resetting draft settings", async () => {
     vi.useFakeTimers();
     let release!: () => void;
@@ -26,7 +153,7 @@ describe("browser topic scenarios", () => {
       fireEvent.click(screen.getByLabelText("Выбрать: Fast topic"));
       await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Создать сценарии в ChatGPT" })); });
       expect(command).toHaveBeenCalledWith("generate-browser-topic-scenarios", {
-        indices: [0], productionItemIds: ["fast"],
+        indices: [0], productionItemIds: ["fast"], batchId: expect.any(String),
       });
       fireEvent.change(screen.getByLabelText("Сопроводительное письмо"), { target: { value: "Unsaved draft" } });
       await act(async () => { await vi.advanceTimersByTimeAsync(1200); });
@@ -191,7 +318,7 @@ describe("browser topic scenarios", () => {
 
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "generate-browser-topic-scenarios",
-      { indices: [4], productionItemIds: ["production-immutable-4"] },
+      { indices: [4], productionItemIds: ["production-immutable-4"], batchId: expect.any(String) },
     ));
     expect(command).toHaveBeenCalledWith("save-browser-topic-scenario-settings", expect.objectContaining({
       projectUrl: "https://chatgpt.com/g/project",
