@@ -330,32 +330,37 @@ class StockService:
 
     def _json(self, provider: str, endpoint: str, params: dict | None = None) -> dict:
         self._checkpoint()
-        key = self._key(provider)
-        params = dict(params or {})
-        headers = {'User-Agent': 'NewsFlow/1.0 (stock media discovery)', 'Accept': 'application/json'}
-        if provider == 'pixabay':
-            params['key'] = key
-        elif key:
-            headers['Authorization'] = ('Bearer ' if provider == 'coverr' else '') + key
-        url = endpoint + (('?' + urlencode(params)) if params else '')
-        self._validate_url(provider, url)
-        try:
-            with self._api_slot(provider), self._open(Request(url, headers=headers), provider=provider, authenticated=bool(key)) as response:
-                raw = response.read(_MAX_JSON_BYTES + 1)
-                if len(raw) > _MAX_JSON_BYTES:
-                    raise StockSourceError('Provider response is too large')
-                result = json.loads(raw)
-                if not isinstance(result, dict):
-                    raise StockSourceError('Unsupported provider response')
-                return result
-        except HTTPError as error:
-            self._status(provider, key, error)
-            error.close()
-            raise StockSourceError('Provider rejected request') from None
-        except InterruptedError:
-            raise
-        except (OSError, ValueError):
-            raise StockSourceError('Provider request failed') from None
+        with self._api_slot(provider):
+            # Waiting requests must observe cooldown/key rejection recorded by
+            # earlier requests. Keep failure publication inside the same slot.
+            key = self._key(provider)
+            params = dict(params or {})
+            headers = {'User-Agent': 'NewsFlow/1.0 (stock media discovery)', 'Accept': 'application/json'}
+            if provider == 'pixabay':
+                params['key'] = key
+            elif key:
+                headers['Authorization'] = ('Bearer ' if provider == 'coverr' else '') + key
+            url = endpoint + (('?' + urlencode(params)) if params else '')
+            self._validate_url(provider, url)
+            try:
+                with self._open(Request(url, headers=headers), provider=provider, authenticated=bool(key)) as response:
+                    raw = response.read(_MAX_JSON_BYTES + 1)
+                    if len(raw) > _MAX_JSON_BYTES:
+                        raise StockSourceError('Provider response is too large')
+                    result = json.loads(raw)
+                    if not isinstance(result, dict):
+                        raise StockSourceError('Unsupported provider response')
+                    return result
+            except HTTPError as error:
+                try:
+                    self._status(provider, key, error)
+                finally:
+                    error.close()
+                raise StockSourceError('Provider rejected request') from None
+            except InterruptedError:
+                raise
+            except (OSError, ValueError):
+                raise StockSourceError('Provider request failed') from None
 
     @staticmethod
     def _query(query: str, kind: str) -> str:

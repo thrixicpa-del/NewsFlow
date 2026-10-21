@@ -116,9 +116,26 @@ class StockDownloadQueue:
         elapsed = max(.001, time.perf_counter() - self._started)
         self._state['elapsedSeconds'] = round(elapsed, 3)
         self._state['bytesPerSecond'] = round(self._state['bytesDownloaded'] / elapsed)
-        temporary = self.path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(self._state), encoding='utf-8')
-        os.replace(temporary, self.path)
+        # Manual preparation and a queue worker can publish independently.
+        # Keep their staging files separate, and tolerate a snapshot reader
+        # briefly holding the destination open without delete sharing on Windows.
+        temporary = self.path.with_name(f'.{self.path.name}.{self._state["runId"]}.tmp')
+        try:
+            temporary.write_text(json.dumps(self._state), encoding='utf-8')
+            deadline = time.monotonic() + 8.0
+            while True:
+                try:
+                    os.replace(temporary, self.path)
+                    break
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.05)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         with self.path.with_suffix('.jsonl').open('a', encoding='utf-8') as stream:
             stream.write(json.dumps({**self._state, 'event': event}) + '\n')
 
