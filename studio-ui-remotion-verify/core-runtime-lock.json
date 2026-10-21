@@ -1,23 +1,24 @@
 {
   "format": 1,
   "appVersion": "2.1.152",
-  "coreRevision": "core-bin-2.1.152-observability-r47",
-  "coreExeSha256": "fd20ccf421226f9ac52540ea6fde9427a6cac6201283b641b2ff4086811e4f9b",
-  "coreExeSize": 34438932,
-  "builtFromGitSha": "a90f18ac2661ced8c911d990b91abd7e5d5fa0a4",
+  "coreRevision": "core-bin-2.1.152-security-r48",
+  "coreExeSha256": "9b4aa652dbbcfe146b534597ad4de89740469d51c97f278c845c21de437f3ffe",
+  "coreExeSize": 21498333,
+  "builtFromGitSha": "d9383c716cbfaa11d08404707fee64ce5ff9eacc",
   "sourceGitBlobs": {
-    "scriptor/bridge.py": "ea2ce8a818d4ddc224b260323ce7e1423851221c",
-    "scriptor/ai_index.py": "8dba2a30cb6c94f84cee5b1defe6b7bac6d72a73",
-    "scriptor/config.py": "9a661d025d804ff34f495cdb1f07978bcddedf91",
-    "scriptor/timeline.py": "1a6cf1af7637db1ea755120489d6433e0a9c51d6",
-    "scriptor/media_health.py": "db7b29b25bc1370d210258d70265deac1de0ddb4",
+    "scriptor/bridge.py": "6df435d8a82b386827a80a346b471c9646748349",
+    "scriptor/ai_index.py": "30155c9b3509100975c208ea9623fb1f46d52071",
+    "scriptor/onnx_clip.py": "5360dee2dea81988f94affa666d2283c6679c7c8",
+    "scriptor/config.py": "f4afc4d80e390f27ef928b473e1cbe2d79749703",
     "scriptor/core.py": "bba3e8e4cfcb690db47eff8baf3222c425283f4a",
     "scriptor/runner.py": "ac9f432e43d1018d22a54b012068796a84b71de1",
     "scriptor/story_planner.py": "7e4131fb560c064fae8dcb4a252ba51c4b3c2d35",
     "scriptor/openai_client.py": "eb1d167f4ccd3369441dab5532e5dc1440cb4bcd",
+    "scriptor/timeline.py": "1a6cf1af7637db1ea755120489d6433e0a9c51d6",
+    "scriptor/media_health.py": "db7b29b25bc1370d210258d70265deac1de0ddb4",
     "scriptor/thumbnail_prompt_v2.py": "1588206d95ce23dd75a61c0b64fae62056b4f6cf",
     "scriptor/observability.py": "942796a1bc94ceb3994c00991f6f9cc0342456ba",
     "bridge_main.py": "abb479996f873ca96d8f9efc6805608cb4a4dd7b",
-    "Scriptor.spec": "a1e07d42165dce70d0f381a9dabce2d08a06462a"
+    "Scriptor.spec": "2396f19e9b28b4d0dee0b96f6ae62439e64ebe3f"
   }
 }

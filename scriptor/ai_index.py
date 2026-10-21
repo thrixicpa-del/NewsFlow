@@ -385,7 +385,7 @@ class ClipIndex:
                     if shared is None:
                         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
                         os.environ.setdefault("TQDM_DISABLE", "1")
-                        from fastembed import ImageEmbedding, TextEmbedding
+                        from .onnx_clip import ImageEmbedding, TextEmbedding
                         threads = max(4, min(16, (os.cpu_count() or 8) // 2))
                         shared = (
                             ImageEmbedding(IMAGE_MODEL, cache_dir=cache, threads=threads, cuda="auto"),

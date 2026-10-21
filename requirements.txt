@@ -1,12 +1,12 @@
 playwright>=1.54,<2
 tkinterdnd2>=0.4,<1
-fastembed>=0.8,<1
+onnxruntime>=1.30,<2
+huggingface-hub>=1,<2
+tokenizers>=0.23,<1
 imageio-ffmpeg>=0.6,<1
 opencv-python-headless>=4.12,<6
-pillow>=12,<13
+pillow>=13,<14
 numpy>=2,<3
-# Creates reusable transparent portrait PNGs for the cover face library.
-rembg>=2.0,<3
 yt-dlp>=2026.7,<2027
 # YouTube OAuth Desktop flow, uploads and private Analytics API access.
 google-auth-oauthlib>=1.2,<2
