@@ -94,11 +94,11 @@
         "to": "core/scriptor"
       },
       {
-        "from": "../.core-bin-2.1.152-review-r51/NewsFlowCore",
+        "from": "../.core-bin-2.1.152-stock-r52/NewsFlowCore",
         "to": "core-bin"
       },
       {
-        "from": "../.core-bin-2.1.152-review-r51/NewsFlowCore/_internal/_tcl_data",
+        "from": "../.core-bin-2.1.152-stock-r52/NewsFlowCore/_internal/_tcl_data",
         "to": "core-tcl-data"
       },
       {
