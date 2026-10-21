@@ -4,11 +4,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scriptor.ai_index import ClipIndex
-from scriptor.footage import (FootageItem, download_best_youtube_segment, rank_items,
-                              scan_folders)
+from scriptor.footage import (
+    FootageItem,
+    download_best_youtube_segment,
+    rank_items,
+    scan_folders,
+)
 
 
 class FootageLibraryTests(unittest.TestCase):
+    def test_scans_wikimedia_ogv_for_library_reuse(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "Ocean surface waves.OGV"
+            source.write_bytes(b"downloaded-media")
+            self.assertEqual([item.path for item in scan_folders([folder])], [str(source.resolve())])
+
     def test_incremental_index_reuses_unchanged_clips_reindexes_changes_and_removes_missing(self):
         """The footage maintenance path must not reopen unchanged video files."""
         import numpy as np

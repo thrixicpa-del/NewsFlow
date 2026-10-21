@@ -7,8 +7,7 @@ from pathlib import Path
 from .core import safe_filename
 from .timeline import ffmpeg_executable
 
-
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".ogv"}
 
 
 def build_cut_command(source: Path, target_pattern: Path, duration: float = 6.0,
@@ -45,7 +44,7 @@ def cut_sources(sources: list[str], output_root: Path, duration: float = 6.0,
         if progress:
             progress({"current": number, "total": len(valid), "source": source.name, "stage": "cutting"})
         result = subprocess.run(build_cut_command(source, pattern, duration, fps, bitrate), capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", creationflags=flags)
+                                text=True, encoding="utf-8", errors="replace", creationflags=flags, check=False)
         if result.returncode:
             detail = (result.stderr or result.stdout or "FFmpeg завершился с ошибкой")[-2500:]
             raise RuntimeError(f"{source.name}: {detail}")
@@ -83,7 +82,7 @@ def cut_single_clip(source: Path, output_root: Path, duration: float = 6.0,
         "-bufsize", "8M", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(partial),
     ]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                            creationflags=flags)
+                            creationflags=flags, check=False)
     if result.returncode:
         detail = (result.stderr or result.stdout or "FFmpeg завершился с ошибкой")[-2500:]
         raise RuntimeError(f"{source.name}: {detail}")
