@@ -467,6 +467,9 @@ class Settings:
     output_folder: str = field(default_factory=lambda: str(default_output_folder()))
     idea_output_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Идеи"))
     footage_folders: list[str] = field(default_factory=list)
+    footage_blocks: list[dict] = field(default_factory=list)
+    footage_block_assignments: dict[str, dict] = field(default_factory=dict)
+    montage_use_footage_blocks: bool = False
     footage_download_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Футажи из интернета"))
     cutter_output_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Нарезки"))
     cutter_sources: list[str] = field(default_factory=list)
@@ -1116,6 +1119,33 @@ def _newsflow_auth_library_candidates() -> list[dict]:
     return candidates
 
 
+def _validate_footage_block_settings(data: dict) -> None:
+    """Reject damaged new fields before a normal save can replace their state."""
+    rows = data.get("footage_blocks", [])
+    assignments = data.get("footage_block_assignments", {})
+    if not isinstance(rows, list) or not isinstance(assignments, dict):
+        raise TypeError("Повреждены настройки блоков футажей")
+    identities, names = set(), set()
+    for row in rows:
+        if (not isinstance(row, dict)
+                or any(not isinstance(row.get(key), str) or not row[key].strip() for key in ("id", "name", "root"))
+                or isinstance(row.get("videoCount", 0), bool)
+                or not isinstance(row.get("videoCount", 0), int) or row.get("videoCount", 0) < 0):
+            raise ValueError("Повреждена запись блока футажей")
+        name = " ".join(row["name"].split()).casefold()
+        if row["id"] in identities or name in names:
+            raise ValueError("Названия и ID блоков футажей должны быть уникальны")
+        identities.add(row["id"])
+        names.add(name)
+    for identity, assignment in assignments.items():
+        if (not isinstance(identity, str) or not identity.strip() or not isinstance(assignment, dict)
+                or not isinstance(assignment.get("blockId"), str) or not assignment["blockId"].strip()
+                or assignment.get("origin") not in {"manual", "import"}):
+            raise ValueError("Повреждено назначение блока футажей")
+    if not isinstance(data.get("montage_use_footage_blocks", False), bool):
+        raise TypeError("Повреждён режим блоков футажей")
+
+
 def load_settings() -> Settings:
     path = config_path()
     try:
@@ -1128,6 +1158,10 @@ def load_settings() -> Settings:
         raise SettingsFileCorruptError(path) from error
     if not isinstance(data, dict):
         raise SettingsFileCorruptError(path)
+    try:
+        _validate_footage_block_settings(data)
+    except (TypeError, ValueError) as error:
+        raise SettingsFileCorruptError(path) from error
     try:
         try:
             stored_schema_version = max(0, int(data.get("schema_version", 0) or 0))
@@ -1214,6 +1248,9 @@ def load_settings() -> Settings:
             output_folder=migrate_standard_folder(data.get("output_folder"), "Исходники", "Сценарии"),
             idea_output_folder=migrate_standard_folder(data.get("idea_output_folder"), "Идеи", "Идеи"),
             footage_folders=data.get("footage_folders", []),
+            footage_blocks=data.get("footage_blocks", []),
+            footage_block_assignments=data.get("footage_block_assignments", {}),
+            montage_use_footage_blocks=bool(data.get("montage_use_footage_blocks", False)),
             footage_download_folder=migrate_newsflow_storage(data.get("footage_download_folder"), "Футажи из интернета"),
             cutter_output_folder=migrate_standard_folder(data.get("cutter_output_folder"), "Нарезки", "Нарезки"),
             cutter_sources=data.get("cutter_sources", []),
@@ -1506,6 +1543,7 @@ def load_settings() -> Settings:
         settings._observed_youtube_key = data.get("youtube_api_key_protected", "")
         settings._observed_cover_key_labels = list(settings.cover_selected_key_labels)
         _remember_montage_reuse_preferences(settings)
+        _remember_footage_blocks(settings)
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
@@ -1590,6 +1628,7 @@ _MONTAGE_REUSE_PREFERENCES = (
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
     # Render/pause controls also belong to the operator, not stale progress writers.
     "montage_gpu_chunk_size", "montage_queue_paused",
+    "montage_use_footage_blocks",
 )
 
 
@@ -1598,6 +1637,30 @@ def _remember_montage_reuse_preferences(settings: Settings) -> None:
     settings._observed_montage_reuse = {
         name: deepcopy(getattr(settings, name)) for name in _MONTAGE_REUSE_PREFERENCES
     }
+
+
+def _remember_footage_blocks(settings: Settings) -> None:
+    settings._observed_footage_blocks = deepcopy(settings.footage_blocks)
+    settings._observed_footage_block_assignments = deepcopy(settings.footage_block_assignments)
+
+
+def _merge_footage_block_records(persisted: dict, incoming: dict, observed: dict) -> dict:
+    """Apply only edited IDs; unrelated stale workers cannot revive removals."""
+    result = deepcopy(persisted)
+    for identity in observed.keys() - incoming.keys():
+        result.pop(identity, None)
+    for identity, row in incoming.items():
+        if identity in observed and row == observed[identity]:
+            continue
+        if identity in observed and identity not in persisted:
+            continue
+        # A stale imported batch does not own a newer individual manual choice.
+        disk = persisted.get(identity, {})
+        if (row.get("origin") == "import" and disk.get("origin") == "manual"
+                and disk != observed.get(identity) and row.get("blockId") != disk.get("blockId")):
+            raise ValueError("Ручное назначение блока изменилось. Обновите предпросмотр импорта.")
+        result[identity] = deepcopy(row)
+    return result
 
 
 def _merge_api_key_records(persisted: object, incoming: object, observed: object = None) -> list[dict]:
@@ -1957,6 +2020,9 @@ def save_settings(settings: Settings):
         "output_folder": settings.output_folder,
         "idea_output_folder": settings.idea_output_folder,
         "footage_folders": settings.footage_folders,
+        "footage_blocks": settings.footage_blocks,
+        "footage_block_assignments": settings.footage_block_assignments,
+        "montage_use_footage_blocks": settings.montage_use_footage_blocks,
         "footage_download_folder": settings.footage_download_folder,
         "cutter_output_folder": settings.cutter_output_folder,
         "cutter_sources": settings.cutter_sources,
@@ -2270,6 +2336,18 @@ def save_settings(settings: Settings):
             on_disk.get("stock_api_keys", []), data.get("stock_api_keys", []),
             getattr(settings, "_observed_stock_keys", None),
         )
+        if not replacement:
+            disk_blocks = {row["id"]: row for row in on_disk.get("footage_blocks", [])}
+            incoming_blocks = {row["id"]: row for row in settings.footage_blocks}
+            observed_blocks = {row["id"]: row for row in getattr(settings, "_observed_footage_blocks", [])}
+            data["footage_blocks"] = list(_merge_footage_block_records(
+                disk_blocks, incoming_blocks, observed_blocks,
+            ).values())
+            data["footage_block_assignments"] = _merge_footage_block_records(
+                on_disk.get("footage_block_assignments", {}), settings.footage_block_assignments,
+                getattr(settings, "_observed_footage_block_assignments", {}),
+            )
+            _validate_footage_block_settings(data)
         data["montage_stock_recent_families"] = list(dict.fromkeys([
             *on_disk.get("montage_stock_recent_families", []), *data["montage_stock_recent_families"],
         ]))[-3000:]
@@ -2372,6 +2450,7 @@ def save_settings(settings: Settings):
                     # a running preparation must keep its captured parameters,
                     # and repeated progress saves must still count as unchanged.
                     _remember_montage_reuse_preferences(settings)
+                    _remember_footage_blocks(settings)
                     settings._edited_montage_reuse = set()
                     break
                 except PermissionError:

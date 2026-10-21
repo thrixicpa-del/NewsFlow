@@ -599,8 +599,14 @@ def _narration_mux_limits(duration: float) -> list[str]:
     return ["-t", f"{duration:.6f}", "-frames:v", str(max(1, math.ceil(duration * 30 - 1e-9)))]
 
 
+def _precise_scene_timing(project: TimelineProject) -> bool:
+    return project.source_policy.get("mode") == "block" or any(
+        clip.continuity.get("mode") in {"freeze", "background"} for clip in project.clips
+    )
+
+
 def _narration_mux_video(project: TimelineProject, ffmpeg: str, duration: float, *, gpu=False):
-    if not any(clip.continuity.get('mode') in {'freeze', 'background'} for clip in project.clips):
+    if not _precise_scene_timing(project):
         return ["-c:v", "copy"], ["-shortest"]
     # Cutting a copied B-frame stream can leave a late reference frame and
     # missing presentation timestamps. Normalize once for continuity projects;
@@ -1251,7 +1257,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
         # a directory that does not exist yet.  Creating it here also makes
         # proxy rendering resilient after a cleanup of AppData.
         cache_root.mkdir(parents=True, exist_ok=True)
-        precise_timeline = any(clip.continuity.get('mode') in {'freeze', 'background'} for clip in project.clips)
+        precise_timeline = _precise_scene_timing(project)
         elapsed_seconds, elapsed_frames = 0.0, 0
         for index, clip in enumerate(render_clips, 1):
             source = Path(clip.path)

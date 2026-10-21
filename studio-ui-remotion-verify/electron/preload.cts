@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('newsflowDesktop', {
   chooseBrowserScenarioRequirementsFiles: () => ipcRenderer.invoke('newsflow:choose-browser-scenario-requirements-files'),
   chooseCoverTextTriples: () => ipcRenderer.invoke('newsflow:choose-cover-text-triples'),
   chooseCoverPromptPairs: () => ipcRenderer.invoke('newsflow:choose-cover-prompt-pairs'),
+  chooseFootageBlockPairs: () => ipcRenderer.invoke('newsflow:choose-footage-block-pairs'),
   chooseScenarioTexts: () => ipcRenderer.invoke('newsflow:choose-scenario-texts'),
   chooseSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-save-path', suggestedName),
   chooseZipSavePath: (suggestedName: string) => ipcRenderer.invoke('newsflow:choose-zip-save-path', suggestedName),

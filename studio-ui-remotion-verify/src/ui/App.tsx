@@ -25,6 +25,9 @@ import "./publication-delivery.css";
 import "./publication-modern.css";
 import "./features/task-center/task-center.css";
 import { PublicationPage } from "./publication/PublicationPage";
+import { FootageBlocks, FootageBlockAssignments } from "./features/footage/FootageBlocks";
+import { unsettledMontageLaunches } from "./features/montage/montage-polling";
+import type { PendingMontageLaunch } from "./features/montage/montage-polling";
 import { TaskCenter } from "./features/task-center/TaskCenter";
 import type { TaskCenterEntry } from "./features/task-center/task-model";
 import { AppShell } from "./layout/AppShell";
@@ -10154,6 +10157,7 @@ export function Footage({
   ];
   return (
     <div className="nf-footage" aria-label="Media Ingest Workspace">
+      <FootageBlocks data={data} command={command} />
       <section className="panel footage-semantic-tools">
         <div className="panel-title">
           <div>
@@ -10989,6 +10993,7 @@ export function Editor({
   >(null);
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [queueLaunching, setQueueLaunching] = useState(false);
+  const [pendingMontageLaunches, setPendingMontageLaunches] = useState<PendingMontageLaunch[]>([]);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [queuePausedDraft, setQueuePausedDraft] = useState(
     data.montageSettings.queueRunning === false
@@ -11033,8 +11038,9 @@ export function Editor({
   const [stockSources, setStockSources] = useState(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
   const [stockTrim, setStockTrim] = useState(data.montageSettings.stockTrim !== false);
   const [stockUseLibrary, setStockUseLibrary] = useState(data.montageSettings.stockUseLibrary !== false);
+  const [useFootageBlocks, setUseFootageBlocks] = useState(Boolean(data.montageSettings.useFootageBlocks));
   const [stockHdOnly, setStockHdOnly] = useState(data.montageSettings.stockHdOnly !== false);
-  const stockSourcesValid = sourceMode === "local" || stockSources.length > 0;
+  const stockSourcesValid = useFootageBlocks || sourceMode === "local" || stockSources.length > 0;
   const autoWeb = sourceMode !== "local";
   const externalOnly = sourceMode === "stock";
   const [useScriptText, setUseScriptText] = useState(
@@ -11059,7 +11065,20 @@ export function Editor({
   // A persisted phase can outlive a crashed or closed Core.  Only the
   // process-backed snapshot field may disable launch controls.
   const running = data.montageSettings.queueRunning === true;
-  const queueActive = running || queueLaunching;
+  const queueActive = running || queueLaunching || pendingMontageLaunches.length > 0;
+  // The owner liveness probe can turn false before the last task snapshot
+  // reaches React. Keep observing this process's unfinished tasks until their
+  // terminal result arrives; historical rows still cannot disable launch.
+  const pollMontage = queueActive || data.montageTasks.some(
+    (task) => task.runtimeCurrent === true && activeMontageStatuses.has(task.status || ""),
+  );
+  useEffect(() => {
+    if (!pendingMontageLaunches.length) return;
+    const unsettled = unsettledMontageLaunches(pendingMontageLaunches, data.montageTasks);
+    if (unsettled.length !== pendingMontageLaunches.length) {
+      setPendingMontageLaunches(unsettled);
+    }
+  }, [data.montageTasks, pendingMontageLaunches]);
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,
   );
@@ -11088,6 +11107,7 @@ export function Editor({
     setStockTrim(data.montageSettings.stockTrim !== false);
     setStockUseLibrary(data.montageSettings.stockUseLibrary !== false);
     setStockHdOnly(data.montageSettings.stockHdOnly !== false);
+    setUseFootageBlocks(Boolean(data.montageSettings.useFootageBlocks));
     setUseScriptText(data.montageSettings.useScriptText !== false);
     setExcludeEnglishText(data.montageSettings.excludeEnglishText !== false);
     setScenePlanner(data.montageSettings.scenePlanner);
@@ -11137,7 +11157,7 @@ export function Editor({
   const localMediaUrl = (path?: string) =>
     path ? encodeURI(`file:///${path.replace(/\\/g, "/")}`) : "";
   useEffect(() => {
-    if (!queueActive) return;
+    if (!pollMontage) return;
     // A Remotion job starts Chromium frame workers. Polling through a separate
     // Python process too aggressively competes with those workers and made the
     // desktop window look frozen on large queues.
@@ -11149,7 +11169,7 @@ export function Editor({
     );
     void refresh();
     return () => window.clearInterval(timer);
-  }, [queueActive, refresh]);
+  }, [pollMontage, refresh, renderer]);
   const chooseOutput = async () => {
     const folder = await window.newsflowDesktop?.chooseFolder();
     if (folder) setOutputFolder(folder);
@@ -11176,6 +11196,7 @@ export function Editor({
       stockTrim,
       stockUseLibrary,
       stockHdOnly,
+      useFootageBlocks,
       useScriptText,
       excludeEnglishText,
       scenePlanner,
@@ -11208,6 +11229,7 @@ export function Editor({
         stockTrim,
         stockUseLibrary,
         stockHdOnly,
+        useFootageBlocks,
         useScriptText,
         excludeEnglishText,
         scenePlanner,
@@ -11215,7 +11237,17 @@ export function Editor({
         uniqueFootagePercent: Number(uniqueFootagePercent),
         fastReuseRanges,
       });
-      if (saved) await command("run-montage-queue", { indices, replaceOutput });
+      if (saved) {
+        setPendingMontageLaunches(indices.map((index) => ({
+          index,
+          previousUpdatedAt: String(data.montageTasks.find((task) => task.index === index)?.updatedAt ?? ""),
+        })));
+        const queued = await command("run-montage-queue", { indices, replaceOutput });
+        if (!queued) setPendingMontageLaunches([]);
+      }
+    } catch (error) {
+      setPendingMontageLaunches([]);
+      throw error;
     } finally {
       setQueueLaunching(false);
       void refresh();
@@ -11332,6 +11364,7 @@ export function Editor({
           </Button>
         </div>
       </section>
+      <FootageBlockAssignments data={data} command={command} />
       <MontageLiveStatus
         data={data}
         queuePaused={queuePausedDraft}
@@ -11355,6 +11388,10 @@ export function Editor({
             </small>
           </div>
         </div>
+        <label className="check-row"><input type="checkbox" checked={useFootageBlocks} onChange={(event) => setUseFootageBlocks(event.target.checked)} />Использовать блоки футажей при монтаже</label>
+        <small className="workflow-note">{useFootageBlocks ? "Материалы берутся только из назначенного теме блока и его подпапок. Темы без назначения требуют выбора блока до запуска." : "Действует обычный подбор из текущих источников. Созданные блоки и назначения сохраняются."}</small>
+        <fieldset disabled={useFootageBlocks}>
+        <legend>Источники обычного подбора</legend>
         <Select label="Источники футажей" value={sourceMode} onChange={(event) => setSourceMode(event.target.value as typeof sourceMode)} options={[
           { value: "local", label: "Локальная библиотека" },
           { value: "hybrid", label: "Библиотека + стоки" },
@@ -11379,6 +11416,7 @@ export function Editor({
         <small className="workflow-note">Папка библиотеки: <span style={{ overflowWrap: "anywhere", userSelect: "text" }}>{data.montageSettings.stockLibraryFolder || "Путь появится после подключения NewsFlow"}</span>. Перед ручной очисткой завершите задачи: сохранённые проекты могут ссылаться на эти файлы.</small>
         <label className="check-row"><input type="checkbox" checked={stockTrim} onChange={(event) => setStockTrim(event.target.checked)} />Обрезать стоковые видео</label>
         <small className="workflow-note">Исходный файл не меняется. При включённой обрезке готовится короткий фрагмент. При выключенной предварительной обрезки нет, но таймлайн по-прежнему ограничивает показ границами озвучки.</small>
+        </fieldset>
       </section>
       {configurationOpen ? <MontageStockKeys data={data} command={command} /> : null}
       <section className="panel renderer-choice-panel">
