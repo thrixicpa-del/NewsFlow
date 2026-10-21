@@ -1,0 +1,56 @@
+name: Real CLIP encoder parity (Windows)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scriptor/onnx_clip.py'
+      - 'scriptor/ai_index.py'
+      - 'tests/verify_onnx_clip_live.py'
+      - '.github/workflows/clip-real-model-parity.yml'
+permissions:
+  contents: read
+jobs:
+  real-clip-parity:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      TQDM_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - name: Install audited current production requirements
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Install historical encoder only in separate disposable virtualenv
+        shell: pwsh
+        run: |
+          $legacy = Join-Path $env:RUNNER_TEMP 'newsflow-clip-legacy'
+          python -m venv $legacy
+          $python = Join-Path $legacy 'Scripts/python.exe'
+          & $python -m pip install 'fastembed==0.8.0' 'pillow==12.3.0' 'onnxruntime==1.30.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Generate fixed vectors with historical encoder (synthetic-only)
+        shell: pwsh
+        run: |
+          $python = Join-Path $env:RUNNER_TEMP 'newsflow-clip-legacy/Scripts/python.exe'
+          $root = Join-Path $env:RUNNER_TEMP 'newsflow-clip-parity'
+          & $python tests/verify_onnx_clip_live.py --mode legacy --root $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Require new Pillow 13 encoder to reuse same cached models offline
+        shell: pwsh
+        run: |
+          $env:HF_HUB_OFFLINE = '1'
+          $root = Join-Path $env:RUNNER_TEMP 'newsflow-clip-parity'
+          python tests/verify_onnx_clip_live.py --mode new --root $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/verify_onnx_clip_live.py --mode compare --root $root
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep only synthetic parity receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: newsflow-clip-parity-receipts
+          path: ${{ runner.temp }}/newsflow-clip-parity/*.json
+          retention-days: 7
+          if-no-files-found: error
