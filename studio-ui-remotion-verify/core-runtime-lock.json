@@ -1,12 +1,12 @@
 {
   "format": 1,
   "appVersion": "2.1.152",
-  "coreRevision": ".core-bin-2.1.152-stock-r53",
-  "coreExeSha256": "9b94eaf4bbb6405e92c84b1e011bded93fc59afe3a258e21c5584053ca9e6400",
-  "coreExeSize": 21798863,
-  "builtFromGitSha": "a8fd3e98498ccdce554747eae07368087e7b4bec",
+  "coreRevision": ".core-bin-2.1.152-stock-r54",
+  "coreExeSha256": "5a450ef3fd99fb2b0e5fdbc6427c2b041c2eca0d67731ba7e939bd10662daff1",
+  "coreExeSize": 21799301,
+  "builtFromGitSha": "cdc7b41fa1d2bb502d1d90d0df94d31f4d0480d3",
   "sourceGitBlobs": {
-    "scriptor/bridge.py": "98836bf79498f76ac489cca1939657f5edfed30b",
+    "scriptor/bridge.py": "37acaad9ef9fefd0b49ebd022af9df0a6231e718",
     "scriptor/ai_index.py": "9f3277c82a17ac151a41df6805b49a237976f4c3",
     "scriptor/onnx_clip.py": "1741aa535fcd8d06a12d1aeff55dcdc67ee8059e",
     "scriptor/scene_intent.py": "bd0ad36e3a6a0380b791a811407ade3f2471a2d1",
