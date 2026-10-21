@@ -278,6 +278,21 @@ class FootageBlockPipelineTests(unittest.TestCase):
         export.assert_not_called()
         self.assertIn("после рендера", result["preparedProject"]["warning"])
 
+    def test_block_preparation_saves_zoom_choice_before_any_render(self):
+        self.test_active_block_bypasses_stocks_and_preserves_native_story_beats()
+        settings = config.load_settings()
+        settings.montage_local_video_zoom = True
+        config.save_settings(settings)
+        for override, expected in ((None, True), (False, False), (True, True)):
+            with self.subTest(override=override):
+                payload = {"scenarioIndex": 0}
+                if override is not None:
+                    payload["localVideoZoom"] = override
+                result = bridge.prepare_montage(payload)
+                project = TimelineProject.load(Path(result["preparedProject"]["path"]))
+                self.assertIs(project.local_video_zoom, expected)
+                self.assertTrue(config.load_settings().montage_local_video_zoom)
+
     def test_saved_block_output_paths_cannot_collide_for_identical_titles(self):
         helper = getattr(bridge, "_montage_project_stem", None)
         self.assertTrue(callable(helper), "Block renders need durable-ID filenames")

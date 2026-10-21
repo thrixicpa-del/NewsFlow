@@ -40,6 +40,13 @@ or ambiguous prefixes. Reviewer confirmed **0 remaining actionable findings**.
 Additional tests exercise explicit ON, omitted override, explicit OFF re-exports
 with selectors/repair/tail planning forbidden, and the actual UI export payload.
 
+Final caller inspection found the separate block-project constructor omitted the
+flag before rendering. The regression reproduced two failures (inherited ON and
+explicit ON); the minimal fix passes the validated choice to that constructor.
+Explicit OFF/ON project overrides do not overwrite the global preference.
+Combined local zoom + complete block pipeline: **21 PASS**, 30.719 s,
+production guard PASS. Independent focused review: no actionable findings.
+
 ## Source and runtime evidence
 
 - Related backend regression: **209 PASS**, 87.781 s,
@@ -58,7 +65,7 @@ python -B tests/run_isolated.py tests.test_local_video_zoom tests.test_timeline 
 
 - Montage UI: **106 PASS**, eight files, 6.59 s.
 - `pnpm typecheck`, `pnpm verify:security`, source `pnpm build`: **PASS**.
-- Ruff on all seven changed Python files, workflow YAML parse and diff whitespace:
+- Ruff on all nine changed Python files, workflow YAML parse and diff whitespace:
   **PASS**. No dependency/lock changes.
 - Real isolated Electron -> trusted IPC -> Python -> settings -> process restart:
   **PASS**, 14.617 s. Zoom off default and visible/persisted ON checked alongside

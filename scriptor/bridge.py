@@ -18588,6 +18588,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             _montage_wait_if_paused(settings, scenario_index)
         return prepare_block_project(settings, scenes, block_policy, title=titles[scenario_index],
             voice_path=voice_path, aspect_ratio=str(payload.get("aspectRatio", settings.montage_aspect_ratio)),
+            local_video_zoom=_montage_zoom_choice(payload, settings.montage_local_video_zoom),
             index=index, scenario_index=scenario_index, batch_usage=batch_usage,
             checkpoint=block_checkpoint, progress=progress, voice_map_provenance=voice_map_provenance,
             preparation_metrics=preparation_metrics, preparation_started=preparation_started)

@@ -275,6 +275,7 @@ def prepare_block_project(
     voice_map_provenance=None,
     preparation_metrics=None,
     preparation_started=None,
+    local_video_zoom=None,
 ):
     """Consume the native scene list; publish through existing production fences."""
     from .montage_blocks import block_history, build_block_clips, fill_block_continuity
@@ -308,6 +309,8 @@ def prepare_block_project(
         aspect_ratio=aspect_ratio,
         clips=clips,
         voiceover_path=voice_path,
+        local_video_zoom=(settings.montage_local_video_zoom
+                          if local_video_zoom is None else local_video_zoom),
         intro_path=intro,
         intro_duration=runtime._full_intro_duration(
             intro, settings.montage_intro_duration
