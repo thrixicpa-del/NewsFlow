@@ -144,13 +144,14 @@ class StockRenderTests(unittest.TestCase):
 
         class Service:
             def __init__(self, _root, *, enabled, **_kwargs):
+                self.root = _root
                 self.enabled = enabled
             def cached(self, *_args, **_kwargs):
                 return []
             def search(self, query, *, kind="video", **_kwargs):
                 queries.append(query)
                 return [candidate] if kind == "video" else []
-            def fetch(self, value):
+            def fetch(self, value, **_kwargs):
                 if value.provider not in self.enabled or mode == "local":
                     raise AssertionError("Unpermitted stock source")
                 return stock

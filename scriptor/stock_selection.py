@@ -84,7 +84,7 @@ class StockReplacementItem(FootageItem):
 class StockSceneSelector:
     def __init__(self, *, mode, service, index, cache_root, threshold, trim,
                  aspect_ratio, semantic_ok, source_allowed, duration_probe, checkpoint, download_semaphore=None, use_library=True,
-                 hd_only=False, local_window=None):
+                 hd_only=False, local_window=None, download_queue=None):
         if mode not in {"local", "hybrid", "stock"}:
             raise ValueError("Неподдерживаемый режим источников")
         self.mode, self.service, self.index = mode, service, index
@@ -95,6 +95,7 @@ class StockSceneSelector:
         self.local_window = local_window
         self.duration_probe, self.checkpoint = duration_probe, checkpoint
         self.download_semaphore = download_semaphore
+        self.download_queue = download_queue or getattr(download_semaphore, 'stock_download_queue', None)
         self.use_library = bool(use_library)
         self.hd_only = bool(hd_only)
         self._hd_sources: dict[tuple[str, str], bool] = {}
@@ -251,10 +252,15 @@ class StockSceneSelector:
         # here, so an unavailable provider is not hammered repeatedly.
         for limit in (10, 20, 40):
             self.checkpoint()
-            found = self.service.search(query, kind=kind, limit=limit)
+            found = self._timed('search', self.service.search, query, kind=kind, limit=limit)
             yield found
             if len(found) < limit:
                 break
+
+    def _timed(self, phase, function, *args, **kwargs):
+        if self.download_queue:
+            return self.download_queue.call(phase, function, *args, **kwargs)
+        return function(*args, **kwargs)
 
     def _stock(self, scene, queries, used, *, kind, cached_only=False, history_families=(), broad_only=False,
                guard_query=None):
@@ -284,6 +290,7 @@ class StockSceneSelector:
 
         for candidates in batches():
             choices = []
+            eligible = []
             for candidate in candidates:
                 self.checkpoint()
                 if candidate.provider not in self.service.enabled or candidate.kind != kind:
@@ -295,16 +302,46 @@ class StockSceneSelector:
                 metadata = FootageItem("", candidate.title, candidate.provider, candidate.source_url, candidate.license, list(candidate.tags))
                 if not self.semantic_ok(original_query, metadata):
                     continue
+                eligible.append(candidate)
+            # Queue only this finite, semantically eligible batch. Selection
+            # still consumes it in the original order and applies every gate.
+            prefetched = {}
+            next_prefetch = 0
+            def refill(eligible=eligible, prefetched=prefetched):
+                nonlocal next_prefetch
+                if not self.download_queue:
+                    return
+                while next_prefetch < len(eligible):
+                    self.checkpoint()
+                    future = self.download_queue.submit(self.service, eligible[next_prefetch], block=False)
+                    if future is None:
+                        break
+                    prefetched[next_prefetch] = future
+                    next_prefetch += 1
+            refill()
+            for candidate_index, candidate in enumerate(eligible):
+                self.checkpoint()
                 try:
-                    with self.download_semaphore or nullcontext():
-                        source = self.service.fetch(candidate)
+                    if self.download_queue:
+                        refill()
+                        future = prefetched.pop(candidate_index, None)
+                        if future is None:
+                            future = self.download_queue.submit(self.service, candidate)
+                            next_prefetch = max(next_prefetch, candidate_index + 1)
+                        try:
+                            source = self.download_queue.result(future, self.checkpoint)
+                        finally:
+                            refill()
+                    else:
+                        with self.download_semaphore or nullcontext():
+                            source = self.service.fetch(candidate)
                     family = f"stock-sha256::{_digest(source)}"
                     if family in used:
                         continue
                     if self.hd_only:
                         hd_key = (family, kind)
                         if hd_key not in self._hd_sources:
-                            self._hd_sources[hd_key] = source_is_hd(source, kind)
+                            self._hd_sources[hd_key] = self._timed('validation', source_is_hd, source, kind)
                         if not self._hd_sources[hd_key]:
                             continue
                     length = needed if kind == "image" else self.duration_probe(source)
@@ -314,9 +351,9 @@ class StockSceneSelector:
                     for start in starts:
                         self.checkpoint()
                         try:
-                            window = prepare_stock_media(source, self.root, duration=needed, trim=True,
+                            window = self._timed('validation', prepare_stock_media, source, self.root, duration=needed, trim=True,
                                 kind=kind, aspect_ratio=self.aspect_ratio, source_start=start)
-                            score = self._score(window, visual_query)
+                            score = self._timed('validation', self._score, window, visual_query)
                             checked = FootageItem(str(window), candidate.title, candidate.provider, candidate.source_url,
                                                   candidate.license, list(candidate.tags))
                             if score < self.threshold or not self.source_allowed(checked):

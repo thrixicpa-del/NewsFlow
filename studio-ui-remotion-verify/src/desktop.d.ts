@@ -1,4 +1,22 @@
+interface StockDownloadStatus {
+  runId: string;
+  running: boolean;
+  interrupted?: boolean;
+  limit: number;
+  active: number;
+  queued: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  bytesDownloaded: number;
+  bytesPerSecond: number;
+  elapsedSeconds: number;
+  phaseSeconds: { search: number; validation: number };
+  history: Array<{ event: string; updatedAt: number; queued: number; active: number; completed: number; failed: number }>;
+}
+
 interface NewsFlowSnapshot {
+  stockDownloads?: StockDownloadStatus;
   pipelineTarget: number;
   autoMontageEnabled: boolean;
   autoPipelineStages: Record<'scenarios' | 'covers' | 'seo' | 'voice' | 'montage' | 'package', boolean>;

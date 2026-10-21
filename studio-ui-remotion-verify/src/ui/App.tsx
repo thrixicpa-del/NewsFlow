@@ -30,6 +30,7 @@ import { unsettledMontageLaunches } from "./features/montage/montage-polling";
 import type { PendingMontageLaunch } from "./features/montage/montage-polling";
 import { TaskCenter } from "./features/task-center/TaskCenter";
 import { MontageOverlays } from "./features/montage/MontageOverlays";
+import { StockDownloadsTimeline } from "./features/montage/StockDownloadsTimeline";
 import type { TaskCenterEntry } from "./features/task-center/task-model";
 import { AppShell } from "./layout/AppShell";
 import { ContextInspector } from "./layout/ContextInspector";
@@ -11793,13 +11794,15 @@ export function Editor({
             />
           </label>
           <label>
-            Скачивание и нарезка{" "}
+            <span>Одновременные скачивания</span>{" "}
             <input
               type="number"
               min="1"
               value={downloadWorkers}
+              aria-label="Одновременные скачивания"
               onChange={(event) => setDownloadWorkers(event.target.value)}
             />
+            <small>Общий лимит загрузок для всей очереди. Применяется при следующем запуске монтажа.</small>
           </label>
           <label>
             Видео одновременно{" "}
@@ -12221,6 +12224,7 @@ export function Editor({
             </Button>
           </div>
         </div>
+        <StockDownloadsTimeline status={data.stockDownloads} />
         {data.montageTasks.length ? (
           <div className="montage-task-cards">
             {data.montageTasks.map((task) => {

@@ -165,6 +165,7 @@ from .session import (
     save_session,
 )
 from .stock_credits import stage_stock_credits
+from .stock_downloads import StockDownloadQueue, read_download_status
 from .stock_selection import (
     StockReplacementItem,
     StockSceneSelector,
@@ -3061,6 +3062,7 @@ def snapshot() -> dict:
         "cutterSources": settings.cutter_sources,
         "cutterSettings": {"outputFolder": settings.cutter_output_folder, "downloadFolder": settings.footage_download_folder,
                            "mixerOutputFolder": settings.mixer_output_folder},
+        "stockDownloads": read_download_status(app_data_root() / "stock-download-status.json"),
         "montageSettings": {"projectFolder": settings.montage_project_folder, "outputFolder": settings.montage_output_folder,
                             "aspectRatio": settings.montage_aspect_ratio, "introEnabled": settings.montage_intro_enabled,
                             "renderer": settings.montage_renderer, "remotionFrameConcurrency": settings.montage_remotion_frame_concurrency,
@@ -18847,6 +18849,14 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                 raise InterruptedError("Монтаж отменён: производство было очищено")
             _montage_wait_if_paused(settings, scenario_index)
         stock_root = Path(settings.footage_download_folder) / "Стоки"
+        download_queue = payload.get("_downloadQueue")
+        if not isinstance(download_queue, StockDownloadQueue):
+            def download_checkpoint():
+                if not _production_generation_is_current(settings):
+                    raise InterruptedError("Монтаж отменён: производство было очищено")
+            download_queue = read_stack.enter_context(StockDownloadQueue(
+                settings.montage_download_workers, app_data_root() / "stock-download-status.json",
+                paused=lambda: load_settings().montage_queue_paused, checkpoint=download_checkpoint))
         keys = {provider: [key.secret for key in settings.stock_api_keys if key.provider == provider and key.active]
                 for provider in ("pexels", "pixabay", "coverr")}
         service = StockService(stock_root, keys=keys,
@@ -18860,7 +18870,8 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
             local_window=_montage_stock_local_window,
             duration_probe=lambda path: verified_duration(FootageItem(str(path), path.name)), checkpoint=stock_checkpoint,
-            download_semaphore=download_semaphore)
+            download_semaphore=download_semaphore,
+            download_queue=download_queue)
     fast_reuse_pool: dict[str, TimelineClip] = {}
     if stock_selector is None:
         read_stack.callback(index.end_visual_scene_admission)
@@ -21221,6 +21232,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         prepared = prepare_montage({"scenarioIndex": index, "aspectRatio": settings.montage_aspect_ratio,
                                     "_blockPolicy": current_policy, "localVideoZoom": queue_zoom,
                                     "_progress": progress, "_downloadSemaphore": download_semaphore,
+                                    "_downloadQueue": download_queue,
                                     "_batchFootageUsage": batch_footage_usage})
         project = prepared.get("preparedProject", {})
         project_path = str(project.get("path", ""))
@@ -21397,8 +21409,16 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     # The user controls every parallelism value.  A worker pool cannot exceed
     # the number of actual queue entries, but there is no hidden safety cap.
     rendering_workers = requested_render_workers
-    with ThreadPoolExecutor(max_workers=planning_workers, thread_name_prefix="newsflow-plan") as planners, \
+    def download_checkpoint():
+        if not _production_generation_is_current(settings):
+            raise InterruptedError("Монтаж отменён: производство было очищено")
+
+    with StockDownloadQueue(settings.montage_download_workers, app_data_root() / "stock-download-status.json",
+                            paused=lambda: load_settings().montage_queue_paused,
+                            checkpoint=download_checkpoint) as download_queue, \
+            ThreadPoolExecutor(max_workers=planning_workers, thread_name_prefix="newsflow-plan") as planners, \
             ThreadPoolExecutor(max_workers=rendering_workers, thread_name_prefix="newsflow-render") as renderers:
+        download_semaphore.stock_download_queue = download_queue
         planned = {} if render_only else {planners.submit(plan_task, index): index for index in valid}
         renders = ({renderers.submit(render_task, index, saved_project_paths[index]): index for index in valid}
                    if render_only else {})
