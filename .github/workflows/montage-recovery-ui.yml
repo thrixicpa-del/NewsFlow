@@ -1,0 +1,26 @@
+name: Montage recovery UI
+on:
+  pull_request:
+    paths:
+      - 'studio-ui-remotion-verify/src/ui/App.tsx'
+      - 'studio-ui-remotion-verify/src/ui/features/montage/montage-view.test.tsx'
+      - '.github/workflows/montage-recovery-ui.yml'
+permissions:
+  contents: read
+jobs:
+  scoped-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: studio-ui-remotion-verify
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with: { version: '11.19.0' }
+      - uses: actions/setup-node@v6
+        with: { node-version: '24.19.0', cache: 'pnpm', cache-dependency-path: studio-ui-remotion-verify/pnpm-lock.yaml }
+      - run: pnpm install --frozen-lockfile
+      - name: Interrupted autofill recovery and pause controls only
+        run: pnpm exec vitest run src/ui/features/montage/montage-view.test.tsx -t 'interrupted autofill|keeps pause and continue'
+      - run: pnpm typecheck

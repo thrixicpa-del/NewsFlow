@@ -486,6 +486,22 @@ describe("Montage Light view", () => {
     ));
   });
 
+  it("keeps interrupted autofill pairs available for a missing-only restart", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Тема", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Тема", state: "Готово", path: "voice.mp3" }],
+      montageTasks: [{ index: 1, title: "Тема", status: "Автозаполнение", outputPath: "", runtimeCurrent: false }],
+      montageSettings: { ...fallback.montageSettings, queueRunning: false },
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+    const restart = screen.getByRole("button", { name: "Собрать незавершённые" });
+    expect(restart.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(restart);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("run-montage-queue", { indices: [1], replaceOutput: false }));
+  });
+
   it("keeps pause and continue controls truthful", async () => {
     let releasePause: ((value: NewsFlowSnapshot | undefined) => void) | undefined;
     const running = {
