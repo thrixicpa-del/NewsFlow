@@ -36,8 +36,10 @@ def _model_path(model_name: str, cache_dir: str | None) -> Path:
         found = Path(snapshot_download(repo_id=model_name, cache_dir=root,
                                        allow_patterns=list(files), local_files_only=True))
     except (OSError, ValueError):
+        found = None
+    if found is None or any(not (found / name).is_file() for name in files):
         if offline:
-            raise RuntimeError(f"CLIP cache unavailable while offline: {model_name}") from None
+            raise RuntimeError(f"CLIP cache unavailable while offline: {model_name}")
         found = Path(snapshot_download(repo_id=model_name, cache_dir=root,
                                        allow_patterns=list(files), local_files_only=False))
     for name in files:
