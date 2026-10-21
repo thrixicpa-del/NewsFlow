@@ -15,6 +15,36 @@ APP = ROOT / "studio-ui-remotion-verify"
 
 
 class ImmutableRcTests(unittest.TestCase):
+    def _windows_packaging_invocation(self):
+        """Execute the real wrapper with process/filesystem side effects stubbed."""
+        script = r"""
+import fs from 'node:fs';
+import child from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const calls = [];
+Object.defineProperty(process, 'platform', { value: 'win32' });
+process.argv = [process.execPath, 'fixture', '--output-root', 'fixture-output', '--type', 'TEST', '--rc', '03'];
+process.env.NEWSFLOW_PACKAGING_SENTINEL = 'preserved';
+process.env.ELECTRON_BUILDER_7Z_FILTER = 'ARM';
+child.execFileSync = (command, args, options = {}) => {
+  calls.push({ command, args, cwd: options.cwd, shell: options.shell,
+    filter: options.env?.ELECTRON_BUILDER_7Z_FILTER,
+    sentinel: options.env?.NEWSFLOW_PACKAGING_SENTINEL });
+  return args[0] === 'scripts/prepare-immutable-rc.mjs' ? 'fixture-candidate\n' : Buffer.alloc(0);
+};
+fs.existsSync = () => false;
+fs.mkdirSync = fs.cpSync = fs.rmSync = () => {};
+syncBuiltinESMExports();
+await import('./scripts/package-immutable-rc.mjs');
+console.log(JSON.stringify({ calls, originalFilter: process.env.ELECTRON_BUILDER_7Z_FILTER }));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=APP, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
     def test_packaging_wrapper_executes_windows_pnpm_shims_through_cmd(self):
         wrapper = (APP / "scripts" / "package-immutable-rc.mjs").read_text(encoding="utf-8")
 
@@ -23,11 +53,21 @@ class ImmutableRcTests(unittest.TestCase):
         self.assertIn('`--config.directories.output="${stagingRoot}"`', wrapper)
 
     def test_windows_packaging_uses_a_short_subst_workdir_for_nsis_templates(self):
-        wrapper = (APP / "scripts" / "package-immutable-rc.mjs").read_text(encoding="utf-8")
+        calls = self._windows_packaging_invocation()["calls"]
+        mapping = next(call for call in calls if call["command"] == "subst.exe")
+        builder = next(call for call in calls if call["args"][:2] == ["exec", "electron-builder"])
+        self.assertEqual(str(ROOT), mapping["args"][1])
+        self.assertEqual(f'{mapping["args"][0]}\\{APP.name}', builder["cwd"])
+        self.assertEqual([mapping["args"][0], "/D"], calls[-1]["args"])
 
-        self.assertIn("createWindowsPackagingWorkdir", wrapper)
-        self.assertIn('"subst.exe"', wrapper)
-        self.assertIn("{ cwd: packagingWorkdir.cwd }", wrapper)
+    def test_windows_builder_receives_compatible_filter_and_inherited_environment(self):
+        invocation = self._windows_packaging_invocation()
+        builder = next(call for call in invocation["calls"] if call["args"][:2] == ["exec", "electron-builder"])
+        self.assertEqual("BCJ", builder["filter"])
+        self.assertEqual("preserved", builder["sentinel"])
+        self.assertEqual("ARM", invocation["originalFilter"])
+        self.assertEqual("pnpm.cmd", builder["command"])
+        self.assertTrue(builder["shell"])
 
     def test_windows_subst_keeps_declared_parent_resources_available(self):
         """The short drive must include ../scriptor used by electron-builder."""

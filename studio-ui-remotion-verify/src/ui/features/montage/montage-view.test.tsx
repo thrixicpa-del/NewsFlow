@@ -6,6 +6,34 @@ import { App, Editor, fallback, Outputs } from "../../App";
 import { diagnostic, makeSnapshot } from "../../../../scripts/fixtures/montage-overflow";
 
 describe("Montage Light view", () => {
+  it("does not overwrite saved download workers when settings close before IPC settles", async () => {
+    const initial = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Тема", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Тема", state: "Готово", path: "voice.mp3" }],
+      montageSettings: { ...fallback.montageSettings, downloadWorkers: 2, queueRunning: false },
+    };
+    const saved = { ...initial, montageSettings: { ...initial.montageSettings, downloadWorkers: 1 } };
+    let release: ((value: typeof saved) => void) | undefined;
+    const command = vi.fn().mockImplementationOnce(() => new Promise<typeof saved>((resolve) => { release = resolve; })).mockResolvedValue(saved);
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<Editor data={initial} command={command} refresh={refresh} />);
+    fireEvent.click(screen.getByRole("button", { name: "Настроить монтаж" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Одновременные скачивания" }), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить параметры" }));
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    rerender(<Editor data={{ ...initial }} command={command} refresh={refresh} />);
+    expect(screen.getByRole("button", { name: "Собрать незавершённые" }).hasAttribute("disabled")).toBe(true);
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+    release?.(saved);
+    rerender(<Editor data={saved} command={command} refresh={refresh} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Собрать незавершённые" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Собрать незавершённые" }));
+    await waitFor(() => expect(command).toHaveBeenLastCalledWith("run-montage-queue", { indices: [1], replaceOutput: false }));
+    expect(command.mock.calls.filter(([name]) => name === "save-montage-settings").map(([,payload]) => payload.downloadWorkers)).toEqual([1, 1]);
+  });
+
   it("keeps the full plan and diagnostics when render refreshes into concatenation", async () => {
     const command = vi.fn();
     const { rerender } = render(<Editor data={makeSnapshot("Рендеринг")} command={command} refresh={async () => undefined} />);
@@ -484,6 +512,22 @@ describe("Montage Light view", () => {
     await waitFor(() => expect(command).toHaveBeenCalledWith(
       "run-montage-queue", { indices: [1], replaceOutput: true },
     ));
+  });
+
+  it("keeps interrupted autofill pairs available for a missing-only restart", async () => {
+    const data = {
+      ...fallback,
+      scenarios: [{ index: 1, title: "Тема", state: "Готово", result: "Текст", error: "" }],
+      voiceItems: [{ index: 1, title: "Тема", state: "Готово", path: "voice.mp3" }],
+      montageTasks: [{ index: 1, title: "Тема", status: "Автозаполнение", outputPath: "", runtimeCurrent: false }],
+      montageSettings: { ...fallback.montageSettings, queueRunning: false },
+    };
+    const command = vi.fn().mockResolvedValue(data);
+    render(<Editor data={data} command={command} refresh={async () => undefined} />);
+    const restart = screen.getByRole("button", { name: "Собрать незавершённые" });
+    expect(restart.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(restart);
+    await waitFor(() => expect(command).toHaveBeenCalledWith("run-montage-queue", { indices: [1], replaceOutput: false }));
   });
 
   it("keeps pause and continue controls truthful", async () => {

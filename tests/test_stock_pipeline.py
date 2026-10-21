@@ -72,14 +72,15 @@ class StockPipelineTests(unittest.TestCase):
             "https://www.pexels.com/video/1/", "Pexels License", "https://www.pexels.com/license/", "Test",
             local_path=self.stock)
         class Service:
-            def __init__(self, *_args, **_kwargs):
+            def __init__(self, root, **_kwargs):
+                self.root = root
                 self.enabled = ["pexels"]
             def cached(self, *_args, **_kwargs):
                 return []
             def search(self, query, **_kwargs):
                 parent.queries.append(query)
                 return [] if empty else [candidate]
-            def fetch(self, _candidate):
+            def fetch(self, _candidate, **_kwargs):
                 return parent.stock
 
         patches = [patch.object(bridge, "ClipIndex", Index),

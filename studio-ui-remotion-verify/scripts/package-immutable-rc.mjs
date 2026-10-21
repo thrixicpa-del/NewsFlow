@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { releaseChannel } from "./release-channel.mjs";
+import { windowsPackagingEnvironment } from "./windows-packaging-env.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -71,7 +72,10 @@ try {
   run(pnpm, ["verify:remotion-native-assets"]);
   run(pnpm, ["build"]);
   packagingWorkdir = createWindowsPackagingWorkdir();
-  run(pnpm, ["exec", "electron-builder", "--win", target, "--config", `--config.directories.output="${stagingRoot}"`], { cwd: packagingWorkdir.cwd });
+  run(pnpm, ["exec", "electron-builder", "--win", target, "--config", `--config.directories.output="${stagingRoot}"`], {
+    cwd: packagingWorkdir.cwd,
+    env: windowsPackagingEnvironment(process.env),
+  });
   run(node, ["scripts/verify-portable.mjs", stagingRoot]);
   cpSync(stagingRoot, artifactRoot, { recursive: true, force: false, errorOnExist: true });
   run(node, ["scripts/finalize-immutable-rc.mjs", "--directory", artifactRoot]);

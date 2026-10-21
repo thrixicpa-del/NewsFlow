@@ -28,6 +28,7 @@ import socket
 import sqlite3
 import stat
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +46,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _MAX_RESULTS = 40
 _TTL = 24 * 60 * 60
+_API_SLOTS = {provider: threading.BoundedSemaphore(3)
+              for provider in ('pexels', 'pixabay', 'coverr', 'wikimedia', 'nasa')}
 _HOSTS = {
     'pexels': {'api.pexels.com', 'www.pexels.com', 'pexels.com',
                'videos.pexels.com', 'images.pexels.com', 'static.pexels.com',
@@ -183,6 +186,7 @@ class StockService:
             canonical for name in enabled
             if (canonical := ('wikimedia' if name == 'commons' else name)) in _HOSTS))
         self.checkpoint = checkpoint or (lambda: None)
+        self._transfer_context = threading.local()
         self._urls: dict[tuple[str, str, str], str] = {}
         self.db_path = self.root / 'stock-cache.sqlite3'
         with self._db() as db:
@@ -200,6 +204,19 @@ class StockService:
                 CREATE INDEX IF NOT EXISTS assets_digest ON assets(digest);
                 PRAGMA user_version=1;
             ''')
+
+    def _checkpoint(self):
+        (getattr(self._transfer_context, 'checkpoint', None) or self.checkpoint)()
+
+    @contextmanager
+    def _api_slot(self, provider):
+        while not _API_SLOTS[provider].acquire(timeout=.2):
+            self._checkpoint()
+        try:
+            self._checkpoint()
+            yield
+        finally:
+            _API_SLOTS[provider].release()
 
     @contextmanager
     def _db(self):
@@ -220,7 +237,7 @@ class StockService:
                 handle.flush()
             deadline = time.monotonic() + 120
             while True:
-                self.checkpoint()
+                self._checkpoint()
                 try:
                     handle.seek(0)
                     if os.name == 'nt':
@@ -312,33 +329,38 @@ class StockService:
         return opener.open(request, timeout=15)
 
     def _json(self, provider: str, endpoint: str, params: dict | None = None) -> dict:
-        self.checkpoint()
-        key = self._key(provider)
-        params = dict(params or {})
-        headers = {'User-Agent': 'NewsFlow/1.0 (stock media discovery)', 'Accept': 'application/json'}
-        if provider == 'pixabay':
-            params['key'] = key
-        elif key:
-            headers['Authorization'] = ('Bearer ' if provider == 'coverr' else '') + key
-        url = endpoint + (('?' + urlencode(params)) if params else '')
-        self._validate_url(provider, url)
-        try:
-            with self._open(Request(url, headers=headers), provider=provider, authenticated=bool(key)) as response:
-                raw = response.read(_MAX_JSON_BYTES + 1)
-                if len(raw) > _MAX_JSON_BYTES:
-                    raise StockSourceError('Provider response is too large')
-                result = json.loads(raw)
-                if not isinstance(result, dict):
-                    raise StockSourceError('Unsupported provider response')
-                return result
-        except HTTPError as error:
-            self._status(provider, key, error)
-            error.close()
-            raise StockSourceError('Provider rejected request') from None
-        except InterruptedError:
-            raise
-        except (OSError, ValueError):
-            raise StockSourceError('Provider request failed') from None
+        self._checkpoint()
+        with self._api_slot(provider):
+            # Waiting requests must observe cooldown/key rejection recorded by
+            # earlier requests. Keep failure publication inside the same slot.
+            key = self._key(provider)
+            params = dict(params or {})
+            headers = {'User-Agent': 'NewsFlow/1.0 (stock media discovery)', 'Accept': 'application/json'}
+            if provider == 'pixabay':
+                params['key'] = key
+            elif key:
+                headers['Authorization'] = ('Bearer ' if provider == 'coverr' else '') + key
+            url = endpoint + (('?' + urlencode(params)) if params else '')
+            self._validate_url(provider, url)
+            try:
+                with self._open(Request(url, headers=headers), provider=provider, authenticated=bool(key)) as response:
+                    raw = response.read(_MAX_JSON_BYTES + 1)
+                    if len(raw) > _MAX_JSON_BYTES:
+                        raise StockSourceError('Provider response is too large')
+                    result = json.loads(raw)
+                    if not isinstance(result, dict):
+                        raise StockSourceError('Unsupported provider response')
+                    return result
+            except HTTPError as error:
+                try:
+                    self._status(provider, key, error)
+                finally:
+                    error.close()
+                raise StockSourceError('Provider rejected request') from None
+            except InterruptedError:
+                raise
+            except (OSError, ValueError):
+                raise StockSourceError('Provider request failed') from None
 
     @staticmethod
     def _query(query: str, kind: str) -> str:
@@ -348,7 +370,7 @@ class StockService:
 
     def search(self, query: str, *, kind: str = 'video', limit: int = 6) -> list[StockCandidate]:
         query = self._query(query, kind)
-        self.checkpoint()
+        self._checkpoint()
         if not query or not self.enabled or limit <= 0:
             return []
         limit = min(_MAX_RESULTS, int(limit))
@@ -510,7 +532,7 @@ class StockService:
         try:
             with path.open('rb') as source:
                 while True:
-                    self.checkpoint()
+                    self._checkpoint()
                     chunk = source.read(256 * 1024)
                     if not chunk:
                         break
@@ -551,7 +573,7 @@ class StockService:
         tokens = set(re.findall(r'\w+', query))
         before = None
         while True:
-            self.checkpoint()
+            self._checkpoint()
             # Release the DB connection before yielding/decoding media. A
             # descending rowid cursor is stable when concurrent downloads add
             # newer assets, and does not accumulate the whole library in RAM.
@@ -575,7 +597,7 @@ class StockService:
             ranked.sort(key=lambda item: -item[0])
             result = []
             for _, filename, digest, data in ranked:
-                self.checkpoint()
+                self._checkpoint()
                 try:
                     path = self._local(filename, digest)
                 except StockSourceError:
@@ -623,8 +645,16 @@ class StockService:
             parsed = self._parse(provider, data, item.kind)
         return next((entry.download_url for entry in parsed if entry.asset_id == item.asset_id), '')
 
-    def fetch(self, candidate: StockCandidate) -> Path:
-        self.checkpoint()
+    def fetch(self, candidate: StockCandidate, *, checkpoint=None, progress=None) -> Path:
+        previous = getattr(self._transfer_context, 'checkpoint', None)
+        self._transfer_context.checkpoint = checkpoint
+        try:
+            return self._fetch(candidate, progress)
+        finally:
+            self._transfer_context.checkpoint = previous
+
+    def _fetch(self, candidate: StockCandidate, progress=None) -> Path:
+        self._checkpoint()
         if candidate.provider == 'commons':
             candidate = replace(candidate, provider='wikimedia')
         provider = candidate.provider
@@ -663,7 +693,7 @@ class StockService:
                         if any(mime in response.headers.get('Content-Type', '').lower() for mime in ('text/html', 'application/json')):
                             raise StockSourceError('Stock response is not media')
                         while True:
-                            self.checkpoint()
+                            self._checkpoint()
                             if time.monotonic() > deadline:
                                 raise StockSourceError('Stock download timed out')
                             chunk = response.read(256 * 1024)
@@ -674,6 +704,8 @@ class StockService:
                                 raise StockSourceError('Stock download exceeds size limit')
                             output.write(chunk)
                             digest.update(chunk)
+                            if progress:
+                                progress(size)
                     output.flush()
                     os.fsync(output.fileno())
                 if not size:

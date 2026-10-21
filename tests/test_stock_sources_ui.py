@@ -69,8 +69,27 @@ class StockSourcesUISmokeTests(unittest.TestCase):
     def test_sources_trim_and_protected_keys_survive_full_process_restart(self):
         subprocess.run([sys.executable, "-c", "import os; from pathlib import Path; from scriptor.config import Settings,save_settings; output=Path(os.environ['NEWSFLOW_TEST_ROOT'])/'io'/'outputs'; output.mkdir(); save_settings(Settings(montage_renderer='ffmpeg', montage_output_folder=str(output), pipeline_target_count=137, cover_rate_auto_resume=False))"],
                        cwd=ROOT, env=self.env, capture_output=True, check=True, timeout=30)
+        seed = """
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from scriptor.config import app_data_root
+from scriptor.stock_downloads import StockDownloadQueue
+root = Path(os.environ['NEWSFLOW_TEST_ROOT'])
+def fetch(candidate, *, progress, **kwargs):
+    progress(1048576)
+    return root / 'synthetic-original.mp4'
+service = SimpleNamespace(root=root, fetch=fetch)
+candidate = SimpleNamespace(provider='nasa', kind='video', asset_id='offline')
+with StockDownloadQueue(7, app_data_root() / 'stock-download-status.json') as queue:
+    queue.result(queue.submit(service, candidate))
+"""
+        subprocess.run([sys.executable, "-B", "-c", seed], cwd=ROOT, env=self.env,
+                       capture_output=True, check=True, timeout=10)
         configured = self._stage("configure")
         restarted = self._stage("restart")
+        self.assertEqual(configured['downloadStatus']['runId'], restarted['downloadStatus']['runId'])
+        self.assertEqual(restarted['downloadStatus']['completed'], 1)
         self.assertEqual(configured["finalSettings"], restarted["finalSettings"])
         self.assertEqual(restarted["finalSettings"]["sourceMode"], "stock")
         self.assertEqual(restarted["finalSettings"]["stockSources"], ["pexels", "wikimedia", "nasa"])

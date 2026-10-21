@@ -1,13 +1,43 @@
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
-from unittest.mock import patch
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from scriptor.cutter import build_cut_command, cut_single_clip
+from scriptor.cutter import build_cut_command, cut_single_clip, cut_sources
 
 
 class CutterTests(unittest.TestCase):
+    @patch("scriptor.cutter.ffmpeg_executable", return_value="ffmpeg.exe")
+    @patch("scriptor.cutter.subprocess.run")
+    def test_unknown_container_extension_reaches_ffmpeg(self, run, _ffmpeg):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "camera.recording"
+            source.write_bytes(b"media")
+            def normalize(command, **_kwargs):
+                Path(command[-1].replace("%04d", "0000")).write_bytes(b"video")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            run.side_effect = normalize
+            self.assertEqual(len(cut_sources([str(source)], root / "batch")), 1)
+            self.assertEqual(cut_single_clip(source, root / "single").read_bytes(), b"video")
+
+    @patch("scriptor.cutter.ffmpeg_executable", return_value="ffmpeg.exe")
+    @patch("scriptor.cutter.subprocess.run")
+    def test_wikimedia_ogv_reaches_normalizer(self, run, _ffmpeg):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Ocean surface waves.OGV"
+            source.write_bytes(b"downloaded-media")
+            def normalize(command, **_kwargs):
+                self.assertEqual(command[command.index("-i") + 1], str(source))
+                Path(command[-1].replace("%04d", "0000")).write_bytes(b"normalized")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            run.side_effect = normalize
+            result = cut_sources([str(source)], root / "cuts")
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].read_bytes(), b"normalized")
+
     @patch("scriptor.cutter.ffmpeg_executable", return_value="ffmpeg.exe")
     def test_builds_silent_normalized_six_second_segments(self, _ffmpeg):
         command = build_cut_command(Path("source.mp4"), Path("out_%04d.mp4"), 6, 30, "4M")

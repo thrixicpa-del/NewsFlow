@@ -85,7 +85,7 @@ describe("Montage stock source settings", () => {
 
   it("accepts a manually entered download worker count above eight without a maximum", async () => {
     const { command } = openSettings();
-    const input = screen.getByLabelText("Скачивание и нарезка") as HTMLInputElement;
+    const input = screen.getByLabelText("Одновременные скачивания") as HTMLInputElement;
     expect(input.max).toBe("");
     fireEvent.change(input, { target: { value: "64" } });
     fireEvent.click(screen.getByRole("button", { name: "Сохранить выбор" }));

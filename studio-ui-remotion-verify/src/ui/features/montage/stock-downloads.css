@@ -1,0 +1,11 @@
+.stock-download-timeline {
+  min-width: 0;
+  margin: 0 20px 16px;
+  padding: 12px;
+  border: 1px solid var(--border, #1d3b57);
+  border-radius: 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.stock-download-timeline p { margin: 6px 0; }
+.stock-download-timeline summary { cursor: pointer; }

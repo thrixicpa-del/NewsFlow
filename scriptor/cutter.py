@@ -8,9 +8,6 @@ from .core import safe_filename
 from .timeline import ffmpeg_executable
 
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
-
-
 def build_cut_command(source: Path, target_pattern: Path, duration: float = 6.0,
                       fps: int = 30, bitrate: str = "4M") -> list[str]:
     """Return the uniform, silent H.264 segmentation command used by NewsFlow."""
@@ -35,7 +32,9 @@ def cut_sources(sources: list[str], output_root: Path, duration: float = 6.0,
     output_root.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    valid = [Path(raw) for raw in sources if Path(raw).is_file() and Path(raw).suffix.casefold() in VIDEO_EXTENSIONS]
+    # FFmpeg detects containers by content; an extension whitelist rejects
+    # valid camera/stock media such as OGV, TS and extensionless recordings.
+    valid = [Path(raw) for raw in sources if Path(raw).is_file()]
     if not valid:
         raise ValueError("Добавьте хотя бы один видеофайл для нарезки")
     for number, source in enumerate(valid, 1):
@@ -45,7 +44,7 @@ def cut_sources(sources: list[str], output_root: Path, duration: float = 6.0,
         if progress:
             progress({"current": number, "total": len(valid), "source": source.name, "stage": "cutting"})
         result = subprocess.run(build_cut_command(source, pattern, duration, fps, bitrate), capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", creationflags=flags)
+                                text=True, encoding="utf-8", errors="replace", creationflags=flags, check=False)
         if result.returncode:
             detail = (result.stderr or result.stdout or "FFmpeg завершился с ошибкой")[-2500:]
             raise RuntimeError(f"{source.name}: {detail}")
@@ -65,7 +64,7 @@ def cut_single_clip(source: Path, output_root: Path, duration: float = 6.0,
     only the requested short interval and writes a deterministic 30 FPS MP4.
     """
     source = Path(source)
-    if not source.is_file() or source.suffix.casefold() not in VIDEO_EXTENSIONS:
+    if not source.is_file():
         raise ValueError("Добавьте существующий видеофайл")
     if duration <= 0:
         raise ValueError("Длительность клипа должна быть больше нуля")
@@ -83,7 +82,7 @@ def cut_single_clip(source: Path, output_root: Path, duration: float = 6.0,
         "-bufsize", "8M", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(partial),
     ]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                            creationflags=flags)
+                            creationflags=flags, check=False)
     if result.returncode:
         detail = (result.stderr or result.stdout or "FFmpeg завершился с ошибкой")[-2500:]
         raise RuntimeError(f"{source.name}: {detail}")

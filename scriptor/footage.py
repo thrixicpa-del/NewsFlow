@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import tempfile
 import urllib.parse
@@ -8,8 +9,9 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from yt_dlp.utils import DownloadError
 
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".ogv"}
 
 
 @dataclass
@@ -151,6 +153,7 @@ def download_youtube_segment(result: dict, folder: Path, start: float = 0.0, dur
     """Download only a short selected interval instead of retaining the entire source video."""
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import download_range_func
+
     from .timeline import ffmpeg_executable
     folder.mkdir(parents=True, exist_ok=True)
     safe_title = re.sub(r"[^\w .()-]", "_", result["title"]).strip()[:100]
@@ -197,8 +200,8 @@ def download_best_youtube_segment(result: dict, folder: Path, visual_query_en: s
             with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as client:
                 metadata = client.extract_info(result["source_url"], download=False)
             source_duration = float((metadata or {}).get("duration") or 0.0)
-        except Exception:
-            pass
+        except (DownloadError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            source_duration = 0.0
     source_duration = max(duration, source_duration)
     latest_start = max(0.0, source_duration - duration)
     if latest_start <= 0.0:
@@ -212,7 +215,7 @@ def download_best_youtube_segment(result: dict, folder: Path, visual_query_en: s
             try:
                 preview = download_youtube_segment(result, preview_folder, start, min(2.0, duration))
                 scored.append((float(scorer(preview.path, visual_query_en)), start))
-            except Exception:
-                continue
+            except (DownloadError, OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+                logging.getLogger(__name__).debug("Optional footage preview failed: %s", type(error).__name__)
     best_start = max(scored, default=(-1.0, 0.0))[1]
     return download_youtube_segment(result, folder, best_start, duration)

@@ -33,6 +33,7 @@ const requiredSources = [
   'scriptor/montage_blocks.py',
   'scriptor/montage_continuity.py',
   'scriptor/stock_credits.py',
+  'scriptor/stock_downloads.py',
   'scriptor/stock_history.py',
   'scriptor/stock_media.py',
   'scriptor/stock_selection.py',

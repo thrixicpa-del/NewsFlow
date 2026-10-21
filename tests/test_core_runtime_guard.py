@@ -35,6 +35,7 @@ REQUIRED_SOURCES = (
     "scriptor/montage_blocks.py",
     "scriptor/montage_continuity.py",
     "scriptor/stock_credits.py",
+    "scriptor/stock_downloads.py",
     "scriptor/stock_history.py",
     "scriptor/stock_media.py",
     "scriptor/stock_selection.py",
@@ -132,20 +133,49 @@ class CoreRuntimeGuardTests(unittest.TestCase):
             check=False,
         )
 
+    def test_guard_rejects_changed_stock_download_queue_content(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            fixture_root, fixture_app, _executable = self._fixture(temporary)
+            relative = "scriptor/stock_downloads.py"
+            source = fixture_root / relative
+            source.write_bytes(b"# stock queue included in the built core\n")
+            lock_path = fixture_app / "core-runtime-lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["sourceGitBlobs"][relative] = _git_blob_sha(source.read_bytes())
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            matching = self._run(fixture_app)
+            self.assertEqual(matching.returncode, 0, matching.stdout + matching.stderr)
+
+            source.write_bytes(b"# queue implementation changed after the core build\n")
+            stale = self._run(fixture_app)
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn(relative, stale.stdout + stale.stderr)
+
+    def test_guard_requires_stock_download_queue_identity(self):
+        with tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+            _fixture_root, fixture_app, _executable = self._fixture(temporary)
+            lock_path = fixture_app / "core-runtime-lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["sourceGitBlobs"].pop("scriptor/stock_downloads.py", None)
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            result = self._run(fixture_app)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("scriptor/stock_downloads.py", result.stdout + result.stderr)
+
     def test_repository_lock_matches_current_source_and_package_revision(self):
         lock = json.loads((APP_ROOT / "core-runtime-lock.json").read_text(encoding="utf-8"))
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], ".core-bin-2.1.152-review-r51")
+        self.assertEqual(lock["coreRevision"], ".core-bin-2.1.152-stock-r54")
         self.assertEqual(
             lock["coreExeSha256"],
-            "2d57a1eef51d8e45a9061b995fd7697ab14e74e03c53ae6bf16ac704fe2e28d3",
+            "5a450ef3fd99fb2b0e5fdbc6427c2b041c2eca0d67731ba7e939bd10662daff1",
         )
-        self.assertEqual(lock["coreExeSize"], 21787315)
+        self.assertEqual(lock["coreExeSize"], 21799301)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "f11c1b092f0326cdab1b994be6f1c2d36728ba7b",
+            "cdc7b41fa1d2bb502d1d90d0df94d31f4d0480d3",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),

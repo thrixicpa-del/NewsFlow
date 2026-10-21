@@ -133,6 +133,19 @@ async function main() {
     await until('initial persisted snapshot rendered', () => evaluate(() => document.querySelector('input[aria-label="Цель выпуска"]')?.value === '137'));
     if (!await evaluate(() => [...document.querySelectorAll('button')].some((button) => button.offsetParent !== null && button.textContent.trim() === 'Монтаж'))) await click('ПРОИЗВОДСТВО');
     await click('Монтаж');
+    const downloads = (await snapshot()).stockDownloads;
+    assert.equal(downloads.running, false);
+    assert.equal(downloads.limit, 7);
+    assert.equal(downloads.completed, 1);
+    assert.equal(downloads.bytesDownloaded, 1048576);
+    assert(downloads.history.some((item) => item.event === 'completed'));
+    await until('durable download counters rendered', () => evaluate(() => {
+      const panel = document.querySelector('.stock-download-timeline');
+      return panel && panel.textContent.includes('Готово: 1') && panel.textContent.includes('1.0 МБ');
+    }));
+    evidence.downloadStatus = downloads;
+    await evaluate(() => document.querySelector('.stock-download-timeline').scrollIntoView({ block: 'center' }));
+    writeFileSync(path.join(artifacts, `${stage}-downloads.png`), (await win.webContents.capturePage()).toPNG());
     await click('Настроить монтаж');
     await until('stock controls', () => evaluate(() => Boolean(document.querySelector('#nf-select-источники-футажей'))));
     if (stage === 'configure') {
@@ -159,7 +172,7 @@ async function main() {
       await checkbox('Coverr', false);
       await checkbox('Обрезать стоковые видео', false);
       await checkbox('Использовать библиотеку скачанных стоков', false);
-      await field('Скачивание и нарезка', '64');
+      await field('Одновременные скачивания', '64');
       assert.deepEqual((await save()).montageSettings.stockSources, ['pexels', 'wikimedia', 'nasa']);
       await field('Новые API-ключи стоков', secrets.slice(0, 2).join('\n'));
       assert.equal(await evaluate(() => getComputedStyle(document.querySelector('#nf-textarea-новые-api-ключи-стоков')).webkitTextSecurity), 'disc');
