@@ -44,6 +44,7 @@ def _embed(root: Path, mode: str) -> None:
     if mode == "legacy":
         from fastembed import ImageEmbedding, TextEmbedding
     elif mode == "new":
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from scriptor.onnx_clip import ImageEmbedding, TextEmbedding
     else:
         raise ValueError(mode)
