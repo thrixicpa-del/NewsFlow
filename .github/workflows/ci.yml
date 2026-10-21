@@ -26,6 +26,9 @@ jobs:
         working-directory: studio-ui-remotion-verify
       - run: pwsh -NoProfile -File scripts/release-lint.ps1
       - run: pwsh -NoProfile -File scripts/audit-python-dependencies.ps1
+      - run: python tests/run_isolated.py tests.test_onnx_clip_adapter
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-clip-adapter
       - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
