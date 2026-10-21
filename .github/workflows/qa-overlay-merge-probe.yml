@@ -20,7 +20,9 @@ jobs:
           git config user.name 'newsflow-integration[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin main codex/montage-overlays --no-tags
+          set +e
           git merge --no-commit --no-ff origin/codex/montage-overlays
+          set -e
           exitcode=$?
           if [ "$exitcode" -ne 0 ]; then
             echo MERGE_PROBE=CONFLICTS
