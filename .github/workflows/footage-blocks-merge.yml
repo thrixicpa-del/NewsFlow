@@ -29,7 +29,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git merge --no-commit --no-ff origin/codex/footage-blocks; then
             conflicts="$(git diff --name-only --diff-filter=U)"
-            allowed="$(printf '%s\n' '.github/workflows/ci.yml' '.github/workflows/windows-native.yml')"
+            allowed="$(printf '%s\n' '.github/workflows/ci.yml' 'studio-ui-remotion-verify/src/contracts/newsflowCommands.ts')"
             if [[ "$conflicts" != "$allowed" ]]; then
               echo "BLOCKS_UNEXPECTED_CONFLICTS: $conflicts"
               for file in $(git diff --name-only --diff-filter=U); do
@@ -38,9 +38,33 @@ jobs:
               done
               exit 1
             fi
-            git checkout --ours .github/workflows/ci.yml .github/workflows/windows-native.yml
+            git checkout --ours .github/workflows/ci.yml studio-ui-remotion-verify/src/contracts/newsflowCommands.ts
           fi
-          git add .github/workflows/ci.yml .github/workflows/windows-native.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("studio-ui-remotion-verify/src/contracts/newsflowCommands.ts")
+          text = path.read_text(encoding="utf-8")
+          before = '"add-footage-folder",'
+          after = '"save-footage-block", "delete-footage-block", "preview-footage-block-import", "import-footage-block-pairs", "assign-footage-block", "add-footage-folder",'
+          assert text.count(before) == 1
+          text = text.replace(before, after, 1)
+          anchor = "export interface CriticalCommandPayloads {\n"
+          addition = '''  "save-footage-block": { blockId?: string; name: string; root: string };
+            "delete-footage-block": { blockId: string };
+            "preview-footage-block-import": { text: string };
+            "import-footage-block-pairs": { text: string; confirmOverwrite?: boolean; previewToken?: string };
+            "assign-footage-block": { productionItemId: string; blockId: string };
+          '''
+          addition = "\n".join(line[10:] if line.startswith("          ") else line for line in addition.splitlines()) + "\n"
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, anchor + addition, 1)
+          old = '"save-montage-settings": { stockHdOnly?: boolean };'
+          new = '"save-montage-settings": { stockHdOnly?: boolean; useFootageBlocks?: boolean };'
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+          git add .github/workflows/ci.yml studio-ui-remotion-verify/src/contracts/newsflowCommands.ts
           test -z "$(git diff --name-only --diff-filter=U)"
           git diff --cached --check
           git diff --check
