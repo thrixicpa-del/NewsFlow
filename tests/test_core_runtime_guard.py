@@ -19,6 +19,8 @@ REQUIRED_SOURCES = (
     "scriptor/bridge.py",
     "scriptor/ai_index.py",
     "scriptor/onnx_clip.py",
+    "scriptor/scene_intent.py",
+    "scriptor/visual_evidence.py",
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
@@ -181,6 +183,21 @@ class CoreRuntimeGuardTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("актуально по содержимому", result.stdout)
+
+    def test_guard_rejects_changed_footage_semantic_runtime(self):
+        for relative in ("scriptor/scene_intent.py", "scriptor/visual_evidence.py"):
+            with self.subTest(source=relative), tempfile.TemporaryDirectory(prefix="newsflow-core-runtime-guard-") as temporary:
+                fixture_root, fixture_app, _ = self._fixture(temporary)
+                source = fixture_root / relative
+                original = b"# semantic runtime fixture\n"
+                lock_path = fixture_app / "core-runtime-lock.json"
+                lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                lock["sourceGitBlobs"][relative] = _git_blob_sha(original)
+                lock_path.write_text(json.dumps(lock), encoding="utf-8")
+                source.write_bytes(b"# changed semantic runtime\n")
+                result = self._run(fixture_app)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(relative, result.stderr)
 
     def test_guard_rejects_changed_scenario_runtime_support_content(self):
         for relative in ("scriptor/config.py", "scriptor/runner.py", "scriptor/story_planner.py"):

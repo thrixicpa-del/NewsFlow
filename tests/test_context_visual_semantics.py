@@ -29,6 +29,55 @@ DESCRIPTIONS = {
 
 
 class ContextVisualSemanticsTests(unittest.TestCase):
+    def test_location_only_query_accepts_checked_city_context_without_claiming_geography(self):
+        for query in ("Azerbaijan Baku", "Азербайджан Баку", "Armenia Yerevan"):
+            with self.subTest(query=query):
+                result = classify_window(query, [{"city": .35, "official": .1}] * 3)
+                self.assertEqual(result["relation"], "context")
+                self.assertEqual(result["supported_kinds"], ["city"])
+                self.assertFalse(result["event_confirmed"])
+                self.assertFalse(result["motion_verified"])
+
+    def test_border_query_requires_checked_checkpoint_instead_of_generic_crowd_or_combat(self):
+        for query in ("border checkpoint guards fence", "пограничный пункт пропуска"):
+            with self.subTest(query=query):
+                good = classify_window(query, [{"border_checkpoint": .35, "city": .12, "combat": .1}] * 3)
+                self.assertEqual(good["relation"], "direct")
+                for negative in ("city", "official", "combat", "peaceful_protest", "queue"):
+                    bad = classify_window(query, [{"border_checkpoint": .15, negative: .36}] * 3)
+                    self.assertEqual(bad["relation"], "contradiction")
+
+    def test_location_context_keeps_close_negative_and_action_priority(self):
+        from scriptor.visual_evidence import query_topic
+        for negative in ("official", "combat", "interview", "leisure", "peaceful_protest"):
+            result = classify_window("Azerbaijan Baku", [{"city": .12, negative: .36}] * 3)
+            self.assertEqual(result["relation"], "contradiction")
+        for query, topic in (("Baku peaceful protest", "protest"),
+                             ("Baku formal statement", "official"),
+                             ("border checkpoint military soldiers", "combat"),
+                             ("Baku freight train", "rail")):
+            self.assertEqual(query_topic(query)[0], topic)
+        for query in ("unrecognised subject", "Azerbaijan hostage execution", "not a border checkpoint",
+                      "not city streets", "without urban footage", "не городские улицы"):
+            self.assertIsNone(query_topic(query))
+
+    def test_real_index_assessment_and_bridge_keep_supported_and_wrong_role_windows_separate(self):
+        from scriptor import bridge
+        from scriptor.footage import FootageItem
+        for query, kind, name in (("Azerbaijan Baku", "city", "Baku streets"),
+                                  ("border checkpoint guards fence", "border_checkpoint", "Border checkpoint")):
+            with self.subTest(query=query):
+                accepted = self.assess(query, {kind: .35, "official": .1})
+                rejected = self.assess(query, {kind: .12, "official": .36})
+                item = FootageItem("test-owned-fixture", name)
+                item._visual_assessor = lambda *_, result=accepted, **__: result
+                self.assertTrue(bridge._semantic_clip_ok(query, item, source_start=0, duration=6))
+                item._visual_assessor = lambda *_, result=rejected, **__: result
+                self.assertFalse(bridge._semantic_clip_ok(query, item, source_start=0, duration=6))
+                if kind == "city":
+                    self.assertFalse(bridge._semantic_clip_ok("Armenia Yerevan", item,
+                        source_start=0, duration=6, visual_assessment=accepted))
+
     def test_grain_commodity_fallback_keeps_direct_rail_and_close_negative_priority(self):
         from scriptor import bridge
         from scriptor.ai_index import SearchHit

@@ -10,8 +10,8 @@ import math
 import re
 from statistics import median
 
-TAXONOMY_VERSION = 8
-RULES_VERSION = 13
+TAXONOMY_VERSION = 9
+RULES_VERSION = 14
 MIN_SIMILARITY = .20
 CLEAR_MARGIN = .012
 
@@ -55,6 +55,10 @@ TAXONOMY = {
     "digital": ("computer servers in a data center with racks and network equipment",),
     "finance": ("bank financial business stock market trading screens and money",),
     "city": ("ordinary city streets buildings traffic and pedestrians urban footage",),
+    "border_checkpoint": (
+        "border crossing checkpoint with passport control booths barriers and border guards",
+        "international border checkpoint with a guarded border fence and vehicles at inspection booths",
+    ),
     "warehouse": ("grain cargo storage warehouse with sacks and forklifts",),
     "aircraft": ("airplane at an airport runway or airport terminal",),
     "road_cargo": ("cargo trucks transporting freight on a highway",),
@@ -111,6 +115,26 @@ _CONTEXT_FACET_PROMPTS = {
 }
 TAXONOMY.update(_CONTEXT_FACET_PROMPTS)
 _NON_ROLE_FACETS = frozenset(_INSTITUTION_SYMBOL_PATTERNS) | frozenset(_CONTEXT_FACET_PROMPTS)
+
+# Bare locations describe illustrative setting, not an action or a recognised
+# landmark. Require the entire query to be locations; never erase an unknown
+# action merely because its query also mentions a familiar country.
+_LOCATION_NAMES = (
+    "azerbaijan", "baku", "armenia", "yerevan", "russia", "moscow", "ukraine", "kyiv", "kiev",
+    "kazakhstan", "astana", "belarus", "minsk", "georgia", "tbilisi", "moldova", "chisinau",
+    "uzbekistan", "tashkent", "kyrgyzstan", "bishkek", "tajikistan", "dushanbe",
+    "turkmenistan", "ashgabat", "france", "paris", "germany", "berlin", "poland", "warsaw",
+    "turkey", "ankara", "iran", "tehran", "china", "beijing", "united kingdom", "london",
+    "united states", "washington", "israel", "lebanon", "beirut", "romania", "bucharest",
+    "азербайджан", "баку", "армения", "ереван", "россия", "москва", "украина", "киев",
+    "казахстан", "астана", "беларусь", "минск", "грузия", "тбилиси", "молдова", "кишинев",
+    "узбекистан", "ташкент", "кыргызстан", "киргизия", "бишкек", "таджикистан", "душанбе",
+    "туркменистан", "ашхабад", "франция", "париж", "германия", "берлин", "польша", "варшава",
+    "турция", "анкара", "иран", "тегеран", "китай", "пекин", "великобритания", "лондон",
+    "сша", "вашингтон", "израиль", "ливан", "бейрут", "румыния", "бухарест",
+)
+_LOCATION_ONLY = re.compile(r"(?:" + "|".join(map(re.escape, _LOCATION_NAMES)) + r")(?:[\s,;/]+(?:"
+                            + "|".join(map(re.escape, _LOCATION_NAMES)) + r"))*")
 
 
 def _has_positive_occurrence(text: str, expression: str, *, clause_negation: bool = False) -> bool:
@@ -211,6 +235,12 @@ def query_topic(query: str) -> tuple[str, frozenset[str], frozenset[str]] | None
             if denied_port:
                 contexts = contexts - {"port"}
             return topic, frozenset({topic}), frozenset(contexts)
+    if _has_positive_occurrence(text, r"\bborder\s+(?:crossing|checkpoint|guards?|fence)\b|пограничн\w*\s+(?:пункт|переход|застав|контрол)|пункт\w*\s+пропуска"):
+        return "border_checkpoint", frozenset({"border_checkpoint"}), frozenset()
+    if _has_positive_occurrence(text, r"\bcity\b|\burban\b|\bstreets?\b|\bskyline\b|городск\w*|\bулиц\w*"):
+        return "city", frozenset({"city"}), frozenset()
+    if _LOCATION_ONLY.fullmatch(text.strip()):
+        return "location_context", frozenset(), frozenset({"city"})
     return None
 
 
@@ -256,6 +286,8 @@ def classify_window(query: str, frame_scores: list[dict[str, float]]) -> dict:
     if topic is None:
         return result
     topic_name, direct, context = topic
+    if topic_name == "location_context":
+        result.update(illustrative_only=True, geography_confirmed=False)
     grain_farm = topic_name == "farm" and _has_positive_occurrence(
         str(query).casefold().replace("ё", "е").replace("_", " "),
         r"\b(?:grain|wheat)\b|\bзерн(?:о\w*|а|у|е|ом|ами|ах)\b|\bзерен\b|\bпшениц\w*",
