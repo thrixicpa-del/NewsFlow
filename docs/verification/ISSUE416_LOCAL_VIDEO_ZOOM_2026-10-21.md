@@ -49,9 +49,16 @@ with selectors/repair/tail planning forbidden, and the actual UI export payload.
 python -B tests/run_isolated.py tests.test_local_video_zoom tests.test_timeline tests.test_montage_queue tests.test_montage_blocks tests.test_overlay_persistence tests.test_overlay_remotion_contract tests.test_overlay_timing tests.test_montage_continuity tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan -q
 ```
 
+- First Linux CI stopped in the existing GPU chunk test double: its old
+  signature rejected the new keyword (`6 PASS / 1 ERROR`). Reproduced locally
+  before changing only that helper to accept and assert the project's choice.
+  Complete `python -B tests/run_isolated.py scriptor.test_montage_render -q`:
+  **33 PASS**, 32.066 s, production guard **PASS**. Production implementation
+  unchanged by this follow-up; exact-head independent gates rerun after push.
+
 - Montage UI: **106 PASS**, eight files, 6.59 s.
 - `pnpm typecheck`, `pnpm verify:security`, source `pnpm build`: **PASS**.
-- Ruff on all six changed Python files, workflow YAML parse and diff whitespace:
+- Ruff on all seven changed Python files, workflow YAML parse and diff whitespace:
   **PASS**. No dependency/lock changes.
 - Real isolated Electron -> trusted IPC -> Python -> settings -> process restart:
   **PASS**, 14.617 s. Zoom off default and visible/persisted ON checked alongside

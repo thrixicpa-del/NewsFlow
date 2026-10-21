@@ -314,7 +314,9 @@ class MontageRenderTests(unittest.TestCase):
             chunk_sizes: list[int] = []
             clip_order: list[str] = []
 
-            def fake_chunk_command(_ffmpeg, clips, chunk_output, _script, _width, _height):
+            def fake_chunk_command(_ffmpeg, clips, chunk_output, _script, _width, _height,
+                                   *, local_video_zoom=False):
+                self.assertEqual(local_video_zoom, project.local_video_zoom)
                 chunk_sizes.append(len(clips))
                 clip_order.extend(clip.path for clip in clips)
                 return ["ffmpeg", "-y", str(chunk_output)]
