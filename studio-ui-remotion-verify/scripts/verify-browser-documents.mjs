@@ -123,6 +123,14 @@ try {
   assert.deepEqual(initial.requirementsFiles, initialExpected);
   assert.equal(initial.running, stage === 'choose-and-cancel');
   if (stage === 'choose-and-cancel') {
+    // Header/form mounting precedes App's initial asynchronous snapshot. The
+    // restored owner lock makes Cancel enabled only after that snapshot reaches
+    // React; editing before then lets hydration reset the unsaved file mode.
+    await until('restored active queue rendered', () => evaluate(() => {
+      const cancel = [...document.querySelectorAll('button')].find((button) =>
+        button.offsetParent !== null && button.textContent.trim() === 'Отменить генерацию');
+      return Boolean(cancel && !cancel.disabled);
+    }));
     await evaluate(() => {
       const label = [...document.querySelectorAll('label')].find((item) => item.querySelector('span')?.textContent === 'Источник требований');
       const field = label?.querySelector('select');
