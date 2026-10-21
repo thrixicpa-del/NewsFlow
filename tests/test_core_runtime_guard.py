@@ -18,6 +18,7 @@ APP_ROOT = ROOT / "studio-ui-remotion-verify"
 REQUIRED_SOURCES = (
     "scriptor/bridge.py",
     "scriptor/ai_index.py",
+    "scriptor/onnx_clip.py",
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
