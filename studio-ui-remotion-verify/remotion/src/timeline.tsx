@@ -8,6 +8,7 @@ export type NewsFlowSequence = {
   from: number;
   durationInFrames: number;
   sourceStart?: number;
+  localVideoZoom?: boolean;
 };
 
 export type NewsFlowRenderProject = {
@@ -27,6 +28,9 @@ const asMediaUrl = (value: string) => {
   return `file:///${value.replace(/\\/g, '/').replace(/^\/+/, '')}`;
 };
 
+export const localVideoZoomScale = (frame: number, durationInFrames: number) =>
+  1 + 0.08 * Math.min(1, Math.max(0, frame / Math.max(1, durationInFrames - 1)));
+
 const FittedVideo: React.FC<{ sequence: NewsFlowSequence; transitionFrames?: number; transitionStyle?: NewsFlowRenderProject['transitionStyle'] }> = ({ sequence, transitionFrames = 0, transitionStyle = 'crossfade' }) => {
   const { fps } = useVideoConfig();
   const frame = useCurrentFrame();
@@ -38,7 +42,9 @@ const FittedVideo: React.FC<{ sequence: NewsFlowSequence; transitionFrames?: num
   const translateX = transitionStyle === 'slide-left' && transitionFrames > 0
     ? interpolate(frame, [0, transitionFrames], [100, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }) : 0;
   const dipOpacity = transitionStyle === 'dip-black' && transitionFrames > 0 ? transition : 1;
-  const scale = sequence.kind === 'intro' ? 1 : interpolate(frame, [0, Math.max(1, sequence.durationInFrames)], [1.035, 1], {
+  const scale = sequence.kind === 'intro' ? 1 : sequence.localVideoZoom
+    ? localVideoZoomScale(frame, sequence.durationInFrames)
+    : interpolate(frame, [0, Math.max(1, sequence.durationInFrames)], [1.035, 1], {
     extrapolateLeft: 'clamp', extrapolateRight: 'clamp', easing: Easing.bezier(0.16, 1, 0.3, 1),
   });
   return (
@@ -48,7 +54,7 @@ const FittedVideo: React.FC<{ sequence: NewsFlowSequence; transitionFrames?: num
         trimBefore={trimBefore}
         objectFit={sequence.kind === 'intro' ? 'contain' : 'cover'}
         volume={sequence.kind === 'intro' ? 1 : 0}
-        style={{ width: '100%', height: '100%', opacity: fade * dipOpacity, scale, transform: `translateX(${translateX}%) scale(${scale})` }}
+        style={{ width: '100%', height: '100%', opacity: fade * dipOpacity, scale: sequence.localVideoZoom ? 1 : scale, transform: `translateX(${translateX}%) scale(${scale})` }}
       />
     </AbsoluteFill>
   );

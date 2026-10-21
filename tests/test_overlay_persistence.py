@@ -341,6 +341,23 @@ class OverlayPersistenceTests(unittest.TestCase):
         self.assertEqual(json.loads(project_path.read_text("utf-8"))["clips"], clips)
         self.assertEqual(settings.montage_task_statuses["0"]["status"], "Готово")
 
+    def test_zoom_reexport_changes_only_effect_and_preserves_it_without_override(self):
+        settings, project_path = self.render_only_fixture()
+        clips = json.loads(project_path.read_text("utf-8"))["clips"]
+        # Global preference can differ from the saved project. Only an explicit
+        # export choice changes that project, and no selector is allowed here.
+        for choice in (True, None, False):
+            with self.subTest(choice=choice):
+                payload = {"indices": [0], "renderOnly": True}
+                if choice is not None:
+                    payload["localVideoZoom"] = choice
+                result = bridge._run_montage_queue_unlocked(payload)
+                self.assertEqual(result["operationResult"]["count"], 1)
+                project = TimelineProject.load(project_path)
+                self.assertEqual(project.local_video_zoom, choice is not False)
+                self.assertEqual(json.loads(project_path.read_text("utf-8"))["clips"], clips)
+                self.assertFalse(settings.montage_local_video_zoom)
+
     def test_render_only_reports_missing_clip_without_reselection(self):
         settings, project_path = self.render_only_fixture(missing=True)
         original = project_path.read_bytes()

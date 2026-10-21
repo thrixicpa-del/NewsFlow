@@ -164,6 +164,7 @@ class TimelineProject:
     manual_replacements: list[dict] = field(default_factory=list)
     overlay_template: dict = field(default_factory=dict)
     overlay_needs_render: bool = False
+    local_video_zoom: bool = False
 
     @property
     def duration(self) -> float:
@@ -881,12 +882,28 @@ def warm_source_proxy(
     return target, False
 
 
-def _proxy_key(clip: TimelineClip, width: int, height: int, frame_count: int | None = None) -> str:
+def _local_clip_zoom(clip: TimelineClip, enabled: bool) -> bool:
+    source = (clip.source or "local").split("·", 1)[0].strip()
+    return bool(enabled and source == "local"
+                and not clip.stock_provenance and not clip.continuity)
+
+
+def _local_zoom_filter(clip: TimelineClip, width: int, height: int,
+                       frame_count: int | None = None) -> str:
+    last_frame = max(1, (frame_count if frame_count is not None else round(clip.duration * 30)) - 1)
+    return (f"zoompan=z='1+0.08*min(on/{last_frame},1)':"
+            f"x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={width}x{height}:fps=30,")
+
+
+def _proxy_key(clip: TimelineClip, width: int, height: int, frame_count: int | None = None,
+               *, local_video_zoom: bool = False) -> str:
     source = Path(clip.path)
     stat = source.stat()
     value = (f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{clip.source_start:.9f}|"
              f"{clip.duration:.9f}|{width}x{height}|30fps|crf20|proxy-v3-loop-short-source|"
              f"bounded-frame-grid-v2|{frame_count}")
+    if _local_clip_zoom(clip, local_video_zoom):
+        value += "|local-video-zoom-v1"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -1049,6 +1066,7 @@ def _gpu_timeline_chunk_command(
     script: Path,
     width: int,
     height: int,
+    *, local_video_zoom: bool = False,
 ) -> list[str]:
     """Build one bounded direct-source GPU timeline command.
 
@@ -1073,9 +1091,10 @@ def _gpu_timeline_chunk_command(
             "-i", str(source),
         ])
         label = f"v{index}"
+        zoom = _local_zoom_filter(clip, width, height) if _local_clip_zoom(clip, local_video_zoom) else ""
         filters.append(
             f"[{index}:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1,fps=30,format=yuv420p[{label}]"
+            f"crop={width}:{height},setsar=1,fps=30,{zoom}format=yuv420p[{label}]"
         )
         labels.append(f"[{label}]")
     filters.append(f"{''.join(labels)}concat=n={len(clips)}:v=1:a=0[outv]")
@@ -1129,6 +1148,7 @@ def _render_project_gpu_timeline(
             script = work / f"chunk-{chunk_number:04d}.ffscript"
             run_ffmpeg(_gpu_timeline_chunk_command(
                 ffmpeg, clip_chunk, chunk, script, width, height,
+                local_video_zoom=project.local_video_zoom,
             ))
             chunks.append(chunk)
             if progress:
@@ -1349,19 +1369,21 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
                     )
                     if clip.duration <= original_available + 1e-6:
                         render_source = source
-            target = cache_root / f"{_proxy_key(clip, width, height, frame_count)}.mp4"
+            target = cache_root / f"{_proxy_key(clip, width, height, frame_count, local_video_zoom=project.local_video_zoom)}.mp4"
             # Never read beyond the selected/verified source interval. EOF
             # handling retains its last actual frame on the 30fps grid; the
             # explicit frame budget prevents both 179-frame underflow and
             # 181-frame overshoot for an ordinary six-second scene.
             proxy_duration = float(clip.duration)
             expected_proxy_duration = frame_count / 30
+            zoom = (_local_zoom_filter(clip, width, height, frame_count)
+                    if _local_clip_zoom(clip, project.local_video_zoom) else "")
             # Normalize timestamps before spatial filters: bundled FFmpeg 7.1
             # can lose the last frame at exact input EOF with scale-before-fps.
             filter_value = (
                 f"fps=30:start_time=0:eof_action=pass,trim=end_frame={frame_count},"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height},format=yuv420p"
+                f"crop={width}:{height},{zoom}format=yuv420p"
             )
             # Several videos can legitimately use the same 6-second local
             # footage.  Serialize only that exact proxy, not the entire render
@@ -1487,6 +1509,7 @@ def remotion_payload(project: TimelineProject, fps: int = 30) -> dict:
     for clip in project.clips:
         duration = max(1, round(clip.duration * fps))
         sequences.append({"kind": "footage", "src": clip.path, "from": frame, "durationInFrames": duration,
+                          "localVideoZoom": _local_clip_zoom(clip, project.local_video_zoom),
                           "sourceStart": clip.source_start, "narration": clip.narration})
         frame += duration
     # The canonical FFmpeg preflight rejects an insufficient footage plan

@@ -78,8 +78,20 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-overlay-boundary
       - name: Isolated stock UI and real synthetic media renders
-        run: python -B tests/run_isolated.py tests.test_stock_sources_ui tests.test_stock_render tests.test_footage_blocks_ui_isolated -q
+        run: python -B tests/run_isolated.py tests.test_stock_sources_ui tests.test_stock_render tests.test_footage_blocks_ui_isolated tests.test_local_video_zoom tests.test_local_video_zoom_media -q
         env:
           NEWSFLOW_RUN_ELECTRON_E2E: '1'
           NEWSFLOW_RUN_FOOTAGE_BLOCKS_UI: '1'
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-stock-boundary
+      - name: Build source Remotion composition
+        run: pnpm build:remotion
+        working-directory: studio-ui-remotion-verify
+      - name: Local zoom real Remotion on/off media comparison
+        shell: pwsh
+        run: |
+          $env:NEWSFLOW_REMOTION_NODE = (Get-Command node).Source
+          $env:NEWSFLOW_REMOTION_RUNNER = (Resolve-Path 'studio-ui-remotion-verify/remotion/render.mjs').Path
+          python -B tests/run_isolated.py tests.test_local_video_zoom_media -q
+        env:
+          NEWSFLOW_LOCAL_ZOOM_RENDERER: remotion
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-local-zoom-remotion-boundary
