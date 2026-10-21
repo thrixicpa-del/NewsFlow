@@ -26,6 +26,17 @@ const requiredSources = [
   'scriptor/media_health.py',
   'scriptor/thumbnail_prompt_v2.py',
   'scriptor/observability.py',
+  'scriptor/footage_block_bridge.py',
+  'scriptor/footage_blocks.py',
+  'scriptor/montage_blocks.py',
+  'scriptor/montage_continuity.py',
+  'scriptor/stock_credits.py',
+  'scriptor/stock_history.py',
+  'scriptor/stock_media.py',
+  'scriptor/stock_selection.py',
+  'scriptor/stock_sources.py',
+  'scriptor/overlay_library.py',
+  'scriptor/overlays.py',
   'bridge_main.py',
   // PyInstaller collects dynamic montage imports from this build recipe; it is
   // therefore part of the immutable Frozen Core identity as well.

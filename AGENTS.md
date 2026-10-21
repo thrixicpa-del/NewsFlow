@@ -29,3 +29,16 @@ The canonical QA and release process is documented in:
 `main GREEN -> release-gate.ps1 -> packaged EXE/RC -> clean Windows -> controlled real providers -> manual exploratory -> full real acceptance -> release manifest/hashes/changelog/rollback -> STABLE`
 
 When this file and a task description differ, follow the stricter safety/verification requirement unless the repository owner explicitly changes the policy.
+
+## Footage relevance policy (owner clarification, 2026-10-20)
+
+- For neutral illustrative footage, match the objects and actions in the narrated
+  scene. The country where the stock was filmed is secondary: a suitable pier,
+  warehouse, pump or similar object may come from another country. Do not reject
+  such footage solely because of its filming location.
+- Keep exact identity when the scene specifically names a person, flag, place
+  or event. Do not present a generic or archival illustration as recording of
+  that specific event. A politician's portrait does not illustrate an unrelated
+  object merely because that politician appears in the overall topic.
+- This clarification preserves licensing checks, visual relevance validation,
+  diversity/history and the user's uniqueness settings.

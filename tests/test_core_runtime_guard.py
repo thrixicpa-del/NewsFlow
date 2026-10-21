@@ -28,6 +28,17 @@ REQUIRED_SOURCES = (
     "scriptor/media_health.py",
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
+    "scriptor/footage_block_bridge.py",
+    "scriptor/footage_blocks.py",
+    "scriptor/montage_blocks.py",
+    "scriptor/montage_continuity.py",
+    "scriptor/stock_credits.py",
+    "scriptor/stock_history.py",
+    "scriptor/stock_media.py",
+    "scriptor/stock_selection.py",
+    "scriptor/stock_sources.py",
+    "scriptor/overlay_library.py",
+    "scriptor/overlays.py",
     "bridge_main.py",
     "Scriptor.spec",
 )
@@ -124,15 +135,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-security-r48")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-montage-r49")
         self.assertEqual(
             lock["coreExeSha256"],
-            "9b4aa652dbbcfe146b534597ad4de89740469d51c97f278c845c21de437f3ffe",
+            "afbd777bab19a90e6e1b3ca5f6dc2d1db4dc93545a63e90a56a8b1f63c5730ce",
         )
-        self.assertEqual(lock["coreExeSize"], 21498333)
+        self.assertEqual(lock["coreExeSize"], 21647319)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "d9383c716cbfaa11d08404707fee64ce5ff9eacc",
+            "3c7362638b4548b4d1c567282bbcd2755642bfe3",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),

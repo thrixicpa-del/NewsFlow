@@ -59,6 +59,22 @@ jobs:
       - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice
+      - name: Offline stock adapters, scene routing, protected keys and media
+        run: >-
+          python -B tests/run_isolated.py tests.test_stock_sources
+          tests.test_stock_settings tests.test_stock_selection tests.test_stock_pipeline
+          tests.test_stock_review_regressions tests.test_stock_diversity tests.test_stock_credits tests.test_stock_media
+          tests.test_stock_scene_semantics tests.test_stock_advertisements tests.test_ai_index_preview_cache
+          tests.test_montage_continuity tests.test_stock_continuity_pipeline
+          tests.test_stock_continuity_selection tests.test_stock_quality
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-stock-boundary
+      - name: Curated footage blocks, durable assignments and source boundaries
+        run: >-
+          python -B tests/run_isolated.py --pytest
+          tests/test_footage_blocks.py tests/test_montage_blocks.py tests/test_footage_block_pipeline.py tests/test_footage_block_media.py -q
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-block-boundary
       - run: python tests/run_isolated.py tests.test_story_planner tests.test_runner tests.test_scenarios tests.test_session tests.test_production_reset tests.test_ideas
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-scenario-story-planner
@@ -70,6 +86,15 @@ jobs:
           scriptor.test_command_contract
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-browser-topics
+      # Real GPU/Remotion media fixtures run in release-gate, not this offline contract check.
+      - name: Overlay source and timeline contracts (offline)
+        run: >-
+          python -B tests/run_isolated.py tests.test_overlay_library
+          tests.test_overlay_timing tests.test_overlay_persistence
+          tests.test_overlay_random
+          tests.test_overlay_remotion_contract tests.test_overlay_storage_boundary
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-overlay-boundary
       - run: pnpm typecheck
         working-directory: studio-ui-remotion-verify
       - run: pnpm test:ui

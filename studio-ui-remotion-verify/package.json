@@ -50,7 +50,7 @@
     "tailwind-merge": "^3.6.0",
     "typescript": "7.0.2",
     "unzipper": "0.12.5",
-    "vite": "8.2.2"
+    "vite": "8.2.4"
   },
   "devDependencies": {
     "@storybook/react-vite": "10.4.0",
@@ -93,11 +93,11 @@
         "to": "core/scriptor"
       },
       {
-        "from": "../core-bin-2.1.152-security-r48/NewsFlowCore",
+        "from": "../core-bin-2.1.152-montage-r49/NewsFlowCore",
         "to": "core-bin"
       },
       {
-        "from": "../core-bin-2.1.152-security-r48/NewsFlowCore/_internal/_tcl_data",
+        "from": "../core-bin-2.1.152-montage-r49/NewsFlowCore/_internal/_tcl_data",
         "to": "core-tcl-data"
       },
       {

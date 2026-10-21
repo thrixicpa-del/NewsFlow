@@ -579,6 +579,36 @@ class VoiceMapTests(unittest.TestCase):
             self.assertAlmostEqual(previous["narration_end"], current["narration_start"], places=6)
         self.assertAlmostEqual(sum(scene["duration"] for scene in scenes), 14.4, places=6)
 
+    def test_aligned_visual_beats_use_measured_words_without_moving_future_radar(self):
+        words = [
+            {'text': text, 'start': start, 'end': end}
+            for text, start, end in (
+                ('Самолет', 0., .5), ('летит', .5, 1.), ('над', 1., 1.2),
+                ('морем', 1.2, 1.7), ('Диспетчер', 2., 2.5),
+                ('проверяет', 2.5, 3.), ('радар', 8., 11.5),
+            )
+        ]
+        payload = {
+            'schemaVersion': VOICE_MAP_SCHEMA_VERSION, 'productionItemId': 'qa:word-timing',
+            'scriptSha256': 's', 'audioSha256': 'a', 'audioDuration': 12.,
+            'title': 'Аэропорт', 'timingMode': 'aligned', 'alignmentEngine': 'test-real-word-interface',
+            'alignment': {'words': words}, 'segments': [{
+                'id': 1, 'start': 0., 'end': 12.,
+                'text': 'Самолет летит над морем. Диспетчер проверяет радар.',
+                'visualQuery': GENERIC_VISUAL_QUERY,
+            }],
+        }
+        status = type('Status', (), {'state': 'ready', 'path': 'qa.json', 'reason': '', 'data': payload})()
+        scenes, _ = bridge._voice_map_scenes(status)
+        self.assertEqual(scenes[0]['narration'], 'Самолет летит над морем. Диспетчер проверяет')
+        self.assertEqual(scenes[1]['narration'], 'радар.')
+        self.assertNotIn('radar', scenes[0]['visual_query_en'])
+        self.assertIn('radar', scenes[1]['visual_query_en'])
+        self.assertEqual(sum(scene['duration'] for scene in scenes), 12.)
+        payload['segments'][0]['visualQuery'] = 'manually approved airport control room'
+        scenes, _ = bridge._voice_map_scenes(status)
+        self.assertEqual(scenes[0]['visual_query_en'], 'manually approved airport control room')
+
     def test_generic_voice_segment_inherits_nearest_concrete_visual_intent(self):
         payload = {
             "schemaVersion": VOICE_MAP_SCHEMA_VERSION,
