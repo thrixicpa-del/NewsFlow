@@ -1,0 +1,91 @@
+name: Frozen source QA (Windows)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Scriptor.spec'
+      - 'scriptor/ai_index.py'
+      - 'scriptor/onnx_clip.py'
+      - 'requirements.lock'
+      - '.github/workflows/frozen-source-qa.yml'
+permissions:
+  contents: read
+jobs:
+  frozen-source-qa:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          lfs: true
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v6
+        with: { node-version: '24.19.0' }
+      - name: Install locked production requirements and PyInstaller
+        run: |
+          python -m pip install --require-hashes -r requirements.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install pyinstaller==6.18.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: pwsh
+      - name: Assert actual locked Windows FFmpeg bytes
+        shell: pwsh
+        run: |
+          $asset = 'assets/ffmpeg.exe'
+          $expected = (Get-Content -Raw 'studio-ui-remotion-verify/core-assets-lock.json' | ConvertFrom-Json).ffmpeg
+          $actualSize = (Get-Item -LiteralPath $asset).Length
+          $actualSha = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSize -ne $expected.size -or $actualSha -ne $expected.sha256) {
+            throw "Windows FFmpeg LFS payload mismatches canonical asset lock. No Frozen build permitted."
+          }
+      - name: Build real Frozen Core from current source
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP 'newsflow-frozen-output'
+          $work = Join-Path $env:RUNNER_TEMP 'newsflow-frozen-work'
+          python -m PyInstaller --noconfirm --clean --distpath $dist --workpath $work Scriptor.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $core = Join-Path $dist 'NewsFlowCore/NewsFlowCore.exe'
+          if (!(Test-Path -LiteralPath $core -PathType Leaf)) { throw 'Frozen Core executable absent' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $core).Hash.ToLowerInvariant()
+          $size = (Get-Item $core).Length
+          $manifest = [ordered]@{
+            gitSha = "$env:GITHUB_SHA"
+            coreExeSha256 = $hash
+            coreExeSize = $size
+            python = '3.12'
+            status = 'BUILT_NOT_RELEASED'
+          }
+          $manifest | ConvertTo-Json | Set-Content (Join-Path $dist 'frozen-source-receipt.json') -Encoding UTF8
+          Write-Output "FROZEN_CORE_BUILT=PASS sha256=$hash bytes=$size"
+      - name: Verify bundled FFmpeg and clean disposable bridge invocation
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP 'newsflow-frozen-output'
+          $coreDir = Join-Path $dist 'NewsFlowCore'
+          node studio-ui-remotion-verify/scripts/verify-core-assets.mjs --directory $coreDir --media-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:NEWSFLOW_TEST_MODE = '1'
+          $env:NEWSFLOW_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'newsflow-frozen-test'
+          $env:LOCALAPPDATA = Join-Path $env:NEWSFLOW_TEST_ROOT 'local'
+          $env:APPDATA = Join-Path $env:NEWSFLOW_TEST_ROOT 'roaming'
+          $env:TEMP = Join-Path $env:NEWSFLOW_TEST_ROOT 'tmp'
+          $env:TMP = $env:TEMP
+          $env:NEWSFLOW_PRODUCTION_LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'newsflow-production-protected'
+          foreach ($p in @($env:NEWSFLOW_TEST_ROOT, $env:LOCALAPPDATA, $env:APPDATA, $env:TEMP, $env:NEWSFLOW_PRODUCTION_LOCALAPPDATA)) {
+            New-Item -ItemType Directory -Force $p | Out-Null
+          }
+          $exe = Join-Path $coreDir 'NewsFlowCore.exe'
+          $out = & $exe snapshot '{}'
+          if ($LASTEXITCODE -ne 0) { throw "Real Frozen snapshot failed, exit $LASTEXITCODE" }
+          $result = ($out | Out-String | ConvertFrom-Json)
+          if ($null -eq $result) { throw 'Real Frozen snapshot has no JSON result' }
+          Write-Output 'FROZEN_BRIDGE_SOURCE_SMOKE=PASS'
+      - name: Upload QA-only frozen receipt and Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: newsflow-frozen-source-qa
+          path: ${{ runner.temp }}/newsflow-frozen-output/
+          retention-days: 7
+          if-no-files-found: error
