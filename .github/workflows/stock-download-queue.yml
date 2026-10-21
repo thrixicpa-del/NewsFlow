@@ -24,7 +24,7 @@ jobs:
       NEWSFLOW_RUN_ELECTRON_E2E: '1'
     steps:
       - uses: actions/checkout@v6
-        with: { lfs: true }
+        with: { lfs: true, fetch-depth: 2 }
       - uses: actions/setup-python@v6
         with: { python-version: '3.12', cache: 'pip', cache-dependency-path: requirements-test.lock }
       - uses: pnpm/action-setup@v4
