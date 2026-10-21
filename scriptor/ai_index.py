@@ -2105,6 +2105,11 @@ class ClipIndex:
                 return -1.0
         return float(np.dot(features.mean, query_vector))
 
+    def stock_visual_features(self, path: str | Path) -> _PreviewFeatures:
+        """Reuse the scored preview's content/model-bound frame features."""
+        image_model, _text_model = self._models()
+        return self._preview_features(Path(path), image_model)
+
     def mark_used(self, paths: Iterable[str]):
         now = time.time()
         with self._connect() as connection:
