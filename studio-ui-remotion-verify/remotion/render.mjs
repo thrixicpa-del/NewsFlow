@@ -4,11 +4,11 @@
  * self-contained: it does not require a global Node.js or a Remotion CLI.
  */
 import { readFile, mkdir, rm, stat, writeFile } from 'node:fs/promises';
-import { createReadStream, existsSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createLocalMediaServer } from './local-media-server.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // The final application does not bundle React at render time.  It receives a
@@ -129,54 +129,14 @@ const getSharedBundle = async () => {
   }
 };
 
-const mimeFor = (file) => {
-  const lower = file.toLowerCase();
-  if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4';
-  if (lower.endsWith('.webm')) return 'video/webm';
-  if (lower.endsWith('.mov')) return 'video/quicktime';
-  if (lower.endsWith('.mp3')) return 'audio/mpeg';
-  if (lower.endsWith('.wav')) return 'audio/wav';
-  if (lower.endsWith('.m4a') || lower.endsWith('.aac')) return 'audio/mp4';
-  return 'application/octet-stream';
-};
-
 // Remotion's compositor can fetch HTTP assets but deliberately rejects raw
 // `file:///` URLs. This private loopback server never exposes a directory: a
 // request contains the exact, encoded local filename from the timeline.
-const mediaServer = createServer(async (request, response) => {
-  try {
-    const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
-    if (requestUrl.pathname !== '/media') throw new Error('Not found');
-    const encoded = requestUrl.searchParams.get('src');
-    const file = encoded ? Buffer.from(encoded, 'base64url').toString('utf8') : '';
-    const { stat } = await import('node:fs/promises');
-    const info = await stat(file);
-    if (!info.isFile()) throw new Error('Not a file');
-    const size = info.size;
-    const range = request.headers.range;
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Headers', 'Range');
-    response.setHeader('Accept-Ranges', 'bytes');
-    response.setHeader('Content-Type', mimeFor(file));
-    response.setHeader('Cache-Control', 'no-store');
-    if (!range) {
-      response.writeHead(200, { 'Content-Length': size });
-      createReadStream(file).pipe(response);
-      return;
-    }
-    const match = /bytes=(\d*)-(\d*)/.exec(range);
-    const start = Math.min(size - 1, Number.parseInt(match?.[1] || '0', 10) || 0);
-    const end = Math.min(size - 1, Number.parseInt(match?.[2] || `${size - 1}`, 10) || size - 1);
-    response.writeHead(206, {
-      'Content-Range': `bytes ${start}-${end}/${size}`,
-      'Content-Length': end - start + 1,
-    });
-    createReadStream(file, { start, end }).pipe(response);
-  } catch {
-    response.writeHead(404);
-    response.end();
-  }
-});
+const mediaServer = await createLocalMediaServer([
+  ...(project.sequences || []).map((sequence) => sequence.src),
+  project.voiceover?.src,
+  project.overlay?.src,
+]);
 
 await new Promise((resolve, reject) => {
   mediaServer.once('error', reject);

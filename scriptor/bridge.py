@@ -12341,47 +12341,52 @@ def _cover_generation_lock_path() -> Path:
 
 
 def _cover_generation_process_is_running(pid: object) -> bool:
-    # The process identity check lives with the montage queue because both
-    # long-running bridge actions are hosted by NewsFlowCore.exe.
-    return _montage_process_is_running(pid)
+    # Source commands run in Python, packaged commands in NewsFlowCore.exe.
+    # Reuse the runtime-aware check rather than assuming a packaged owner.
+    return _browser_topic_process_is_running(pid)
 
 
 def _claim_cover_generation_lock() -> Path | None:
     """Claim one cross-process cover batch, or return None for an active one."""
     lock_path = _cover_generation_lock_path()
-    if lock_path.exists():
+    # Serialise read/reclaim/publication using a stable OS lock. The PID
+    # record can be temporarily empty while a different owner publishes it.
+    with _exclusive_settings_write(lock_path.with_name("cover-generation-owner.json")):
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if lock_path.exists():
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                existing = {}
+            if _cover_generation_process_is_running(existing.get("pid")):
+                return None
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return None
         try:
-            existing = json.loads(lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            existing = {}
-        if _cover_generation_process_is_running(existing.get("pid")):
+            with lock_path.open("x", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
+        except FileExistsError:
             return None
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return None
-    try:
-        with lock_path.open("x", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "startedAt": datetime.now().astimezone().isoformat(timespec="seconds")}, stream)
-    except FileExistsError:
-        return None
-    return lock_path
+        return lock_path
 
 
 def _release_cover_generation_lock(lock_path: Path) -> None:
     """Release only the lock still owned by this bridge process."""
-    try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        payload = {}
-    if payload.get("pid") != os.getpid():
-        return
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
+    with _exclusive_settings_write(lock_path.with_name("cover-generation-owner.json")):
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            payload = {}
+        if payload.get("pid") != os.getpid():
+            return
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _cover_repeat_political_contract_error(item: dict, face_mode: str) -> str:
@@ -15560,6 +15565,9 @@ def _generate_voice_unlocked(payload: dict) -> dict:
 def set_voice_queue_paused(payload: dict) -> dict:
     settings = load_settings()
     settings.voice_queue_paused = bool(payload.get("paused", True))
+    # A repeated explicit choice owns this write even if an intervening
+    # command changed disk after we loaded the same requested value.
+    settings._edited_independent_workflows = {"voice_queue_paused"}
     save_settings(settings)
     return {**snapshot(), "operationResult": {
         "kind": "voice-pause", "count": 0,
@@ -20410,15 +20418,48 @@ def _cached_or_probed_montage_duration(index: ClipIndex | None, path: Path,
     return value
 
 
+def _montage_block_source_allowed(project: TimelineProject, path: str) -> bool:
+    """The saved manual root owns block eligibility, not automatic semantics."""
+    root = project.source_policy.get("footageBlock", {}).get("root")
+    if not root or not path:
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(Path(root).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _montage_saved_source_allowed(project: TimelineProject, clip: TimelineClip,
+                                 index: ClipIndex | None, story: str) -> bool:
+    if project.source_policy.get("mode") == "block":
+        # Continuity derivatives live in the application cache; their original
+        # anchors were checked against the saved block when they were created.
+        return (clip.continuity.get("mode") in {"freeze", "background"}
+                or _montage_block_source_allowed(project, clip.path))
+    return _montage_retained_source_allowed(index, clip.path, story)
+
+
+def _montage_saved_window_available(project: TimelineProject, clip: TimelineClip,
+                                   available: float) -> bool:
+    if not math.isfinite(available) or available <= .05:
+        return False
+    if not project.source_policy:
+        return True  # Legacy projects retain their separate tail-repair route.
+    start, duration = float(clip.source_start), float(clip.duration)
+    return (math.isfinite(start) and math.isfinite(duration) and start >= 0 and duration > 0
+            and available - start + .05 >= duration)
+
+
 def _montage_project_missing_clips(project: TimelineProject, index: ClipIndex | None = None) -> list[str]:
-    """Return unavailable or story-incompatible sources before FFmpeg starts."""
+    """Return unavailable saved windows or policy-incompatible sources."""
     memo: dict[str, float] = {}
     story_context = getattr(index, "montage_story_context", None)
     if story_context is None:
         story_context = " ".join((project.title, *(clip.narration for clip in project.clips)))
     return [str(clip.path) for clip in project.clips
-            if (not _montage_retained_source_allowed(index, clip.path, story_context)
-                or _cached_or_probed_montage_duration(index, Path(clip.path), memo) <= 0.05)]
+            if (not _montage_saved_source_allowed(project, clip, index, story_context)
+                or not _montage_saved_window_available(project, clip,
+                    _cached_or_probed_montage_duration(index, Path(clip.path), memo)))]
 
 
 def _project_repair_settings(settings: Settings, project: TimelineProject) -> Settings:
@@ -20560,31 +20601,37 @@ def _repair_missing_project_clips(project: TimelineProject, candidate_provider,
     """
     story = (" ".join((project.title, *(clip.narration for clip in project.clips)))
              if story_context is None else story_context)
+    block_mode = project.source_policy.get("mode") == "block"
     def story_allowed(clip):
-        return _montage_retained_source_allowed(index, clip.path, story)
+        return _montage_saved_source_allowed(project, clip, index, story)
+    def window_available(clip):
+        return _montage_saved_window_available(project, clip,
+            _validated_montage_clip_duration(Path(clip.path)))
     excluded_paths = {_montage_clip_key(clip.path) for clip in project.clips
-                      if story_allowed(clip) and _validated_montage_clip_duration(Path(clip.path)) > 0.05}
+                      if story_allowed(clip) and window_available(clip)}
     excluded_families = {clip.source_family or _montage_clip_family_key(clip.path) for clip in project.clips
-                         if story_allowed(clip) and _validated_montage_clip_duration(Path(clip.path)) > 0.05}
+                         if story_allowed(clip) and window_available(clip)}
     repaired = 0
     for position, clip in enumerate(list(project.clips)):
         query = _montage_clip_effective_query(clip)
         story_forbidden = not story_allowed(clip)
-        if _validated_montage_clip_duration(Path(clip.path)) > 0.05 and not story_forbidden:
+        if window_available(clip) and not story_forbidden:
             continue
         replacement = None
         for item in candidate_provider(clip, {"paths": excluded_paths, "families": excluded_families}) or []:
             from .scene_intent import person_evidence
-            if (not _montage_story_candidate_allowed(story, item)
+            policy_allowed = (_montage_block_source_allowed(project, item.path) if block_mode
+                              else _montage_story_candidate_allowed(story, item))
+            if (not policy_allowed
                     or getattr(item, "source_family", "") in excluded_families
                     or _montage_item_is_excluded(item, excluded_paths, excluded_families)):
                 continue
             available = _validated_montage_clip_duration(Path(item.path))
             required = max(float(clip.minimum_source_duration), float(clip.duration))
-            start = _montage_recovery_window_start(query, item, required)
+            start = 0.0 if block_mode else _montage_recovery_window_start(query, item, required)
             if (start is None or available - start + 1e-6 < required
-                    or not _semantic_clip_ok(query, item, source_start=start, duration=required,
-                                             story_context=story)):
+                    or (not block_mode and not _semantic_clip_ok(query, item, source_start=start, duration=required,
+                                                                 story_context=story))):
                 continue
             person = person_evidence(query, item, start, required)
             replacement = replace(
@@ -23984,11 +24031,17 @@ def save_template(payload: dict) -> dict:
     settings.scenario_target_chars = target
     settings.scenario_allowed_min = minimum
     settings.scenario_allowed_max = maximum
+    settings._edited_independent_workflows = {"template"} | {
+        name for key, name in (("targetChars", "scenario_target_chars"),
+                              ("allowedMin", "scenario_allowed_min"),
+                              ("allowedMax", "scenario_allowed_max")) if key in payload
+    }
     ranges = payload.get("ranges")
     if isinstance(ranges, list):
         settings.prompt_ranges = [{"start": max(1, int(item.get("start", 1))), "end": max(1, int(item.get("end", 1))),
                                    "prompt": str(item.get("prompt", "")), "target_chars": max(0, int(item.get("target_chars", 0) or 0)),
                                    "allowed_min": max(0, int(item.get("allowed_min", 0) or 0)), "allowed_max": max(0, int(item.get("allowed_max", 0) or 0))} for item in ranges if isinstance(item, dict)]
+        settings._edited_independent_workflows.add("prompt_ranges")
     save_settings(settings)
     return snapshot()
 
@@ -24026,6 +24079,9 @@ def save_template_preset(payload: dict) -> dict:
     settings.scenario_target_chars = target
     settings.scenario_allowed_min = minimum
     settings.scenario_allowed_max = maximum
+    settings._edited_independent_workflows = {
+        "template", "prompt_ranges", "scenario_target_chars", "scenario_allowed_min", "scenario_allowed_max",
+    }
     save_settings(settings)
     return {**snapshot(), "operationResult": {"kind": "template-preset", "count": 1,
                                                 "message": f"Пресет «{name}» сохранён."}}
@@ -24064,6 +24120,7 @@ def save_range_preset(payload: dict) -> dict:
     else:
         existing.update(value)
     settings.prompt_ranges = safe_ranges
+    settings._edited_independent_workflows = {"prompt_ranges"}
     save_settings(settings)
     return {**snapshot(), "operationResult": {"kind": "range-preset", "count": len(safe_ranges),
                                                 "message": f"Набор диапазонов «{name}» сохранён."}}

@@ -4,6 +4,7 @@ import os
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,145 @@ def _hold_owner(root, ready):
 
 
 class VoiceQueueOwnerTests(unittest.TestCase):
+    @contextmanager
+    def _overtaken_template_save(self):
+        with tempfile.TemporaryDirectory(dir=os.environ["NEWSFLOW_TEST_ROOT"]) as folder, \
+             patch.object(config, "config_path", return_value=Path(folder) / "settings.json"), \
+             patch.object(bridge, "snapshot", return_value={}):
+            initial = config.Settings(
+                template="Original template {title}", scenario_target_chars=12000,
+                scenario_allowed_min=8000, scenario_allowed_max=15000,
+                prompt_ranges=[{"start": 1, "end": 2, "prompt": "Original range",
+                                "target_chars": 0, "allowed_min": 0, "allowed_max": 0}],
+            )
+            config.save_settings(initial)
+            pending = config.load_settings()
+            concurrent = config.load_settings()
+            concurrent.template = "Concurrent template {title}"
+            concurrent.scenario_target_chars = 14000
+            concurrent.scenario_allowed_min = 10000
+            concurrent.scenario_allowed_max = 16000
+            concurrent.prompt_ranges = [{"start": 3, "end": 4, "prompt": "Concurrent range",
+                                         "target_chars": 0, "allowed_min": 0, "allowed_max": 0}]
+            config.save_settings(concurrent)
+            yield initial, pending, concurrent
+
+    def test_repeated_explicit_template_and_range_saves_apply_active_fields(self):
+        fields = ("template", "prompt_ranges", "scenario_target_chars",
+                  "scenario_allowed_min", "scenario_allowed_max")
+        for command in (bridge.save_template, bridge.save_template_preset, bridge.save_range_preset):
+            with self.subTest(command=command.__name__), self._overtaken_template_save() as values:
+                initial, pending, concurrent = values
+                payload = {"name": "Saved preset", "template": initial.template,
+                           "ranges": initial.prompt_ranges, "targetChars": initial.scenario_target_chars,
+                           "allowedMin": initial.scenario_allowed_min, "allowedMax": initial.scenario_allowed_max}
+                with patch.object(bridge, "load_settings", return_value=pending):
+                    command(payload)
+                saved = config.load_settings()
+                for name in fields:
+                    source = (concurrent if command is bridge.save_range_preset and name != "prompt_ranges"
+                              else initial)
+                    self.assertEqual(getattr(saved, name), getattr(source, name), name)
+
+                # The next command may change all active fields. A subsequent
+                # unrelated save of the old object must not retain ownership.
+                later = config.load_settings()
+                later.template = "Later template {title}"
+                later.prompt_ranges = [{"start": 7, "end": 8, "prompt": "Later range",
+                                        "target_chars": 0, "allowed_min": 0, "allowed_max": 0}]
+                later.scenario_target_chars = 17000
+                later.scenario_allowed_min = 16000
+                later.scenario_allowed_max = 18000
+                config.save_settings(later)
+                pending.voice_task_statuses = {"1": {"label": "Running", "progress": 55}}
+                config.save_settings(pending)
+                final = config.load_settings()
+                for name in fields:
+                    self.assertEqual(getattr(final, name), getattr(later, name), name)
+
+    def test_template_save_preserves_omitted_lengths_ranges_and_presets(self):
+        lengths = {"targetChars": "scenario_target_chars", "allowedMin": "scenario_allowed_min",
+                   "allowedMax": "scenario_allowed_max"}
+        for submitted in (None, *lengths):
+            with self.subTest(submitted=submitted), self._overtaken_template_save() as values:
+                initial, pending, concurrent = values
+                # An unrelated preset is added after the old settings read.
+                current = config.load_settings()
+                current.scenario_templates.append({"name": "Concurrent preset", "template": "Keep me"})
+                config.save_settings(current)
+                payload = {"template": initial.template, "ranges": None}
+                if submitted:
+                    payload[submitted] = getattr(initial, lengths[submitted])
+                with patch.object(bridge, "load_settings", return_value=pending):
+                    bridge.save_template(payload)
+                saved = config.load_settings()
+                self.assertEqual(saved.template, initial.template)
+                self.assertEqual(saved.prompt_ranges, concurrent.prompt_ranges)
+                self.assertEqual(saved.scenario_templates, current.scenario_templates)
+                for key, name in lengths.items():
+                    source = initial if key == submitted else concurrent
+                    self.assertEqual(getattr(saved, name), getattr(source, name), name)
+
+    def test_partial_length_save_rejects_conflicting_current_bounds_without_writes(self):
+        for key, value, latest_min, latest_max in (
+            ("allowedMax", 15000, 16000, 18000),
+            ("allowedMin", 8000, 6000, 7000),
+        ):
+            with self.subTest(key=key), self._overtaken_template_save() as values:
+                initial, pending, _concurrent = values
+                latest = config.load_settings()
+                latest.scenario_allowed_min = latest_min
+                latest.scenario_allowed_max = latest_max
+                config.save_settings(latest)
+                path = config.config_path()
+                backup = path.parent / "state-backups" / "settings-last-known-good.json"
+                before, previous_backup = path.read_bytes(), backup.read_bytes()
+                with patch.object(bridge, "load_settings", return_value=pending), \
+                     self.assertRaisesRegex(ValueError, "Минимальная длина сценария больше максимальной"):
+                    bridge.save_template({"template": initial.template, key: value})
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(backup.read_bytes(), previous_backup)
+
+    def test_partial_length_save_allows_zero_as_unset_and_preserves_other_bound(self):
+        for key, field, omitted in (
+            ("allowedMax", "scenario_allowed_max", "scenario_allowed_min"),
+            ("allowedMin", "scenario_allowed_min", "scenario_allowed_max"),
+        ):
+            with self.subTest(key=key), self._overtaken_template_save() as values:
+                initial, pending, concurrent = values
+                with patch.object(bridge, "load_settings", return_value=pending):
+                    bridge.save_template({"template": initial.template, key: 0})
+                saved = config.load_settings()
+                self.assertEqual(getattr(saved, field), 0)
+                self.assertEqual(getattr(saved, omitted), getattr(concurrent, omitted))
+                self.assertEqual(saved.scenario_target_chars, concurrent.scenario_target_chars)
+
+    def test_explicit_pause_choice_wins_after_same_value_snapshot_is_overtaken(self):
+        for paused in (True, False):
+            with self.subTest(paused=paused), \
+                 tempfile.TemporaryDirectory(dir=os.environ["NEWSFLOW_TEST_ROOT"]) as folder, \
+                 patch.object(config, "config_path", return_value=Path(folder) / "settings.json"), \
+                 patch.object(bridge, "snapshot", return_value={}):
+                config.save_settings(config.Settings(voice_queue_paused=paused))
+                pending_command = config.load_settings()
+                competing_command = config.load_settings()
+                competing_command.voice_queue_paused = not paused
+                config.save_settings(competing_command)
+
+                # This explicit command read before the competing write, but
+                # reaches the write mutex last. Its requested value must win,
+                # even when that value equals its earlier loaded snapshot.
+                with patch.object(bridge, "load_settings", return_value=pending_command):
+                    bridge.set_voice_queue_paused({"paused": paused})
+                self.assertEqual(config.load_settings().voice_queue_paused, paused)
+
+                # Ownership belongs to that explicit write only. Reusing the
+                # object for unrelated work must not undo a later choice.
+                bridge.set_voice_queue_paused({"paused": not paused})
+                pending_command.template = "Independent template {title}"
+                config.save_settings(pending_command)
+                self.assertEqual(config.load_settings().voice_queue_paused, not paused)
+
     def test_stale_voice_progress_preserves_new_template_and_preset(self):
         with tempfile.TemporaryDirectory(dir=os.environ["NEWSFLOW_TEST_ROOT"]) as folder, \
              patch.object(config, "config_path", return_value=Path(folder) / "settings.json"), \

@@ -68,7 +68,8 @@ def resolve_project_continuity(project, output_root, *, missing_paths=(), durati
                 except (OSError, ValueError, RuntimeError):
                     lengths[key] = 0.0
             length = lengths[key]
-        if math.isfinite(length) and length > max(.05, float(clip.source_start)):
+        if (math.isfinite(length) and length > max(.05, float(clip.source_start))
+                and length - float(clip.source_start) + .05 >= float(clip.duration)):
             healthy.append(i)
         else:
             gaps.append(i)

@@ -262,7 +262,7 @@ class MontageRenderTests(unittest.TestCase):
             inputs = [command[index + 1] for index, value in enumerate(command) if value == "-i"]
             starts = [command[index + 1] for index, value in enumerate(command) if value == "-ss"]
             self.assertEqual(inputs, [str(first), str(second)])
-            self.assertEqual(starts, ["1.250", "4.500"])
+            self.assertEqual(starts, ["1.250000000", "4.500000000"])
             filter_script = script.read_text(encoding="utf-8")
             self.assertLess(filter_script.index("[0:v]"), filter_script.index("[1:v]"))
             self.assertIn("concat=n=2:v=1:a=0[outv]", filter_script)
@@ -315,8 +315,9 @@ class MontageRenderTests(unittest.TestCase):
             clip_order: list[str] = []
 
             def fake_chunk_command(_ffmpeg, clips, chunk_output, _script, _width, _height,
-                                   *, local_video_zoom=False):
+                                   *, local_video_zoom=False, frame_counts=None):
                 self.assertEqual(local_video_zoom, project.local_video_zoom)
+                self.assertEqual(frame_counts, [30] * len(clips))
                 chunk_sizes.append(len(clips))
                 clip_order.extend(clip.path for clip in clips)
                 return ["ffmpeg", "-y", str(chunk_output)]

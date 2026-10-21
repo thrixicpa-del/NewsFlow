@@ -2347,9 +2347,17 @@ def save_settings(settings: Settings):
             # Resolve unchanged workflow fields against disk under the write
             # lock. Reloading before save alone leaves a lost-update window
             # between a voice progress publication and a template/preset save.
+            edited_workflows = getattr(settings, "_edited_independent_workflows", set())
             for name, observed in getattr(settings, "_observed_independent_workflows", {}).items():
-                if getattr(settings, name) == observed:
+                if name not in edited_workflows and getattr(settings, name) == observed:
                     data[name] = on_disk.get(name, data[name])
+            if {"scenario_allowed_min", "scenario_allowed_max"}.intersection(edited_workflows):
+                # A partial operator edit must also fit the latest opposite
+                # bound, which may have changed after command validation.
+                minimum = max(0, int(data.get("scenario_allowed_min", 0) or 0))
+                maximum = max(0, int(data.get("scenario_allowed_max", 0) or 0))
+                if minimum and maximum and minimum > maximum:
+                    raise ValueError("Минимальная длина сценария больше максимальной")
             usage = list(getattr(settings, "_montage_recent_clip_usage", []))
             if usage:
                 # A planner owns only the clips it actually used. Merge those
@@ -2520,6 +2528,7 @@ def save_settings(settings: Settings):
                     _remember_independent_workflow_fields(settings)
                     _remember_footage_blocks(settings)
                     settings._edited_montage_reuse = set()
+                    settings._edited_independent_workflows = set()
                     if not replacement:
                         settings._observed_montage_history = list(settings.montage_recent_clip_paths)
                         settings._montage_recent_clip_usage = []
