@@ -20575,7 +20575,8 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
                                      excluded_families: set[str] | None = None,
                                      *, required_duration: float | None = None,
                                      story_context: str | None = None,
-                                     allow_shorter: bool = False) -> list[FootageItem]:
+                                     allow_shorter: bool = False,
+                                     retained_clips=()) -> list[FootageItem]:
     """Find a bounded, semantically relevant replacement for one broken slot."""
     block_policy = getattr(settings, "_footage_block_policy", None)
     if block_policy is not None:
@@ -20614,6 +20615,10 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
             local_window=_montage_stock_local_window,
             duration_probe=lambda path: _cached_or_probed_montage_duration(index, path, {}), checkpoint=lambda: None,
             download_semaphore=download_semaphore)
+        if retained_clips:
+            selector.exclude_project_clips(retained_clips)
+        excluded_families = (excluded_families or set()) | {
+            item.source_family for item in retained_clips if item.stock_provenance and item.source_family}
         scene = {"visual_query_en": query, "narration": clip.narration, "duration": clip.duration,
                  "minimum_footage_duration": clip.minimum_source_duration}
         choice = selector.select(scene, {"STRICT_MATCH": hits}, stock_query_variants(scene, _montage_query_ladder(query)),
@@ -20744,7 +20749,7 @@ def _complete_project_visual_tail(project: TimelineProject, index: ClipIndex, se
     candidates = _replacement_candidates_for_clip(
         index, last, settings, download_semaphore, created_paths=created_paths,
         required_duration=min(6.0, remaining_tail), story_context=story,
-        allow_shorter=True,
+        allow_shorter=True, retained_clips=project.clips,
     )
     existing_paths = {_montage_clip_key(clip.path) for clip in project.clips}
     existing_families = {clip.source_family or _montage_clip_family_key(clip.path) for clip in project.clips}
@@ -21155,7 +21160,8 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
                 _montage_wait_if_paused(settings, index)
                 def candidates_for(clip: TimelineClip, _excluded: dict) -> list[FootageItem]:
                     return _replacement_candidates_for_clip(project_index, clip, repair_settings, download_semaphore,
-                        excluded_families=_excluded.get("families", set()))
+                        excluded_families=_excluded.get("families", set()),
+                        retained_clips=[item for item in project.clips if item is not clip])
                 changed = _repair_missing_project_clips(project, candidates_for, story_context=project_story_context,
                                                         index=project_index)
                 replaced += changed

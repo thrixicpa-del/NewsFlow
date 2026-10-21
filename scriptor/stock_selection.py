@@ -71,6 +71,7 @@ class StockChoice:
     position_bucket: str = ""
     context_query: str = ""
     context_score: float = 0.0
+    visual_features: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -118,6 +119,56 @@ class StockSceneSelector:
         self.plan_uses[choice.family] += 1
         self.last_family = choice.family
         return choice
+
+    def exclude_project_clips(self, clips):
+        """Seed repair with retained stock windows, never the full library."""
+        extractor = getattr(type(self.index), 'stock_visual_features', None)
+        if not callable(extractor):
+            return
+        for clip in clips:
+            self.checkpoint()
+            if not clip.stock_provenance or not Path(clip.path).is_file():
+                continue
+            try:
+                available = self.duration_probe(Path(clip.path)) - clip.source_start
+                if not math.isfinite(available) or available + .01 < clip.duration:
+                    continue  # Other failed/short slots are not retained edits.
+                window = prepare_stock_media(Path(clip.path), self.root, duration=clip.duration,
+                    trim=True, kind='video', aspect_ratio=self.aspect_ratio, source_start=clip.source_start)
+            except (OSError, ValueError, RuntimeError, StockSourceError):
+                continue
+            features = extractor(self.index, window)
+            self._visual_duplicate(features, set())  # Validate before retaining.
+            self.pool.append(StockChoice(FootageItem(clip.path, '', clip.source), clip.duration,
+                clip.score, clip.source_family, provenance=clip.stock_provenance, visual_features=features))
+
+    def _visual_duplicate(self, features, used):
+        """Match near-identical views, not merely a shared subject/category.
+
+        Only accepted windows of this project participate. Rejected batch
+        claims leave the pool; deliberate SAFE_REUSE is handled separately.
+        """
+        if features is None:
+            return False  # Legacy index adapters have no image feature API.
+        import numpy as np
+
+        mean, frames = np.asarray(features.mean), np.asarray(features.frames)
+        if (mean.ndim != 1 or frames.ndim != 2 or not len(frames)
+                or frames.shape[1] != len(mean) or not np.isfinite(mean).all()
+                or not np.isfinite(frames).all()):
+            raise ValueError('Недостоверные признаки визуальной уникальности')
+        for choice in self.pool:
+            previous = choice.visual_features
+            if choice.family not in used or previous is None:
+                continue
+            if float(np.dot(mean, previous.mean)) < .95:
+                continue
+            similarities = frames @ np.asarray(previous.frames).T
+            # Two-way coverage excludes an isolated common intro/logo frame.
+            if ((similarities.max(axis=1) >= .94).mean() >= 2 / 3
+                    and (similarities.max(axis=0) >= .94).mean() >= 2 / 3):
+                return True
+        return False
 
     def _score(self, path: Path, query: str) -> float:
         # Content keys survive restarts and do not accept a differently named
@@ -270,6 +321,13 @@ class StockSceneSelector:
                                                   candidate.license, list(candidate.tags))
                             if score < self.threshold or not self.source_allowed(checked):
                                 continue
+                            # The concrete index exposes real, cached CLIP
+                            # frame features. Do not trust dynamically invented
+                            # capabilities on legacy/test adapters.
+                            extractor = getattr(type(self.index), 'stock_visual_features', None)
+                            features = extractor(self.index, window) if callable(extractor) else None
+                            if self._visual_duplicate(features, used):
+                                continue
                             path = window if self.trim or kind == "image" else source
                             metadata = {**candidate.to_dict(), "kind": kind, "originalSha256": family.split("::", 1)[1],
                                         "clipScore": score, "originalPath": str(source), "originalStart": start,
@@ -278,7 +336,8 @@ class StockSceneSelector:
                             item = FootageItem(str(path), candidate.title, candidate.provider, candidate.source_url,
                                                candidate.license, list(candidate.tags))
                             choices.append(StockChoice(item, self.duration_probe(path), score, family,
-                                source_start=0.0 if path == window else start, level="EXTERNAL_FALLBACK", provenance=metadata))
+                                source_start=0.0 if path == window else start, level="EXTERNAL_FALLBACK", provenance=metadata,
+                                visual_features=features))
                         except InterruptedError:
                             raise
                         except (OSError, ValueError, RuntimeError, StockSourceError):

@@ -61,6 +61,19 @@ class PreviewCacheTests(unittest.TestCase):
         with self.index._connect() as connection:
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM clips').fetchone()[0], 0)
 
+    def test_stock_visual_comparison_reuses_scored_frames_and_invalidates_changed_content(self):
+        self.index.score_stock_file(self.clip, 'red')
+        features = self.index.stock_visual_features(self.clip)
+        np.testing.assert_allclose(features.mean, [.6, .8])
+        self.assertEqual(len(features.frames), 3)
+        self.assertEqual(len(self.sampled), 1)
+        original = self.clip.stat()
+        self.clip.write_bytes(b'blu')
+        os.utime(self.clip, ns=(original.st_atime_ns, original.st_mtime_ns))
+        changed = self.index.stock_visual_features(self.clip)
+        np.testing.assert_allclose(changed.mean, [.8, .6])
+        self.assertEqual(len(self.sampled), 2)
+
     def test_same_size_same_mtime_overwrite_recomputes_from_content(self):
         self.assertAlmostEqual(self.index.score_file(self.clip, 'red'), .6, places=6)
         stat = self.clip.stat()

@@ -53,6 +53,122 @@ class StockSelectionTests(unittest.TestCase):
                 self.assertEqual(choice.item.path, str(self.local))
         self.assertEqual(self.calls, [])
 
+    def visual_selector(self):
+        import numpy as np
+
+        parent = self
+        candidates = []
+        vectors = {}
+        for number, vector in enumerate(([1., 0., 0.], [.97, .243, 0.], [0., 0., 1.])):
+            path = self.root / f'visual-{number}.mp4'
+            path.write_bytes(f'different original bytes {number}'.encode())
+            candidates.append(SimpleNamespace(**{**vars(self.candidate), 'asset_id': str(number), 'local_path': path}))
+            value = np.asarray(vector)
+            value /= np.linalg.norm(value)
+            vectors[path] = SimpleNamespace(mean=value, frames=(value, value, value))
+
+        class VisualIndex:
+            def score_file(self, *_args):
+                return .8
+
+            def stock_visual_features(self, path):
+                return vectors[path]
+
+        selector = self.selector('stock', candidates=candidates[:1])
+        selector.index = VisualIndex()
+        selector.service.search = lambda *_a, **_k: parent.available
+        self.available = candidates[:1]
+        self.visual_candidates, self.visual_vectors = candidates, vectors
+        return selector
+
+    def test_different_bytes_of_same_view_are_rejected_for_a_distinct_alternative(self):
+        selector = self.visual_selector()
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            first = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+            self.available = self.visual_candidates[1:]
+            second = selector.select(self.scene, {}, ['cargo train'], used_families={first.family})
+        self.assertEqual(second.item.path, str(self.visual_candidates[2].local_path))
+
+    def test_duplicate_view_without_alternative_returns_no_candidate_including_context(self):
+        selector = self.visual_selector()
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            first = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+            self.available = self.visual_candidates[1:2]
+            self.assertIsNone(selector.select(self.scene, {}, ['cargo train'], used_families={first.family}))
+            self.assertIsNone(selector.select_context(self.scene, {}, ['freight railway'], used_families={first.family}))
+
+    def test_rejected_reservation_does_not_reserve_its_visual_view(self):
+        selector = self.visual_selector()
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            first = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+            selector.reject_unclaimed(first.family)
+            self.available = self.visual_candidates[1:2]
+            second = selector.select(self.scene, {}, ['cargo train'], used_families={first.family})
+        self.assertIsNotNone(second)
+
+    def test_deliberate_safe_reuse_still_accepts_the_verified_pool(self):
+        selector = self.visual_selector()
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            first = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+            reused = selector.select(self.scene, {}, ['cargo train'], used_families={first.family}, allow_reuse=True)
+        self.assertTrue(reused.reused)
+        self.assertEqual(reused.family, first.family)
+
+    def test_one_matching_frame_does_not_disqualify_an_otherwise_distinct_view(self):
+        import numpy as np
+
+        selector = self.visual_selector()
+        path = self.visual_candidates[1].local_path
+        self.visual_vectors[path] = SimpleNamespace(mean=np.array([0., 1., 0.]),
+            frames=(np.array([1., 0., 0.]), np.array([0., 1., 0.]), np.array([0., 1., 0.])))
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source):
+            first = selector.select(self.scene, {}, ['cargo train'], used_families=set())
+            self.available = self.visual_candidates[1:2]
+            self.assertIsNotNone(selector.select(self.scene, {}, ['cargo train'], used_families={first.family}))
+
+    def test_recovery_compares_the_saved_window_even_when_it_references_an_original(self):
+        from scriptor.timeline import TimelineClip
+
+        selector = self.visual_selector()
+        retained = TimelineClip(str(self.visual_candidates[0].local_path), '', 'cargo train',
+            duration=3., source_start=4., source_family='retained-stock',
+            stock_provenance={'kind': 'video'})
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source) as prepare:
+            selector.exclude_project_clips([retained])
+            self.available = self.visual_candidates[1:]
+            second = selector.select(self.scene, {}, ['cargo train'], used_families={'retained-stock'})
+        self.assertEqual(second.item.path, str(self.visual_candidates[2].local_path))
+        self.assertEqual(prepare.call_args_list[0].kwargs['source_start'], 4.)
+
+    def test_failed_visual_analysis_cannot_admit_an_unverified_candidate(self):
+        selector = self.visual_selector()
+        with (patch('scriptor.stock_selection.prepare_stock_media', side_effect=lambda source, *_a, **_k: source),
+              patch.object(type(selector.index), 'stock_visual_features', side_effect=ValueError('failed features'))):
+            self.assertIsNone(selector.select(self.scene, {}, ['cargo train'], used_families=set()))
+
+    def test_multiple_broken_retained_files_do_not_abort_recovery_of_another_slot(self):
+        from scriptor.timeline import TimelineClip
+
+        selector = self.visual_selector()
+        broken = [self.root / f'broken-{number}.mp4' for number in range(3)]
+        for path in broken:
+            path.write_bytes(b'present but unusable media')
+        retained = [TimelineClip(str(path), '', 'cargo train', duration=3., source_family=str(path),
+                    stock_provenance={'kind': 'video'}) for path in broken]
+        good = self.visual_candidates[0].local_path
+        retained.append(TimelineClip(str(good), '', 'cargo train', duration=3.,
+                        source_family='retained-good', stock_provenance={'kind': 'video'}))
+        selector.duration_probe = lambda path: 1. if path == broken[2] else 0. if path in broken else 10.
+        def prepare(source, *_a, **_k):
+            if source in broken:
+                raise ValueError('Cannot prepare a damaged/short retained interval')
+            return source
+        with patch('scriptor.stock_selection.prepare_stock_media', side_effect=prepare):
+            selector.exclude_project_clips(retained)
+            self.available = self.visual_candidates[1:]
+            second = selector.select(self.scene, {}, ['cargo train'], used_families={'retained-good'})
+        self.assertEqual(second.item.path, str(self.visual_candidates[2].local_path))
+
     def test_library_checks_all_synonyms_before_network_and_can_be_disabled(self):
         for enabled in (True, False):
             with self.subTest(library=enabled):
