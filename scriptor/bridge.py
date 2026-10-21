@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import errno
 import hashlib
 import json
 import math
@@ -14734,7 +14735,41 @@ def prepare_voice_jobs(settings, titles: list[str], jobs: list[Job], selected: s
     return snapshots
 
 
+@contextmanager
+def _voice_queue_owner():
+    """Own voice queue state without holding the unrelated settings mutex.
+
+    Keep the inode stable: closing the OS lock handle releases ownership on
+    success, exception or process death; unlinking could admit a second owner.
+    """
+    path = app_data_root() / "voice-generation.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as initializer:
+            initializer.write(b"0")
+    except FileExistsError:
+        pass
+    with path.open("r+b") as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            raise ValueError("Очередь озвучки уже выполняется. Дождитесь завершения текущей очереди.") from None
+        yield
+
+
 def generate_voice_range(payload: dict) -> dict:
+    with _voice_queue_owner():
+        return _generate_voice_range_unlocked(payload)
+
+
+def _generate_voice_range_unlocked(payload: dict) -> dict:
     """Run or explicitly re-run only one resolved inclusive TTS range."""
     settings = load_settings()
     titles, _jobs = load_session()
@@ -14747,10 +14782,15 @@ def generate_voice_range(payload: dict) -> dict:
     if not indices:
         raise ValueError("В диапазоне нет сценариев текущего batch")
     save_settings(settings)
-    return generate_voice({"indices": indices, "force": bool(payload.get("force", False))})
+    return _generate_voice_unlocked({"indices": indices, "force": bool(payload.get("force", False))})
 
 
 def generate_voice_queue(payload: dict) -> dict:
+    with _voice_queue_owner():
+        return _generate_voice_queue_unlocked(payload)
+
+
+def _generate_voice_queue_unlocked(payload: dict) -> dict:
     """Start only the ready current-session scenarios from the Voice queue.
 
     This is deliberately separate from ``generate_voice``: the selected-items
@@ -14782,7 +14822,7 @@ def generate_voice_queue(payload: dict) -> dict:
                 "message": "В очереди нет готовых сценариев для озвучки.",
             },
         }
-    result = generate_voice({"indices": eligible, "force": bool(payload.get("force", False))})
+    result = _generate_voice_unlocked({"indices": eligible, "force": bool(payload.get("force", False))})
     return {
         **result,
         "operationResult": {
@@ -14904,6 +14944,11 @@ def _profile_from_saved(item: dict) -> VoiceProfile:
 
 
 def generate_voice(payload: dict) -> dict:
+    with _voice_queue_owner():
+        return _generate_voice_unlocked(payload)
+
+
+def _generate_voice_unlocked(payload: dict) -> dict:
     settings = load_settings()
     resume_requested = bool(payload.get("resume", False))
     selected = {int(index) for index in payload.get("indices", [])}

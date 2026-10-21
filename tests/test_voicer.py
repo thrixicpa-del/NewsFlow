@@ -117,11 +117,15 @@ class VoicerTests(unittest.TestCase):
         class BlockingVoiceGen:
             reached = threading.Event()
             release = threading.Event()
+            calls = 0
 
             def __init__(self, _key):
                 pass
 
             def synthesize(self, _text, _filename, _profile, *, threads, progress=None):
+                self.__class__.calls += 1
+                if self.__class__.calls > 1:
+                    return b"MP3"
                 if progress:
                     progress("VoiceGen: выполняется", 55)
                 self.__class__.reached.set()
@@ -166,15 +170,20 @@ class VoicerTests(unittest.TestCase):
                 worker.start()
                 self.assertTrue(BlockingVoiceGen.reached.wait(2), "voice provider did not start")
 
-                bridge.save_template({"template": "Новый шаблон {title}"})
-                self.assertTrue(worker.is_alive(), "saving a template must not wait for voice synthesis")
-                self.assertEqual(persisted["settings"].template, "Новый шаблон {title}")
-
-                BlockingVoiceGen.release.set()
-                worker.join(5)
+                try:
+                    bridge.save_template({"template": "Новый шаблон {title}"})
+                    self.assertTrue(worker.is_alive(), "saving a template must not wait for voice synthesis")
+                    self.assertEqual(persisted["settings"].template, "Новый шаблон {title}")
+                    for launch in (bridge.generate_voice, bridge.generate_voice_queue, bridge.generate_voice_range):
+                        with self.assertRaisesRegex(ValueError, "Очередь озвучки уже выполняется"):
+                            launch({"indices": [0], "rangeId": "unused"})
+                finally:
+                    BlockingVoiceGen.release.set()
+                    worker.join(5)
 
         self.assertFalse(worker.is_alive(), "voice generation thread did not finish")
         self.assertEqual(failures, [])
+        self.assertEqual(BlockingVoiceGen.calls, 1, "A competing start must not call the provider")
         self.assertEqual(persisted["settings"].template, "Новый шаблон {title}")
         self.assertEqual(persisted["settings"].voice_task_statuses["1"]["label"], "Готово")
 
@@ -187,7 +196,7 @@ class VoicerTests(unittest.TestCase):
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "load_session", return_value=(["Готовый", "Не готов"], jobs)), \
              patch.object(bridge, "save_settings"), \
-             patch.object(bridge, "generate_voice", return_value={"ok": True}) as generate:
+             patch.object(bridge, "_generate_voice_unlocked", return_value={"ok": True}) as generate:
             result = bridge.generate_voice_queue({})
 
         generate.assert_called_once_with({"indices": [0], "force": False})
@@ -221,7 +230,7 @@ class VoicerTests(unittest.TestCase):
             settings_path = Path(state_dir) / "settings.json"
             candidate = Path(output) / "001 — Тема 1.mp3"
             candidate.write_bytes(b"audio")
-            script_hash = hashlib.sha256("Текст".encode("utf-8")).hexdigest()
+            script_hash = hashlib.sha256("Текст".encode()).hexdigest()
             settings = Settings(
                 voice_tts_jobs={"production-1": {
                     "id": "job-1", "production_item_id": "production-1",
@@ -258,7 +267,7 @@ class VoicerTests(unittest.TestCase):
             settings_path = Path(state_dir) / "settings.json"
             candidate = Path(output) / "001 — Тема 1.mp3"
             candidate.write_bytes(b"audio")
-            script_hash = hashlib.sha256("Текст".encode("utf-8")).hexdigest()
+            script_hash = hashlib.sha256("Текст".encode()).hexdigest()
             settings = Settings(
                 voice_tts_jobs={"production-1": {
                     "id": "job-1", "production_item_id": "production-1",
@@ -297,7 +306,7 @@ class VoicerTests(unittest.TestCase):
             settings_path = Path(state_dir) / "settings.json"
             candidate = Path(output) / "002 — Тема 2.mp3"
             candidate.write_bytes(b"audio")
-            script_hash = hashlib.sha256("Текст 2".encode("utf-8")).hexdigest()
+            script_hash = hashlib.sha256("Текст 2".encode()).hexdigest()
             initial_deleted_ids_hash = hashlib.sha256(b"").hexdigest()
             settings = Settings(
                 voice_tts_jobs={"production-2": {

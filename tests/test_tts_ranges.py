@@ -18,7 +18,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "load_session", return_value=(["Готов", "Без сценария"], [ready, waiting])), \
              patch.object(bridge, "save_settings"), \
-             patch.object(bridge, "generate_voice", return_value={"ok": True}) as generate:
+             patch.object(bridge, "_generate_voice_unlocked", return_value={"ok": True}) as generate:
             result = bridge.generate_voice_queue({})
 
         self.assertEqual(result["operationResult"]["eligible"], 1)
@@ -1290,7 +1290,7 @@ class TtsRangeOrchestrationTests(unittest.TestCase):
         with patch.object(bridge, "load_settings", return_value=settings), \
              patch.object(bridge, "load_session", return_value=(["1", "2", "3"], [])), \
              patch.object(bridge, "save_settings"), \
-             patch.object(bridge, "generate_voice", return_value={"ok": True}) as generate:
+             patch.object(bridge, "_generate_voice_unlocked", return_value={"ok": True}) as generate:
             result = bridge.generate_voice_range({"rangeId": "middle", "force": True})
 
         self.assertEqual(result, {"ok": True})
