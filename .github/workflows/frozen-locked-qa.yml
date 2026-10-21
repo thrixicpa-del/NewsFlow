@@ -1,0 +1,46 @@
+name: Frozen lock QA (Windows)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'studio-ui-remotion-verify/core-runtime-lock.json'
+      - 'studio-ui-remotion-verify/package.json'
+      - 'studio-ui-remotion-verify/scripts/verify-core-runtime.mjs'
+      - 'tests/test_core_runtime_guard.py'
+      - 'scriptor/**'
+      - 'Scriptor.spec'
+      - '.github/workflows/frozen-locked-qa.yml'
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  frozen-locked-qa:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with: { node-version: '24.19.0' }
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - name: Restore exact independently built Frozen Core binary
+        uses: actions/download-artifact@v4
+        with:
+          name: newsflow-frozen-source-qa
+          run-id: 39575622177
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: core-bin-2.1.152-security-r48
+      - name: Verify exact binary SHA, source hashes and FFmpeg
+        run: node scripts/verify-core-runtime.mjs
+        working-directory: studio-ui-remotion-verify
+      - name: Exercise Frozen core source-lock invariants
+        run: python -m unittest tests.test_core_runtime_guard -q
+      - name: Confirm no production state touched
+        shell: pwsh
+        run: |
+          if (!(Test-Path -LiteralPath 'core-bin-2.1.152-security-r48/NewsFlowCore/NewsFlowCore.exe')) {
+            throw 'Pinned Frozen Core binary missing'
+          }
+          Write-Output 'FROZEN_LOCK_QA=PASS pinned Windows build + source provenance'
