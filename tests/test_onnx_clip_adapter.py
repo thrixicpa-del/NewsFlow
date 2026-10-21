@@ -71,6 +71,14 @@ class _Tokenizer:
 
 
 class ClipAdapterTests(unittest.TestCase):
+    def test_frozen_spec_collects_new_runtime_not_fastembed(self):
+        spec = (Path(__file__).resolve().parents[1] / "Scriptor.spec").read_text(encoding="utf-8")
+        self.assertNotIn('collect_all("fastembed")', spec)
+        self.assertNotIn('collect_submodules("fastembed")', spec)
+        self.assertNotIn('    "fastembed",', spec)
+        self.assertIn('collect_submodules("huggingface_hub")', spec)
+        self.assertIn('collect_submodules("tokenizers")', spec)
+
     def test_same_model_ids_cannot_be_accidentally_reassigned(self):
         with self.assertRaises(ValueError):
             onnx_clip.ImageEmbedding("other/model")
