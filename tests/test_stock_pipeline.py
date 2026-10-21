@@ -15,7 +15,7 @@ from scriptor.footage import FootageItem
 from scriptor.runner import Job, RunState
 from scriptor.session import save_session
 from scriptor.stock_sources import StockCandidate
-from scriptor.timeline import TimelineProject
+from scriptor.timeline import TimelineClip, TimelineProject
 
 
 class StockPipelineTests(unittest.TestCase):
@@ -38,7 +38,8 @@ class StockPipelineTests(unittest.TestCase):
                         "voice_segment_id": 17, "voice_segment_ids": [17],
                         "narration_start": 0.0, "narration_end": 3.0}]
 
-    def prepare(self, mode, *, local_score=.9, empty=False, fast_reuse=False, hd_only=False):
+    def prepare(self, mode, *, local_score=.9, empty=False, fast_reuse=False, hd_only=False,
+                local_item=None, real_semantics=False):
         settings = Settings(montage_renderer="ffmpeg", montage_source_mode=mode,
             montage_stock_sources=["pexels"], montage_stock_trim=False,
             footage_folders=[str(self.root)], voice_scenario_outputs={"1": str(self.voice)},
@@ -60,7 +61,8 @@ class StockPipelineTests(unittest.TestCase):
             def screen_text_stats(self):
                 return {"safe": 1, "blocked": 0, "unchecked": 0}
             def search_many(self, queries, **_kwargs):
-                return [[SearchHit(FootageItem(str(parent.local), "Cargo train"), local_score, 10.0)] for _ in queries]
+                item = local_item or FootageItem(str(parent.local), "Cargo train")
+                return [[SearchHit(item, local_score, 10.0)] for _ in queries]
             def score_file(self, *_args):
                 return .8
             def media_duration(self, *_args):
@@ -87,8 +89,9 @@ class StockPipelineTests(unittest.TestCase):
             patch.object(bridge, "probe_media_duration", return_value=3.0),
             patch.object(bridge, "_cached_or_probed_montage_duration", return_value=10.0),
             patch.object(bridge, "_montage_screen_text_safe", return_value=True),
-            patch.object(bridge, "_semantic_clip_ok", return_value=True),
             patch("scriptor.stock_selection.prepare_stock_media", side_effect=lambda source, *_args, **_kwargs: source)]
+        if not real_semantics:
+            patches.append(patch.object(bridge, "_semantic_clip_ok", return_value=True))
         for context in patches:
             context.start()
             self.addCleanup(context.stop)
@@ -112,6 +115,58 @@ class StockPipelineTests(unittest.TestCase):
     def test_hybrid_downloads_when_local_is_below_threshold(self):
         project = self.prepare("hybrid", local_score=.01)
         self.assertEqual(project.clips[0].path, str(self.stock))
+
+    def mixed_people(self, target_start):
+        item = FootageItem(str(self.local), "Mixed speakers")
+        stat = self.local.stat()
+        item.person_evidence = {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+            "observations": [
+                {"person_id": "putin", "start": 0, "end": target_start, "source": "manual", "complete": True},
+                {"person_id": "zelensky", "start": target_start, "end": 10, "source": "manual", "complete": True}]}
+        self.scenes[0]["visual_query_en"] = "Volodymyr Zelensky"
+        return item
+
+    def test_local_scene_keeps_confirmed_person_window_when_rotation_is_unsafe(self):
+        item = self.mixed_people(4)
+        with patch.object(bridge, "_montage_source_start", return_value=0):
+            project = self.prepare("local", local_item=item, real_semantics=True)
+        self.assertEqual(project.clips[0].path, str(self.local))
+        self.assertEqual(project.clips[0].source_start, 4)
+        self.assertEqual(project.clips[0].duration, 3)
+
+    def test_hybrid_accepts_confirmed_three_second_window_without_six_second_requirement(self):
+        item = self.mixed_people(7)
+        with patch.object(bridge, "_montage_source_start", return_value=0):
+            project = self.prepare("hybrid", local_item=item, real_semantics=True)
+        self.assertEqual(project.clips[0].path, str(self.local))
+        self.assertEqual(project.clips[0].source_start, 7)
+        self.assertEqual(self.queries, [])
+
+    def test_fast_reuse_keeps_the_previously_verified_local_window(self):
+        item = self.mixed_people(7)
+        self.scenes.extend({**self.scenes[0], "narration_start": start, "narration_end": start + 3}
+                           for start in (3, 6))
+        with patch.object(bridge, "_montage_source_start", return_value=0):
+            project = self.prepare("local", local_item=item, real_semantics=True, fast_reuse=True)
+        self.assertEqual([project.clips[i].source_start for i in (0, 2)], [7, 7])
+        self.assertEqual(project.clips[2].fallback_level, "SAFE_REUSE")
+
+    def test_local_recovery_preserves_short_person_interval_and_its_annotations(self):
+        from scriptor.scene_intent import person_evidence
+        item = self.mixed_people(7)
+        index = SimpleNamespace(search_many=lambda *_args, **_kwargs: [[SearchHit(item, .9, 10)]])
+        settings = Settings(montage_source_mode="local", footage_folders=[str(self.root)],
+                            footage_download_folder=str(self.root / "downloads"))
+        clip = TimelineClip(str(self.root / "missing.mp4"), "Zelensky", "Volodymyr Zelensky", duration=3)
+        with patch.object(bridge, "_montage_screen_text_safe", return_value=True), \
+             patch.object(bridge, "_cached_or_probed_montage_duration", return_value=10):
+            replacements = bridge._replacement_candidates_for_clip(index, clip, settings)
+        self.assertEqual(len(replacements), 1)
+        replacement = replacements[0]
+        self.assertEqual(replacement.path, str(self.local))
+        start = bridge._montage_recovery_window_start(clip.visual_query_en, replacement, clip.duration)
+        self.assertEqual(start, 7)
+        self.assertEqual(person_evidence(clip.visual_query_en, replacement, start, 3)["status"], "confirmed")
 
     def test_exhausted_stock_scene_automatically_preserves_narration_on_background(self):
         project = self.prepare("stock", empty=True)

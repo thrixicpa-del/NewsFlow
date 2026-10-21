@@ -17252,6 +17252,19 @@ def _semantic_clip_ok(scene_query: str, item: FootageItem, *, source_start: floa
     return True
 
 
+def _montage_stock_local_window(query, item, duration, start=None):
+    """Keep local selection, rotation and recovery on a checked scene interval."""
+    from .scene_intent import person_evidence, person_window
+    preferred = person_window(query, item, duration)
+    start = preferred if start is None else start
+    chosen = person_evidence(query, item, preferred, duration)
+    actual = person_evidence(query, item, start, duration)
+    if (chosen["status"] == "confirmed" and actual["status"] != "confirmed"
+            or not _semantic_clip_ok(query, item, source_start=start, duration=duration)):
+        return None
+    return start
+
+
 _MONTAGE_GENERIC_QUERY_PHRASES = {
     "international news", "documentary footage", "current events", "news footage",
     "russia current events", "world news", "breaking news",
@@ -18780,6 +18793,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             use_library=settings.montage_stock_use_library,
             hd_only=settings.montage_stock_hd_only,
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
+            local_window=_montage_stock_local_window,
             duration_probe=lambda path: verified_duration(FootageItem(str(path), path.name)), checkpoint=stock_checkpoint,
             download_semaphore=download_semaphore)
     fast_reuse_pool: dict[str, TimelineClip] = {}
@@ -18840,7 +18854,12 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
             source_start = choice.source_start
             if not choice.provenance:
                 source_start, _reused = allocate_batch_source_start(choice.family, position_bucket,
-                    choice.duration, float(scene["duration"]), titles[scenario_index])
+                    choice.duration, float(scene["duration"]), titles[scenario_index],
+                    preferred_start=choice.source_start,
+                    window_allowed=lambda start, choice=choice, scene=scene: (
+                        start == choice.source_start if choice.reused else _montage_stock_local_window(
+                            scene["visual_query_en"], choice.item, float(scene["duration"]), start) is not None))
+                choice.source_start = source_start
             clip = TimelineClip(path=choice.item.path, narration=scene["narration"], visual_query_en=scene["visual_query_en"],
                 duration=float(scene["duration"]), source_start=source_start, score=choice.score,
                 source=choice.item.source, source_family=choice.family, reused=choice.reused,
@@ -20592,6 +20611,7 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
             use_library=settings.montage_stock_use_library,
             hd_only=settings.montage_stock_hd_only,
             semantic_ok=_semantic_clip_ok, source_allowed=lambda item: _montage_screen_text_safe(index, item),
+            local_window=_montage_stock_local_window,
             duration_probe=lambda path: _cached_or_probed_montage_duration(index, path, {}), checkpoint=lambda: None,
             download_semaphore=download_semaphore)
         scene = {"visual_query_en": query, "narration": clip.narration, "duration": clip.duration,
@@ -20609,6 +20629,14 @@ def _replacement_candidates_for_clip(index: ClipIndex, clip: TimelineClip, setti
             choice = selector.select_context(scene, {"SAFE_CONTEXT": [hit for group in context_hits for hit in group]},
                 contexts, used_families=excluded_families or set())
         if choice:
+            if not choice.provenance:
+                # Recovery derives its own window from these annotations. Do
+                # not discard curated identities or the indexed assessor.
+                replacement = copy(choice.item)
+                replacement.source_family = choice.family
+                replacement.stock_provenance = {}
+                replacement.selection_score = choice.score
+                return [replacement]
             # Repair receives a prepared verified interval. It resets source
             # start to zero, so materialize the selected window even trim-off.
             if choice.provenance and choice.source_start:

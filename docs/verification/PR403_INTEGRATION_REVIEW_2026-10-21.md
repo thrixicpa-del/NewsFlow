@@ -1,5 +1,7 @@
 # PR403 source integration checkpoint — 2026-10-21
 
+Follow-up: [bounded technical review](PR403_BOUNDED_REVIEW_2026-10-21.md) corrects the evidence-availability statement below, identifies the ARM12/RU19 unsupported-intent rejection path, and records local/hybrid interval and Windows fixture corrections. This checkpoint remains historical; its tests do not establish final merge readiness.
+
 Owner requested continuation with short dependency/compatibility checks, without heavy acceptance runs. Base: main ec98d0e3ddc7d1aac6b83ac6df4bd6b9f2fd15fe; original PR403 a61438cb094647a796d083e269b326ba926ba8dd.
 
 ## Changes
