@@ -32,8 +32,8 @@ jobs:
             throw 'Frozen r48 artifact differs from independently verified exact bytes'
           }
           $receipt = Get-Content -LiteralPath '.qa-frozen-r48/frozen-source-receipt.json' -Raw | ConvertFrom-Json
-          if ($receipt.gitSha -ne 'd9383c716cbfaa11d08404707fee64ce5ff9eacc' -or $receipt.coreExeSha256 -ne $expected) {
-            throw 'Build provenance receipt mismatch'
+          if ($receipt.gitSha -ne '4c1938f11ed111929c5eef5e5b8a35637c8fbcd1' -or $receipt.coreExeSha256 -ne $expected) {
+            throw 'Build provenance receipt mismatch (verified PR merge commit)'
           }
           $target = Join-Path $env:RUNNER_TEMP 'newsflow-core-2.1.152-r48.zip'
           Compress-Archive -LiteralPath '.qa-frozen-r48/NewsFlowCore', '.qa-frozen-r48/frozen-source-receipt.json' -DestinationPath $target -CompressionLevel Optimal
