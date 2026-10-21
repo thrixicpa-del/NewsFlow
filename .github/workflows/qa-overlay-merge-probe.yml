@@ -25,13 +25,16 @@ jobs:
           exitcode=$?
           set -e
           if [ "$exitcode" -ne 0 ]; then
-            echo MERGE_PROBE=CONFLICTS
+            echo MERGE_PROBE=CONFLICT_REPAIR
             git diff --name-only --diff-filter=U | tee merge-conflicts.txt
-            for file in $(git diff --name-only --diff-filter=U); do
-              echo "=== CONFLICT $file ==="
-              grep -n -C 8 '^<<<<<<<\|^=======\|^>>>>>>>' "$file" | head -220 || true
-            done
-            exit 2
+            python3 scripts/qa_resolve_overlay_merge.py $(cat merge-conflicts.txt)
+            git add $(cat merge-conflicts.txt)
+            git diff --cached --check
+          fi
+          python3 -m compileall -q scriptor
+          if git diff --name-only --diff-filter=U | grep .; then
+            echo UNRESOLVED_CONFLICTS
+            exit 3
           fi
           git commit -m 'qa: prove overlay merge atop stock and blocks (not release)'
           git push origin HEAD:qa/overlay-merge-probe-20261021
