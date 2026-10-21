@@ -1,0 +1,22 @@
+name: Promote technical Frozen Core r48 archive (one-shot)
+on:
+  push:
+    branches: [fix/security-pillow-onnx-clip]
+    paths: ['.github/workflows/promote-frozen-r48.yml']
+permissions:
+  contents: write
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Publish ONLY the audited technical core asset as a prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='internal-core-2.1.152-r48'
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/419374939")
+          echo "$release" | python -c 'import sys,json; x=json.load(sys.stdin); assert x["draft"] is True and x["prerelease"] is True and x["tag_name"]=="internal-core-2.1.152-r48"; assets=x["assets"]; assert len(assets)==1 and assets[0]["id"]==662002877 and assets[0]["name"]=="newsflow-core-2.1.152-r48.zip" and assets[0]["size"]==249997712'
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --title 'INTERNAL QA ONLY — Frozen Core r48 (not an app release)'
+          echo 'FROZEN_CORE_TECHNICAL_ARCHIVE=PASS prerelease=true draft=false'
