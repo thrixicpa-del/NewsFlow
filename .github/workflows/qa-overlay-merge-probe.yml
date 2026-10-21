@@ -36,7 +36,15 @@ jobs:
             echo UNRESOLVED_CONFLICTS
             exit 3
           fi
-          git commit -m 'qa: prove overlay merge atop stock and blocks (not release)'
+          # Workflow writes require a separate permission; leave the existing
+          # CI files unchanged here and apply their explicit additions later.
+          git restore --source=HEAD --staged --worktree -- .github/workflows/ci.yml .github/workflows/windows-native.yml
+          git diff --cached --check
+          git commit -m 'qa: resolve overlays without changing CI workflows'
+          # Squash the merge into one normal branch commit; do not re-push
+          # overlay branch history which already contains workflow edits.
+          git reset --soft HEAD^1
+          git commit -m 'qa: integrate overlay source and tests (no workflow changes)'
           git push origin HEAD:qa/overlay-merge-probe-20261021
           echo MERGE_PROBE=PASS
           git rev-parse HEAD
