@@ -317,6 +317,9 @@ def prepare_block_project(
         overlay_path=runtime._random_video(settings.montage_overlay_folder)
         if settings.montage_overlay_enabled
         else "",
+        overlay_template=runtime._montage_overlay_template_for_task(
+            settings, scenario_index, title=title
+        ),
         transition_style=settings.montage_transition_style,
         transition_frames=settings.montage_transition_frames,
         source_policy={
@@ -352,9 +355,16 @@ def prepare_block_project(
     staged = staging / target.name
     project.save(staged)
     targets = [(staged, target)]
+    xml_warning = ""
     if settings.montage_export_davinci_xml:
-        export_fcpxml(project, staged.with_suffix(".fcpxml"))
-        targets.append((staged.with_suffix(".fcpxml"), target.with_suffix(".fcpxml")))
+        from .overlays import overlay_layers
+
+        if overlay_layers(project.overlay_template, project.aspect_ratio, legacy_path=project.overlay_path):
+            xml_warning = "DaVinci XML с наложениями будет создан после рендера: наложения будут сведены в MP4."
+        else:
+            export_fcpxml(project, staged.with_suffix(".fcpxml"))
+            targets.append((staged.with_suffix(".fcpxml"), target.with_suffix(".fcpxml")))
+            project.save(staged)
     if len(runtime._publish_staged_paths(settings, targets)) != len(targets):
         raise InterruptedError("Подготовка блока отменена: производство очищено")
     block_history(app_data_root()).record(str(target.resolve()), project.clips)
@@ -375,6 +385,7 @@ def prepare_block_project(
     return {
         **runtime.snapshot(),
         "preparedProject": {
+            "warning": xml_warning,
             "title": title,
             "path": str(target),
             "clips": len(project.clips),

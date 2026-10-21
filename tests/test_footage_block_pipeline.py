@@ -256,6 +256,28 @@ class FootageBlockPipelineTests(unittest.TestCase):
         self.assertEqual(project.duration, 3)
         self.assertEqual(project.voice_map_provenance["productionItemId"], "product-1")
 
+    def test_block_preparation_preserves_selected_overlays_and_defers_xml(self):
+        self.test_active_block_bypasses_stocks_and_preserves_native_story_beats()
+        from scriptor.overlays import normalize_overlay_template
+
+        image = self.root / "selected.png"
+        image.write_bytes(b"metadata-only image fixture")
+        chosen = normalize_overlay_template({"layouts": {"16:9": [
+            {"id": "selected", "path": str(image), "mode": "until-end"}
+        ]}})
+        settings = config.load_settings()
+        settings.montage_task_statuses["0"]["overlayTemplate"] = chosen
+        settings.montage_task_statuses["0"]["overlayTemplateRevision"] = 1
+        settings.montage_export_davinci_xml = True
+        config.save_settings(settings)
+        with patch("scriptor.timeline.export_fcpxml",
+                   side_effect=lambda _project, path: path.write_text("fixture")) as export:
+            result = bridge.prepare_montage({"scenarioIndex": 0})
+        project = TimelineProject.load(Path(result["preparedProject"]["path"]))
+        self.assertEqual(project.overlay_template, chosen)
+        export.assert_not_called()
+        self.assertIn("после рендера", result["preparedProject"]["warning"])
+
     def test_saved_block_output_paths_cannot_collide_for_identical_titles(self):
         helper = getattr(bridge, "_montage_project_stem", None)
         self.assertTrue(callable(helper), "Block renders need durable-ID filenames")
