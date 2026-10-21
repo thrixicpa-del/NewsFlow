@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     env:
-      LOCALAPPDATA: ${{ runner.temp }}/newsflow-ogv-boundary
+      LOCALAPPDATA: ${{ github.workspace }}/.ci-ogv-production-boundary
     steps:
       - uses: actions/checkout@v6
         with: { fetch-depth: 2 }

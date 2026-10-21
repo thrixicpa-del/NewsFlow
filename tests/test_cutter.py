@@ -10,6 +10,20 @@ from scriptor.cutter import build_cut_command, cut_single_clip, cut_sources
 class CutterTests(unittest.TestCase):
     @patch("scriptor.cutter.ffmpeg_executable", return_value="ffmpeg.exe")
     @patch("scriptor.cutter.subprocess.run")
+    def test_unknown_container_extension_reaches_ffmpeg(self, run, _ffmpeg):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "camera.recording"
+            source.write_bytes(b"media")
+            def normalize(command, **_kwargs):
+                Path(command[-1].replace("%04d", "0000")).write_bytes(b"video")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            run.side_effect = normalize
+            self.assertEqual(len(cut_sources([str(source)], root / "batch")), 1)
+            self.assertEqual(cut_single_clip(source, root / "single").read_bytes(), b"video")
+
+    @patch("scriptor.cutter.ffmpeg_executable", return_value="ffmpeg.exe")
+    @patch("scriptor.cutter.subprocess.run")
     def test_wikimedia_ogv_reaches_normalizer(self, run, _ffmpeg):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

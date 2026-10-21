@@ -462,7 +462,9 @@ handleTrusted('newsflow:choose-folder', async () => {
   return result.canceled ? '' : result.filePaths[0] || '';
 });
 handleTrusted('newsflow:choose-videos', async () => {
-  const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Видео', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'] }] });
+  // FFmpeg identifies the video container from content, including recordings
+  // with uncommon/no extensions. Keep every supported input selectable.
+  const result = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Все форматы видео (FFmpeg)', extensions: ['*'] }] });
   return result.canceled ? [] : result.filePaths;
 });
 handleTrusted('newsflow:choose-images', async () => {
