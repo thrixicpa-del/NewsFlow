@@ -115,6 +115,13 @@ describe("Montage Light view", () => {
     expect(screen.queryByText(/Не найдено ни одного допустимого футажа/)).toBeNull();
   });
 
+  it("shows held scenes and neutral backgrounds in the saved project header", () => {
+    const data = { ...fallback, montageProjects: [{ title: "Continuity test", path: "D:/test/continuity.newsflow",
+      selectionSummary: { continuity: 5, held: 2, background: 1 }, clips: [] }] };
+    render(<Editor data={data} command={vi.fn()} refresh={async () => undefined} />);
+    expect(screen.getByText("удержание 2 · нейтральный фон 1")).toBeTruthy();
+  });
+
   it("keeps advanced montage configuration in a focused workspace drawer", () => {
     render(<Editor data={fallback} command={vi.fn()} refresh={async () => undefined} />);
 

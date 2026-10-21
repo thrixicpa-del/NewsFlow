@@ -365,6 +365,11 @@ export const fallback: NewsFlowSnapshot = {
     autoWeb: true,
     autoYoutube: false,
     externalOnly: false,
+    sourceMode: "hybrid",
+    stockSources: ["pexels", "pixabay", "coverr", "wikimedia", "nasa"],
+    stockTrim: true,
+    stockHdOnly: true,
+    stockKeys: [],
     useScriptText: true,
     excludeEnglishText: true,
     scenePlanner: "local",
@@ -10655,6 +10660,62 @@ export function Cutter({
   );
 }
 
+const montageStockProviders = [
+  { id: "pexels", label: "Pexels" },
+  { id: "pixabay", label: "Pixabay" },
+  { id: "coverr", label: "Coverr" },
+  { id: "wikimedia", label: "Wikimedia" },
+  { id: "nasa", label: "NASA" },
+];
+const montageSourceMode = (settings: NewsFlowSnapshot["montageSettings"]) =>
+  settings.sourceMode ?? (settings.externalOnly ? "stock" : settings.autoWeb ? "hybrid" : "local");
+
+function MontageStockKeys({ data, command }: { data: NewsFlowSnapshot; command: Command }) {
+  const [provider, setProvider] = useState<"pexels" | "pixabay" | "coverr">("pexels");
+  const [draft, setDraft] = useState("");
+  const [keys, setKeys] = useState(data.montageSettings.stockKeys ?? []);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => setKeys(data.montageSettings.stockKeys ?? []), [data.montageSettings.stockKeys]);
+  const save = async (payload: CommandRequest<"save-montage-stock-keys">, clearDraft = false) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const saved = await command("save-montage-stock-keys", payload);
+      if (!saved) {
+        setError("Не удалось сохранить ключи. Повторите попытку.");
+        return;
+      }
+      setKeys(saved.montageSettings.stockKeys ?? []);
+      if (clearDraft) setDraft("");
+    } catch {
+      setError("Не удалось сохранить ключи. Повторите попытку.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const newKeys = draft.split(/\r?\n/).map((key) => key.trim()).filter(Boolean);
+  return (
+    <section className="panel" aria-label="API-ключи стоков">
+      <div className="panel-title"><div><b>API-ключи стоков</b><small>Добавляйте любое количество ключей: один на строку. Сохранённые секреты не показываются.</small></div></div>
+      {montageStockProviders.slice(0, 3).map(({ id, label }) => (
+        <small key={id} className="workflow-note">{label}: активно {keys.filter((key) => key.provider === id && key.active).length} из {keys.filter((key) => key.provider === id).length}</small>
+      ))}
+      <Select label="Провайдер API-ключей" value={provider} disabled={saving} onChange={(event) => setProvider(event.target.value as typeof provider)} options={montageStockProviders.slice(0, 3).map(({ id, label }) => ({ value: id, label }))} />
+      <Textarea label="Новые API-ключи стоков" rows={3} value={draft} disabled={saving} onChange={(event) => setDraft(event.target.value)} autoComplete="off" autoCorrect="off" spellCheck={false} style={{ WebkitTextSecurity: "disc" } as React.CSSProperties} />
+      <Button disabled={saving || !newKeys.length} onClick={() => void save({ provider, keys: newKeys }, true)}>Добавить ключи</Button>
+      {error ? <small role="alert">{error}</small> : null}
+      {keys.map((key) => (
+        <div key={key.id} className="toolbar compact">
+          <label className="check-row"><input type="checkbox" aria-label={`Активен ${key.label}`} checked={key.active} disabled={saving} onChange={(event) => void save({ id: key.id, active: event.target.checked })} />{key.label}</label>
+          <UiButton disabled={saving} onClick={() => void save({ id: key.id, remove: true })} aria-label={`Удалить ${key.label}`}><Trash2 size={15} />Удалить</UiButton>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function MontageAssets({
   data,
   command,
@@ -10968,10 +11029,14 @@ export function Editor({
   const [renderWorkers, setRenderWorkers] = useState(
     String(data.montageSettings.renderWorkers),
   );
-  const [autoWeb, setAutoWeb] = useState(data.montageSettings.autoWeb);
-  const [externalOnly, setExternalOnly] = useState(
-    data.montageSettings.externalOnly,
-  );
+  const [sourceMode, setSourceMode] = useState(montageSourceMode(data.montageSettings));
+  const [stockSources, setStockSources] = useState(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
+  const [stockTrim, setStockTrim] = useState(data.montageSettings.stockTrim !== false);
+  const [stockUseLibrary, setStockUseLibrary] = useState(data.montageSettings.stockUseLibrary !== false);
+  const [stockHdOnly, setStockHdOnly] = useState(data.montageSettings.stockHdOnly !== false);
+  const stockSourcesValid = sourceMode === "local" || stockSources.length > 0;
+  const autoWeb = sourceMode !== "local";
+  const externalOnly = sourceMode === "stock";
   const [useScriptText, setUseScriptText] = useState(
     data.montageSettings.useScriptText !== false,
   );
@@ -11018,8 +11083,11 @@ export function Editor({
     setPlanningWorkers(String(data.montageSettings.planningWorkers));
     setDownloadWorkers(String(data.montageSettings.downloadWorkers));
     setRenderWorkers(String(data.montageSettings.renderWorkers));
-    setAutoWeb(data.montageSettings.autoWeb);
-    setExternalOnly(data.montageSettings.externalOnly);
+    setSourceMode(montageSourceMode(data.montageSettings));
+    setStockSources(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
+    setStockTrim(data.montageSettings.stockTrim !== false);
+    setStockUseLibrary(data.montageSettings.stockUseLibrary !== false);
+    setStockHdOnly(data.montageSettings.stockHdOnly !== false);
     setUseScriptText(data.montageSettings.useScriptText !== false);
     setExcludeEnglishText(data.montageSettings.excludeEnglishText !== false);
     setScenePlanner(data.montageSettings.scenePlanner);
@@ -11060,6 +11128,12 @@ export function Editor({
       (project) =>
         project.path === selectedProjects[selectedProjects.length - 1],
     ) || data.montageProjects[0];
+  const projectBackgroundCount = Math.max(0, Number(selectedProject?.selectionSummary?.background || 0));
+  const projectHeldCount = Math.max(0, Number(selectedProject?.selectionSummary?.held || 0));
+  const projectContinuitySummary = [
+    projectHeldCount > 0 ? `удержание ${projectHeldCount}` : "",
+    projectBackgroundCount > 0 ? `нейтральный фон ${projectBackgroundCount}` : "",
+  ].filter(Boolean).join(" · ");
   const localMediaUrl = (path?: string) =>
     path ? encodeURI(`file:///${path.replace(/\\/g, "/")}`) : "";
   useEffect(() => {
@@ -11081,7 +11155,7 @@ export function Editor({
     if (folder) setOutputFolder(folder);
   };
   const saveSettings = () => {
-    if (renderer === "gpu-timeline" && !gpuChunkSizeValid) return;
+    if (!stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
     void command("save-montage-settings", {
       aspectRatio: ratio,
       renderer,
@@ -11097,6 +11171,11 @@ export function Editor({
       renderWorkers: Number(renderWorkers),
       autoWeb,
       externalOnly,
+      sourceMode,
+      stockSources,
+      stockTrim,
+      stockUseLibrary,
+      stockHdOnly,
       useScriptText,
       excludeEnglishText,
       scenePlanner,
@@ -11106,7 +11185,7 @@ export function Editor({
     });
   };
   const launch = async (indices: number[], replaceOutput = false) => {
-    if (!indices.length || queueActive || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
+    if (!indices.length || queueActive || !stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
     setQueueLaunching(true);
     try {
       const saved = await command("save-montage-settings", {
@@ -11124,6 +11203,11 @@ export function Editor({
         renderWorkers: Number(renderWorkers),
         autoWeb,
         externalOnly,
+        sourceMode,
+        stockSources,
+        stockTrim,
+        stockUseLibrary,
+        stockHdOnly,
         useScriptText,
         excludeEnglishText,
         scenePlanner,
@@ -11264,23 +11348,39 @@ export function Editor({
       <section className="panel montage-short-mode">
         <div className="panel-title">
           <div>
-            <b>Короткий ролик из внешних источников</b>
+            <b>Источники футажей</b>
             <small>
-              Для ролика на несколько минут пропускает библиотеку и ищет каждый
-              футаж в разрешённых новостных и стоковых источниках.
-              Автоматическая загрузка коротких фрагментов YouTube выключена.
+              Локальная библиотека, сочетание библиотеки со стоками или только стоки.
+              Процент уникальных футажей и правила ротации действуют во всех режимах.
             </small>
           </div>
         </div>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={externalOnly}
-            onChange={(event) => setExternalOnly(event.target.checked)}
-          />
-          Собирать только из внешних источников
-        </label>
+        <Select label="Источники футажей" value={sourceMode} onChange={(event) => setSourceMode(event.target.value as typeof sourceMode)} options={[
+          { value: "local", label: "Локальная библиотека" },
+          { value: "hybrid", label: "Библиотека + стоки" },
+          { value: "stock", label: "Только стоки" },
+        ]} />
+        <label className="check-row"><input type="checkbox" checked={sourceMode === "hybrid"} onChange={(event) => setSourceMode(event.target.checked ? "hybrid" : "local")} />Использовать стоки с моими футажами</label>
+        <small className="workflow-note">Сначала точное совпадение в вашей библиотеке, затем разрешённые стоки. Снятая галочка выбирает только ваши футажи; режим «Только стоки» остаётся в списке выше.</small>
+        <small className="workflow-note">Если материалов не хватает, используем тематические перебивки или удерживаем кадр; озвучка продолжается.</small>
+        <fieldset disabled={sourceMode === "local"}>
+          <legend>Стоковые источники</legend>
+          <label className="check-row"><input type="checkbox" checked={montageStockProviders.every(({ id }) => stockSources.includes(id))} onChange={(event) => setStockSources(event.target.checked ? montageStockProviders.map(({ id }) => id) : [])} />Все вместе</label>
+          {montageStockProviders.map(({ id, label }) => (
+            <label key={id} className="check-row"><input type="checkbox" checked={stockSources.includes(id)} onChange={(event) => setStockSources((current) => event.target.checked ? montageStockProviders.map((item) => item.id).filter((item) => item === id || current.includes(item)) : current.filter((item) => item !== id))} />{label}</label>
+          ))}
+        </fieldset>
+        <small className="workflow-note">Материалы предоставлены <a href="https://www.pexels.com/" target="_blank" rel="noopener noreferrer">Pexels</a>, <a href="https://pixabay.com/" target="_blank" rel="noopener noreferrer">Pixabay</a>, <a href="https://coverr.co/" target="_blank" rel="noopener noreferrer">Coverr</a>, Wikimedia Commons и NASA. Источники и лицензии использованных файлов сохраняются рядом с MP4.</small>
+        <label className="check-row"><input type="checkbox" checked={stockHdOnly} onChange={(event) => setStockHdOnly(event.target.checked)} />HD 720p+</label>
+        <small className="workflow-note">Отбираются стоки с исходным качеством не ниже HD 720p. Размер готового MP4 1080p сам по себе не повышает детализацию исходника.</small>
+        {!stockSourcesValid ? <small role="alert">Выберите хотя бы один стоковый источник.</small> : null}
+        <label className="check-row"><input type="checkbox" checked={stockUseLibrary} onChange={(event) => setStockUseLibrary(event.target.checked)} />Использовать библиотеку скачанных стоков</label>
+        <small className="workflow-note">Сначала проверяются подходящие скачанные материалы. История использования сохраняется, чтобы чередовать источники и фрагменты в следующих роликах.</small>
+        <small className="workflow-note">Папка библиотеки: <span style={{ overflowWrap: "anywhere", userSelect: "text" }}>{data.montageSettings.stockLibraryFolder || "Путь появится после подключения NewsFlow"}</span>. Перед ручной очисткой завершите задачи: сохранённые проекты могут ссылаться на эти файлы.</small>
+        <label className="check-row"><input type="checkbox" checked={stockTrim} onChange={(event) => setStockTrim(event.target.checked)} />Обрезать стоковые видео</label>
+        <small className="workflow-note">Исходный файл не меняется. При включённой обрезке готовится короткий фрагмент. При выключенной предварительной обрезки нет, но таймлайн по-прежнему ограничивает показ границами озвучки.</small>
       </section>
+      {configurationOpen ? <MontageStockKeys data={data} command={command} /> : null}
       <section className="panel renderer-choice-panel">
         <div className="panel-title">
           <div>
@@ -11290,7 +11390,7 @@ export function Editor({
               редактируемый план этой же дорожки, без второго рендера.
             </small>
           </div>
-          <Button disabled={renderer === "gpu-timeline" && !gpuChunkSizeValid} onClick={() => void saveSettings()}>
+          <Button disabled={!stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)} onClick={() => void saveSettings()}>
             <Check size={16} />
             Сохранить выбор
           </Button>
@@ -11563,7 +11663,6 @@ export function Editor({
             <input
               type="number"
               min="1"
-              max="8"
               value={downloadWorkers}
               onChange={(event) => setDownloadWorkers(event.target.value)}
             />
@@ -11603,14 +11702,6 @@ export function Editor({
           <label className="check-row">
             <input type="checkbox" checked disabled readOnly />
             Не использовать футажи с английскими/латинскими надписями — обязательное правило
-          </label>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={autoWeb}
-              onChange={(event) => setAutoWeb(event.target.checked)}
-            />
-            Искать в разрешённых внешних источниках, если локальный матч слабый
           </label>
         </div>
         <small className="workflow-note">
@@ -12363,6 +12454,7 @@ export function Editor({
               {selectedProject.selectionSummaryText}
             </p>
           ) : null}
+          {projectContinuitySummary ? <p className="project-duration">{projectContinuitySummary}</p> : null}
           {selectedProject.outputPath ? (
             <video
               className="project-video"

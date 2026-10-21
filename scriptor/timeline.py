@@ -135,6 +135,9 @@ class TimelineClip:
     # Appended at the end to preserve the positional TimelineClip contract
     # used by legacy/manual project constructors.
     voice_segment_ids: list[int] = field(default_factory=list)
+    stock_provenance: dict = field(default_factory=dict)
+    # A materialized still-frame gap is continuity, not newly selected footage.
+    continuity: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -153,6 +156,8 @@ class TimelineProject:
     selection_summary: dict = field(default_factory=dict)
     preparation_metrics_ms: dict = field(default_factory=dict)
     voice_map_provenance: dict = field(default_factory=dict)
+    source_policy: dict = field(default_factory=dict)
+    manual_replacements: list[dict] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -209,11 +214,23 @@ VISUAL_TERMS = {
     "гибрид": "cybersecurity network operations military command Europe",
     "кибер": "cybersecurity operations computer networks servers monitoring",
     "хакер": "cybersecurity computer network operations monitoring screens",
-    "одесс": "Odesa port Black Sea", "порт": "seaport cargo cranes ships", "кораб": "ship navy cargo vessel",
+    "одесс": "Odesa port Black Sea", "порт": "seaport cargo cranes ships", "кораб": "ship cargo vessel maritime navigation",
+    "причал": "harbor pier quay moored cargo ships", "буксир": "harbor tugboat towing cargo vessel",
+    "понтон": "floating pontoon dock harbor", "сухогруз": "bulk carrier cargo ship",
+    "швартов": "mooring ropes cargo ship quay", "судн": "cargo ship vessel",
+    "пристань": "harbor pier quay", "тамож": "customs cargo inspection documents",
+    "насос": "industrial water pumps equipment", "очистки воды": "water purification treatment equipment",
+    "железнодорожн": "freight railway cargo tracks", "портальн": "cargo gantry crane terminal",
+    "пожар": "fire smoke firefighters emergency", "эсмин": "navy destroyer warship",
+    "фрегат": "navy frigate warship",
+    "аэропорт": "airport runway terminal aircraft", "аэродром": "airfield runway aircraft",
+    "самол": "aircraft flight airport runway", "радар": "radar antenna monitoring equipment",
+    "радиолокац": "radar antenna tracking equipment",
+    "взлетно-посадочн": "airport runway landing strip",
     "завод": "industrial factory workers", "переговор": "diplomatic negotiations leaders journalists cameras",
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
     "азербайдж": "Azerbaijan Baku", "израил": "Israel military border", "ливан": "Lebanon Beirut",
-    "энерг": "energy infrastructure power plant", "склад": "warehouse fire emergency workers",
+    "энерг": "energy infrastructure power plant", "склад": "warehouse storage logistics workers",
     # Military reports must request the visible action, not the abstract word
     # "war".  This separates an offensive/frontline from a Kremlin office or
     # an unrelated politician shot in a large mixed footage library.
@@ -242,8 +259,45 @@ GENERIC_VISUAL_QUERY = "international news, documentary footage"
 
 
 def fallback_visual_query(text: str) -> str:
-    lowered = text.casefold()
-    terms = [english for stem, english in VISUAL_TERMS.items() if stem in lowered]
+    lowered = text.casefold().replace("ё", "е")
+    aviation = bool(re.search(
+        r"\b(?:самол\w*|аэропорт\w*|аэродром\w*|авиадиспетчер\w*)"
+        r"|\bвоздушн\w*\s+(?:судн\w*|движен\w*)"
+        r"|\bдиспетчерск\w*\s+(?:башн\w*|вышк\w*)"
+        r"|\bдежурн\w*\s+борт\w*", lowered,
+    ))
+    naval = bool(re.search(
+        r"\b(?:эсмин\w*|фрегат\w*|вмф)\b|\bвоенно-мор\w*"
+        r"|\b(?:военн|боев)\w*\s+(?:кораб|судн)\w*", lowered,
+    ))
+    port = bool(re.search(r"\bпорт(?:[ауеы]|ом|ов|ам|ами|ах|ов\w*)?\b", lowered))
+    terms = [english for stem, english in VISUAL_TERMS.items()
+             if (port if stem == "порт" else stem in lowered)]
+    maritime = bool(re.search(r"\bмор(?:е|я|ю|ем|ск\w*)\b|\bсудн\w*", lowered))
+    if naval:
+        terms = ["navy warship" if term in (VISUAL_TERMS["кораб"], VISUAL_TERMS["судн"])
+                 else term for term in terms]
+    if aviation:
+        terms = ["aircraft flight" if term == VISUAL_TERMS["судн"] else term for term in terms]
+        if not any("aircraft" in term for term in terms):
+            terms.append("aircraft flight")
+        if re.search(r"\bвоенн\w*\s+самол\w*", lowered):
+            terms = ["military aircraft airbase flight" if term == VISUAL_TERMS["самол"]
+                     else term for term in terms]
+        if not re.search(r"\b(?:танк|брон|солдат|пехот|назем|машин)\w*", lowered):
+            terms = [term for term in terms if term != VISUAL_TERMS["военн"]]
+        if re.search(r"\bтерминал\w*\s+(?:(?:совсем|полностью)\s+)?опустел\w*\b", lowered):
+            terms = [term for term in terms if term not in (
+                VISUAL_TERMS["аэропорт"], VISUAL_TERMS["аэродром"], VISUAL_TERMS["самол"], "aircraft flight")]
+            terms.append("empty airport terminal")
+    if "диспетч" in lowered:
+        terms.append("air traffic control tower operators" if aviation else "operations control room operators")
+    if maritime and not naval and not aviation:
+        terms.append("civilian maritime cargo ship harbor")
+    # A legal court/manifest is not a vessel/shipping manifest. Require the
+    # surrounding visible cargo/harbor context for these ambiguous words.
+    if "манифест" in lowered and (maritime or port or re.search(r"\b(?:груз|причал)\w*", lowered)):
+        terms.append("cargo shipping manifest documents")
     return ", ".join(dict.fromkeys(terms)) or GENERIC_VISUAL_QUERY
 
 
@@ -539,6 +593,29 @@ def required_video_duration(voice_duration: float, intro_duration: float = 0.0) 
     return max(0.0, float(voice_duration)) + max(0.0, float(intro_duration))
 
 
+def _narration_mux_limits(duration: float) -> list[str]:
+    # -shortest may lose delayed packets; -t alone may include reordered
+    # packets beyond the boundary. Bound both on the normalized output.
+    return ["-t", f"{duration:.6f}", "-frames:v", str(max(1, math.ceil(duration * 30 - 1e-9)))]
+
+
+def _narration_mux_video(project: TimelineProject, ffmpeg: str, duration: float, *, gpu=False):
+    if not any(clip.continuity.get('mode') in {'freeze', 'background'} for clip in project.clips):
+        return ["-c:v", "copy"], ["-shortest"]
+    # Cutting a copied B-frame stream can leave a late reference frame and
+    # missing presentation timestamps. Normalize once for continuity projects;
+    # ordinary projects retain their existing stream-copy fast path.
+    if gpu:
+        encoder = gpu_timeline_encoder_args(ffmpeg)
+    elif gpu_timeline_capability(ffmpeg)["available"]:
+        encoder = video_encoder_args(ffmpeg)
+    else:
+        encoder = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+    # A stateful fps filter can flush/drop its buffered boundary frame when
+    # color metadata changes. Output synchronization enforces CFR without it.
+    return [*encoder, "-vf", "null", "-r", "30", "-fps_mode", "cfr"], _narration_mux_limits(duration)
+
+
 def _remaining_source_duration(source_duration: float, source_start: float) -> float:
     """Return playable source duration left after a clip-specific start offset."""
     return max(0.0, float(source_duration) - max(0.0, float(source_start)))
@@ -788,11 +865,13 @@ def warm_source_proxy(
     return target, False
 
 
-def _proxy_key(clip: TimelineClip, width: int, height: int) -> str:
+def _proxy_key(clip: TimelineClip, width: int, height: int, *, frame_budget: int | None = None) -> str:
     source = Path(clip.path)
     stat = source.stat()
     value = (f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{clip.source_start:.3f}|"
              f"{clip.duration:.3f}|{width}x{height}|30fps|crf20|proxy-v3-loop-short-source")
+    if frame_budget is not None:
+        value += f"|continuity-frame-budget-v1|{frame_budget}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -1051,6 +1130,7 @@ def _render_project_gpu_timeline(
                     "чтобы не получить зависший последний кадр. Нажмите «Переделать» — "
                     "NewsFlow подберёт дополнительные разные футажи."
                 )
+            mux_video, mux_limits = _narration_mux_video(project, ffmpeg, required_duration, gpu=True)
             intro = Path(project.intro_path) if project.intro_path else None
             if intro and intro.exists() and project.intro_duration > 0:
                 delay = int(project.intro_duration * 1000)
@@ -1061,15 +1141,15 @@ def _render_project_gpu_timeline(
                 )
                 run_ffmpeg([
                     ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-i", str(intro),
-                    "-filter_complex", mix, "-map", "0:v:0", "-map", "[audio]", "-c:v", "copy",
-                    "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(partial_output),
+                    "-filter_complex", mix, "-map", "0:v:0", "-map", "[audio]", *mux_video,
+                    "-c:a", "aac", "-b:a", "192k", *mux_limits, "-movflags", "+faststart", str(partial_output),
                 ])
             else:
                 delay = ["-af", f"adelay={int(project.intro_duration * 1000)}:all=1"] if project.intro_duration > 0 else []
                 run_ffmpeg([
                     ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-map", "0:v:0",
-                    "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                    *delay, "-shortest", "-movflags", "+faststart", str(partial_output),
+                    "-map", "1:a:0", *mux_video, "-c:a", "aac", "-b:a", "192k",
+                    *delay, *mux_limits, "-movflags", "+faststart", str(partial_output),
                 ])
         else:
             shutil.copy2(video_source, partial_output)
@@ -1085,6 +1165,8 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                    remotion_parallel_jobs: int = 1,
                    heartbeat: Callable[[int | None], None] | None = None,
                    gpu_chunk_size: int = GPU_TIMELINE_CHUNK_SIZE):
+    if project.manual_replacements:
+        raise ValueError("Требуется ручная замена отмеченных сцен")
     if not project.clips:
         raise ValueError("Таймлайн пуст")
     # FAST NEWS uses the direct, cached FFmpeg pipeline by default.  Remotion
@@ -1112,8 +1194,17 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
     if renderer != "ffmpeg":
         raise ValueError(f"Неподдерживаемый рендерер монтажа: {renderer}")
     ffmpeg = ffmpeg_executable()
-    def run_ffmpeg(command: list[str]) -> None:
-        _run(command, process_observer=heartbeat)
+    def run_ffmpeg(command: list[str], *, mux_cpu_retry=False) -> None:
+        try:
+            _run(command, process_observer=heartbeat)
+        except RuntimeError:
+            if not mux_cpu_retry or "h264_nvenc" not in command:
+                raise
+            encoder_start = command.index("-c:v")
+            encoder_end = command.index("-vf", encoder_start)
+            _ENCODER_CACHE[ffmpeg] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+            _run([*command[:encoder_start], *_ENCODER_CACHE[ffmpeg], *command[encoder_end:]],
+                 process_observer=heartbeat)
     width, height = (1080, 1920) if project.aspect_ratio == "9:16" else (1920, 1080)
     output.parent.mkdir(parents=True, exist_ok=True)
     published_output = output
@@ -1128,8 +1219,9 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
         render_clips.insert(0, TimelineClip(project.intro_path, "Заставка", "intro", project.intro_duration, source="intro"))
     # Encoders can round a 30fps proxy down by a few frames.  Borrow that
     # tiny technical margin from the *real final source* before rendering,
-    # rather than cloning its final frame after concat.  ``-shortest`` then
-    # ends exactly on the narration without frozen visual padding.
+    # rather than cloning its final frame after concat. The final mux uses an
+    # explicit narration limit: -shortest can discard delayed video packets
+    # when gapless MP3 audio finishes before its container duration.
     voice_for_margin = Path(project.voiceover_path) if project.voiceover_path else None
     if voice_for_margin and voice_for_margin.is_file() and project.clips:
         try:
@@ -1159,12 +1251,23 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
         # a directory that does not exist yet.  Creating it here also makes
         # proxy rendering resilient after a cleanup of AppData.
         cache_root.mkdir(parents=True, exist_ok=True)
+        precise_timeline = any(clip.continuity.get('mode') in {'freeze', 'background'} for clip in project.clips)
+        elapsed_seconds, elapsed_frames = 0.0, 0
         for index, clip in enumerate(render_clips, 1):
             source = Path(clip.path)
             if not source.exists():
                 raise FileNotFoundError(f"Футаж не найден: {source}")
             render_source = render_source_for_proxy(source, width, height)
-            target = cache_root / f"{_proxy_key(clip, width, height)}.mp4"
+            frame_budget = None
+            if precise_timeline:
+                elapsed_seconds += float(clip.duration)
+                frame_end = max(elapsed_frames + 1, math.ceil(elapsed_seconds * 30 - 1e-9))
+                frame_budget, elapsed_frames = frame_end - elapsed_frames, frame_end
+            target = cache_root / f"{_proxy_key(clip, width, height, frame_budget=frame_budget)}.mp4"
+            required_proxy_duration = frame_budget / 30 if frame_budget is not None else clip.duration
+            def proxy_duration_ok(duration, expected=required_proxy_duration, exact=frame_budget is not None):
+                return abs(duration - expected) < 1 / 60 if exact else duration + .05 >= expected
+            frame_args = ["-frames:v", str(frame_budget), "-r", "30", "-fps_mode", "cfr"] if frame_budget is not None else []
             # FFmpeg's ``-t 6.000`` at 30fps can encode only 179 frames
             # (5.97s). Across 44 ordinary clips that silently removed 1.3s
             # from a real NewsFlow video. Ask for one extra frame from the
@@ -1180,7 +1283,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
             with _proxy_lock(target):
                 if target.is_file():
                     result = default_health_store().check(target)
-                    if result.state == "valid" and result.duration + .05 < clip.duration:
+                    if result.state == "valid" and not proxy_duration_ok(result.duration):
                         result = replace(result, state="invalid", reason="Прокси короче требуемой сцены")
                     if result.state == "invalid":
                         if quarantine_cache(target, target.parent, result, source) is None:
@@ -1202,7 +1305,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                         loop_args = ["-stream_loop", "-1"] if available + 0.01 < proxy_duration else []
                         command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
                                    "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
-                                   "-vf", filter_value, "-an", *video_encoder_args(ffmpeg),
+                                   "-vf", filter_value, "-an", *frame_args, *video_encoder_args(ffmpeg),
                                    "-movflags", "+faststart", str(partial)]
                         try:
                             run_ffmpeg(command)
@@ -1212,11 +1315,11 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                             _ENCODER_CACHE[ffmpeg] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
                             command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
                                        "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
-                                       "-vf", filter_value, "-an", *_ENCODER_CACHE[ffmpeg],
+                                       "-vf", filter_value, "-an", *frame_args, *_ENCODER_CACHE[ffmpeg],
                                        "-movflags", "+faststart", str(partial)]
                             run_ffmpeg(command)
                         result = default_health_store().check(partial)
-                        if result.state != "valid" or result.duration + .05 < clip.duration:
+                        if result.state != "valid" or not proxy_duration_ok(result.duration):
                             raise RuntimeError(f"FFmpeg создал непригодный proxy: {result.reason}")
                         _replace_with_retry(partial, target, timeout=12.0)
                     finally:
@@ -1267,6 +1370,7 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                 )
             # Keep the real sound of the initial news insert.  The narration
             # starts only after it; this avoids the old silent/truncated intro.
+            mux_video, mux_limits = _narration_mux_video(project, ffmpeg, required_duration)
             intro = Path(project.intro_path) if project.intro_path else None
             if intro and intro.exists() and project.intro_duration > 0:
                 delay = int(project.intro_duration * 1000)
@@ -1276,13 +1380,13 @@ def render_project(project: TimelineProject, output: Path, progress: Callable[[i
                     "[intro][voice]amix=inputs=2:duration=longest:normalize=0[audio]"
                 )
                 run_ffmpeg([ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-i", str(intro),
-                      "-filter_complex", mix, "-map", "0:v:0", "-map", "[audio]", "-c:v", "copy",
-                      "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(output)])
+                      "-filter_complex", mix, "-map", "0:v:0", "-map", "[audio]", *mux_video,
+                      "-c:a", "aac", "-b:a", "192k", *mux_limits, "-movflags", "+faststart", str(output)], mux_cpu_retry=True)
             else:
                 audio_filter = ["-af", f"adelay={int(project.intro_duration * 1000)}:all=1"] if project.intro_duration > 0 else []
                 run_ffmpeg([ffmpeg, "-y", "-i", str(video_source), "-i", str(voiceover), "-map", "0:v:0",
-                      "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                      *audio_filter, "-shortest", "-movflags", "+faststart", str(output)])
+                      "-map", "1:a:0", *mux_video, "-c:a", "aac", "-b:a", "192k",
+                      *audio_filter, *mux_limits, "-movflags", "+faststart", str(output)], mux_cpu_retry=True)
         else:
             shutil.copy2(video_source, output)
         if progress:
