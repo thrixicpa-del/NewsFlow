@@ -83,7 +83,7 @@ class StockReplacementItem(FootageItem):
 class StockSceneSelector:
     def __init__(self, *, mode, service, index, cache_root, threshold, trim,
                  aspect_ratio, semantic_ok, source_allowed, duration_probe, checkpoint, download_semaphore=None, use_library=True,
-                 hd_only=False):
+                 hd_only=False, local_window=None):
         if mode not in {"local", "hybrid", "stock"}:
             raise ValueError("Неподдерживаемый режим источников")
         self.mode, self.service, self.index = mode, service, index
@@ -91,6 +91,7 @@ class StockSceneSelector:
         self.threshold = max(.01, float(threshold))
         self.trim, self.aspect_ratio = trim, aspect_ratio
         self.semantic_ok, self.source_allowed = semantic_ok, source_allowed
+        self.local_window = local_window
         self.duration_probe, self.checkpoint = duration_probe, checkpoint
         self.download_semaphore = download_semaphore
         self.use_library = bool(use_library)
@@ -155,8 +156,11 @@ class StockSceneSelector:
                     continue
                 # No below-threshold/random continuity escape for the new modes.
                 if ((score_query is None and hit.score < self.threshold)
-                        or not self.semantic_ok(guard_query if guard_query is not None else scene["visual_query_en"], item)
                         or not self.source_allowed(item)):
+                    continue
+                query = guard_query if guard_query is not None else scene["visual_query_en"]
+                start = self.local_window(query, item, float(scene["duration"])) if self.local_window else 0.0
+                if start is None or (not self.local_window and not self.semantic_ok(query, item)):
                     continue
                 try:
                     score = float(hit.score) if score_query is None else self._score(Path(item.path), score_query)
@@ -167,9 +171,10 @@ class StockSceneSelector:
                 if score < self.threshold:
                     continue
                 duration = self.duration_probe(Path(item.path))
-                if duration + .01 < float(scene.get("minimum_footage_duration", scene["duration"])):
+                if duration - start + .01 < max(float(scene["duration"]), float(scene.get("minimum_footage_duration", 0))):
                     continue
-                candidates.append(StockChoice(item, duration, score, family, level=level, reused=family in used))
+                candidates.append(StockChoice(item, duration, score, family, source_start=start,
+                                              level=level, reused=family in used))
         return self._best(candidates, history_families)
 
     def _best(self, choices, history_families=()):
@@ -345,7 +350,11 @@ class StockSceneSelector:
             for choice in self.pool:
                 if choice.family not in used_families or choice.duration-choice.source_start + .01 < float(scene["duration"]):
                     continue
-                if not self.semantic_ok(scene["visual_query_en"], choice.item):
+                if not choice.provenance and self.local_window:
+                    if self.local_window(scene["visual_query_en"], choice.item, float(scene["duration"]),
+                                         choice.source_start) is None:
+                        continue
+                elif not self.semantic_ok(scene["visual_query_en"], choice.item):
                     continue
                 try:
                     needed = max(float(scene["duration"]), float(scene.get("minimum_footage_duration", 0)))

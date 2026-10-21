@@ -1,0 +1,44 @@
+{
+  "harness_sha": "0af2979a43b0967fe6eca58852259af3c7987935",
+  "production_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+  "dataset": "2 owner-authorized real speech originals, 35 real footage, actual CLIP, no injected labels",
+  "original_hashes": "UNCHANGED",
+  "engineering_suite": "6 tests PASS; does not mean two complete videos",
+  "semantics": "FAIL",
+  "alignment": "approximate; model unavailable; no measured word timing",
+  "results": [
+    {
+      "voice": 1,
+      "status": "INCOMPLETE",
+      "reason": "controlled missing suitable footage at scene17; matching partial draft preserved",
+      "elapsed_seconds": 7.638125199999195
+    },
+    {
+      "voice": 2,
+      "status": "RENDERED",
+      "duration": 300,
+      "stream_endpoints": {
+        "audio": 300.0,
+        "video": 299.933333
+      },
+      "scene_count": 50,
+      "distinct_sources": 16,
+      "levels": {
+        "STRICT_MATCH": 15,
+        "RELAXED_SEMANTIC": 1,
+        "SAFE_REUSE": 34
+      },
+      "preparation_seconds": 16.945118899995578,
+      "render_seconds": 54.50643069999933,
+      "metrics_ms": {
+        "alignment": 264.991,
+        "planning": 834.035,
+        "retrieval": 114.197,
+        "selection": 10065.027,
+        "fallback_expansion": 3158.019,
+        "external": 0.051,
+        "total": 16449.734
+      }
+    }
+  ]
+}

@@ -22,7 +22,7 @@ _MODEL_FILES = {
 }
 
 
-def _model_path(model_name: str, cache_dir: str | None) -> Path:
+def _model_path(model_name: str, cache_dir: str | None, *, local_files_only: bool = False) -> Path:
     if model_name not in _MODEL_FILES:
         raise ValueError("Unsupported NewsFlow CLIP model")
     from huggingface_hub import snapshot_download
@@ -38,7 +38,7 @@ def _model_path(model_name: str, cache_dir: str | None) -> Path:
     except (OSError, ValueError):
         found = None
     if found is None or any(not (found / name).is_file() for name in files):
-        if offline:
+        if offline or local_files_only:
             raise RuntimeError(f"CLIP cache unavailable while offline: {model_name}")
         found = Path(snapshot_download(repo_id=model_name, cache_dir=root,
                                        allow_patterns=list(files), local_files_only=False))
@@ -79,10 +79,10 @@ class ImageEmbedding:
     """CLIP vision encoder with FastEmbed 0.8-compatible preprocessing."""
 
     def __init__(self, model_name: str = _IMAGE_MODEL, cache_dir: str | None = None,
-                 threads: int | None = None, cuda: str = "auto"):
+                 threads: int | None = None, cuda: str = "auto", *, local_files_only: bool = False):
         if model_name != _IMAGE_MODEL:
             raise ValueError("Only NewsFlow's existing CLIP vision model is supported")
-        self.dir = _model_path(model_name, cache_dir)
+        self.dir = _model_path(model_name, cache_dir, local_files_only=local_files_only)
         self.session = _session(self.dir, threads)
         self.config = json.loads((self.dir / "preprocessor_config.json").read_text(encoding="utf-8"))
         if self.config.get("image_processor_type", "CLIPImageProcessor") != "CLIPImageProcessor":
@@ -155,12 +155,12 @@ class TextEmbedding:
     """CLIP text encoder; retains the query_embed API consumed by ClipIndex."""
 
     def __init__(self, model_name: str = _TEXT_MODEL, cache_dir: str | None = None,
-                 threads: int | None = None, cuda: str = "auto"):
+                 threads: int | None = None, cuda: str = "auto", *, local_files_only: bool = False):
         if model_name != _TEXT_MODEL:
             raise ValueError("Only NewsFlow's existing CLIP text model is supported")
         from tokenizers import AddedToken, Tokenizer
 
-        self.dir = _model_path(model_name, cache_dir)
+        self.dir = _model_path(model_name, cache_dir, local_files_only=local_files_only)
         self.session = _session(self.dir, threads)
         self.tokenizer = Tokenizer.from_file(str(self.dir / "tokenizer.json"))
         cfg = json.loads((self.dir / "config.json").read_text(encoding="utf-8"))

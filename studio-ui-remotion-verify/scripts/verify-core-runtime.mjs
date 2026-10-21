@@ -17,6 +17,8 @@ const requiredSources = [
   'scriptor/bridge.py',
   'scriptor/ai_index.py',
   'scriptor/onnx_clip.py',
+  'scriptor/scene_intent.py',
+  'scriptor/visual_evidence.py',
   'scriptor/config.py',
   'scriptor/core.py',
   'scriptor/runner.py',

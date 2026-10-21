@@ -1,0 +1,47 @@
+{
+  "source_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+  "status": "PASS",
+  "method": "decode each stream from time0, compare mono16k PCM windows at0/149/297seconds; avoid codec random-seek warmup differences",
+  "scope": "real speech preserved; no ASR or measured word alignment",
+  "rows": [
+    {
+      "voice": 1,
+      "start_seconds": 0,
+      "original_vs_trim_correlation": 0.9999999977540601,
+      "trim_rms": 0.0751283792293494
+    },
+    {
+      "voice": 1,
+      "start_seconds": 149,
+      "original_vs_trim_correlation": 0.999999998426679,
+      "trim_rms": 0.09218476756405598
+    },
+    {
+      "voice": 1,
+      "start_seconds": 297,
+      "original_vs_trim_correlation": 0.9999999984281995,
+      "trim_rms": 0.09033981713911343
+    },
+    {
+      "voice": 2,
+      "start_seconds": 0,
+      "original_vs_trim_correlation": 0.999999997933652,
+      "trim_rms": 0.08766828319906968,
+      "trim_vs_mp4_correlation": 0.9999924753065175
+    },
+    {
+      "voice": 2,
+      "start_seconds": 149,
+      "original_vs_trim_correlation": 0.9999999962277862,
+      "trim_rms": 0.05694405018936218,
+      "trim_vs_mp4_correlation": 0.9999908404065356
+    },
+    {
+      "voice": 2,
+      "start_seconds": 297,
+      "original_vs_trim_correlation": 0.999999998196856,
+      "trim_rms": 0.08379026377912029,
+      "trim_vs_mp4_correlation": 0.9999935773258504
+    }
+  ]
+}

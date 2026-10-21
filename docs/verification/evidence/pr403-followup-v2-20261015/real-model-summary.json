@@ -1,0 +1,678 @@
+{
+  "scope": "real CLIP, same 35 original files; evaluation labels NOT inserted in index; tone audio; no original paths/images published",
+  "base_sha": "6f59443fb0b3a8787a6b3a73f3f88395fb8b7e98",
+  "after_sha": "53ff949123c6a3aa8210673509e33c727eee7049",
+  "original_hashes": "UNCHANGED",
+  "human_independent_review": "PENDING",
+  "observed_visual_failures": [
+    "missing Pashinyan fallback chose bar interview",
+    "map/interview accepted as exact action; model tags remain advisory",
+    "some boundary frames still show previous shot; render timestamp acceptance remains open"
+  ],
+  "observed_visual_improvements": [
+    "commentator scene selects Zelensky instead of statement author Putin",
+    "frontline-to-meeting switches military footage to meeting context",
+    "denied advance uses official context then actual artillery",
+    "mixed battle/refinery tags no longer fill civilian port with a frontline map"
+  ],
+  "runs": {
+    "base": [
+      {
+        "script": "На фронте продолжаются бои. Делегации встретились для обсуждения соглашения.",
+        "status": "RENDERED",
+        "scenes": [
+          {
+            "text": "На фронте продолжаются бои.",
+            "query": "frontline trenches soldiers battlefield military action",
+            "time": 0,
+            "source_id": 25,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Делегации встретились для обсуждения соглашения.",
+            "query": "frontline trenches soldiers battlefield military action",
+            "time": 6.0,
+            "source_id": 24,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "Заявление Путина прокомментировал Зеленский. Путин выступил с заявлением.",
+        "status": "RENDERED",
+        "scenes": [
+          {
+            "text": "Заявление Путина прокомментировал Зеленский.",
+            "query": "Vladimir Putin, press conference statement journalists cameras",
+            "time": 0,
+            "source_id": 27,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "RELAXED_SEMANTIC",
+            "person": {
+              "targets": [
+                "putin"
+              ],
+              "status": "probable",
+              "visible": [
+                "aliyev",
+                "putin"
+              ],
+              "source": "unverified-metadata",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Путин выступил с заявлением.",
+            "query": "Vladimir Putin, press conference statement journalists cameras",
+            "time": 6.0,
+            "source_id": 13,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "RELAXED_SEMANTIC",
+            "person": {
+              "targets": [
+                "putin"
+              ],
+              "status": "probable",
+              "visible": [
+                "putin"
+              ],
+              "source": "unverified-metadata",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "Наступление не началось. Обстрел продолжился.",
+        "status": "RENDERED",
+        "scenes": [
+          {
+            "text": "Наступление не началось.",
+            "query": "frontline battlefield soldiers advancing infantry armored vehicles",
+            "time": 0,
+            "source_id": 26,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Обстрел продолжился.",
+            "query": "artillery shelling explosion damaged buildings",
+            "time": 6.0,
+            "source_id": 2,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "Пашинян выступил с заявлением. Делегации провели встречу.",
+        "status": "RENDERED",
+        "scenes": [
+          {
+            "text": "Пашинян выступил с заявлением.",
+            "query": "Nikol Pashinyan, press conference statement journalists cameras",
+            "time": 0,
+            "source_id": 32,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_CONTEXT",
+            "person": {
+              "targets": [
+                "pashinyan"
+              ],
+              "status": "unknown",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Делегации провели встречу.",
+            "query": "Nikol Pashinyan, press conference statement journalists cameras",
+            "time": 6.0,
+            "source_id": 30,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "RELAXED_SEMANTIC",
+            "person": {
+              "targets": [
+                "pashinyan"
+              ],
+              "status": "probable",
+              "visible": [
+                "pashinyan",
+                "putin"
+              ],
+              "source": "unverified-metadata",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "На фронте продолжаются бои. Жители собрались на мирный митинг. Представители властей начали переговоры. Рабочие объявили забастовку. В порту возобновилась погрузка.",
+        "status": "RENDERED",
+        "scenes": [
+          {
+            "text": "На фронте продолжаются бои.",
+            "query": "frontline trenches soldiers battlefield military action",
+            "time": 0,
+            "source_id": 1,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Жители собрались на мирный митинг.",
+            "query": "protest crowd placards flags street rally",
+            "time": 6.0,
+            "source_id": 0,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Представители властей начали переговоры.",
+            "query": "diplomatic negotiations leaders journalists cameras",
+            "time": 12.0,
+            "source_id": 28,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Рабочие объявили забастовку.",
+            "query": "workers labor strike picket line factory gate",
+            "time": 18.0,
+            "source_id": 1,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_REUSE",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "В порту возобновилась погрузка.",
+            "query": "seaport cargo cranes ships",
+            "time": 24.0,
+            "source_id": 33,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "На митинге не было столкновений. Митинг отменили. Делегации встретились. Фермеры протестуют у здания правительства.",
+        "status": "RENDERED",
+        "scenes": [
+          {
+            "text": "На митинге не было столкновений.",
+            "query": "protest crowd placards flags street rally",
+            "time": 0,
+            "source_id": 7,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Митинг отменили.",
+            "query": "protest crowd placards flags street rally",
+            "time": 6.0,
+            "source_id": 6,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Делегации встретились.",
+            "query": "protest crowd placards flags street rally",
+            "time": 12.0,
+            "source_id": 7,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_REUSE",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Фермеры протестуют у здания правительства.",
+            "query": "protest crowd placards flags street rally",
+            "time": 18.0,
+            "source_id": 6,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_REUSE",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      }
+    ],
+    "after": [
+      {
+        "script": "На фронте продолжаются бои. Делегации встретились для обсуждения соглашения.",
+        "status": "RENDERED",
+        "audio_duration": 12.0,
+        "video_duration": 11.933333,
+        "scenes": [
+          {
+            "text": "На фронте продолжаются бои.",
+            "query": "frontline trenches soldiers battlefield military action",
+            "time": 0,
+            "source_id": 25,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Делегации встретились для обсуждения соглашения.",
+            "query": "diplomatic negotiations delegations meeting consultations",
+            "time": 6.0,
+            "source_id": 27,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "Заявление Путина прокомментировал Зеленский. Путин выступил с заявлением.",
+        "status": "RENDERED",
+        "audio_duration": 12.0,
+        "video_duration": 11.933333,
+        "scenes": [
+          {
+            "text": "Заявление Путина прокомментировал Зеленский.",
+            "query": "Volodymyr Zelensky, press conference statement journalists cameras",
+            "time": 0,
+            "source_id": 15,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "RELAXED_SEMANTIC",
+            "person": {
+              "targets": [
+                "zelensky"
+              ],
+              "status": "probable",
+              "visible": [
+                "zelensky"
+              ],
+              "source": "unverified-metadata",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Путин выступил с заявлением.",
+            "query": "Vladimir Putin, press conference statement journalists cameras",
+            "time": 6.0,
+            "source_id": 13,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "RELAXED_SEMANTIC",
+            "person": {
+              "targets": [
+                "putin"
+              ],
+              "status": "probable",
+              "visible": [
+                "putin"
+              ],
+              "source": "unverified-metadata",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "Наступление не началось. Обстрел продолжился.",
+        "status": "RENDERED",
+        "audio_duration": 12.0,
+        "video_duration": 11.933333,
+        "scenes": [
+          {
+            "text": "Наступление не началось.",
+            "query": "official statement government briefing illustrative context",
+            "time": 0,
+            "source_id": 28,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Обстрел продолжился.",
+            "query": "artillery shelling explosion damaged buildings",
+            "time": 6.0,
+            "source_id": 24,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "Пашинян выступил с заявлением. Делегации провели встречу.",
+        "status": "RENDERED",
+        "audio_duration": 12.0,
+        "video_duration": 11.933333,
+        "scenes": [
+          {
+            "text": "Пашинян выступил с заявлением.",
+            "query": "Nikol Pashinyan, press conference statement journalists cameras",
+            "time": 0,
+            "source_id": 32,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_CONTEXT",
+            "person": {
+              "targets": [
+                "pashinyan"
+              ],
+              "status": "unknown",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Делегации провели встречу.",
+            "query": "diplomatic negotiations delegations meeting consultations",
+            "time": 6.0,
+            "source_id": 30,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "На фронте продолжаются бои. Жители собрались на мирный митинг. Представители властей начали переговоры. Рабочие объявили забастовку. В порту возобновилась погрузка.",
+        "status": "RENDERED",
+        "audio_duration": 30.0,
+        "video_duration": 29.9,
+        "scenes": [
+          {
+            "text": "На фронте продолжаются бои.",
+            "query": "frontline trenches soldiers battlefield military action",
+            "time": 0,
+            "source_id": 26,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Жители собрались на мирный митинг.",
+            "query": "peaceful civilian protest crowd placards street rally march",
+            "time": 6.0,
+            "source_id": 6,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Представители властей начали переговоры.",
+            "query": "diplomatic negotiations leaders journalists cameras, diplomatic negotiations delegations meeting consultations",
+            "time": 12.0,
+            "source_id": 12,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Рабочие объявили забастовку.",
+            "query": "peaceful workers labor strike picket line union protest factory gate",
+            "time": 18.0,
+            "source_id": 6,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_REUSE",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "В порту возобновилась погрузка.",
+            "query": "seaport cargo cranes ships",
+            "time": 24.0,
+            "source_id": 33,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      },
+      {
+        "script": "На митинге не было столкновений. Митинг отменили. Делегации встретились. Фермеры протестуют у здания правительства.",
+        "status": "RENDERED",
+        "audio_duration": 24.0,
+        "video_duration": 24.0,
+        "scenes": [
+          {
+            "text": "На митинге не было столкновений.",
+            "query": "peaceful civilian protest crowd placards street rally march",
+            "time": 0,
+            "source_id": 0,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Митинг отменили.",
+            "query": "official statement government building exterior venue illustrative context",
+            "time": 6.0,
+            "source_id": 34,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "STRICT_MATCH",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Делегации встретились.",
+            "query": "diplomatic negotiations delegations meeting consultations",
+            "time": 12.0,
+            "source_id": 34,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_REUSE",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          },
+          {
+            "text": "Фермеры протестуют у здания правительства.",
+            "query": "peaceful farmers protest tractors placards government demonstration",
+            "time": 18.0,
+            "source_id": 0,
+            "source_start": 0.0,
+            "duration": 6.0,
+            "level": "SAFE_REUSE",
+            "person": {
+              "targets": [],
+              "status": "not_requested",
+              "visible": [],
+              "source": "none",
+              "event_confirmed": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

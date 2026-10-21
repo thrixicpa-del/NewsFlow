@@ -1,0 +1,187 @@
+{
+  "scope": "6 synthetic videos including2protest scripts; deterministic embeddings/tone audio; NOT real semantics",
+  "base_sha": "6f59443fb0b3a8787a6b3a73f3f88395fb8b7e98",
+  "after_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+  "method": "3 alternating sequential BASE/AFTER trials; same bundled FFmpeg, fresh test profiles/render caches; no heavy concurrent local tests",
+  "trials": {
+    "base": [
+      {
+        "repeat": 1,
+        "runtime": {
+          "python": "3.12.10",
+          "platform": "Windows-11-10.0.26200-SP0",
+          "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+          "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+          "ffprobe_version": "ffprobe version 9.0.1-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+        },
+        "prepare": 15.427778500015847,
+        "render": 58.96283550000226,
+        "preparation_metrics_ms": {
+          "alignment": 0.013000000000000001,
+          "planning": 2596.475,
+          "retrieval": 14.143,
+          "selection": 9615.451,
+          "fallback_expansion": 40.422,
+          "external": 0.005,
+          "total": 14079.256
+        },
+        "total": 74.3906140000181
+      },
+      {
+        "repeat": 2,
+        "runtime": {
+          "python": "3.12.10",
+          "platform": "Windows-11-10.0.26200-SP0",
+          "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+          "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+          "ffprobe_version": "ffprobe version 9.0.1-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+        },
+        "prepare": 14.997593400010373,
+        "render": 57.86901269998634,
+        "preparation_metrics_ms": {
+          "alignment": 0.012,
+          "planning": 2445.8450000000003,
+          "retrieval": 14.445,
+          "selection": 9430.618,
+          "fallback_expansion": 37.212,
+          "external": 0.004,
+          "total": 13857.617
+        },
+        "total": 72.86660609999672
+      },
+      {
+        "repeat": 3,
+        "runtime": {
+          "python": "3.12.10",
+          "platform": "Windows-11-10.0.26200-SP0",
+          "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+          "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+          "ffprobe_version": "ffprobe version 9.0.1-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+        },
+        "prepare": 15.220497500005877,
+        "render": 57.635430199996335,
+        "preparation_metrics_ms": {
+          "alignment": 0.014,
+          "planning": 2314.2290000000003,
+          "retrieval": 17.033,
+          "selection": 9754.146999999999,
+          "fallback_expansion": 42.63,
+          "external": 0.006,
+          "total": 13982.886
+        },
+        "total": 72.85592770000221
+      }
+    ],
+    "after": [
+      {
+        "repeat": 1,
+        "runtime": {
+          "python": "3.12.10",
+          "platform": "Windows-11-10.0.26200-SP0",
+          "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+          "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+          "ffprobe_version": "ffprobe version 9.0.1-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+        },
+        "prepare": 14.497978900006274,
+        "render": 53.917524599979515,
+        "preparation_metrics_ms": {
+          "alignment": 0.013000000000000001,
+          "planning": 2427.212,
+          "retrieval": 15.164,
+          "selection": 8832.074,
+          "fallback_expansion": 36.484,
+          "external": 0.003,
+          "total": 13233.886
+        },
+        "total": 68.41550349998579
+      },
+      {
+        "repeat": 2,
+        "runtime": {
+          "python": "3.12.10",
+          "platform": "Windows-11-10.0.26200-SP0",
+          "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+          "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+          "ffprobe_version": "ffprobe version 9.0.1-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+        },
+        "prepare": 14.362184599987813,
+        "render": 54.45563870000478,
+        "preparation_metrics_ms": {
+          "alignment": 0.017,
+          "planning": 2479.322,
+          "retrieval": 17.374,
+          "selection": 8699.702,
+          "fallback_expansion": 26.653,
+          "external": 0.003,
+          "total": 13154.284
+        },
+        "total": 68.8178232999926
+      },
+      {
+        "repeat": 3,
+        "runtime": {
+          "python": "3.12.10",
+          "platform": "Windows-11-10.0.26200-SP0",
+          "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+          "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+          "ffprobe_version": "ffprobe version 9.0.1-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+        },
+        "prepare": 14.160523899976397,
+        "render": 53.324768599981326,
+        "preparation_metrics_ms": {
+          "alignment": 0.018000000000000002,
+          "planning": 2269.983,
+          "retrieval": 15.66,
+          "selection": 8987.275,
+          "fallback_expansion": 23.997,
+          "external": 0.003,
+          "total": 13085.867
+        },
+        "total": 67.48529249995772
+      }
+    ]
+  },
+  "aggregate_seconds": {
+    "base": {
+      "prepare": {
+        "median": 15.220497500005877,
+        "min": 14.997593400010373,
+        "max": 15.427778500015847
+      },
+      "render": {
+        "median": 57.86901269998634,
+        "min": 57.635430199996335,
+        "max": 58.96283550000226
+      },
+      "total": {
+        "median": 72.86660609999672,
+        "min": 72.85592770000221,
+        "max": 74.3906140000181
+      }
+    },
+    "after": {
+      "prepare": {
+        "median": 14.362184599987813,
+        "min": 14.160523899976397,
+        "max": 14.497978900006274
+      },
+      "render": {
+        "median": 53.917524599979515,
+        "min": 53.324768599981326,
+        "max": 54.45563870000478
+      },
+      "total": {
+        "median": 68.41550349998579,
+        "min": 67.48529249995772,
+        "max": 68.8178232999926
+      }
+    }
+  },
+  "limits": [
+    "selected clips differ, not pixel-identical render",
+    "synthetic vectors/tone and small material pools",
+    "not full real library/face/provider benchmark",
+    "cProfile validation/proxy lookups measured separately, non-additive",
+    "no full source proxy creation in direct cut mode"
+  ]
+}

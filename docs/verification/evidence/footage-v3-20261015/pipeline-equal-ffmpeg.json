@@ -1,0 +1,230 @@
+{
+  "scope": "synthetic source prepare and render; four videos totalling 90 seconds",
+  "base_sha": "43dd0709d7341eb79b308303031b5f3a47fd3ebc",
+  "after_source_sha": "d7d5ef9ba38a6aaa4113927dcbfa2c1ddee8a83e",
+  "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+  "ffmpeg_version": "ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers",
+  "method": "3 sequential alternating BASE/AFTER trials, same FFmpeg binary, fresh isolated profile and render workspace per trial; no other test suites running except small pure/storage RED probes",
+  "limitations": [
+    "synthetic motion patterns, deterministic embeddings and sine audio",
+    "no actual person imagery or visual semantics acceptance",
+    "single Windows machine with production app left running",
+    "prepare/render only; synthetic generation and QA extraction excluded from elapsed metric",
+    "memory/RSS not measured in full pipeline",
+    "post-review changes have separate final smoke; table measures stated source SHA"
+  ],
+  "rejected_hypotheses": [
+    "earlier 23.80 vs 54.30s comparison had different FFmpeg binaries and cannot establish a source slowdown",
+    "repeated source_exists path resolution was only 0.013s of 2.745s first prepare profile; not the dominant delay"
+  ],
+  "trials": {
+    "base": [
+      {
+        "repeat": 1,
+        "test_status": "PASS",
+        "production_guard": "PASS",
+        "prepare": 10.084086200004094,
+        "render": 35.830719599995064,
+        "total": 45.91480579999916,
+        "stages_ms": {
+          "alignment": 0.01,
+          "planning": 1337.211,
+          "retrieval": 5.021,
+          "selection": 6940.845,
+          "fallback_expansion": 0.0,
+          "external": 0.0,
+          "total": 9419.188999999998
+        }
+      },
+      {
+        "repeat": 2,
+        "test_status": "PASS",
+        "production_guard": "PASS",
+        "prepare": 10.083611499983817,
+        "render": 36.875872000004165,
+        "total": 46.95948349998798,
+        "stages_ms": {
+          "alignment": 0.01,
+          "planning": 1331.421,
+          "retrieval": 5.103,
+          "selection": 6079.531,
+          "fallback_expansion": 2.879,
+          "external": 0.005,
+          "total": 9404.862
+        }
+      },
+      {
+        "repeat": 3,
+        "test_status": "PASS",
+        "production_guard": "PASS",
+        "prepare": 10.199829399978626,
+        "render": 35.28605169999355,
+        "total": 45.485881099972175,
+        "stages_ms": {
+          "alignment": 0.01,
+          "planning": 1341.028,
+          "retrieval": 5.359999999999999,
+          "selection": 7050.418,
+          "fallback_expansion": 1.325,
+          "external": 0.002,
+          "total": 9537.506
+        }
+      }
+    ],
+    "after": [
+      {
+        "repeat": 1,
+        "test_status": "PASS",
+        "production_guard": "PASS",
+        "prepare": 9.901773399993544,
+        "render": 34.430875200021546,
+        "total": 44.33264860001509,
+        "stages_ms": {
+          "alignment": 0.009000000000000001,
+          "planning": 1308.317,
+          "retrieval": 9.095,
+          "selection": 6793.104,
+          "fallback_expansion": 18.758,
+          "external": 0.003,
+          "total": 9238.735
+        }
+      },
+      {
+        "repeat": 2,
+        "test_status": "PASS",
+        "production_guard": "PASS",
+        "prepare": 9.955842300012591,
+        "render": 34.692286400008015,
+        "total": 44.64812870002061,
+        "stages_ms": {
+          "alignment": 0.011,
+          "planning": 1315.696,
+          "retrieval": 8.994,
+          "selection": 6826.333,
+          "fallback_expansion": 18.371,
+          "external": 0.002,
+          "total": 9272.239
+        }
+      },
+      {
+        "repeat": 3,
+        "test_status": "PASS",
+        "production_guard": "PASS",
+        "prepare": 9.944614599982742,
+        "render": 34.46219540001766,
+        "total": 44.406810000000405,
+        "stages_ms": {
+          "alignment": 0.014,
+          "planning": 1302.0610000000001,
+          "retrieval": 8.512,
+          "selection": 6836.329,
+          "fallback_expansion": 18.667,
+          "external": 0.003,
+          "total": 9276.343
+        }
+      }
+    ]
+  },
+  "aggregate_seconds": {
+    "base": {
+      "prepare": {
+        "median": 10.084086200004094,
+        "min": 10.083611499983817,
+        "max": 10.199829399978626
+      },
+      "render": {
+        "median": 35.830719599995064,
+        "min": 35.28605169999355,
+        "max": 36.875872000004165
+      },
+      "total": {
+        "median": 45.91480579999916,
+        "min": 45.485881099972175,
+        "max": 46.95948349998798
+      }
+    },
+    "after": {
+      "prepare": {
+        "median": 9.944614599982742,
+        "min": 9.901773399993544,
+        "max": 9.955842300012591
+      },
+      "render": {
+        "median": 34.46219540001766,
+        "min": 34.430875200021546,
+        "max": 34.692286400008015
+      },
+      "total": {
+        "median": 44.406810000000405,
+        "min": 44.33264860001509,
+        "max": 44.64812870002061
+      }
+    }
+  },
+  "prepare_profile_after": [
+    {
+      "video": 1,
+      "profile_total_seconds": 2.745326499999999,
+      "run": {
+        "calls": 8,
+        "cumulative_seconds": 2.2423895000000003
+      },
+      "source_exists": {
+        "calls": 51,
+        "cumulative_seconds": 0.013128200000000001
+      },
+      "person_evidence": {
+        "calls": 296,
+        "cumulative_seconds": 0.0113226
+      }
+    },
+    {
+      "video": 2,
+      "profile_total_seconds": 3.4559551999999996,
+      "run": {
+        "calls": 11,
+        "cumulative_seconds": 3.0559691
+      },
+      "source_exists": {
+        "calls": 4,
+        "cumulative_seconds": 0.0011856
+      },
+      "person_evidence": {
+        "calls": 37,
+        "cumulative_seconds": 0.000777
+      }
+    },
+    {
+      "video": 3,
+      "profile_total_seconds": 3.4521073000000024,
+      "run": {
+        "calls": 11,
+        "cumulative_seconds": 3.0075042
+      },
+      "source_exists": {
+        "calls": 35,
+        "cumulative_seconds": 0.009208500000000001
+      },
+      "person_evidence": {
+        "calls": 233,
+        "cumulative_seconds": 0.0057441
+      }
+    },
+    {
+      "video": 4,
+      "profile_total_seconds": 1.0323412000000012,
+      "run": {
+        "calls": 2,
+        "cumulative_seconds": 0.5822233
+      },
+      "source_exists": {
+        "calls": 55,
+        "cumulative_seconds": 0.014663200000000001
+      },
+      "person_evidence": {
+        "calls": 196,
+        "cumulative_seconds": 0.0058148
+      }
+    }
+  ]
+}

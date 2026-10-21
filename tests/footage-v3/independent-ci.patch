@@ -1,0 +1,43 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 53d6b9f..201e3fb 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -36,6 +36,10 @@ jobs:
+       - run: python tests/run_isolated.py tests.test_ai_index tests.test_montage_queue tests.test_montage_index_integrity
+         env:
+           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-proxy
++      - name: Footage V3 scene, identity evidence and fallback regressions
++        run: python tests/run_isolated.py --pytest tests/test_footage_v3.py tests/test_montage_semantic_diversity.py tests/test_fast_reuse_render.py -q
++        env:
++          LOCALAPPDATA: ${{ runner.temp }}/newsflow-footage-v3
+       - run: >-
+           python tests/run_isolated.py
+           scriptor.test_montage_render.MontageRenderTests.test_source_proxy_cache_reuses_an_unchanged_source_without_touching_it
+diff --git a/.github/workflows/windows-native.yml b/.github/workflows/windows-native.yml
+index d99f65f..7109d84 100644
+--- a/.github/workflows/windows-native.yml
++++ b/.github/workflows/windows-native.yml
+@@ -8,6 +8,9 @@ jobs:
+     steps:
+       - uses: actions/checkout@v6
+         with: { lfs: true }
++      - uses: actions/setup-python@v6
++        with: { python-version: '3.12' }
++      - run: python -m pip install --require-hashes -r requirements-test.lock
+       - uses: pnpm/action-setup@v4
+         with: { version: '11.19.0' }
+       - uses: actions/setup-node@v6
+@@ -18,3 +21,13 @@ jobs:
+         working-directory: studio-ui-remotion-verify
+       - run: pnpm build:desktop
+         working-directory: studio-ui-remotion-verify
++      - name: Footage V3 source regressions
++        run: python tests/run_isolated.py --pytest tests/test_footage_v3.py tests/test_montage_semantic_diversity.py -q
++        env:
++          LOCALAPPDATA: ${{ runner.temp }}/newsflow-footage-v3-production-boundary
++      - name: Footage V3 actual source Electron montage
++        run: python tests/run_isolated.py --pytest tests/test_electron_e2e.py -k footage_v3 -q
++        env:
++          LOCALAPPDATA: ${{ runner.temp }}/newsflow-footage-v3-production-boundary
++          NEWSFLOW_RUN_ELECTRON_E2E: '1'
++          NEWSFLOW_PYTHON: python

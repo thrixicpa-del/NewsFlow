@@ -1,0 +1,368 @@
+{
+  "scope": "deterministic suitable-pool selector/history simulation; no visual acceptance",
+  "seed": "fixed-video-N",
+  "topics": "original",
+  "results": [
+    {
+      "parallel": false,
+      "fast_reuse": false,
+      "scarce": false,
+      "configured_duration_target_percent": null,
+      "videos": [
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        },
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        },
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        },
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        }
+      ],
+      "pair_intersection_clips": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "identical_openings": 0
+    },
+    {
+      "parallel": false,
+      "fast_reuse": false,
+      "scarce": true,
+      "configured_duration_target_percent": null,
+      "videos": [
+        {
+          "distinct_clips": 5,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 14,
+          "actual_distinct_path_percent": 20.83
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        }
+      ],
+      "pair_intersection_clips": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "identical_openings": 3
+    },
+    {
+      "parallel": false,
+      "fast_reuse": true,
+      "scarce": false,
+      "configured_duration_target_percent": 50,
+      "videos": [
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        },
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        },
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        },
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        }
+      ],
+      "pair_intersection_clips": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "identical_openings": 0
+    },
+    {
+      "parallel": false,
+      "fast_reuse": true,
+      "scarce": true,
+      "configured_duration_target_percent": 50,
+      "videos": [
+        {
+          "distinct_clips": 5,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 14,
+          "actual_distinct_path_percent": 20.83
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        }
+      ],
+      "pair_intersection_clips": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "identical_openings": 3
+    },
+    {
+      "parallel": true,
+      "fast_reuse": false,
+      "scarce": false,
+      "configured_duration_target_percent": null,
+      "videos": [
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        },
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        },
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        },
+        {
+          "distinct_clips": 24,
+          "distinct_families": 24,
+          "adjacent_repeats": 0,
+          "repeated_triples": 0,
+          "actual_distinct_path_percent": 100.0
+        }
+      ],
+      "pair_intersection_clips": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "identical_openings": 0
+    },
+    {
+      "parallel": true,
+      "fast_reuse": false,
+      "scarce": true,
+      "configured_duration_target_percent": null,
+      "videos": [
+        {
+          "distinct_clips": 5,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 14,
+          "actual_distinct_path_percent": 20.83
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        }
+      ],
+      "pair_intersection_clips": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "identical_openings": 3
+    },
+    {
+      "parallel": true,
+      "fast_reuse": true,
+      "scarce": false,
+      "configured_duration_target_percent": 50,
+      "videos": [
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        },
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        },
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        },
+        {
+          "distinct_clips": 12,
+          "distinct_families": 12,
+          "adjacent_repeats": 0,
+          "repeated_triples": 4,
+          "actual_distinct_path_percent": 50.0
+        }
+      ],
+      "pair_intersection_clips": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "identical_openings": 0
+    },
+    {
+      "parallel": true,
+      "fast_reuse": true,
+      "scarce": true,
+      "configured_duration_target_percent": 50,
+      "videos": [
+        {
+          "distinct_clips": 5,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 14,
+          "actual_distinct_path_percent": 20.83
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        },
+        {
+          "distinct_clips": 4,
+          "distinct_families": 4,
+          "adjacent_repeats": 0,
+          "repeated_triples": 16,
+          "actual_distinct_path_percent": 16.67
+        }
+      ],
+      "pair_intersection_clips": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "identical_openings": 3
+    }
+  ],
+  "source_sha": "aac2a2c36e0b34f64f12f881426593beef936797"
+}

@@ -71,6 +71,30 @@ class _Tokenizer:
 
 
 class ClipAdapterTests(unittest.TestCase):
+    def test_local_only_request_never_downloads_missing_assets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            calls = []
+            def load(**kwargs):
+                calls.append(kwargs["local_files_only"])
+                return folder
+            with patch.dict(sys.modules, {"huggingface_hub": types.SimpleNamespace(snapshot_download=load)}), \
+                    self.assertRaisesRegex(RuntimeError, "offline"):
+                onnx_clip._model_path(onnx_clip._IMAGE_MODEL, folder, local_files_only=True)
+            self.assertEqual(calls, [True])
+
+    def test_image_constructor_forwards_local_only(self):
+        with patch.object(onnx_clip, "_model_path", side_effect=RuntimeError("cache missing")) as lookup:
+            with self.assertRaisesRegex(RuntimeError, "cache missing"):
+                onnx_clip.ImageEmbedding(local_files_only=True)
+            lookup.assert_called_once_with(onnx_clip._IMAGE_MODEL, None, local_files_only=True)
+
+    def test_text_constructor_forwards_local_only(self):
+        with patch.dict(sys.modules, {"tokenizers": types.SimpleNamespace(Tokenizer=_Tokenizer, AddedToken=object)}), \
+                patch.object(onnx_clip, "_model_path", side_effect=RuntimeError("cache missing")) as lookup:
+            with self.assertRaisesRegex(RuntimeError, "cache missing"):
+                onnx_clip.TextEmbedding(local_files_only=True)
+            lookup.assert_called_once_with(onnx_clip._TEXT_MODEL, None, local_files_only=True)
+
     def test_frozen_spec_collects_new_runtime_not_fastembed(self):
         spec = (Path(__file__).resolve().parents[1] / "Scriptor.spec").read_text(encoding="utf-8")
         self.assertNotIn('collect_all("fastembed")', spec)

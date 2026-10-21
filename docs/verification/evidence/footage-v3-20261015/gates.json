@@ -1,0 +1,35 @@
+{
+  "base_sha": "43dd0709d7341eb79b308303031b5f3a47fd3ebc",
+  "branch": "codex/footage-semantic-person-fallback-v3",
+  "release_ready": false,
+  "merge_authorized": false,
+  "checks": [
+    {"name": "baseline_related_pytest", "tests": "PASS", "passed": 275, "production_hash_guard": "FAIL"},
+    {"name": "expanded_backend_contract_security", "tests": "PASS", "passed": 351, "production_hash_guard": "FAIL"},
+    {"name": "related_targeted", "tests": "PASS", "passed": 224, "production_hash_guard": "FAIL"},
+    {"name": "final_targeted_v3_diversity_voice_map", "command": "python tests/run_isolated.py --pytest tests/test_footage_v3.py tests/test_montage_semantic_diversity.py tests/test_voice_map.py -q --tb=short", "tests": "PASS", "passed": 110, "production_hash_guard": "FAIL"},
+    {"name": "post_review_backend_contract_security", "tests": "PASS", "passed": 369, "seconds": 92.03, "production_hash_guard": "PASS", "scope": "V3, index, timeline, diversity, index integrity, queues/locks, VoiceMap, fast reuse, runtime/command contracts, integrity runner, security/Electron security"},
+    {"name": "post_review_v3", "tests": "PASS", "passed": 67, "seconds": 2.07, "production_hash_guard": "PASS", "red_evidence": "Before fixes, inverse-speaker cases, VoiceMap authored speaker, three denied-offensive cases and both stale-annotation retrieval modes failed with expected assertions"},
+    {"name": "post_review_source_electron_montage", "tests": "PASS", "passed": 1, "deselected": 9, "seconds": 17.93, "production_hash_guard": "PASS", "command": "NEWSFLOW_RUN_ELECTRON_E2E=1 NEWSFLOW_PYTHON=python python tests/run_isolated.py --pytest tests/test_electron_e2e.py -k footage_v3 -q --tb=short", "scope": "actual local source UI/IPC/queue/core/render/reload; synthetic media and metadata"},
+    {"name": "post_review_four_mp4", "tests": "PASS", "seconds": 58.56, "production_hash_guard": "PASS", "prepare_seconds": 9.908970300006331, "render_seconds": 34.78347539999231, "evidence": "media-after-engineering.json", "scope": "four synthetic 18/18/36/18s MP4s, persisted plans, full decode, audio/video duration, source hashes and local storyboard; real person/content accuracy NOT VERIFIED"},
+    {"name": "source_electron", "command": "NEWSFLOW_RUN_ELECTRON_E2E=1 NEWSFLOW_PYTHON=python python tests/run_isolated.py --pytest tests/test_electron_e2e.py -q", "tests": "PASS", "passed": 10, "production_hash_guard": "FAIL", "limits": "synthetic prepared roots/media; no native dialogs or real providers"},
+    {"name": "frontend_vitest", "tests": "PASS", "files": 47, "passed": 381},
+    {"name": "typecheck_web_desktop_build_security_montage_contract", "status": "PASS"},
+    {"name": "changed_python_ruff_secret_scan_diff_check", "status": "PASS"},
+    {"name": "dependency_audits_python_node_production", "status": "PASS"},
+    {"name": "frozen_runtime_guard", "status": "FAIL", "passed": 10, "failed": 1, "reason": "Core-owned source differs from existing Frozen lock; rebuild prohibited for this task"},
+    {"name": "independent_ci", "status": "FAIL", "source_sha": "d7d5ef9ba38a6aaa4113927dcbfa2c1ddee8a83e", "url": "https://github.com/thrixicpa-del/NewsFlow/actions/runs/38643667540", "reason": "10 Frozen guard tests passed; repository source/lock consistency failed for scriptor/bridge.py. Existing preceding source, frontend and security steps passed; CI production guard passed.", "limits": "existing PR workflows only; additional V3/Electron workflow patch blocked by missing OAuth workflow scope and preserved in tests/footage-v3/independent-ci.patch"},
+    {"name": "independent_windows_source_build", "status": "PASS", "source_sha": "d7d5ef9ba38a6aaa4113927dcbfa2c1ddee8a83e", "url": "https://github.com/thrixicpa-del/NewsFlow/actions/runs/38643667558", "limits": "web and Electron source builds only; workflow does not run the new Python/Electron E2E"},
+    {"name": "docker", "status": "NOT_RUN", "reason": "Docker Desktop daemon pipe unavailable"},
+    {"name": "real_person_visual_semantics", "status": "NOT_VERIFIED", "reason": "no permitted independently labelled real-person/video dataset"},
+    {"name": "synthetic_equal_ffmpeg_pipeline_speed", "status": "PASS", "repeats_per_version": 3, "base_median_seconds": 45.91480579999916, "after_median_seconds": 44.406810000000405, "production_hash_guards": "6 PASS", "source_sha": "d7d5ef9ba38a6aaa4113927dcbfa2c1ddee8a83e", "evidence": "pipeline-equal-ffmpeg.json", "limits": "four synthetic videos; changed selected scenes; no real-library/provider/face acceptance"},
+    {"name": "full_user_pipeline_speed", "status": "NOT_VERIFIED", "reason": "Retrieval and equal-binary synthetic workload improved. Earlier comparison used different FFmpeg binaries and cannot establish a code regression. Actual user-media speed remains unverified."},
+    {"name": "gpu_clean_windows_release_acceptance", "status": "NOT_RUN", "reason": "source review branch; no Frozen/EXE release authorized"}
+  ],
+  "safety_notes": [
+    "Production application was running and settings hash changed during many test runs; writer not established. These FAIL outcomes remain unresolved.",
+    "Renderer workspace isolation gap discovered and fixed in tests/run_isolated.py. Subsequent smoke uses separate disposable render/proxy caches.",
+    "No provider calls, external video downloads, original-media moves/transcodes, main merge or Frozen lock changes were performed.",
+    "Public evidence contains aggregate synthetic fixture data; local media and full project paths are not published."
+  ]
+}

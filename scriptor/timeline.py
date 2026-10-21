@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
@@ -20,6 +21,7 @@ from xml.sax.saxutils import quoteattr
 from .config import validate_gpu_chunk_size
 from .media_health import default_health_store, quarantine_cache, signature
 from .overlays import compose_overlays, normalize_overlay_template, overlay_layers
+from .scene_intent import visual_intent
 
 _ENCODER_CACHE: dict[str, list[str]] = {}
 _GPU_TIMELINE_CAPABILITY_CACHE: dict[str, dict[str, object]] = {}
@@ -136,6 +138,7 @@ class TimelineClip:
     # Appended at the end to preserve the positional TimelineClip contract
     # used by legacy/manual project constructors.
     voice_segment_ids: list[int] = field(default_factory=list)
+    selection_diagnostics: dict = field(default_factory=dict)
     stock_provenance: dict = field(default_factory=dict)
     # A materialized still-frame gap is continuity, not newly selected footage.
     continuity: dict = field(default_factory=dict)
@@ -205,6 +208,16 @@ VISUAL_TERMS = {
     # specific political visual and are requested only when the narration
     # actually names them.
     "росси": "Russia current events", "москв": "Moscow Russia government city",
+    "беларус": "Belarus regional context", "белорус": "Belarus regional context",
+    "минск": "Minsk Belarus city",
+    "грузи": "Georgia regional context", "тбилиси": "Tbilisi Georgia regional context",
+    "молдов": "Moldova regional context", "кишин": "Chisinau Moldova regional context",
+    "казахстан": "Kazakhstan regional context", "астан": "Astana Kazakhstan regional context",
+    "узбеки": "Uzbekistan regional context", "ташкент": "Tashkent Uzbekistan regional context",
+    "кыргыз": "Kyrgyzstan regional context", "киргиз": "Kyrgyzstan regional context",
+    "бишкек": "Bishkek Kyrgyzstan regional context", "таджик": "Tajikistan regional context",
+    "душанбе": "Dushanbe Tajikistan regional context", "туркмен": "Turkmenistan regional context",
+    "ашхабад": "Ashgabat Turkmenistan regional context",
     "кремл": "Kremlin Moscow government", "вашингтон": "Washington DC White House US government officials",
     "сша": "United States Washington DC government officials", "америк": "United States government Washington DC",
     "киев": "Kyiv Ukraine government city", "брюссел": "Brussels European Union institutions",
@@ -235,6 +248,8 @@ VISUAL_TERMS = {
     "завод": "industrial factory workers", "переговор": "diplomatic negotiations leaders journalists cameras",
     "саммит": "political summit leaders journalists", "армени": "Armenia Yerevan",
     "азербайдж": "Azerbaijan Baku", "израил": "Israel military border", "ливан": "Lebanon Beirut",
+    "тавуш": "Tavush Armenia regional context",
+    "ереван": "Yerevan Armenia regional context", "баку": "Baku Azerbaijan regional context",
     "энерг": "energy infrastructure power plant", "склад": "warehouse storage logistics workers",
     # Military reports must request the visible action, not the abstract word
     # "war".  This separates an offensive/frontline from a Kremlin office or
@@ -257,6 +272,7 @@ VISUAL_TERMS = {
     "картош": "potato harvest farm tractor agricultural field", "урож": "harvest farming combine wheat field",
     "сельхоз": "agriculture farm tractor combine field workers", "пшениц": "wheat harvest grain field combine",
     "зерн": "grain harvest agricultural storage wheat field", "комбайн": "farm combine harvester agricultural field",
+    "нпз": "oil refinery industrial oil infrastructure",
 }
 
 
@@ -264,68 +280,26 @@ GENERIC_VISUAL_QUERY = "international news, documentary footage"
 
 
 def fallback_visual_query(text: str) -> str:
-    lowered = text.casefold().replace("ё", "е")
-    aviation = bool(re.search(
-        r"\b(?:самол\w*|аэропорт\w*|аэродром\w*|авиадиспетчер\w*)"
-        r"|\bвоздушн\w*\s+(?:судн\w*|движен\w*)"
-        r"|\bдиспетчерск\w*\s+(?:башн\w*|вышк\w*)"
-        r"|\bдежурн\w*\s+борт\w*", lowered,
-    ))
-    naval = bool(re.search(
-        r"\b(?:эсмин\w*|фрегат\w*|вмф)\b|\bвоенно-мор\w*"
-        r"|\b(?:военн|боев)\w*\s+(?:кораб|судн)\w*", lowered,
-    ))
-    port = bool(re.search(r"\bпорт(?:[ауеы]|ом|ов|ам|ами|ах|ов\w*)?\b", lowered))
-    terms = [english for stem, english in VISUAL_TERMS.items()
-             if (port if stem == "порт" else stem in lowered)]
-    maritime = bool(re.search(r"\bмор(?:е|я|ю|ем|ск\w*)\b|\bсудн\w*", lowered))
-    if naval:
-        terms = ["navy warship" if term in (VISUAL_TERMS["кораб"], VISUAL_TERMS["судн"])
-                 else term for term in terms]
-    if aviation:
-        terms = ["aircraft flight" if term == VISUAL_TERMS["судн"] else term for term in terms]
-        if not any("aircraft" in term for term in terms):
-            terms.append("aircraft flight")
-        if re.search(r"\bвоенн\w*\s+самол\w*", lowered):
-            terms = ["military aircraft airbase flight" if term == VISUAL_TERMS["самол"]
-                     else term for term in terms]
-        if not re.search(r"\b(?:танк|брон|солдат|пехот|назем|машин)\w*", lowered):
-            terms = [term for term in terms if term != VISUAL_TERMS["военн"]]
-        if re.search(r"\bтерминал\w*\s+(?:(?:совсем|полностью)\s+)?опустел\w*\b", lowered):
-            terms = [term for term in terms if term not in (
-                VISUAL_TERMS["аэропорт"], VISUAL_TERMS["аэродром"], VISUAL_TERMS["самол"], "aircraft flight")]
-            terms.append("empty airport terminal")
-    if "диспетч" in lowered:
-        terms.append("air traffic control tower operators" if aviation else "operations control room operators")
-    if maritime and not naval and not aviation:
-        terms.append("civilian maritime cargo ship harbor")
-    # A legal court/manifest is not a vessel/shipping manifest. Require the
-    # surrounding visible cargo/harbor context for these ambiguous words.
-    if "манифест" in lowered and (maritime or port or re.search(r"\b(?:груз|причал)\w*", lowered)):
-        terms.append("cargo shipping manifest documents")
-    return ", ".join(dict.fromkeys(terms)) or GENERIC_VISUAL_QUERY
+    return visual_intent(text, VISUAL_TERMS)["visual_query"] or GENERIC_VISUAL_QUERY
 
 
 def fallback_scene_plan(narration: str, topic: str = "") -> list[dict]:
-    """Build deterministic scenes while retaining the overall news topic.
-
-    Later sentences often use pronouns such as "это" or "он" and contain no
-    country, subject or location on their own.  Searching only those words
-    used to let an unrelated war clip outrank footage from the actual story.
-    The title is therefore appended as stable visual context to every local
-    scene query; it does not change the narration or invent an event.
-    """
+    """Use the local action first; inherit only unambiguous nearby context."""
     plan = []
     topic_query = fallback_visual_query(topic) if topic else ""
+    previous = None
     for sentence in split_narration(narration):
         word_count = len(sentence.split())
         duration = min(6.0, max(2.5, word_count / 2.7))
-        sentence_query = fallback_visual_query(sentence)
-        if sentence_query == GENERIC_VISUAL_QUERY and topic_query != GENERIC_VISUAL_QUERY:
-            sentence_query = ""
-        query = ", ".join(dict.fromkeys(filter(None, (topic_query, sentence_query))))
+        intent = visual_intent(sentence, VISUAL_TERMS, previous=previous)
+        # Only an explicit anaphoric continuation may inherit a visual action.
+        # An unrelated sentence with unknown vocabulary must not repeat a battle.
+        continuation = bool(re.match(r"\s*(?:это|там|здесь|также)\b", sentence, re.IGNORECASE))
+        inherited = (previous or {}).get("visual_query") if continuation else ""
+        query = intent["visual_query"] or inherited or topic_query or GENERIC_VISUAL_QUERY
         plan.append({"narration": sentence, "visual_query_en": query,
-                     "duration": round(duration, 2)})
+                     "duration": round(duration, 2), "scene_intent": intent})
+        previous = intent
     return plan
 
 
@@ -543,6 +517,19 @@ def gpu_timeline_encoder_args(ffmpeg: str) -> list[str]:
     return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", "-b:v", "0"]
 
 def probe_media_duration(path: Path) -> float:
+    # FFmpeg's human-readable Duration line rounds to centiseconds. A 12.387s
+    # PCM voice consequently looked like 12.39s and created a 3ms extra cut.
+    # Read PCM sample counts directly; compressed/container formats retain
+    # the existing probe path, with no new executable or decoder dependency.
+    if path.suffix.casefold() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as audio:
+                rate = audio.getframerate()
+                duration = audio.getnframes() / rate if rate else 0.0
+            if math.isfinite(duration) and duration > 0:
+                return duration
+        except (OSError, EOFError, wave.Error):
+            pass
     ffmpeg = ffmpeg_executable()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run([ffmpeg, "-i", str(path)], capture_output=True, text=True,
@@ -614,7 +601,7 @@ def _precise_scene_timing(project: TimelineProject) -> bool:
 
 def _narration_mux_video(project: TimelineProject, ffmpeg: str, duration: float, *, gpu=False):
     if not _precise_scene_timing(project):
-        return ["-c:v", "copy"], ["-shortest"]
+        return ["-c:v", "copy"], ["-t", f"{duration:.9f}"]
     # Cutting a copied B-frame stream can leave a late reference frame and
     # missing presentation timestamps. Normalize once for continuity projects;
     # ordinary projects retain their existing stream-copy fast path.
@@ -642,6 +629,7 @@ def align_timeline_to_audio(
     duration_probe: Callable[[Path], float] = probe_media_duration,
     tolerance: float = 0.05,
     allow_terminal_reuse: bool = False,
+    preserve_clip_windows: bool = False,
 ) -> list[TimelineClip]:
     """Make the visual timeline cover the narration without looping footage.
 
@@ -667,6 +655,8 @@ def align_timeline_to_audio(
         if total >= target - tolerance:
             break
         available = _remaining_source_duration(source_duration(clip), clip.source_start)
+        if preserve_clip_windows:
+            available = min(available, float(clip.duration))
         remaining = max(0.0, target - total)
         contribution = min(available, remaining)
         normalized.append(replace(clip, duration=contribution))
@@ -692,6 +682,8 @@ def align_timeline_to_audio(
             terminal_reuse_used = True
         try:
             available = _remaining_source_duration(source_duration(candidate), candidate.source_start)
+            if preserve_clip_windows:
+                available = min(available, float(candidate.duration))
         except (OSError, ValueError):
             continue
         remaining = max(0.0, target - total)
@@ -889,14 +881,36 @@ def warm_source_proxy(
     return target, False
 
 
-def _proxy_key(clip: TimelineClip, width: int, height: int, *, frame_budget: int | None = None) -> str:
+def _proxy_key(clip: TimelineClip, width: int, height: int, frame_count: int | None = None) -> str:
     source = Path(clip.path)
     stat = source.stat()
-    value = (f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{clip.source_start:.3f}|"
-             f"{clip.duration:.3f}|{width}x{height}|30fps|crf20|proxy-v3-loop-short-source")
-    if frame_budget is not None:
-        value += f"|continuity-frame-budget-v1|{frame_budget}"
+    value = (f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{clip.source_start:.9f}|"
+             f"{clip.duration:.9f}|{width}x{height}|30fps|crf20|proxy-v3-loop-short-source|"
+             f"bounded-frame-grid-v2|{frame_count}")
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _clip_proxy_health(path: Path, frame_count: int):
+    result = default_health_store().check(path)
+    if frame_count != 1 or result.state != "invalid":
+        return result
+    # The general source-health policy rejects <=50ms media. A selected
+    # fractional tail may legitimately contain exactly one 30fps frame.
+    # Validate that tiny renderer-owned proxy locally without weakening the
+    # source-library policy or borrowing more frames from the source.
+    import cv2
+    before = signature(path)
+    capture = cv2.VideoCapture(str(path))
+    try:
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        count = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        first, _ = capture.read()
+        second, _ = capture.read()
+    finally:
+        capture.release()
+    if first and not second and count == 1 and abs(fps - 30) < .001 and signature(path) == before:
+        return replace(result, state="valid", reason="", duration=1 / 30)
+    return result
 
 
 def _remotion_runner() -> tuple[str, str] | None:
@@ -1296,30 +1310,6 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
     render_clips = list(project.clips)
     if project.intro_path and Path(project.intro_path).exists() and project.intro_duration > 0:
         render_clips.insert(0, TimelineClip(project.intro_path, "Заставка", "intro", project.intro_duration, source="intro"))
-    # Encoders can round a 30fps proxy down by a few frames.  Borrow that
-    # tiny technical margin from the *real final source* before rendering,
-    # rather than cloning its final frame after concat. The final mux uses an
-    # explicit narration limit: -shortest can discard delayed video packets
-    # when gapless MP3 audio finishes before its container duration.
-    voice_for_margin = Path(project.voiceover_path) if project.voiceover_path else None
-    if voice_for_margin and voice_for_margin.is_file() and project.clips:
-        try:
-            target = required_video_duration(probe_media_duration(voice_for_margin), project.intro_duration)
-            margin = 0.15
-            current = sum(max(0.0, float(clip.duration)) for clip in render_clips)
-            needed = target + margin - current
-            tail_index = len(render_clips) - 1
-            tail = render_clips[tail_index]
-            available = _remaining_source_duration(
-                probe_video_duration(Path(tail.path)), tail.source_start,
-            )
-            if needed > 0.0 and available + 0.01 >= tail.duration + needed:
-                render_clips[tail_index] = replace(tail, duration=tail.duration + needed)
-        except (OSError, RuntimeError, ValueError):
-            # The strict source preflight in the queue will surface a real
-            # problem.  Legacy manual FFmpeg rendering retains its clear
-            # timeline-length validation below.
-            pass
     total = len(render_clips) + 2
     temp_root = render_workspace_root()
     with tempfile.TemporaryDirectory(prefix="newsflow-render-", dir=temp_root) as temporary:
@@ -1330,40 +1320,57 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
         # a directory that does not exist yet.  Creating it here also makes
         # proxy rendering resilient after a cleanup of AppData.
         cache_root.mkdir(parents=True, exist_ok=True)
-        precise_timeline = _precise_scene_timing(project)
-        elapsed_seconds, elapsed_frames = 0.0, 0
+        elapsed = 0.0
+        frame_cursor = 0
         for index, clip in enumerate(render_clips, 1):
+            # Quantize cumulative cut positions, so fractional scenes cannot
+            # accumulate an independent rounding error. A frame belongs to
+            # the scene active at its PTS; ceil also covers the narration tail.
+            elapsed += max(0.0, float(clip.duration))
+            frame_end = math.ceil(elapsed * 30 - 1e-8)
+            frame_count = frame_end - frame_cursor
+            frame_cursor = frame_end
+            if frame_count <= 0:
+                continue
             source = Path(clip.path)
             if not source.exists():
                 raise FileNotFoundError(f"Футаж не найден: {source}")
             render_source = render_source_for_proxy(source, width, height)
-            frame_budget = None
-            if precise_timeline:
-                elapsed_seconds += float(clip.duration)
-                frame_end = max(elapsed_frames + 1, math.ceil(elapsed_seconds * 30 - 1e-9))
-                frame_budget, elapsed_frames = frame_end - elapsed_frames, frame_end
-            target = cache_root / f"{_proxy_key(clip, width, height, frame_budget=frame_budget)}.mp4"
-            required_proxy_duration = frame_budget / 30 if frame_budget is not None else clip.duration
-            def proxy_duration_ok(duration, expected=required_proxy_duration, exact=frame_budget is not None):
-                return abs(duration - expected) < 1 / 60 if exact else duration + .05 >= expected
-            frame_args = ["-frames:v", str(frame_budget), "-r", "30", "-fps_mode", "cfr"] if frame_budget is not None else []
-            # FFmpeg's ``-t 6.000`` at 30fps can encode only 179 frames
-            # (5.97s). Across 44 ordinary clips that silently removed 1.3s
-            # from a real NewsFlow video. Ask for one extra frame from the
-            # source; the final audio mux still ends at the exact MP3 length.
-            proxy_duration = max(0.1, clip.duration + (1.0 / 30.0) + 0.002)
+            if render_source != source:
+                prepared_available = _remaining_source_duration(
+                    probe_video_duration(render_source), clip.source_start,
+                )
+                # Old full-source proxies may omit a frame at EOF. A bounded
+                # source window still available in the original must use it;
+                # looping that short proxy could expose frames before start.
+                if prepared_available + 1e-6 < clip.duration:
+                    original_available = _remaining_source_duration(
+                        probe_video_duration(source), clip.source_start,
+                    )
+                    if clip.duration <= original_available + 1e-6:
+                        render_source = source
+            target = cache_root / f"{_proxy_key(clip, width, height, frame_count)}.mp4"
+            # Never read beyond the selected/verified source interval. EOF
+            # handling retains its last actual frame on the 30fps grid; the
+            # explicit frame budget prevents both 179-frame underflow and
+            # 181-frame overshoot for an ordinary six-second scene.
+            proxy_duration = float(clip.duration)
+            expected_proxy_duration = frame_count / 30
+            # Normalize timestamps before spatial filters: bundled FFmpeg 7.1
+            # can lose the last frame at exact input EOF with scale-before-fps.
             filter_value = (
+                f"fps=30:start_time=0:eof_action=pass,trim=end_frame={frame_count},"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height},fps=30,format=yuv420p"
+                f"crop={width}:{height},format=yuv420p"
             )
             # Several videos can legitimately use the same 6-second local
             # footage.  Serialize only that exact proxy, not the entire render
             # queue, so two workers never write/rename the same partial MP4.
             with _proxy_lock(target):
                 if target.is_file():
-                    result = default_health_store().check(target)
-                    if result.state == "valid" and not proxy_duration_ok(result.duration):
-                        result = replace(result, state="invalid", reason="Прокси короче требуемой сцены")
+                    result = _clip_proxy_health(target, frame_count)
+                    if result.state == "valid" and abs(result.duration - expected_proxy_duration) > .01:
+                        result = replace(result, state="invalid", reason="Прокси не совпадает с кадровой сеткой сцены")
                     if result.state == "invalid":
                         if quarantine_cache(target, target.parent, result, source) is None:
                             raise RuntimeError(f"Не удалось изолировать повреждённый proxy: {target}")
@@ -1382,9 +1389,9 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
                         # fallback for an explicit clip already in a project.
                         available = _remaining_source_duration(probe_video_duration(render_source), clip.source_start)
                         loop_args = ["-stream_loop", "-1"] if available + 0.01 < proxy_duration else []
-                        command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
-                                   "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
-                                   "-vf", filter_value, "-an", *frame_args, *video_encoder_args(ffmpeg),
+                        command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.9f}",
+                                   "-t", f"{proxy_duration:.9f}", "-i", str(render_source),
+                                   "-vf", filter_value, "-frames:v", str(frame_count), "-an", *video_encoder_args(ffmpeg),
                                    "-movflags", "+faststart", str(partial)]
                         try:
                             run_ffmpeg(command)
@@ -1392,14 +1399,17 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
                             if "h264_nvenc" not in command:
                                 raise
                             _ENCODER_CACHE[ffmpeg] = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
-                            command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.3f}",
-                                       "-t", f"{proxy_duration:.3f}", "-i", str(render_source),
-                                       "-vf", filter_value, "-an", *frame_args, *_ENCODER_CACHE[ffmpeg],
+                            command = [ffmpeg, "-y", *loop_args, "-ss", f"{max(0.0, clip.source_start):.9f}",
+                                       "-t", f"{proxy_duration:.9f}", "-i", str(render_source),
+                                       "-vf", filter_value, "-frames:v", str(frame_count), "-an", *_ENCODER_CACHE[ffmpeg],
                                        "-movflags", "+faststart", str(partial)]
                             run_ffmpeg(command)
-                        result = default_health_store().check(partial)
-                        if result.state != "valid" or not proxy_duration_ok(result.duration):
-                            raise RuntimeError(f"FFmpeg создал непригодный proxy: {result.reason}")
+                        result = _clip_proxy_health(partial, frame_count)
+                        if result.state != "valid" or abs(result.duration - expected_proxy_duration) > .01:
+                            raise RuntimeError(
+                                f"FFmpeg создал непригодный proxy: {result.reason}; "
+                                f"длительность {result.duration:.6f}, ожидается {expected_proxy_duration:.6f}"
+                            )
                         _replace_with_retry(partial, target, timeout=12.0)
                     finally:
                         try:
@@ -1440,6 +1450,9 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
             # starts only after it; this avoids the old silent/truncated intro.
             mux_video, mux_limits = _narration_mux_video(project, ffmpeg, required_duration)
             intro = Path(project.intro_path) if project.intro_path else None
+            # -shortest can discard the packet spanning the final fractional
+            # audio endpoint. The measured narration endpoint keeps that frame
+            # and the complete audio without extending any selected source.
             if intro and intro.exists() and project.intro_duration > 0:
                 delay = int(project.intro_duration * 1000)
                 mix = (

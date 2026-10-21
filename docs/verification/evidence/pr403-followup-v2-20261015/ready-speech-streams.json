@@ -1,0 +1,16 @@
+{
+  "validation_sha": "aac2a2c36e0b34f64f12f881426593beef936797",
+  "status": "PASS",
+  "streams": [
+    {
+      "kind": "video",
+      "start": "0.000000",
+      "duration": "299.933333"
+    },
+    {
+      "kind": "audio",
+      "start": "0.000000",
+      "duration": "300.000000"
+    }
+  ]
+}

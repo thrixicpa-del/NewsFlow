@@ -339,6 +339,7 @@ class StockRenderTests(unittest.TestCase):
 
     def test_normal_continuity_mux_retries_failed_nvenc_once_with_cpu(self):
         from scriptor import timeline as timeline_module
+        from scriptor.media_health import MediaHealth
         source, voice = (self.root / name for name in ('source.mp4', 'voice.mp3'))
         source.write_bytes(b'isolated video fixture')
         voice.write_bytes(b'isolated voice fixture')
@@ -351,8 +352,9 @@ class StockRenderTests(unittest.TestCase):
             Path(command[-1]).write_bytes(b'x' * 2048)
         project = TimelineProject('CPU retry', clips=[TimelineClip(str(source), 'N', 'Q', duration=3.05,
             continuity={'mode': 'background'})], voiceover_path=str(voice))
-        # The proxy includes the existing .15s terminal technical margin.
-        health = SimpleNamespace(check=lambda _path: SimpleNamespace(state='valid', duration=3.2))
+        # 3.05 seconds occupies 92 frames at 30fps; use the real health
+        # contract and the exact frame budget, without the old .15s padding.
+        health = SimpleNamespace(check=lambda _path: MediaHealth('valid', duration=92 / 30))
         with patch.object(timeline_module, '_run', side_effect=run), \
              patch.object(timeline_module, 'ffmpeg_executable', return_value='ffmpeg'), \
              patch.object(timeline_module, 'gpu_timeline_capability', return_value={'available': True}), \

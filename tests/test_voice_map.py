@@ -649,7 +649,28 @@ class VoiceMapTests(unittest.TestCase):
         self.assertEqual(scenes[0]["visual_query_en"], "Washington White House US government")
         self.assertEqual(scenes[1]["visual_query_en"], "Kyiv Ukraine government")
 
-    def test_subsecond_terminal_remainder_is_absorbed_in_previous_cutter_beat(self):
+    def test_short_tail_never_demands_a_source_longer_than_the_cutter_cadence(self):
+        self.assertEqual([(float(start),float(start+6)) for start in range(0,300,6)],
+                         bridge._voice_map_visual_beats(300.))
+        for duration in (6.398, 12.387, 12.61, 18.999):
+            with self.subTest(duration=duration):
+                payload={"audioDuration":duration,"timingMode":"approximate",
+                         "schemaVersion":VOICE_MAP_SCHEMA_VERSION,"productionItemId":"test-tail",
+                         "scriptSha256":"synthetic","audioSha256":"synthetic","alignmentEngine":"newsflow-fallback",
+                         "segments":[{"id":1,"start":0.,"end":duration,"duration":duration,
+                                      "text":"Зеленский выступил с заявлением перед журналистами.",
+                                      "visualQuery":"Volodymyr Zelensky press conference"}]}
+                status=type("Status",(),{"state":"approximate","path":"synthetic.json","reason":"","data":payload})()
+                scenes,_=bridge._voice_map_scenes(status)
+                self.assertTrue(all(1. <= scene["duration"] <= 6. for scene in scenes))
+                self.assertAlmostEqual(duration,sum(scene["duration"] for scene in scenes))
+                self.assertEqual(0.,scenes[0]["narration_start"])
+                self.assertAlmostEqual(duration,scenes[-1]["narration_end"])
+                for left,right in pairwise(scenes):
+                    self.assertEqual(left["narration_end"],right["narration_start"])
+                self.assertTrue(all(scene["minimum_footage_duration"]==scene["duration"] for scene in scenes))
+
+    def test_subsecond_terminal_remainder_is_balanced_without_an_oversized_source(self):
         payload = {
             "schemaVersion": VOICE_MAP_SCHEMA_VERSION,
             "productionItemId": "production:alpha",
@@ -675,13 +696,14 @@ class VoiceMapTests(unittest.TestCase):
 
         scenes, _provenance = bridge._voice_map_scenes(status)
 
-        self.assertEqual(len(scenes), 1)
-        self.assertAlmostEqual(scenes[0]["duration"], 6.398, places=6)
-        self.assertAlmostEqual(scenes[0]["minimum_footage_duration"], 6.0, places=6)
-        self.assertEqual(scenes[0]["voice_segment_id"], 29)
-        self.assertEqual(scenes[0]["voice_segment_ids"], [29])
+        self.assertEqual(len(scenes), 2)
+        for scene in scenes:
+            self.assertAlmostEqual(scene["duration"], 3.199, places=6)
+            self.assertAlmostEqual(scene["minimum_footage_duration"], 3.199, places=6)
+            self.assertEqual(scene["voice_segment_id"], 29)
+            self.assertEqual(scene["voice_segment_ids"], [29])
         self.assertEqual(scenes[0]["narration_start"], 0.0)
-        self.assertAlmostEqual(scenes[0]["narration_end"], 6.398, places=6)
+        self.assertAlmostEqual(scenes[-1]["narration_end"], 6.398, places=6)
 
         payload["audioDuration"] = 12.61
         payload["segments"][0].update({
@@ -689,10 +711,10 @@ class VoiceMapTests(unittest.TestCase):
             "duration": 12.61,
         })
         scenes, _ = bridge._voice_map_scenes(status)
-        self.assertEqual([round(scene["duration"], 3) for scene in scenes], [6.0, 6.61])
+        self.assertEqual([round(scene["duration"], 3) for scene in scenes], [6.0, 3.305, 3.305])
         self.assertEqual(
             [round(scene["minimum_footage_duration"], 3) for scene in scenes],
-            [6.0, 6.0],
+            [6.0, 3.305, 3.305],
         )
 
     def test_prepare_montage_uses_voice_map_timing_instead_of_proportional_fitter(self):
@@ -791,6 +813,56 @@ class VoiceMapTests(unittest.TestCase):
             bridge.prepare_montage({"scenarioIndex": 0})
 
         legacy_fitter.assert_not_called()
+
+
+def load_tests(loader, standard_tests, pattern):
+    # The existing CI invokes this module with unittest. Keep the follow-up
+    # planner/VoiceMap/selection regressions in that independently run suite.
+    from tests.test_context_visual_semantics import ContextVisualSemanticsTests
+    from tests.test_footage_actual_scene_context import ActualSceneContextTests
+    from tests.test_footage_followup import FootageFollowupTests
+    from tests.test_footage_person_rotation import PersonRotationTests
+    from tests.test_footage_political_context import PoliticalContextTests
+    from tests.test_footage_political_context_review import (
+        IndependentPoliticalReviewTests,
+    )
+    from tests.test_footage_quality_external import ExternalFallbackSafetyTests
+    from tests.test_footage_quality_intent import LocalActionQualityTests
+    from tests.test_footage_quality_recovery import RecoveryVisualQualityTests
+    from tests.test_footage_quality_roles import InstitutionalWindowRoleTests
+    from tests.test_footage_quality_timing import FootageQualityTimingTests
+    from tests.test_footage_quality_visual import WindowVisualQualityTests
+    from tests.test_footage_quality_voice import BeatLocalVoiceQualityTests
+    from tests.test_footage_ready_voice import ReadyVoiceEvidenceTests
+    from tests.test_montage_cold_fairness import (
+        ColdFairnessPreparationTests,
+        ColdFairnessSelectorTests,
+    )
+    from tests.test_montage_semantic_diversity import MontageSemanticDiversityTests
+    from tests.test_visual_cold_budget import VisualColdBudgetTests
+    from tests.test_visual_evidence import VisualWindowTests
+    from tests.test_visual_feature_reuse import VisualFeatureReuseTests
+    standard_tests.addTests(loader.loadTestsFromTestCase(ContextVisualSemanticsTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ActualSceneContextTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(FootageFollowupTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(PersonRotationTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(PoliticalContextTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(IndependentPoliticalReviewTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ExternalFallbackSafetyTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ReadyVoiceEvidenceTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(BeatLocalVoiceQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(WindowVisualQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualWindowTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualFeatureReuseTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(FootageQualityTimingTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(LocalActionQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(RecoveryVisualQualityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(InstitutionalWindowRoleTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(MontageSemanticDiversityTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ColdFairnessPreparationTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(ColdFairnessSelectorTests))
+    standard_tests.addTests(loader.loadTestsFromTestCase(VisualColdBudgetTests))
+    return standard_tests
 
 
 if __name__ == "__main__":

@@ -1549,12 +1549,15 @@ def load_settings() -> Settings:
         settings._observed_youtube_key = data.get("youtube_api_key_protected", "")
         settings._observed_cover_key_labels = list(settings.cover_selected_key_labels)
         _remember_montage_reuse_preferences(settings)
+        settings._observed_montage_history = list(settings.montage_recent_clip_paths)
         _remember_footage_blocks(settings)
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
-        return Settings()
+        settings = Settings()
+        settings._observed_montage_history = []
+        return settings
 
 
 def _montage_status_order(item: object) -> tuple[str, int, int]:
@@ -2321,6 +2324,21 @@ def save_settings(settings: Settings):
             # save. Start from the current locked disk snapshot so concurrent
             # settings changes and other credential selections survive.
             data = dict(on_disk)
+        if not replacement:
+            usage = list(getattr(settings, "_montage_recent_clip_usage", []))
+            if usage:
+                # A planner owns only the clips it actually used. Merge those
+                # against the locked current history, never its stale snapshot.
+                data["montage_recent_clip_paths"] = list(dict.fromkeys(reversed([
+                    *(on_disk.get("montage_recent_clip_paths") or []), *usage,
+                ])))[::-1][-3000:]
+            elif (hasattr(settings, "_observed_montage_history")
+                  and settings.montage_recent_clip_paths == settings._observed_montage_history):
+                # Queue progress/render/final saves must not undo a separate
+                # planner's history or resurrect an explicitly cleared list.
+                data["montage_recent_clip_paths"] = list(
+                    on_disk.get("montage_recent_clip_paths") or [],
+                )[-3000:]
         observed_reuse = getattr(settings, "_observed_montage_reuse", {})
         edited_reuse = getattr(settings, "_edited_montage_reuse", set())
         for name in _MONTAGE_REUSE_PREFERENCES:
@@ -2476,6 +2494,9 @@ def save_settings(settings: Settings):
                     _remember_montage_reuse_preferences(settings)
                     _remember_footage_blocks(settings)
                     settings._edited_montage_reuse = set()
+                    if not replacement:
+                        settings._observed_montage_history = list(settings.montage_recent_clip_paths)
+                        settings._montage_recent_clip_usage = []
                     break
                 except PermissionError:
                     if time.monotonic() >= deadline:

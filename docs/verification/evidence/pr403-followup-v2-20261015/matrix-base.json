@@ -1,0 +1,156 @@
+[
+  {
+    "text": "Жители вышли на митинг против повышения тарифов",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "protest",
+    "forbidden": "artillery",
+    "status": "PASS"
+  },
+  {
+    "text": "В центре города проходит мирная демонстрация",
+    "query": "protest crowd demonstration banners street",
+    "wanted": "peaceful",
+    "forbidden": "clashes",
+    "status": "FAIL"
+  },
+  {
+    "text": "Фермеры протестуют из-за падения доходов и вывели тракторы к зданию правительства",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "protest",
+    "forbidden": "harvest",
+    "status": "PASS"
+  },
+  {
+    "text": "Рабочие завода объявили забастовку и вышли на пикет",
+    "query": "industrial factory workers, picket line workers protest banners, workers labor strike picket line factory gate",
+    "wanted": "labor strike",
+    "forbidden": "industrial factory workers",
+    "status": "FAIL"
+  },
+  {
+    "text": "Студенты провели акцию протеста у университета",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "protest",
+    "forbidden": "classroom",
+    "status": "PASS"
+  },
+  {
+    "text": "Участники митинга потребовали прекратить войну",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "protest",
+    "forbidden": "battlefield",
+    "status": "PASS"
+  },
+  {
+    "text": "На площади прошёл митинг в поддержку армии",
+    "query": "army soldiers military vehicles, protest crowd placards flags street rally",
+    "wanted": "protest",
+    "forbidden": "army soldiers",
+    "status": "FAIL"
+  },
+  {
+    "text": "Полиция охраняет мирный митинг",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "peaceful",
+    "forbidden": "clashes",
+    "status": "FAIL"
+  },
+  {
+    "text": "Полиция начала разгон демонстрации, произошли столкновения",
+    "query": "protest crowd demonstration banners street",
+    "wanted": "police dispersal",
+    "forbidden": "battlefield",
+    "status": "FAIL"
+  },
+  {
+    "text": "Министерство направило дипломатический протест",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "diplomatic",
+    "forbidden": "protest crowd",
+    "status": "FAIL"
+  },
+  {
+    "text": "На выставке прошла демонстрация нового оборудования",
+    "query": "protest crowd demonstration banners street",
+    "wanted": "equipment",
+    "forbidden": "protest crowd",
+    "status": "FAIL"
+  },
+  {
+    "text": "Компания начала рекламную акцию, стоимость её акций выросла",
+    "query": "international news, documentary footage",
+    "wanted": "finance",
+    "forbidden": "protest",
+    "status": "FAIL"
+  },
+  {
+    "text": "Фермеры завершили уборку урожая",
+    "query": "agriculture farming fields farm workers, harvest farming combine wheat field",
+    "wanted": "harvest",
+    "forbidden": "protest",
+    "status": "PASS"
+  },
+  {
+    "text": "Рабочие завода увеличили выпуск продукции",
+    "query": "industrial factory workers",
+    "wanted": "factory",
+    "forbidden": "labor strike",
+    "status": "PASS"
+  },
+  {
+    "text": "Митинг отменили",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "statement",
+    "forbidden": "protest crowd",
+    "status": "FAIL"
+  },
+  {
+    "text": "Протесты не начались",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "statement",
+    "forbidden": "protest crowd",
+    "status": "FAIL"
+  },
+  {
+    "text": "Забастовку удалось предотвратить",
+    "query": "workers labor strike picket line factory gate",
+    "wanted": "statement",
+    "forbidden": "labor strike",
+    "status": "FAIL"
+  },
+  {
+    "text": "На митинге не было столкновений",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "peaceful",
+    "forbidden": "clashes",
+    "status": "FAIL"
+  },
+  {
+    "text": "Митинг не отменили, участники собрались на площади",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "protest",
+    "forbidden": "statement",
+    "status": "PASS"
+  },
+  {
+    "text": "Рабочие угрожают забастовкой",
+    "query": "workers labor strike picket line factory gate",
+    "wanted": "statement",
+    "forbidden": "labor strike",
+    "status": "FAIL"
+  },
+  {
+    "text": "Власти обсуждают протест",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "statement",
+    "forbidden": "protest crowd",
+    "status": "FAIL"
+  },
+  {
+    "text": "Если начнутся протесты, власти выступят с заявлением",
+    "query": "protest crowd placards flags street rally",
+    "wanted": "statement",
+    "forbidden": "protest crowd",
+    "status": "FAIL"
+  }
+]
