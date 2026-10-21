@@ -40,6 +40,9 @@ jobs:
             fi
             git checkout --ours .github/workflows/ci.yml studio-ui-remotion-verify/src/contracts/newsflowCommands.ts
           fi
+          # The stock+main Windows workflow already contains valid steps; retain it here
+          # and add the curated-blocks check through the connected GitHub writer later.
+          git checkout HEAD -- .github/workflows/windows-native.yml
           python3 - <<'PY'
           from pathlib import Path
           path = Path("studio-ui-remotion-verify/src/contracts/newsflowCommands.ts")
