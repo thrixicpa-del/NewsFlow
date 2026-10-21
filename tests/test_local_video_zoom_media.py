@@ -87,7 +87,10 @@ class LocalVideoZoomMediaTests(unittest.TestCase):
                             self.assertGreater(last/first, .92)
                             self.assertLess(last/first, .96)
                         else:
-                            self.assertAlmostEqual(last/first, 1.0, delta=.015)
+                            # Chroma subsampling/encoding moves the thresholded
+                            # edge by one pixel per side on hosted CPU encoders.
+                            # Two pixels are well below the ON growth (>=7px).
+                            self.assertLessEqual(abs(last-first), 2)
                         raw = run([ffmpeg, "-v", "error", "-i", str(output), "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-f", "f32le", "-"])
                         samples = np.frombuffer(raw, dtype="<f4")
                         self.assertGreaterEqual(len(samples)/48000, 2.39)

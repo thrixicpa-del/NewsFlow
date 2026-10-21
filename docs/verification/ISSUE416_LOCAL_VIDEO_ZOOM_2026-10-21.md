@@ -83,6 +83,17 @@ still verifying video duration, voice frequency/tail and no source audio. OFF
 also intentionally retains Remotion's old slight zoom-out. These are documented
 baseline behaviors, not changes to production audio/timing code.
 
+The first hosted Windows comparison also exposed an overly narrow OFF marker
+tolerance: 128 to 130 thresholded pixels (1.5625%) exceeded 1.5%. The comparison
+now bounds OFF variation to two pixels, one per encoded edge; this is tighter
+for the wider horizontal marker and remains below ON's minimum seven-pixel
+growth. No production filter/cache code changed. Actual forced-CPU libx264
+comparisons in both layouts: **4 outputs PASS**, 21.082 s, production guard PASS;
+receipt `.superpowers/local-video-zoom/media/48c530d60e5d4469aac96c3e109d3cec`.
+Independent review confirmed the revised measurement preserves effect/timing
+coverage. Hosted step had 14 PASS, 1 FAIL, 1 existing profile-reuse SKIP; it is
+not reported as PASS. Its actual zoom UI restart and six unit tests did pass.
+
 ## Independent gates and limits
 
 CI runs the new unit/regression contract and complete existing source gates.
