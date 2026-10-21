@@ -1,0 +1,71 @@
+name: One-time montage Frozen r49 build
+on:
+  push:
+    branches: [qa/frozen-montage-r49-20261021]
+permissions:
+  contents: read
+jobs:
+  frozen:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          lfs: true
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v6
+        with: { node-version: '24.19.0' }
+      - name: Install locked runtime and pinned packager
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes -r requirements.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install pyinstaller==6.18.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify FFmpeg LFS asset before embedding
+        shell: pwsh
+        run: |
+          $asset = 'assets/ffmpeg.exe'
+          $lock = Get-Content -LiteralPath 'studio-ui-remotion-verify/core-assets-lock.json' -Raw | ConvertFrom-Json
+          if (-not (Test-Path $asset -PathType Leaf)) { throw 'Missing bundled FFmpeg' }
+          if ((Get-Item $asset).Length -ne $lock.ffmpeg.size) { throw 'FFmpeg size mismatch' }
+          if ((Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant() -ne $lock.ffmpeg.sha256) { throw 'FFmpeg hash mismatch' }
+      - name: Build actual Frozen Core once
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --distpath "$env:RUNNER_TEMP/frozen49" --workpath "$env:RUNNER_TEMP/frozen49-work" Scriptor.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $env:RUNNER_TEMP 'frozen49/NewsFlowCore/NewsFlowCore.exe'
+          if (-not (Test-Path $exe -PathType Leaf)) { throw 'Frozen EXE absent' }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item $exe).Length
+          $receipt = [ordered]@{ format = 1; source = "$env:GITHUB_SHA"; coreExeSha256 = $hash; coreExeSize = $size; channel = 'INTERNAL_TEST_ONLY'; version = '2.1.152-r49' }
+          $receipt | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP 'frozen49/frozen-receipt.json') -Encoding UTF8
+          Write-Output "FROZEN_R49_BUILD=PASS sha256=$hash bytes=$size source=$env:GITHUB_SHA"
+      - name: Verify real FFmpeg and isolated Frozen bridge snapshot
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'frozen49/NewsFlowCore'
+          node studio-ui-remotion-verify/scripts/verify-core-assets.mjs --directory $root --media-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:NEWSFLOW_TEST_MODE='1'
+          $env:NEWSFLOW_TEST_ROOT=Join-Path $env:RUNNER_TEMP 'qa-frozen49-test'
+          $env:NEWSFLOW_PRODUCTION_LOCALAPPDATA=Join-Path $env:RUNNER_TEMP 'qa-frozen49-protected'
+          $env:LOCALAPPDATA=Join-Path $env:NEWSFLOW_TEST_ROOT 'local'
+          $env:APPDATA=Join-Path $env:NEWSFLOW_TEST_ROOT 'roaming'
+          $env:TEMP=Join-Path $env:NEWSFLOW_TEST_ROOT 'temp'
+          $env:TMP=$env:TEMP
+          foreach($p in @($env:NEWSFLOW_TEST_ROOT, $env:NEWSFLOW_PRODUCTION_LOCALAPPDATA, $env:LOCALAPPDATA, $env:APPDATA, $env:TEMP)) { New-Item -ItemType Directory -Path $p -Force | Out-Null }
+          $out = & (Join-Path $root 'NewsFlowCore.exe') snapshot '{}'
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen bridge snapshot failed' }
+          $parsed = $out | Out-String | ConvertFrom-Json
+          if ($null -eq $parsed) { throw 'Frozen bridge returned no JSON' }
+          Write-Output 'FROZEN_R49_BRIDGE=PASS'
+      - name: Archive one QA-only binary and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: newsflow-core-r49-verified
+          path: ${{ runner.temp }}/frozen49/
+          retention-days: 30
+          if-no-files-found: error
