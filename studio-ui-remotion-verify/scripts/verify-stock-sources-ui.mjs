@@ -148,10 +148,10 @@ async function main() {
       await field('Источники футажей', 'stock');
       await checkbox('Все вместе', true);
       await checkbox('Все вместе', false);
-      assert.equal(await evaluate(() => [...document.querySelectorAll('fieldset input')].filter((input) => input.checked).length), 0);
+      assert.equal(await evaluate(() => [...document.querySelectorAll('.montage-short-mode fieldset fieldset input[type="checkbox"]')].filter((input) => input.checked).length), 0);
       assert.equal(await evaluate(() => [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Сохранить выбор').disabled), true);
       await checkbox('Все вместе', true);
-      assert.equal(await evaluate(() => [...document.querySelectorAll('fieldset input')].filter((input) => input.checked).length), 6);
+      assert.equal(await evaluate(() => [...document.querySelectorAll('.montage-short-mode fieldset fieldset input[type="checkbox"]')].filter((input) => input.checked).length), 6);
       await checkbox('Pixabay', false);
       await checkbox('Coverr', false);
       await checkbox('Обрезать стоковые видео', false);
