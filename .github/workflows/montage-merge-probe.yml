@@ -1,32 +1,90 @@
-name: Montage integration conflict probe (temporary)
+name: Montage stock integration (temporary)
 on:
   push:
     branches: [integrate/commercial-montage-2026-10-21]
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: commercial-montage-stock-integration
+  cancel-in-progress: false
 jobs:
-  probe:
+  merge:
+    if: github.repository == 'thrixicpa-del/NewsFlow'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Attempt an unmodified three-way merge of stock features
+          persist-credentials: true
+      - name: Merge stock and preserve main/stock test gates
         shell: bash
         run: |
+          set -euo pipefail
           git fetch origin codex/montage-stock-sources --no-tags
-          git config user.name 'NewsFlow QA Probe'
-          git config user.email 'qa-probe@users.noreply.github.com'
-          if git merge --no-commit --no-ff origin/codex/montage-stock-sources; then
-            echo 'MERGE_STOCK_UNMODIFIED=PASS'
-            git diff --stat --cached
+          if git merge-base --is-ancestor origin/codex/montage-stock-sources HEAD; then
+            echo 'STOCK_ALREADY_MERGED=PASS'
             exit 0
           fi
-          echo 'MERGE_STOCK_UNMODIFIED=FAIL: conflict, no source silently chosen'
-          git diff --name-only --diff-filter=U
-          for file in $(git diff --name-only --diff-filter=U); do
-            echo "::group::CONFLICT $file"
-            grep -n -E '^<<<<<<< |^=======|^>>>>>>> ' "$file" | head -n 50 || true
-            echo "::endgroup::"
-          done
-          exit 1
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git merge --no-commit --no-ff origin/codex/montage-stock-sources; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            allowed="$(printf '%s\n' '.github/workflows/ci.yml' '.github/workflows/windows-native.yml')"
+            if [[ "$conflicts" != "$allowed" ]]; then
+              echo "MERGE_UNEXPECTED_CONFLICTS: $conflicts"
+              exit 1
+            fi
+            git checkout --ours .github/workflows/ci.yml .github/workflows/windows-native.yml
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ci = Path(".github/workflows/ci.yml")
+          source = ci.read_text(encoding="utf-8")
+          needle = "      - run: python tests/run_isolated.py tests.test_story_planner"
+          assert source.count(needle) == 1, "Refuse to rewrite unexpected CI flow"
+          stock = """      - name: Offline stock adapters, scene routing, protected keys and media
+                  run: >-
+                    python -B tests/run_isolated.py tests.test_stock_sources
+                    tests.test_stock_settings tests.test_stock_selection tests.test_stock_pipeline
+                    tests.test_stock_review_regressions tests.test_stock_diversity tests.test_stock_credits tests.test_stock_media
+                    tests.test_stock_scene_semantics tests.test_stock_advertisements tests.test_ai_index_preview_cache
+                    tests.test_montage_continuity tests.test_stock_continuity_pipeline
+                    tests.test_stock_continuity_selection tests.test_stock_quality
+                  env:
+                    LOCALAPPDATA: ${{ runner.temp }}/newsflow-stock-boundary
+          """
+          # Remove the YAML source indentation added for embedding.
+          stock = "\n".join(line[8:] if line.startswith("        ") else line for line in stock.splitlines()) + "\n"
+          assert "      - name: Offline stock adapters" in stock
+          assert "      - name: Offline stock adapters" not in source
+          ci.write_text(source.replace(needle, stock + needle), encoding="utf-8")
+
+          win = Path(".github/workflows/windows-native.yml")
+          old = win.read_text(encoding="utf-8").rstrip() + "\n"
+          assert "Isolated stock UI and real synthetic media renders" not in old
+          appendix = """      - name: Ensure FFprobe for independent media inspection
+                  shell: pwsh
+                  run: |
+                    if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+                      choco install ffmpeg --yes --no-progress
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                      "$env:ChocolateyInstall\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                    }
+                - name: Isolated stock UI and real synthetic media renders
+                  run: python -B tests/run_isolated.py tests.test_stock_sources_ui tests.test_stock_render -q
+                  env:
+                    NEWSFLOW_RUN_ELECTRON_E2E: '1'
+                    LOCALAPPDATA: ${{ runner.temp }}/newsflow-stock-boundary
+          """
+          appendix = "\n".join(line[8:] if line.startswith("        ") else line for line in appendix.splitlines()) + "\n"
+          assert "      - name: Ensure FFprobe" in appendix
+          win.write_text(old + appendix, encoding="utf-8")
+          PY
+          git add .github/workflows/ci.yml .github/workflows/windows-native.yml
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --cached --check
+          git diff --check
+          git commit -m 'integration: merge reviewed stock montage with all existing main gates'
+          git push origin HEAD:integrate/commercial-montage-2026-10-21
+          echo 'STOCK_INTEGRATED=PASS'
