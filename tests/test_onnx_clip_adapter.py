@@ -145,6 +145,24 @@ class ClipAdapterTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertTrue(calls[0]["local_files_only"])
 
+    def test_missing_cached_asset_is_recovered_only_during_online_indexing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name in onnx_clip._MODEL_FILES[onnx_clip._IMAGE_MODEL]:
+                (root / name).write_bytes(b"x")
+            (root / "model.onnx").unlink()
+            attempts = []
+
+            def load(**kwargs):
+                attempts.append(kwargs["local_files_only"])
+                if not kwargs["local_files_only"]:
+                    (root / "model.onnx").write_bytes(b"repaired")
+                return str(root)
+
+            with patch.dict(sys.modules, {"huggingface_hub": types.SimpleNamespace(snapshot_download=load)}):
+                self.assertEqual(onnx_clip._model_path(onnx_clip._IMAGE_MODEL, folder), root)
+            self.assertEqual(attempts, [True, False])
+
     def test_incomplete_model_cache_is_error_not_silent_fallback(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.dict(sys.modules, {"huggingface_hub": types.SimpleNamespace(snapshot_download=lambda **_: folder)}):
