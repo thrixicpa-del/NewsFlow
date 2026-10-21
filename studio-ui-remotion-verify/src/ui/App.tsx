@@ -26,6 +26,8 @@ import "./publication-modern.css";
 import "./features/task-center/task-center.css";
 import { PublicationPage } from "./publication/PublicationPage";
 import { FootageBlocks, FootageBlockAssignments } from "./features/footage/FootageBlocks";
+import { unsettledMontageLaunches } from "./features/montage/montage-polling";
+import type { PendingMontageLaunch } from "./features/montage/montage-polling";
 import { TaskCenter } from "./features/task-center/TaskCenter";
 import type { TaskCenterEntry } from "./features/task-center/task-model";
 import { AppShell } from "./layout/AppShell";
@@ -10846,6 +10848,7 @@ export function Editor({
   >(null);
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [queueLaunching, setQueueLaunching] = useState(false);
+  const [pendingMontageLaunches, setPendingMontageLaunches] = useState<PendingMontageLaunch[]>([]);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [queuePausedDraft, setQueuePausedDraft] = useState(
     data.montageSettings.queueRunning === false
@@ -10917,13 +10920,20 @@ export function Editor({
   // A persisted phase can outlive a crashed or closed Core.  Only the
   // process-backed snapshot field may disable launch controls.
   const running = data.montageSettings.queueRunning === true;
-  const queueActive = running || queueLaunching;
+  const queueActive = running || queueLaunching || pendingMontageLaunches.length > 0;
   // The owner liveness probe can turn false before the last task snapshot
   // reaches React. Keep observing this process's unfinished tasks until their
   // terminal result arrives; historical rows still cannot disable launch.
   const pollMontage = queueActive || data.montageTasks.some(
     (task) => task.runtimeCurrent === true && activeMontageStatuses.has(task.status || ""),
   );
+  useEffect(() => {
+    if (!pendingMontageLaunches.length) return;
+    const unsettled = unsettledMontageLaunches(pendingMontageLaunches, data.montageTasks);
+    if (unsettled.length !== pendingMontageLaunches.length) {
+      setPendingMontageLaunches(unsettled);
+    }
+  }, [data.montageTasks, pendingMontageLaunches]);
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,
   );
@@ -11082,7 +11092,17 @@ export function Editor({
         uniqueFootagePercent: Number(uniqueFootagePercent),
         fastReuseRanges,
       });
-      if (saved) await command("run-montage-queue", { indices, replaceOutput });
+      if (saved) {
+        setPendingMontageLaunches(indices.map((index) => ({
+          index,
+          previousUpdatedAt: String(data.montageTasks.find((task) => task.index === index)?.updatedAt ?? ""),
+        })));
+        const queued = await command("run-montage-queue", { indices, replaceOutput });
+        if (!queued) setPendingMontageLaunches([]);
+      }
+    } catch (error) {
+      setPendingMontageLaunches([]);
+      throw error;
     } finally {
       setQueueLaunching(false);
       void refresh();
