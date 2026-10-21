@@ -11073,15 +11073,17 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   // Persisted phases alone cannot imply a running process. A locally launched
   // overlay export is watched separately until its final snapshot is visible:
   // the worker can exit before the renderer receives that last snapshot.
   const running = data.montageSettings.queueRunning === true;
-  const queueActive = running || queueLaunching || pendingMontageLaunches.length > 0 || overlayExportWatch !== null;
+  const queueBusy = running || queueLaunching || pendingMontageLaunches.length > 0 || overlayExportWatch !== null;
+  const queueActive = settingsSaving || queueBusy;
   // The owner liveness probe can turn false before the last task snapshot
   // reaches React. Keep observing this process's unfinished tasks until their
   // terminal result arrives; historical rows still cannot disable launch.
-  const pollMontage = queueActive || data.montageTasks.some(
+  const pollMontage = queueBusy || data.montageTasks.some(
     (task) => task.runtimeCurrent === true && activeMontageStatuses.has(task.status || ""),
   );
   useEffect(() => {
@@ -11152,7 +11154,7 @@ export function Editor({
     // settings Sheet is open, every field below is an operator-owned draft:
     // a background snapshot must not overwrite renderer, workers, folders,
     // ratio or reuse controls before explicit Save.
-    if (configurationOpen) return;
+    if (configurationOpen || settingsSaving) return;
     setRatio(data.montageSettings.aspectRatio);
     setRenderer(data.montageSettings.renderer);
     setGpuChunkSize(String(data.montageSettings.gpuChunkSize ?? 12));
@@ -11182,7 +11184,7 @@ export function Editor({
       String(data.montageSettings.uniqueFootagePercent ?? 100),
     );
     setFastReuseRanges(data.montageSettings.fastReuseRanges || []);
-  }, [data.montageSettings, configurationOpen]);
+  }, [data.montageSettings, configurationOpen, settingsSaving]);
   const setRendererDraft = (value: "remotion" | "ffmpeg" | "gpu-timeline") => {
     setRenderer(value);
   };
@@ -11245,9 +11247,11 @@ export function Editor({
     const folder = await window.newsflowDesktop?.chooseFolder();
     if (folder) setOutputFolder(folder);
   };
-  const saveSettings = () => {
-    if (!stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
-    void command("save-montage-settings", {
+  const saveSettings = async () => {
+    if (settingsSaving || !stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
+    setSettingsSaving(true);
+    try {
+      await command("save-montage-settings", {
       aspectRatio: ratio,
       renderer,
       ...(gpuChunkSizeValid ? { gpuChunkSize: Number(gpuChunkSize) } : {}),
@@ -11275,7 +11279,10 @@ export function Editor({
       fastReuseEnabled,
       uniqueFootagePercent: Number(uniqueFootagePercent),
       fastReuseRanges,
-    });
+      });
+    } finally {
+      setSettingsSaving(false);
+    }
   };
   const launch = async (indices: number[], replaceOutput = false) => {
     if (!indices.length || queueActive || !stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;

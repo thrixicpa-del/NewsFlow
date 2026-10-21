@@ -78,6 +78,33 @@ class ProductionResetTests(unittest.TestCase):
             [Job(ScenarioRequest(0, "Старая тема", "", "old-id"), RunState.DONE, "Сценарий")],
         )
 
+    def test_reset_preserves_stock_library_inside_generated_parent(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "LOCALAPPDATA": directory, "TEMP": str(Path(directory) / "io"), "TMP": str(Path(directory) / "io"),
+        }):
+            root = Path(directory)
+            settings = self._settings(root)
+            settings.media_output_folder = str(root / "production")
+            stock = Path(settings.footage_download_folder) / "Стоки"
+            original = stock / "originals" / "cached.mp4"
+            original.parent.mkdir(parents=True)
+            original.write_bytes(b"immutable downloaded original")
+            original.chmod(0o444)
+            database = stock / "stock-cache.sqlite3"
+            database.write_bytes(b"reusable stock index")
+            save_settings(settings)
+            self._seed_session()
+            try:
+                bridge.clear_production_queue(self.confirmation)
+                self.assertEqual(original.read_bytes(), b"immutable downloaded original")
+                self.assertEqual(database.read_bytes(), b"reusable stock index")
+                self.assertFalse((Path(settings.footage_download_folder) / "old-release.txt").exists())
+                self.assertEqual(load_session(), ([], []))
+                self.assertEqual(load_settings().production_reset_generation, 1)
+            finally:
+                if original.exists():
+                    original.chmod(0o666)
+
     def test_reset_releases_topic_memory_and_manual_readd_survives_restart(self):
         with TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory}):
             root = Path(directory)

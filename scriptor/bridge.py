@@ -22215,7 +22215,7 @@ def save_publication_allocation_preset(payload: dict) -> dict:
             "message": f"Пресет конструктора «{name}» сохранён."}}
 
 
-def _clear_production_folder(folder: str) -> int:
+def _clear_production_folder(folder: str, *, preserved_roots: tuple[Path, ...] = ()) -> int:
     """Delete children of one configured output folder, never the folder itself."""
     target = Path(folder).expanduser().resolve()
     if not target.exists():
@@ -22225,6 +22225,12 @@ def _clear_production_folder(folder: str) -> int:
         raise ValueError("Небезопасный путь производственной папки")
     removed = 0
     for child in target.iterdir():
+        resolved = child.resolve()
+        if any(resolved == root or resolved.is_relative_to(root) for root in preserved_roots):
+            continue
+        if child.is_dir() and any(root.is_relative_to(resolved) for root in preserved_roots):
+            removed += _clear_production_folder(str(child), preserved_roots=preserved_roots)
+            continue
         if child.is_dir():
             shutil.rmtree(child)
         else:
@@ -22429,8 +22435,11 @@ def _clear_production_queue_locked(payload: dict) -> dict:
         for path in voice_maps_root.glob("*.voice-map.json"):
             path.unlink()
     save_session([], [])
+    # Downloaded stock and its persistent index are reusable library assets,
+    # including when a configured generated-media parent contains the cache.
+    stock_roots = ((Path(settings.footage_download_folder).expanduser().resolve() / "Стоки"),)
     removed_files = sum(
-        _clear_production_folder(folder)
+        _clear_production_folder(folder, preserved_roots=stock_roots)
         for folder in folders
         if str(folder).strip()
     )

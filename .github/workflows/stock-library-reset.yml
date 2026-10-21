@@ -1,0 +1,21 @@
+name: Stock library reset regression
+on:
+  pull_request:
+    paths:
+      - 'scriptor/bridge.py'
+      - 'tests/test_production_reset.py'
+      - '.github/workflows/stock-library-reset.yml'
+permissions:
+  contents: read
+jobs:
+  scoped-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      LOCALAPPDATA: ${{ github.workspace }}/.ci-reset-production-boundary
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: '3.12', cache: 'pip', cache-dependency-path: requirements-test.lock }
+      - run: python -m pip install --require-hashes -r requirements-test.lock
+      - run: python -B tests/run_isolated.py --pytest tests/test_production_reset.py -q -k 'preserves_stock_library or reset_refuses or reset_allows_generated'
