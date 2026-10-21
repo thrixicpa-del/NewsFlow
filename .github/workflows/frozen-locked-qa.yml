@@ -32,9 +32,16 @@ jobs:
         run: |
           $temp = Join-Path $env:RUNNER_TEMP 'newsflow-core-verified-download'
           New-Item -ItemType Directory -Path $temp -Force | Out-Null
-          & gh release download internal-core-2.1.152-r48 --repo $env:GITHUB_REPOSITORY --pattern 'newsflow-core-2.1.152-r48.zip' --dir $temp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $archive = Join-Path $temp 'newsflow-core-2.1.152-r48.zip'
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/octet-stream'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          Invoke-WebRequest -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/662002877" -Headers $headers -OutFile $archive -MaximumRedirection 5
+          if ((Get-Item -LiteralPath $archive).Length -lt 200000000) {
+            throw 'GitHub release asset API returned metadata/error instead of the pinned Frozen ZIP'
+          }
           if (!(Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'Pinned Frozen Core archive unavailable' }
           Expand-Archive -LiteralPath $archive -DestinationPath 'core-bin-2.1.152-security-r48' -Force
           if (!(Test-Path -LiteralPath 'core-bin-2.1.152-security-r48/NewsFlowCore/NewsFlowCore.exe' -PathType Leaf)) {
