@@ -1,4 +1,7 @@
 name: Frozen source QA (Windows)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 on:
   pull_request:
     branches: [main]
@@ -85,7 +88,7 @@ jobs:
       - name: Upload QA-only frozen receipt and Windows binary
         uses: actions/upload-artifact@v4
         with:
-          name: newsflow-frozen-source-qa
-          path: ${{ runner.temp }}/newsflow-frozen-output/
+          name: newsflow-frozen-source-qa-receipt
+          path: ${{ runner.temp }}/newsflow-frozen-output/frozen-source-receipt.json
           retention-days: 7
           if-no-files-found: error
