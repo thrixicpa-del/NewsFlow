@@ -14,6 +14,10 @@ jobs:
       - uses: actions/setup-python@v6
         with: { python-version: '3.12' }
       - run: python -m pip install --require-hashes -r requirements-test.lock
+      - name: Voice queue ownership and independent template save
+        run: python -B tests/run_isolated.py tests.test_voice_queue_owner tests.test_voicer.VoicerTests.test_template_save_survives_an_independent_running_voice_job -q
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice-owner-boundary
       - uses: pnpm/action-setup@v4
         with: { version: '11.19.0' }
       - uses: actions/setup-node@v6

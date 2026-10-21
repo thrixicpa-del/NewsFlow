@@ -59,7 +59,7 @@ jobs:
           scriptor.test_montage_render.MontageRenderTests.test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-render
-      - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map
+      - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map tests.test_voice_queue_owner
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-voice
       - name: Offline stock adapters, scene routing, protected keys and media

@@ -1551,6 +1551,7 @@ def load_settings() -> Settings:
         settings._observed_youtube_key = data.get("youtube_api_key_protected", "")
         settings._observed_cover_key_labels = list(settings.cover_selected_key_labels)
         _remember_montage_reuse_preferences(settings)
+        _remember_independent_workflow_fields(settings)
         settings._observed_montage_history = list(settings.montage_recent_clip_paths)
         _remember_footage_blocks(settings)
         return settings
@@ -1659,6 +1660,20 @@ _MONTAGE_REUSE_PREFERENCES = (
     "montage_use_footage_blocks",
     "montage_overlay_template",
 )
+
+
+_INDEPENDENT_WORKFLOW_FIELDS = (
+    "template", "scenario_templates", "prompt_ranges", "scenario_target_chars",
+    "scenario_allowed_min", "scenario_allowed_max",
+    "voice_scenario_outputs", "voice_task_statuses", "voice_tts_batches",
+    "voice_active_tts_batch_id", "voice_tts_jobs", "voice_queue_paused",
+)
+
+
+def _remember_independent_workflow_fields(settings: Settings) -> None:
+    settings._observed_independent_workflows = {
+        name: deepcopy(getattr(settings, name)) for name in _INDEPENDENT_WORKFLOW_FIELDS
+    }
 
 
 def _remember_montage_reuse_preferences(settings: Settings) -> None:
@@ -2329,6 +2344,12 @@ def save_settings(settings: Settings):
             # settings changes and other credential selections survive.
             data = dict(on_disk)
         if not replacement:
+            # Resolve unchanged workflow fields against disk under the write
+            # lock. Reloading before save alone leaves a lost-update window
+            # between a voice progress publication and a template/preset save.
+            for name, observed in getattr(settings, "_observed_independent_workflows", {}).items():
+                if getattr(settings, name) == observed:
+                    data[name] = on_disk.get(name, data[name])
             usage = list(getattr(settings, "_montage_recent_clip_usage", []))
             if usage:
                 # A planner owns only the clips it actually used. Merge those
@@ -2496,6 +2517,7 @@ def save_settings(settings: Settings):
                     # a running preparation must keep its captured parameters,
                     # and repeated progress saves must still count as unchanged.
                     _remember_montage_reuse_preferences(settings)
+                    _remember_independent_workflow_fields(settings)
                     _remember_footage_blocks(settings)
                     settings._edited_montage_reuse = set()
                     if not replacement:
