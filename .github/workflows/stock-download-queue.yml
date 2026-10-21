@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
-      LOCALAPPDATA: ${{ runner.temp }}/newsflow-stock-production-boundary
+      LOCALAPPDATA: ${{ github.workspace }}/.ci-production-boundary
       NEWSFLOW_RUN_ELECTRON_E2E: '1'
     steps:
       - uses: actions/checkout@v6
