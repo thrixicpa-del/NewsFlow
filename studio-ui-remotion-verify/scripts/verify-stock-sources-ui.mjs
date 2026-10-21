@@ -102,11 +102,12 @@ const waitCommand = async (name, action) => {
   return response.result;
 };
 const snapshot = () => evaluate(() => window.newsflowDesktop.snapshot());
-const safeSettings = (settings) => ({ sourceMode: settings.sourceMode, stockSources: settings.stockSources, stockTrim: settings.stockTrim, stockUseLibrary: settings.stockUseLibrary, downloadWorkers: settings.downloadWorkers, stockLibraryFolder: settings.stockLibraryFolder, stockKeys: settings.stockKeys });
+const safeSettings = (settings) => ({ localVideoZoom: settings.localVideoZoom, sourceMode: settings.sourceMode, stockSources: settings.stockSources, stockTrim: settings.stockTrim, stockUseLibrary: settings.stockUseLibrary, downloadWorkers: settings.downloadWorkers, stockLibraryFolder: settings.stockLibraryFolder, stockKeys: settings.stockKeys });
 const checkFinal = (settings) => {
   assert.equal(settings.sourceMode, 'stock');
   assert.deepEqual(settings.stockSources, ['pexels', 'wikimedia', 'nasa']);
   assert.equal(settings.stockTrim, false);
+  assert.equal(settings.localVideoZoom, true);
   assert.equal(settings.stockUseLibrary, false);
   assert.equal(settings.downloadWorkers, 64);
   assert(path.isAbsolute(settings.stockLibraryFolder));
@@ -136,6 +137,8 @@ async function main() {
     await until('stock controls', () => evaluate(() => Boolean(document.querySelector('#nf-select-источники-футажей'))));
     if (stage === 'configure') {
       const save = () => waitCommand('save-montage-settings', () => click('Сохранить выбор'));
+      assert.equal((await snapshot()).montageSettings.localVideoZoom, false);
+      await checkbox('Плавное приближение локальных видео', true);
       for (const mode of ['local', 'hybrid', 'stock']) {
         await field('Источники футажей', mode);
         const state = await save();
@@ -177,6 +180,7 @@ async function main() {
     const visible = await evaluate(() => ({ mode: document.querySelector('#nf-select-источники-футажей').value, trim: [...document.querySelectorAll('label')].find((label) => label.textContent.trim() === 'Обрезать стоковые видео').querySelector('input').checked, raw: document.body.innerText }));
     assert.equal(visible.mode, 'stock');
     assert.equal(visible.trim, false);
+    assert.equal(await evaluate(() => [...document.querySelectorAll('label')].find((label) => label.textContent.trim() === 'Плавное приближение локальных видео').querySelector('input').checked), true);
     assert(visible.raw.includes(final.stockLibraryFolder));
     assert.equal(await evaluate(() => [...document.querySelectorAll('label')].find((label) => label.textContent.trim() === 'Использовать библиотеку скачанных стоков').querySelector('input').checked), false);
     assertSafe(visible);

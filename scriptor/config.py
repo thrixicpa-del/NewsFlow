@@ -529,6 +529,7 @@ class Settings:
     montage_intro_duration: float = 6.0
     montage_overlay_enabled: bool = False
     montage_overlay_folder: str = ""
+    montage_local_video_zoom: bool = False
     montage_overlay_template: dict = field(default_factory=lambda: {
         "version": 1, "layouts": {"16:9": [], "9:16": []},
     })
@@ -1302,6 +1303,7 @@ def load_settings() -> Settings:
             montage_intro_duration=float(data.get("montage_intro_duration", 6.0)),
             montage_overlay_enabled=bool(data.get("montage_overlay_enabled", False)),
             montage_overlay_folder=data.get("montage_overlay_folder", ""),
+            montage_local_video_zoom=bool(data.get("montage_local_video_zoom", False)),
             montage_overlay_template=deepcopy(data.get("montage_overlay_template") or {
                 "version": 1, "layouts": {"16:9": [], "9:16": []},
             }),
@@ -1648,6 +1650,7 @@ _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
 
 
 _MONTAGE_REUSE_PREFERENCES = (
+    "montage_local_video_zoom",
     "montage_source_mode", "montage_stock_sources", "montage_stock_trim", "montage_stock_use_library",
     "montage_stock_hd_only",
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
@@ -2086,6 +2089,7 @@ def save_settings(settings: Settings):
         "montage_intro_duration": settings.montage_intro_duration,
         "montage_overlay_enabled": settings.montage_overlay_enabled,
         "montage_overlay_folder": settings.montage_overlay_folder,
+        "montage_local_video_zoom": settings.montage_local_video_zoom,
         "montage_overlay_template": settings.montage_overlay_template,
         "montage_planning_workers": settings.montage_planning_workers,
         "montage_download_workers": settings.montage_download_workers,

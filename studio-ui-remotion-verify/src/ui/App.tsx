@@ -365,6 +365,7 @@ export const fallback: NewsFlowSnapshot = {
     introFolder: "",
     introDuration: 6,
     overlayEnabled: false,
+    localVideoZoom: false,
     overlayFolder: "",
     autoWeb: true,
     autoYoutube: false,
@@ -11058,6 +11059,7 @@ export function Editor({
   const [scenePlanner, setScenePlanner] = useState(
     data.montageSettings.scenePlanner,
   );
+  const [localVideoZoom, setLocalVideoZoom] = useState(Boolean(data.montageSettings.localVideoZoom));
   const [fastReuseEnabled, setFastReuseEnabled] = useState(
     Boolean(data.montageSettings.fastReuseEnabled),
   );
@@ -11171,6 +11173,7 @@ export function Editor({
     setUseScriptText(data.montageSettings.useScriptText !== false);
     setExcludeEnglishText(data.montageSettings.excludeEnglishText !== false);
     setScenePlanner(data.montageSettings.scenePlanner);
+    setLocalVideoZoom(Boolean(data.montageSettings.localVideoZoom));
     setFastReuseEnabled(Boolean(data.montageSettings.fastReuseEnabled));
     setUniqueFootagePercent(
       String(data.montageSettings.uniqueFootagePercent ?? 100),
@@ -11265,6 +11268,7 @@ export function Editor({
       useScriptText,
       excludeEnglishText,
       scenePlanner,
+      localVideoZoom,
       fastReuseEnabled,
       uniqueFootagePercent: Number(uniqueFootagePercent),
       fastReuseRanges,
@@ -11298,6 +11302,7 @@ export function Editor({
         useScriptText,
         excludeEnglishText,
         scenePlanner,
+        localVideoZoom,
         fastReuseEnabled,
         uniqueFootagePercent: Number(uniqueFootagePercent),
         fastReuseRanges,
@@ -11318,12 +11323,14 @@ export function Editor({
       void refresh();
     }
   };
-  const renderOverlayPlans = async (indices: number[]) => {
+  const renderOverlayPlans = async (indices: number[], applyZoom = false) => {
     if (queueActive || !indices.length) return undefined;
     setQueueLaunching(true);
     setOverlayExportWatch({ indices: [...indices], baselineTasks: data.montageTasks.map((task) => ({ ...task })), observedActive: [] });
     try {
-      const result = await command("run-montage-queue", { indices, renderOnly: true });
+      const result = await command("run-montage-queue", {
+        indices, renderOnly: true, ...(applyZoom ? { localVideoZoom } : {}),
+      });
       if (!result) setOverlayExportWatch(null);
       return result;
     } catch (error) {
@@ -11519,6 +11526,9 @@ export function Editor({
             Сохранить выбор
           </Button>
         </div>
+        <label className="check-row"><input type="checkbox" checked={localVideoZoom} onChange={(event) => setLocalVideoZoom(event.target.checked)} />Плавное приближение локальных видео</label>
+        <small className="workflow-note">Плавный зум 100–108% за сцену в готовом MP4. Скорость и озвучка сохраняются. Для готовых планов выберите строки и повторите экспорт. DaVinci XML сохраняет исходные клипы без этого эффекта.</small>
+        <Button disabled={queueActive || !selected.length} onClick={() => void renderOverlayPlans(selected, true)}>Повторный экспорт с выбранным приближением</Button>
         <div className="renderer-choice renderer-choice-four">
           <button
             className={renderer === "ffmpeg" ? "selected" : ""}

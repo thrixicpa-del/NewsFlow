@@ -3069,6 +3069,7 @@ def snapshot() -> dict:
                             "transitionStyle": settings.montage_transition_style, "transitionFrames": settings.montage_transition_frames,
                             "introFolder": settings.montage_intro_folder, "introDuration": settings.montage_intro_duration, "overlayEnabled": settings.montage_overlay_enabled,
                             "overlayFolder": settings.montage_overlay_folder,
+                            "localVideoZoom": settings.montage_local_video_zoom,
                             "overlayTemplate": deepcopy(settings.montage_overlay_template),
                             "autoWeb": settings.montage_auto_web, "autoYoutube": settings.montage_auto_youtube,
                             "externalOnly": settings.montage_external_only,
@@ -16091,8 +16092,17 @@ def save_montage_overlays(payload: dict) -> dict:
     }}
 
 
+def _montage_zoom_choice(payload: dict, default: bool) -> bool:
+    if "localVideoZoom" not in payload:
+        return default
+    if type(payload["localVideoZoom"]) is not bool:
+        raise ValueError("localVideoZoom должно быть true/false")
+    return payload["localVideoZoom"]
+
+
 def save_montage_settings(payload: dict) -> dict:
     settings = load_settings()
+    settings.montage_local_video_zoom = _montage_zoom_choice(payload, settings.montage_local_video_zoom)
     if "sourceMode" in payload:
         mode = payload["sourceMode"]
         if mode not in {"local", "hybrid", "stock"}:
@@ -16201,6 +16211,7 @@ def save_montage_settings(payload: dict) -> dict:
     # baseline. Background workers must never claim an unchanged pause flag.
     settings._edited_montage_reuse = {
         setting for key, setting in (
+            ("localVideoZoom", "montage_local_video_zoom"),
             ("sourceMode", "montage_source_mode"),
             ("stockSources", "montage_stock_sources"),
             ("stockTrim", "montage_stock_trim"),
@@ -19662,6 +19673,7 @@ def _prepare_montage(payload: dict, *, read_stack: ExitStack) -> dict:
                               # in front in full, with its original sound.
                               intro_duration=_full_intro_duration(intro_path, settings.montage_intro_duration) if intro_path else 0,
                               overlay_path=_random_video(settings.montage_overlay_folder) if settings.montage_overlay_enabled else "",
+                              local_video_zoom=_montage_zoom_choice(payload, settings.montage_local_video_zoom),
                               overlay_template=overlay_template,
                               transition_style=settings.montage_transition_style,
                               transition_frames=settings.montage_transition_frames,
@@ -19765,6 +19777,7 @@ def render_montage(payload: dict) -> dict:
     if not project_path.is_file():
         raise ValueError("Сначала подготовьте или выберите проект монтажа")
     project = TimelineProject.load(project_path)
+    project.local_video_zoom = _montage_zoom_choice(payload, project.local_video_zoom)
     _apply_montage_continuity(project, settings)
     if project.manual_replacements:
         raise ValueError("Требуется ручная замена отмеченных сцен в сохранённом проекте")
@@ -20951,6 +20964,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
     if "renderOnly" in payload and type(payload["renderOnly"]) is not bool:
         raise ValueError("renderOnly должно быть true/false")
     render_only = payload.get("renderOnly") is True
+    queue_zoom = _montage_zoom_choice(payload, settings.montage_local_video_zoom)
     # Auto-clear a persisted pause only when this exact owner reclaimed a
     # dead PID record. A brand-new owner may race with a fresh operator Pause,
     # which must win and remain visible.
@@ -21112,7 +21126,7 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         current_policy = get_block_snapshot(load_settings(), str(jobs_by_index[index].request.production_item_id or ""))
         _montage_task_update(settings, index, footageBlock=current_policy)
         prepared = prepare_montage({"scenarioIndex": index, "aspectRatio": settings.montage_aspect_ratio,
-                                    "_blockPolicy": current_policy,
+                                    "_blockPolicy": current_policy, "localVideoZoom": queue_zoom,
                                     "_progress": progress, "_downloadSemaphore": download_semaphore,
                                     "_batchFootageUsage": batch_footage_usage})
         project = prepared.get("preparedProject", {})
@@ -21132,6 +21146,8 @@ def _run_montage_queue_unlocked(payload: dict) -> dict:
         _montage_wait_if_paused(settings, index)
         _montage_task_update(settings, index, status="Рендер", phase="Подготовка рендера", progress=60)
         project = TimelineProject.load(Path(project_path))
+        project.local_video_zoom = (_montage_zoom_choice(payload, project.local_video_zoom)
+                                    if render_only else queue_zoom)
         if project.manual_replacements:
             _apply_montage_continuity(project, settings,
                 checkpoint=lambda: _montage_wait_if_paused(settings, index))
