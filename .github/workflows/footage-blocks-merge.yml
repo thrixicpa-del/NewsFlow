@@ -1,0 +1,49 @@
+name: Curated footage blocks integration (temporary)
+on:
+  push:
+    branches: [integrate/commercial-montage-2026-10-21]
+permissions:
+  contents: write
+concurrency:
+  group: commercial-montage-blocks-integration
+  cancel-in-progress: false
+jobs:
+  merge:
+    if: github.repository == 'thrixicpa-del/NewsFlow'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Merge block source with scoped conflict policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin codex/footage-blocks --no-tags
+          if git merge-base --is-ancestor origin/codex/footage-blocks HEAD; then
+            echo 'BLOCKS_ALREADY_MERGED=PASS'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git merge --no-commit --no-ff origin/codex/footage-blocks; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            allowed="$(printf '%s\n' '.github/workflows/ci.yml' '.github/workflows/windows-native.yml')"
+            if [[ "$conflicts" != "$allowed" ]]; then
+              echo "BLOCKS_UNEXPECTED_CONFLICTS: $conflicts"
+              for file in $(git diff --name-only --diff-filter=U); do
+                echo "CONFLICT $file"
+                grep -n -E '^<<<<<<< |^=======|^>>>>>>> ' "$file" | head -n 35 || true
+              done
+              exit 1
+            fi
+            git checkout --ours .github/workflows/ci.yml .github/workflows/windows-native.yml
+          fi
+          git add .github/workflows/ci.yml .github/workflows/windows-native.yml
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --cached --check
+          git diff --check
+          git commit -m 'integration: merge curated footage blocks atop stock selection'
+          git push origin HEAD:integrate/commercial-montage-2026-10-21
+          echo 'BLOCKS_INTEGRATED=PASS'
