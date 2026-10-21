@@ -1044,19 +1044,23 @@ def _gpu_timeline_render_clips(project: TimelineProject) -> list[TimelineClip]:
     render_clips = list(project.clips)
     if project.intro_path and Path(project.intro_path).exists() and project.intro_duration > 0:
         render_clips.insert(0, TimelineClip(project.intro_path, "Заставка", "intro", project.intro_duration, source="intro"))
-    voice = Path(project.voiceover_path) if project.voiceover_path else None
-    if voice and voice.is_file() and project.clips:
-        try:
-            target = required_video_duration(probe_media_duration(voice), project.intro_duration)
-            needed = target + 0.15 - sum(max(0.0, float(clip.duration)) for clip in render_clips)
-            tail_index = len(render_clips) - 1
-            tail = render_clips[tail_index]
-            available = _remaining_source_duration(probe_video_duration(Path(tail.path)), tail.source_start)
-            if needed > 0.0 and available + 0.01 >= tail.duration + needed:
-                render_clips[tail_index] = replace(tail, duration=tail.duration + needed)
-        except (OSError, RuntimeError, ValueError):
-            pass
     return render_clips
+
+
+def _timeline_frame_counts(durations: list[float], fps: int = 30) -> list[int]:
+    """Quantize cumulative cuts once, including cuts between GPU chunks.
+
+    A frame belongs to the scene active at its PTS. Independent scene rounding
+    drifts on fractional cuts; adding source time borrows unverified footage.
+    """
+    elapsed, previous = 0.0, 0
+    counts = []
+    for duration in durations:
+        elapsed += max(0.0, float(duration))
+        end = math.ceil(elapsed * fps - 1e-8)
+        counts.append(end - previous)
+        previous = end
+    return counts
 
 
 def _gpu_timeline_chunk_command(
@@ -1067,6 +1071,7 @@ def _gpu_timeline_chunk_command(
     width: int,
     height: int,
     *, local_video_zoom: bool = False,
+    frame_counts: list[int] | None = None,
 ) -> list[str]:
     """Build one bounded direct-source GPU timeline command.
 
@@ -1077,32 +1082,40 @@ def _gpu_timeline_chunk_command(
     inputs: list[str] = []
     filters: list[str] = []
     labels: list[str] = []
-    for index, clip in enumerate(clips):
+    if frame_counts is None:
+        frame_counts = _timeline_frame_counts([clip.duration for clip in clips])
+    for clip, frame_count in zip(clips, frame_counts, strict=True):
+        if frame_count <= 0:
+            continue
+        index = len(labels)
         source = Path(clip.path)
         if not source.is_file():
             raise FileNotFoundError(f"Футаж не найден: {source}")
-        duration = max(0.1, float(clip.duration) + (1.0 / 30.0) + 0.002)
+        duration = float(clip.duration)
         available = _remaining_source_duration(probe_video_duration(source), clip.source_start)
         loop = ["-stream_loop", "-1"] if available + 0.01 < duration else []
         inputs.extend([
             *loop,
-            "-ss", f"{max(0.0, clip.source_start):.3f}",
-            "-t", f"{duration:.3f}",
+            "-ss", f"{max(0.0, clip.source_start):.9f}",
+            "-t", f"{duration:.9f}",
             "-i", str(source),
         ])
         label = f"v{index}"
-        zoom = _local_zoom_filter(clip, width, height) if _local_clip_zoom(clip, local_video_zoom) else ""
+        zoom = _local_zoom_filter(clip, width, height, frame_count) if _local_clip_zoom(clip, local_video_zoom) else ""
         filters.append(
-            f"[{index}:v]setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},setsar=1,fps=30,{zoom}format=yuv420p[{label}]"
+            f"[{index}:v]fps=30:start_time=0:eof_action=pass,trim=end_frame={frame_count},"
+            f"setpts=PTS-STARTPTS,scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1,{zoom}format=yuv420p[{label}]"
         )
         labels.append(f"[{label}]")
-    filters.append(f"{''.join(labels)}concat=n={len(clips)}:v=1:a=0[outv]")
+    if not labels:
+        raise ValueError("В блоке GPU-таймлайна нет кадров")
+    filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
     script.write_text(";\n".join(filters), encoding="utf-8")
     return [
         ffmpeg, "-y", *inputs,
         "-filter_complex_script", str(script),
-        "-map", "[outv]", "-an", *gpu_timeline_encoder_args(ffmpeg),
+        "-map", "[outv]", "-frames:v", str(sum(frame_counts)), "-an", *gpu_timeline_encoder_args(ffmpeg),
         "-movflags", "+faststart", str(output),
     ]
 
@@ -1133,6 +1146,12 @@ def _render_project_gpu_timeline(
         f"{published_output.stem}.{os.getpid()}.{threading.get_ident()}.partial{published_output.suffix}"
     )
     render_clips = _gpu_timeline_render_clips(project)
+    frame_counts = _timeline_frame_counts([clip.duration for clip in render_clips])
+    framed_clips = [(clip, count) for clip, count in zip(render_clips, frame_counts, strict=True) if count > 0]
+    render_clips = [clip for clip, _ in framed_clips]
+    frame_counts = [count for _, count in framed_clips]
+    if not render_clips:
+        raise ValueError("В GPU-таймлайне нет кадров")
     total_chunks = max(1, (len(render_clips) + chunk_size - 1) // chunk_size)
     total_steps = total_chunks + 2
 
@@ -1149,6 +1168,7 @@ def _render_project_gpu_timeline(
             run_ffmpeg(_gpu_timeline_chunk_command(
                 ffmpeg, clip_chunk, chunk, script, width, height,
                 local_video_zoom=project.local_video_zoom,
+                frame_counts=frame_counts[start:start + chunk_size],
             ))
             chunks.append(chunk)
             if progress:
@@ -1502,12 +1522,16 @@ def _render_project_base(project: TimelineProject, output: Path, progress: Calla
 def remotion_payload(project: TimelineProject, fps: int = 30) -> dict:
     """Portable data for the final Remotion composition stage."""
     sequences, frame = [], 0
-    if project.intro_path and project.intro_duration > 0:
-        duration = round(project.intro_duration * fps)
-        sequences.append({"kind": "intro", "src": project.intro_path, "from": frame, "durationInFrames": duration})
-        frame += duration
-    for clip in project.clips:
-        duration = max(1, round(clip.duration * fps))
+    has_intro = bool(project.intro_path and project.intro_duration > 0)
+    durations = ([project.intro_duration] if has_intro else []) + [clip.duration for clip in project.clips]
+    frame_counts = _timeline_frame_counts(durations, fps)
+    intro_frames = frame_counts.pop(0) if has_intro else 0
+    if intro_frames:
+        sequences.append({"kind": "intro", "src": project.intro_path, "from": frame, "durationInFrames": intro_frames})
+        frame += intro_frames
+    for clip, duration in zip(project.clips, frame_counts, strict=True):
+        if duration <= 0:
+            continue
         sequences.append({"kind": "footage", "src": clip.path, "from": frame, "durationInFrames": duration,
                           "localVideoZoom": _local_clip_zoom(clip, project.local_video_zoom),
                           "sourceStart": clip.source_start, "narration": clip.narration})
@@ -1517,13 +1541,14 @@ def remotion_payload(project: TimelineProject, fps: int = 30) -> dict:
     # preserve every narration frame when it is opened/repaired later; its
     # `visualDurationInFrames` makes a short legacy plan explicit rather than
     # silently truncating the MP3.
-    voice_frames = 0
+    voice_duration = 0.0
     if project.voiceover_path and Path(project.voiceover_path).is_file():
         try:
-            voice_frames = max(1, round(probe_media_duration(Path(project.voiceover_path)) * fps))
+            voice_duration = probe_media_duration(Path(project.voiceover_path))
         except (OSError, ValueError, RuntimeError):
-            voice_frames = 0
-    required_frames = round(max(0.0, project.intro_duration) * fps) + voice_frames
+            voice_duration = 0.0
+    voice_from = math.ceil(max(0.0, project.intro_duration) * fps - 1e-8)
+    required_frames = voice_from + math.ceil(max(0.0, voice_duration) * fps - 1e-8)
     composition_frames = max(frame, required_frames)
     return {"schema": "newsflow-remotion/v1", "fps": fps, "aspectRatio": project.aspect_ratio,
             "durationInFrames": max(1, composition_frames), "visualDurationInFrames": frame, "sequences": sequences,
@@ -1532,7 +1557,7 @@ def remotion_payload(project: TimelineProject, fps: int = 30) -> dict:
             "overlayTemplate": normalize_overlay_template(project.overlay_template),
             "requiresOverlayFinishing": bool(overlay_layers(project.overlay_template, project.aspect_ratio,
                                                              legacy_path=project.overlay_path)),
-            "voiceover": {"src": project.voiceover_path, "from": round(project.intro_duration * fps)},
+            "voiceover": {"src": project.voiceover_path, "from": voice_from},
             "overlay": {"src": project.overlay_path, "chromaKey": "#00ff00", "position": "bottom"}}
 
 

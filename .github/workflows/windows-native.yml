@@ -58,7 +58,7 @@ jobs:
           if (!(Test-Path 'studio-ui-remotion-verify/node_modules/electron/dist/electron.exe')) {
             throw 'Real Electron runtime required; UI acceptance must not skip'
           }
-          python tests/run_isolated.py tests.test_cover_prompt_blocks tests.test_cover_prompt_blocks_ui -v
+          python tests/run_isolated.py tests.test_cover_generation_owner tests.test_cover_prompt_blocks tests.test_cover_prompt_blocks_ui -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
@@ -81,6 +81,10 @@ jobs:
         run: python -B tests/run_isolated.py tests.test_overlay_source_ui -q
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-overlay-boundary
+      - name: Saved project windows, GPU frame timing and local media authorization
+        run: python -B tests/run_isolated.py tests.test_saved_montage_recovery_policy tests.test_gpu_timeline_timing tests.test_remotion_media_server -q
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-independent-review-boundary
       - name: Isolated stock UI and real synthetic media renders
         run: python -B tests/run_isolated.py tests.test_stock_sources_ui tests.test_stock_render tests.test_footage_blocks_ui_isolated tests.test_local_video_zoom tests.test_local_video_zoom_media -q
         env:

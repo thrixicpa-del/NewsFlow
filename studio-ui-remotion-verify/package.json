@@ -85,6 +85,7 @@
     ],
     "asarUnpack": [
       "remotion/render.mjs",
+      "remotion/local-media-server.mjs",
       "remotion-bundle/**/*"
     ],
     "extraResources": [

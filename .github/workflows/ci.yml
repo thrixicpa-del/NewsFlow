@@ -32,10 +32,10 @@ jobs:
       - run: python tests/run_isolated.py tests.test_onnx_clip_adapter
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-clip-adapter
-      - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan
+      - run: python tests/run_isolated.py tests.test_runtime_action_map tests.test_electron_security tests.test_secret_scan tests.test_remotion_media_server
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
-      - run: python tests/run_isolated.py tests.test_cover_prompt_blocks tests.test_cover_standalone_topics tests.test_cover_prompt_pairs_import tests.test_cover_manual_prompt_readiness tests.test_cover_manual_no_paid_aux tests.test_cover_result_identity tests.test_cover_queue_tombstones tests.test_covers
+      - run: python tests/run_isolated.py tests.test_cover_generation_owner tests.test_cover_prompt_blocks tests.test_cover_standalone_topics tests.test_cover_prompt_pairs_import tests.test_cover_manual_prompt_readiness tests.test_cover_manual_no_paid_aux tests.test_cover_result_identity tests.test_cover_queue_tombstones tests.test_covers
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-production-boundary
       - run: python tests/run_isolated.py tests.test_publication_v2 tests.test_youtube_publisher tests.test_youtube_engagement tests.test_youtube_studio
@@ -57,6 +57,7 @@ jobs:
           scriptor.test_montage_render.MontageRenderTests.test_gpu_capability_requires_a_working_nvenc_device_and_caches_the_probe
           scriptor.test_montage_render.MontageRenderTests.test_gpu_chunk_command_preserves_order_and_source_trims
           scriptor.test_montage_render.MontageRenderTests.test_gpu_renderer_uses_bounded_chunks_and_never_proxy_cache
+          tests.test_gpu_timeline_timing tests.test_saved_montage_recovery_policy
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-montage-render
       - run: python tests/run_isolated.py tests.test_voicer tests.test_tts_ranges tests.test_voice_map tests.test_voice_queue_owner

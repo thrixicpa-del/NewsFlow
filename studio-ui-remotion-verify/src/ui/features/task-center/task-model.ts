@@ -29,6 +29,11 @@ const voiceTaskState = (item: NewsFlowSnapshot["voiceItems"][number]): TaskState
   const state = stateFromBackend(item.jobState || item.voiceStatus || (item.path ? "READY" : "QUEUED"));
   if (item.jobState) return state;
   const label = String(item.voiceStatus || "").trim().toUpperCase();
+  const providerLabel = label.replace(/^(?:API|LUMEAN|VOICEGEN|WPROJECT):\s*/, "");
+  // These provider messages still describe pending work; "готовый MP3"
+  // describes the awaited file, including when an older output exists.
+  if (/^ОЖИДАЕМ (?:ГОТОВЫЙ MP3|КНОПКУ СКАЧИВАНИЯ В ИСТОРИИ)$/.test(providerLabel)) return "WAITING";
+  if (/^СКАЧИВАЕМ (?:ГОТОВЫЙ )?MP3$/.test(providerLabel)) return "RUNNING";
   if (/(?:^|:\s*)ГОТОВИМ(?:\s|$)/.test(label)) return "PREPARING";
   if (state === "QUEUED" && /ВЫПОЛНЯ|СОЗДА[ЁЕ]Т|ОТПРАВЛЯ|СОХРАНЯ/.test(label)) return "RUNNING";
   return state;

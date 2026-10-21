@@ -6,6 +6,10 @@ describe("buildTaskCenterEntries", () => {
     { voiceStatus: "VoiceGen: выполняется", expected: "RUNNING" },
     { voiceStatus: "VoiceGen: готовим задачу", expected: "PREPARING" },
     { voiceStatus: "API: сохраняем MP3", expected: "RUNNING" },
+    { voiceStatus: "Скачиваем готовый MP3", expected: "RUNNING" },
+    { voiceStatus: "VoiceGen: скачиваем MP3", expected: "RUNNING" },
+    { voiceStatus: "Ожидаем готовый MP3", expected: "WAITING" },
+    { voiceStatus: "Ожидаем кнопку скачивания в истории", expected: "WAITING" },
     { voiceStatus: "Ожидание ответа провайдера", expected: "WAITING" },
     { voiceStatus: "Ошибка озвучки", expected: "FAILED" },
     { voiceStatus: "", expected: "QUEUED" },
@@ -16,6 +20,19 @@ describe("buildTaskCenterEntries", () => {
     } as unknown as NewsFlowSnapshot);
     expect(entries[0].status).toBe(expected);
     expect(entries[0].detail).toBe(voiceStatus || "Ожидает озвучки");
+  });
+
+  it.each([
+    { path: "old.mp3", expected: "WAITING" },
+    { path: "ready.mp3", jobState: "ready", expected: "READY" },
+    { path: "old.mp3", voiceError: "Ошибка провайдера", expected: "FAILED" },
+    { path: "old.mp3", jobState: "cancelled", expected: "CANCELLED" },
+  ])("preserves canonical state and errors over legacy activity labels", ({ expected, ...voice }) => {
+    const entries = buildTaskCenterEntries({
+      scenarios: [], covers: [], montageTasks: [], publication: { v2: { queue: [] } },
+      voiceItems: [{ index: 0, title: "Voice", state: "Готово", voiceStatus: "Ожидаем готовый MP3", ...voice }],
+    } as unknown as NewsFlowSnapshot);
+    expect(entries[0].status).toBe(expected);
   });
 
   it("projects real backend states without treating a command acknowledgement as ready", () => {
