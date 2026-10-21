@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 import { buildTaskCenterEntries } from "./task-model";
 
 describe("buildTaskCenterEntries", () => {
+  it.each([
+    { voiceStatus: "VoiceGen: выполняется", expected: "RUNNING" },
+    { voiceStatus: "VoiceGen: готовим задачу", expected: "PREPARING" },
+    { voiceStatus: "API: сохраняем MP3", expected: "RUNNING" },
+    { voiceStatus: "Ожидание ответа провайдера", expected: "WAITING" },
+    { voiceStatus: "Ошибка озвучки", expected: "FAILED" },
+    { voiceStatus: "", expected: "QUEUED" },
+  ])("keeps script readiness separate from voice $expected", ({ voiceStatus, expected }) => {
+    const entries = buildTaskCenterEntries({
+      scenarios: [], covers: [], montageTasks: [], publication: { v2: { queue: [] } },
+      voiceItems: [{ index: 0, title: "Voice", state: "Готово", path: "", jobState: "", voiceStatus }],
+    } as unknown as NewsFlowSnapshot);
+    expect(entries[0].status).toBe(expected);
+    expect(entries[0].detail).toBe(voiceStatus || "Ожидает озвучки");
+  });
+
   it("projects real backend states without treating a command acknowledgement as ready", () => {
     const entries = buildTaskCenterEntries({
       scenarios: [

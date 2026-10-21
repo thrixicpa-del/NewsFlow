@@ -23,6 +23,17 @@ const stateFromBackend = (value: unknown): TaskState => {
   return "QUEUED";
 };
 
+const voiceTaskState = (item: NewsFlowSnapshot["voiceItems"][number]): TaskState => {
+  // item.state belongs to the source script, not the voice worker.
+  if (item.voiceError) return "FAILED";
+  const state = stateFromBackend(item.jobState || item.voiceStatus || (item.path ? "READY" : "QUEUED"));
+  if (item.jobState) return state;
+  const label = String(item.voiceStatus || "").trim().toUpperCase();
+  if (/(?:^|:\s*)ГОТОВИМ(?:\s|$)/.test(label)) return "PREPARING";
+  if (state === "QUEUED" && /ВЫПОЛНЯ|СОЗДА[ЁЕ]Т|ОТПРАВЛЯ|СОХРАНЯ/.test(label)) return "RUNNING";
+  return state;
+};
+
 export function buildTaskCenterEntries(data: NewsFlowSnapshot): TaskCenterEntry[] {
   const scenarios = data.scenarios.map((item) => ({
     id: `scenario-${item.index}`,
@@ -43,7 +54,7 @@ export function buildTaskCenterEntries(data: NewsFlowSnapshot): TaskCenterEntry[
     id: `voice-${item.productionItemId || item.index}`,
     source: "voice" as const,
     title: item.title,
-    status: stateFromBackend(item.jobState || item.state || item.voiceStatus),
+    status: voiceTaskState(item),
     detail: item.voiceError || item.voiceStatus || item.jobState || "Ожидает озвучки",
     progress: item.voiceProgress,
   }));
