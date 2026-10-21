@@ -22,8 +22,8 @@ jobs:
           git fetch origin main codex/montage-overlays --no-tags
           set +e
           git merge --no-commit --no-ff origin/codex/montage-overlays
-          set -e
           exitcode=$?
+          set -e
           if [ "$exitcode" -ne 0 ]; then
             echo MERGE_PROBE=CONFLICTS
             git diff --name-only --diff-filter=U | tee merge-conflicts.txt
