@@ -363,4 +363,3 @@ class FootageFollowupTests(unittest.TestCase):
             used_paths=set(),used_families=set(),project_used_paths=set(),project_used_families=set(),
             reserved_paths=set(),reserved_families=set(),source_exists=lambda _:True,source_duration=lambda _:6)
         self.assertEqual(direct.path,result.item.path)
-

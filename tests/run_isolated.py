@@ -48,11 +48,14 @@ def main(arguments: list[str]) -> int:
         environment.update({
             "NEWSFLOW_TEST_MODE": "1",
             "NEWSFLOW_TEST_ROOT": str(root),
-            "NEWSFLOW_RENDER_TEMP_ROOT": str(root / "render-workspace"),
+            # Montage has a separate cache override; TEMP/LOCALAPPDATA alone
+            # otherwise leave it on the user's D: drive (and break Linux).
+            "NEWSFLOW_RENDER_TEMP_ROOT": str(root / "RenderWorkspace"),
             "NEWSFLOW_PRODUCTION_LOCALAPPDATA": production_local_appdata,
             "LOCALAPPDATA": str(root),
             "TEMP": str(root),
             "TMP": str(root),
+            "TMPDIR": str(root),
         })
         if runner == "pytest":
             command = [sys.executable, "-m", "pytest", *(arguments or ["-q"])]

@@ -107,6 +107,21 @@ class MontageQueueStateTests(unittest.TestCase):
             patches.append(patch.object(bridge, "_montage_task_needs_render", return_value=force_needs_render))
         return patches, plan_calls, render_calls
 
+    def test_queue_project_references_final_published_mp4(self):
+        from contextlib import ExitStack
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings, jobs = self._queue_settings(root, ['Queued'])
+            patches, _plans, _renders = self._queue_runtime_patches(root, settings, ['Queued'], jobs)
+            with ExitStack() as stack:
+                for context in patches:
+                    stack.enter_context(context)
+                bridge.run_montage_queue({'indices': [0]})
+            project = TimelineProject.load(Path(settings.montage_project_folder) / '0.newsflow')
+            output = Path(settings.montage_output_folder) / 'Queued.mp4'
+            self.assertTrue(output.is_file())
+            self.assertEqual(project.output_path, str(output))
+
     def test_overlapping_queue_starts_have_one_owner_and_one_render(self):
         """Keep the owner before status persistence until the contender returns."""
         with tempfile.TemporaryDirectory() as folder:

@@ -25,7 +25,11 @@ import "./publication-delivery.css";
 import "./publication-modern.css";
 import "./features/task-center/task-center.css";
 import { PublicationPage } from "./publication/PublicationPage";
+import { FootageBlocks, FootageBlockAssignments } from "./features/footage/FootageBlocks";
+import { unsettledMontageLaunches } from "./features/montage/montage-polling";
+import type { PendingMontageLaunch } from "./features/montage/montage-polling";
 import { TaskCenter } from "./features/task-center/TaskCenter";
+import { MontageOverlays } from "./features/montage/MontageOverlays";
 import type { TaskCenterEntry } from "./features/task-center/task-model";
 import { AppShell } from "./layout/AppShell";
 import { ContextInspector } from "./layout/ContextInspector";
@@ -206,6 +210,7 @@ export const fallback: NewsFlowSnapshot = {
     requirementsMode: "text",
     requirementsText: "",
     requirementsFile: "",
+    requirementsFiles: [],
     companionPrompt: "",
     minimumChars: 12000,
     maximumChars: 18000,
@@ -364,6 +369,11 @@ export const fallback: NewsFlowSnapshot = {
     autoWeb: true,
     autoYoutube: false,
     externalOnly: false,
+    sourceMode: "hybrid",
+    stockSources: ["pexels", "pixabay", "coverr", "wikimedia", "nasa"],
+    stockTrim: true,
+    stockHdOnly: true,
+    stockKeys: [],
     useScriptText: true,
     excludeEnglishText: true,
     scenePlanner: "local",
@@ -3092,7 +3102,7 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
   const [sessionId, setSessionId] = useState(saved.sessionId);
   const [requirementsMode, setRequirementsMode] = useState<'text' | 'file'>(saved.requirementsMode);
   const [requirementsText, setRequirementsText] = useState(saved.requirementsText);
-  const [requirementsFile, setRequirementsFile] = useState(saved.requirementsFile);
+  const [requirementsFiles, setRequirementsFiles] = useState(saved.requirementsFiles ?? (saved.requirementsFile ? [saved.requirementsFile] : []));
   const [companionPrompt, setCompanionPrompt] = useState(saved.companionPrompt);
   const [minimumChars, setMinimumChars] = useState(String(saved.minimumChars || 12000));
   const [maximumChars, setMaximumChars] = useState(String(saved.maximumChars || 18000));
@@ -3107,14 +3117,18 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
   const [rangeAdditionalPrompt, setRangeAdditionalPrompt] = useState("");
   const [rangeError, setRangeError] = useState("");
   const [launching, setLaunching] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const cancelRequested = useRef(false);
+  const currentLaunchId = useRef<string | undefined>(undefined);
   const [lengthOverrides, setLengthOverrides] = useState(saved.lengthOverrides || {});
   const [additionalPromptOverrides, setAdditionalPromptOverrides] = useState(saved.additionalPromptOverrides || {});
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>(saved.promptOverrides);
   const [urlOverrides, setUrlOverrides] = useState<Record<string, string>>(saved.urlOverrides);
-  const savedRevision = JSON.stringify(saved);
+  const queueRunning = launching || Boolean(saved.running);
+  const savedRevision = JSON.stringify({ ...saved, running: undefined });
 
   useEffect(() => {
-    if (!launching || !refresh) return;
+    if (!queueRunning || !refresh) return;
     let stopped = false;
     let timer: number | undefined;
     const poll = async () => {
@@ -3130,14 +3144,14 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
     };
     timer = window.setTimeout(() => void poll(), 900);
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [launching, refresh]);
+  }, [queueRunning, refresh]);
 
   useEffect(() => {
     setProjectUrl(saved.projectUrl);
     setSessionId(saved.sessionId);
     setRequirementsMode(saved.requirementsMode);
     setRequirementsText(saved.requirementsText);
-    setRequirementsFile(saved.requirementsFile);
+    setRequirementsFiles(saved.requirementsFiles ?? (saved.requirementsFile ? [saved.requirementsFile] : []));
     setCompanionPrompt(saved.companionPrompt);
     setMinimumChars(String(saved.minimumChars || 12000));
     setMaximumChars(String(saved.maximumChars || 18000));
@@ -3160,9 +3174,9 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
       ? current.filter((value) => value !== productionItemId)
       : [...current, productionItemId],
   );
-  const chooseRequirementsFile = async () => {
-    const selected = await window.newsflowDesktop?.chooseBrowserScenarioRequirements();
-    if (selected) setRequirementsFile(selected);
+  const chooseRequirementsFiles = async () => {
+    const selected = await window.newsflowDesktop?.chooseBrowserScenarioRequirementsFiles();
+    if (selected?.length) setRequirementsFiles((current) => [...new Set([...current, ...selected])]);
   };
   const applyOverrides = () => {
     if (!selectedIds.length) return;
@@ -3229,7 +3243,8 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
       sessionId,
       requirementsMode,
       requirementsText,
-      requirementsFile,
+      requirementsFile: requirementsFiles[0] || "",
+      requirementsFiles,
       companionPrompt,
       minimumChars: Number(minimumChars),
       maximumChars: Number(maximumChars),
@@ -3252,17 +3267,32 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
     await command("save-browser-topic-scenario-settings", settingsPayload());
   };
   const runSelected = async () => {
-    if (launching || !validateConcurrency()) return;
+    if (queueRunning || !validateConcurrency()) return;
+    const batchId = crypto.randomUUID();
+    currentLaunchId.current = batchId;
+    cancelRequested.current = false;
     setLaunching(true);
     try {
       const savedState = await command("save-browser-topic-scenario-settings", settingsPayload());
-      if (!savedState || !selectedTopics.length) return;
+      if (cancelRequested.current || !savedState || !selectedTopics.length) return;
       await command("generate-browser-topic-scenarios", {
+        batchId,
         indices: selectedTopics.map((topic) => topic.index),
         productionItemIds: selectedTopics.map((topic) => String(topic.productionItemId)),
       });
     } finally {
+      currentLaunchId.current = undefined;
       setLaunching(false);
+    }
+  };
+  const cancel = async () => {
+    if (!queueRunning || cancelling) return;
+    cancelRequested.current = true;
+    setCancelling(true);
+    try {
+      await command("cancel-browser-topic-scenarios", currentLaunchId.current ? { batchId: currentLaunchId.current } : {});
+    } finally {
+      setCancelling(false);
     }
   };
   const sessionIndex = data.chromeSessions.findIndex((session) => session.id === sessionId);
@@ -3286,14 +3316,19 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
         {concurrencyError ? <div role="alert">{concurrencyError}</div> : null}
       </section>
       <section className="panel scenario-add">
-        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённый файл или текст. NewsFlow добавляет только точные строки «ТЕМА» и «ОБЪЁМ» из текущей темы и таблицы.</small></div></div>
-        <Select label="Источник требований" value={requirementsMode} onChange={(event) => setRequirementsMode(event.target.value as 'text' | 'file')} options={[{ value: "text", label: "Вставить текст в сообщение" }, { value: "file", label: "Прикрепить файл к ChatGPT" }]} />
-        {requirementsMode === "text" ? <Textarea label="Требования к стилю и структуре" value={requirementsText} onChange={(event) => setRequirementsText(event.target.value)} placeholder="Вставьте требования…" /> : <div className="form-row"><Input label="Файл требований" value={requirementsFile} readOnly placeholder="Выберите TXT или Markdown" /><Button onClick={() => void chooseRequirementsFile()}><FolderOpen size={16} />Выбрать файл</Button></div>}
+        <div className="panel-title"><div><b>Требования и сопроводительное письмо</b><small>Выберите один источник требований: прикреплённые файлы или текст. NewsFlow добавляет только точные строки «ТЕМА» и «ОБЪЁМ» из текущей темы и таблицы.</small></div></div>
+        <Select label="Источник требований" value={requirementsMode} onChange={(event) => setRequirementsMode(event.target.value as 'text' | 'file')} options={[{ value: "text", label: "Вставить текст в сообщение" }, { value: "file", label: "Прикрепить файлы к ChatGPT" }]} />
+        {requirementsMode === "text" ? <Textarea label="Требования к стилю и структуре" value={requirementsText} onChange={(event) => setRequirementsText(event.target.value)} placeholder="Вставьте требования…" /> : <div>
+          {requirementsFiles.map((file, index) => <div className="form-row" key={file}><Input label={`Файл требований ${index + 1}`} value={file} readOnly /><Button ariaLabel={`Удалить файл: ${file}`} onClick={() => setRequirementsFiles((current) => current.filter((value) => value !== file))}>Удалить</Button></div>)}
+          <Button onClick={() => void chooseRequirementsFiles()}><FolderOpen size={16} />Добавить файлы</Button>
+          <p className="shortcut-tip">TXT или Markdown. Пока вложения не готовы, отправка приостановлена. Можно прикрепить файлы вручную в открытом чате; NewsFlow повторно проверит вложения и текст перед отправкой.</p>
+        </div>}
         <Textarea label="Сопроводительное письмо" value={companionPrompt} onChange={(event) => setCompanionPrompt(event.target.value)} placeholder="Укажите требования, общие для каждого сценария. Тему и объём сюда писать не нужно." />
       </section>
       <section className="panel scenario-add">
         <div className="panel-title"><div><b>Темы для запуска</b><small>Привязка выполняется только по ProductionItem ID. Фильтрация, сортировка и положение строки не меняют назначение.</small></div><span className="status">Выбрано: {selectedTopics.length}</span></div>
-        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length || launching} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <div className="toolbar compact"><Button kind="primary" onClick={() => void save()}><Check size={16} />Сохранить настройки</Button><Button onClick={selectAllNew}>Выбрать все новые темы</Button><Button kind="success" disabled={!selectedTopics.length || queueRunning} onClick={() => void runSelected()}><Sparkles size={16} />Создать сценарии в ChatGPT</Button><Button disabled={!queueRunning || cancelling} onClick={() => void cancel()}>Отменить генерацию</Button><span className="shortcut-tip">Каждая выбранная тема откроется в отдельном новом чате. Готовые сценарии не перезаписываются.</span></div>
+        <p className="shortcut-tip">Генерация не ограничена 15 минутами: NewsFlow ждёт завершения ответа и сохранённого TXT. Если готовый файл не удаётся скачать после повторных попыток, тема получает ошибку, её вкладка закрывается, очередь продолжается. Отмена останавливает очередь и закрывает созданные ею вкладки.</p>
         <div className="form-row">
           <Textarea label="Prompt для выбранных тем (необязательно)" value={overridePrompt} onChange={(event) => setOverridePrompt(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий prompt" />
           <Input label="URL для выбранных тем (необязательно)" value={overrideUrl} onChange={(event) => setOverrideUrl(event.target.value)} placeholder="Оставьте пустым, чтобы использовать общий URL" />
@@ -3307,7 +3342,7 @@ export function BrowserTopicScenarios({ data, command, refresh }: {
           <Button onClick={applyRangeOverrides}>Применить диапазон</Button>
         </div>
         {rangeError ? <p className="error" role="alert">{rangeError}</p> : null}
-        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning || launching} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && !launching && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult ? "Готово" : isRunning ? "В работе" : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
+        <div className="table-wrap scenario-table"><table><thead><tr><th>№</th><th>Выбор</th><th>ТЕМА</th><th>ProductionItem ID</th><th>Статус</th><th>Объём</th><th>Prompt / URL</th></tr></thead><tbody>{topics.map((topic) => { const id = String(topic.productionItemId); const hasResult = Boolean(topic.result.trim()); const exportFailed = topic.state === "Ошибка" && topic.error.startsWith("ChatGPT вернул сценарий, но TXT"); const isRunning = topic.state === "В работе"; const volume = lengthOverrides[id] || { minimum_chars: Number(minimumChars), maximum_chars: Number(maximumChars) }; return <tr key={id}><td>{topic.index + 1}</td><td><Checkbox disabled={hasResult || isRunning || launching} checked={!hasResult && !isRunning && selectedIds.includes(id)} onCheckedChange={() => !hasResult && !isRunning && !launching && toggle(id)} label={`Выбрать: ${topic.title}`} /></td><td>{topic.title}</td><td><code>{id}</code></td><td>{hasResult && !exportFailed ? "Готово" : isRunning ? (topic.error || "В работе") : topic.error ? `Ошибка: ${topic.error}` : topic.state}</td><td>{volume.minimum_chars.toLocaleString("ru-RU")}–{volume.maximum_chars.toLocaleString("ru-RU")}</td><td>{hasResult ? "Готовый текст — пропуск" : `${promptOverrides[id] ? "Отдельный prompt" : "Общий prompt"}${additionalPromptOverrides[id] ? " + дополнение" : ""} · ${urlOverrides[id] ? "Отдельный URL" : "Общий URL"}`}</td></tr>; })}</tbody></table></div>
         {!topics.length ? <EmptyState title="Нет тем с ProductionItem ID" description="Добавьте темы в очередь сценариев или выполните восстановление состояния проекта." /> : null}
       </section>
     </div>
@@ -4415,6 +4450,46 @@ export function Covers({
   const [coverPromptImportError, setCoverPromptImportError] = useState("");
   const [coverPromptImporting, setCoverPromptImporting] = useState(false);
   const coverPromptImportLock = useRef(false);
+  const [manualMissingOnly, setManualMissingOnly] = useState(data.coverSettings.manualMissingOnly ?? true);
+  useEffect(() => {
+    setManualMissingOnly(data.coverSettings.manualMissingOnly ?? true);
+  }, [data.coverSettings.manualMissingOnly]);
+  const [standaloneCoverOpen, setStandaloneCoverOpen] = useState(false);
+  const [standaloneCoverPairs, setStandaloneCoverPairs] = useState("");
+  const [manualImportMode, setManualImportMode] = useState("pairs");
+  const [manualImportTopic, setManualImportTopic] = useState("");
+  const [manualImportPreview, setManualImportPreview] = useState<NewsFlowSnapshot["operationResult"]>();
+  const manualImportId = useRef(crypto.randomUUID());
+  const invalidateManualPreview = () => { setManualImportPreview(undefined); };
+  const importManualBlocks = async (previewOnly: boolean) => {
+    if (coverPromptImportLock.current) return;
+    coverPromptImportLock.current = true;
+    setCoverPromptImporting(true);
+    setCoverPromptImportError("");
+    try {
+      const result = await command("import-cover-prompt-pairs", {
+        text: standaloneCoverPairs, mode: "blocks", createMissingTopics: true,
+        importId: manualImportId.current,
+        ...(manualImportMode === "selected" ? { productionItemId: manualImportTopic } : {}),
+        ...(previewOnly ? { previewOnly: true } : { previewToken: manualImportPreview?.previewToken }),
+      });
+      if (previewOnly && result?.operationResult?.kind === "cover-prompt-blocks-preview") {
+        setManualImportPreview(result.operationResult);
+      } else if (!previewOnly && result) {
+        setStandaloneCoverPairs(""); setStandaloneCoverOpen(false); invalidateManualPreview();
+        manualImportId.current = crypto.randomUUID();
+      } else {
+        invalidateManualPreview();
+        setCoverPromptImportError("Не удалось сохранить или проверить привязку. Ввод сохранён; проверьте его ещё раз.");
+      }
+    } catch (error) {
+      invalidateManualPreview();
+      setCoverPromptImportError(error instanceof Error ? error.message : "Ошибка импорта; ввод сохранён.");
+    } finally {
+      coverPromptImportLock.current = false;
+      setCoverPromptImporting(false);
+    }
+  };
   const [textMode, setTextMode] = useState<"overlay" | "fastgen">(
     data.coverSettings.textMode,
   );
@@ -4782,6 +4857,7 @@ export function Covers({
   const removeBuildModeRange = (index: number) =>
     setBuildModeRanges((current) => current.filter((_range, row) => row !== index));
   const coverSettingsPayload = () => ({
+    manualMissingOnly,
     operation,
     aspectRatio: ratio,
     variantCount: Math.max(1, Math.min(10, Number(count) || 1)),
@@ -4999,17 +5075,27 @@ export function Covers({
       setCoverTextImporting(false);
     }
   };
-  const importCoverPromptPairs = async () => {
+  const importCoverPromptPairs = async (options?: { text?: string; createMissingTopics?: boolean; draftOnly?: boolean }) => {
     if (coverPromptImportLock.current) return;
     coverPromptImportLock.current = true;
     setCoverPromptImporting(true);
     setCoverPromptImportError("");
     try {
-      const text = await window.newsflowDesktop?.chooseCoverPromptPairs();
+      const text = options?.text ?? await window.newsflowDesktop?.chooseCoverPromptPairs();
       if (!text) return;
-      const result = await command("import-cover-prompt-pairs", { text });
+      if (options?.draftOnly) {
+        setStandaloneCoverPairs(text);
+        invalidateManualPreview();
+        return;
+      }
+      const result = await command("import-cover-prompt-pairs", {
+        text, ...(options?.createMissingTopics ? { createMissingTopics: true } : {}),
+      });
       if (!result) {
         setCoverPromptImportError("Не удалось импортировать промпты. Существующие промпты не изменены.");
+      } else if (options?.createMissingTopics) {
+        setStandaloneCoverPairs("");
+        setStandaloneCoverOpen(false);
       }
     } catch (error) {
       setCoverPromptImportError(
@@ -5047,6 +5133,7 @@ export function Covers({
       });
       await command("generate-covers", {
         ...coverSelectionPayload(),
+        manualMissingOnly,
         // This is the primary explicit start action. It must resume a queue
         // previously paused by the operator before the core dispatches workers.
         resumeGeneration: true,
@@ -5372,11 +5459,10 @@ export function Covers({
       <section className="panel cover-studio-hero">
         <div>
           <span className="eyebrow">FASTGEN · THUMBNAIL LAB</span>
-          <h2>Обложки по сценарию</h2>
+          <h2>Обложки по темам и промптам</h2>
           <p>
-            Сначала выберите сценарии, затем получите два разных визуальных хода
-            от агента или ChatGPT. Выбираете лучший промпт — FastGen делает
-            столько картинок, сколько зададите.
+            Добавьте свои темы и промпты или передайте готовые сценарии.
+            Для каждой темы можно выбрать промпт и запустить FastGen.
           </p>
         </div>
         <div className="cover-hero-metrics">
@@ -5495,12 +5581,24 @@ export function Covers({
               {" всем"}
             </Button>
             <Button
-              onClick={coverPromptImporting ? undefined : importCoverPromptPairs}
+              onClick={coverPromptImporting ? undefined : () => void importCoverPromptPairs()}
               aria-busy={coverPromptImporting}
             >
               <Upload size={16} />
               Импортировать промпты TXT
             </Button>
+            <Button onClick={coverPromptImporting ? undefined : () => {
+              setCoverPromptImportError("");
+              setManualImportMode("pairs");
+              invalidateManualPreview();
+              setStandaloneCoverOpen(true);
+            }}>
+              Добавить темы и промпты
+            </Button>
+            <Button onClick={coverPromptImporting ? undefined : () => {
+              setCoverPromptImportError(""); setManualImportMode("blocks");
+              invalidateManualPreview(); setStandaloneCoverOpen(true);
+            }}>Добавить несколько промптов</Button>
             <Button
               kind="primary"
               onClick={selected.length ? () => void generatePrompts(selected) : undefined}
@@ -5922,8 +6020,65 @@ export function Covers({
             </Button>
           </article>
         </div>
-        {coverPromptImportError ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
+        <Checkbox label="Только недостающие варианты — готовые сохранить"
+          checked={manualMissingOnly}
+          onCheckedChange={(checked) => {
+            setManualMissingOnly(checked);
+            void command("save-cover-settings", { manualMissingOnly: checked });
+          }} />
+        <p>Для ручных вариантов: с галочкой — только без готовой картинки; без галочки — все промпты. Прежние файлы сохраняются в обоих случаях.</p>
+        {coverPromptImportError && !standaloneCoverOpen ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
       </section>
+      <Sheet
+        open={standaloneCoverOpen}
+        onOpenChange={(open) => { if (!coverPromptImporting) setStandaloneCoverOpen(open); }}
+        title="Темы и промпты для обложек"
+        description="Можно начать с пустого производства. Каждая новая тема получит свой ID; сценарий не требуется."
+      >
+        <Select label="Формат импорта" value={manualImportMode}
+          disabled={coverPromptImporting}
+          onChange={(event) => { setManualImportMode(event.target.value); invalidateManualPreview(); }}
+          options={[
+            { value: "blocks", label: "Тема → несколько промптов → следующая тема" },
+            { value: "selected", label: "Только промпты одной выбранной темы" },
+            { value: "pairs", label: "Прежние пары: тема → один промпт (замена)" },
+          ]} />
+        {manualImportMode === "selected" ? <Select label="Тема для списка промптов" value={manualImportTopic}
+          disabled={coverPromptImporting} onChange={(event) => { setManualImportTopic(event.target.value); invalidateManualPreview(); }}
+          options={[{ value: "", label: "Выберите тему" }, ...data.covers.filter(row => row.production_item_id).map(row => ({ value: row.production_item_id!, label: row.title }))]} /> : null}
+        <Textarea
+          label="Темы и промпты"
+          value={standaloneCoverPairs}
+          onChange={(event) => { setStandaloneCoverPairs(event.target.value); invalidateManualPreview(); }}
+          placeholder={manualImportMode === "pairs" ? "Тема А\nОдин промпт\nТема Б\nОдин промпт" : "Тема: Сад\n\nПервый готовый промпт\n\nВторой готовый промпт\n\nТема: Хлеб\n\nСледующий готовый промпт"}
+          disabled={coverPromptImporting}
+        />
+        {manualImportMode === "pairs" ? <p>Одна строка — тема, следующая — её промпт. Этот прежний режим заменяет активный промпт. Для добавления вариантов выберите формат с несколькими промптами.</p> : <p>Начните блок строкой «Тема: название», затем разделяйте готовые промпты пустой строкой. Следующая строка «Тема: название» начинает другую тему. Точные названия существующих тем тоже распознаются. В режиме выбранной темы вставляйте только промпты. Новые варианты добавляются с продолжением номеров, сохранённые картинки остаются. Число 1–10 в настройках относится только к созданию промптов ИИ. Генерация запускается отдельно.</p>}
+        {manualImportPreview?.topics ? <div role="region" aria-label="Предпросмотр привязки промптов">
+          {manualImportPreview.topics.map(topic => <article key={topic.productionItemId}>
+            <b>{topic.title}</b> · Product ID: <code>{topic.productionItemId}</code>
+            <p>Промптов в блоке: {topic.variants.length}</p>
+            <ol>{topic.variants.map(variant => <li key={variant.id} value={variant.number}>№{variant.number} · {variant.added ? "новый" : "уже сохранён"}: {variant.prompt}</li>)}</ol>
+          </article>)}
+        </div> : null}
+        <div className="form-row">
+          <Button onClick={coverPromptImporting ? undefined : () => void importCoverPromptPairs({ draftOnly: true })}>
+            {manualImportMode === "pairs" ? "Загрузить пары из TXT" : "Загрузить из TXT"}
+          </Button>
+          {manualImportMode !== "pairs" ? <Button
+            onClick={coverPromptImporting || !standaloneCoverPairs.trim() || (manualImportMode === "selected" && !manualImportTopic) ? undefined : () => void importManualBlocks(true)}>
+            Проверить привязку
+          </Button> : null}
+          <Button kind="primary" aria-busy={coverPromptImporting}
+            onClick={coverPromptImporting || !standaloneCoverPairs.trim() || (manualImportMode !== "pairs" && !manualImportPreview?.previewToken) ? undefined : () => {
+              if (manualImportMode === "pairs") void importCoverPromptPairs({ text: standaloneCoverPairs, createMissingTopics: true });
+              else void importManualBlocks(false);
+            }}>
+            Добавить в обложки
+          </Button>
+        </div>
+        {coverPromptImportError ? <div className="knowledge-status" role="alert">{coverPromptImportError}</div> : null}
+      </Sheet>
       <section className="panel cover-settings-launcher">
         <div>
           <span className="eyebrow">STUDIO CONFIGURATION</span>
@@ -7973,13 +8128,12 @@ export function Covers({
                           cover.selected_prompt_index === option ? "chosen" : ""
                         }
                         onClick={() =>
-                          void command("select-cover-prompt", { index, option })
+                          void command("select-cover-prompt", { index, option, ...(cover.manual_prompt_variants ? { productionItemId: cover.production_item_id } : {}) })
                         }
                       >
                         <span>
-                          {cover.selected_prompt_index === option
-                            ? "✓ Выбран ИИ / вручную"
-                            : `Вариант ${option + 1}`}
+                          {`№${cover.manual_prompt_variants?.find(v => v.prompt === prompt)?.number ?? option + 1} · `}
+                          {cover.selected_prompt_index === option ? "✓ Выбран ИИ / вручную" : "Вариант"}
                         </span>
                         <p>{prompt}</p>
                       </button>
@@ -10004,6 +10158,7 @@ export function Footage({
   ];
   return (
     <div className="nf-footage" aria-label="Media Ingest Workspace">
+      <FootageBlocks data={data} command={command} />
       <section className="panel footage-semantic-tools">
         <div className="panel-title">
           <div>
@@ -10510,6 +10665,62 @@ export function Cutter({
   );
 }
 
+const montageStockProviders = [
+  { id: "pexels", label: "Pexels" },
+  { id: "pixabay", label: "Pixabay" },
+  { id: "coverr", label: "Coverr" },
+  { id: "wikimedia", label: "Wikimedia" },
+  { id: "nasa", label: "NASA" },
+];
+const montageSourceMode = (settings: NewsFlowSnapshot["montageSettings"]) =>
+  settings.sourceMode ?? (settings.externalOnly ? "stock" : settings.autoWeb ? "hybrid" : "local");
+
+function MontageStockKeys({ data, command }: { data: NewsFlowSnapshot; command: Command }) {
+  const [provider, setProvider] = useState<"pexels" | "pixabay" | "coverr">("pexels");
+  const [draft, setDraft] = useState("");
+  const [keys, setKeys] = useState(data.montageSettings.stockKeys ?? []);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => setKeys(data.montageSettings.stockKeys ?? []), [data.montageSettings.stockKeys]);
+  const save = async (payload: CommandRequest<"save-montage-stock-keys">, clearDraft = false) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const saved = await command("save-montage-stock-keys", payload);
+      if (!saved) {
+        setError("Не удалось сохранить ключи. Повторите попытку.");
+        return;
+      }
+      setKeys(saved.montageSettings.stockKeys ?? []);
+      if (clearDraft) setDraft("");
+    } catch {
+      setError("Не удалось сохранить ключи. Повторите попытку.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const newKeys = draft.split(/\r?\n/).map((key) => key.trim()).filter(Boolean);
+  return (
+    <section className="panel" aria-label="API-ключи стоков">
+      <div className="panel-title"><div><b>API-ключи стоков</b><small>Добавляйте любое количество ключей: один на строку. Сохранённые секреты не показываются.</small></div></div>
+      {montageStockProviders.slice(0, 3).map(({ id, label }) => (
+        <small key={id} className="workflow-note">{label}: активно {keys.filter((key) => key.provider === id && key.active).length} из {keys.filter((key) => key.provider === id).length}</small>
+      ))}
+      <Select label="Провайдер API-ключей" value={provider} disabled={saving} onChange={(event) => setProvider(event.target.value as typeof provider)} options={montageStockProviders.slice(0, 3).map(({ id, label }) => ({ value: id, label }))} />
+      <Textarea label="Новые API-ключи стоков" rows={3} value={draft} disabled={saving} onChange={(event) => setDraft(event.target.value)} autoComplete="off" autoCorrect="off" spellCheck={false} style={{ WebkitTextSecurity: "disc" } as React.CSSProperties} />
+      <Button disabled={saving || !newKeys.length} onClick={() => void save({ provider, keys: newKeys }, true)}>Добавить ключи</Button>
+      {error ? <small role="alert">{error}</small> : null}
+      {keys.map((key) => (
+        <div key={key.id} className="toolbar compact">
+          <label className="check-row"><input type="checkbox" aria-label={`Активен ${key.label}`} checked={key.active} disabled={saving} onChange={(event) => void save({ id: key.id, active: event.target.checked })} />{key.label}</label>
+          <UiButton disabled={saving} onClick={() => void save({ id: key.id, remove: true })} aria-label={`Удалить ${key.label}`}><Trash2 size={15} />Удалить</UiButton>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function MontageAssets({
   data,
   command,
@@ -10783,6 +10994,12 @@ export function Editor({
   >(null);
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [queueLaunching, setQueueLaunching] = useState(false);
+  const [pendingMontageLaunches, setPendingMontageLaunches] = useState<PendingMontageLaunch[]>([]);
+  const [overlayExportWatch, setOverlayExportWatch] = useState<{
+    indices: number[];
+    baselineTasks: NewsFlowSnapshot["montageTasks"];
+    observedActive: number[];
+  } | null>(null);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [queuePausedDraft, setQueuePausedDraft] = useState(
     data.montageSettings.queueRunning === false
@@ -10823,10 +11040,15 @@ export function Editor({
   const [renderWorkers, setRenderWorkers] = useState(
     String(data.montageSettings.renderWorkers),
   );
-  const [autoWeb, setAutoWeb] = useState(data.montageSettings.autoWeb);
-  const [externalOnly, setExternalOnly] = useState(
-    data.montageSettings.externalOnly,
-  );
+  const [sourceMode, setSourceMode] = useState(montageSourceMode(data.montageSettings));
+  const [stockSources, setStockSources] = useState(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
+  const [stockTrim, setStockTrim] = useState(data.montageSettings.stockTrim !== false);
+  const [stockUseLibrary, setStockUseLibrary] = useState(data.montageSettings.stockUseLibrary !== false);
+  const [useFootageBlocks, setUseFootageBlocks] = useState(Boolean(data.montageSettings.useFootageBlocks));
+  const [stockHdOnly, setStockHdOnly] = useState(data.montageSettings.stockHdOnly !== false);
+  const stockSourcesValid = useFootageBlocks || sourceMode === "local" || stockSources.length > 0;
+  const autoWeb = sourceMode !== "local";
+  const externalOnly = sourceMode === "stock";
   const [useScriptText, setUseScriptText] = useState(
     data.montageSettings.useScriptText !== false,
   );
@@ -10846,10 +11068,77 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
-  // A persisted phase can outlive a crashed or closed Core.  Only the
-  // process-backed snapshot field may disable launch controls.
+  // Persisted phases alone cannot imply a running process. A locally launched
+  // overlay export is watched separately until its final snapshot is visible:
+  // the worker can exit before the renderer receives that last snapshot.
   const running = data.montageSettings.queueRunning === true;
-  const queueActive = running || queueLaunching;
+  const queueActive = running || queueLaunching || pendingMontageLaunches.length > 0 || overlayExportWatch !== null;
+  // The owner liveness probe can turn false before the last task snapshot
+  // reaches React. Keep observing this process's unfinished tasks until their
+  // terminal result arrives; historical rows still cannot disable launch.
+  const pollMontage = queueActive || data.montageTasks.some(
+    (task) => task.runtimeCurrent === true && activeMontageStatuses.has(task.status || ""),
+  );
+  useEffect(() => {
+    if (!pendingMontageLaunches.length) return;
+    const unsettled = unsettledMontageLaunches(pendingMontageLaunches, data.montageTasks);
+    if (unsettled.length !== pendingMontageLaunches.length) {
+      setPendingMontageLaunches(unsettled);
+    }
+  }, [data.montageTasks, pendingMontageLaunches]);
+  useEffect(() => {
+
+    if (!overlayExportWatch) return;
+
+    const observedActive = new Set(overlayExportWatch.observedActive);
+
+    const terminal = overlayExportWatch.indices.map((index) => {
+
+      const task = data.montageTasks.find((item) => item.index === index);
+
+      if (!task) return true;
+
+      if (task.status !== "Готово" && task.status !== "Ошибка") {
+
+        observedActive.add(index);
+
+        return false;
+
+      }
+
+      const baseline = overlayExportWatch.baselineTasks.find((item) => item.index === index);
+
+      const currentTime = Date.parse(task.updatedAt || "");
+
+      const previousTime = Date.parse(baseline?.updatedAt || "");
+
+      // The bridge writes monotonic microsecond stamps. Date.parse truncates
+
+      // sub-millisecond precision, so compare the stable stamp strings on ties.
+
+      const newerStamp = Boolean(task.updatedAt && (!baseline?.updatedAt ||
+
+        (Number.isFinite(currentTime) && Number.isFinite(previousTime)
+
+          ? currentTime > previousTime || (currentTime === previousTime && task.updatedAt > baseline.updatedAt)
+
+          : task.updatedAt > baseline.updatedAt)));
+
+      const newerAttempt = (task.renderAttempt || 0) > (baseline?.renderAttempt || 0);
+
+      return observedActive.has(index) || newerStamp || newerAttempt;
+
+    }).every(Boolean);
+
+    if (terminal) setOverlayExportWatch(null);
+
+    else if (observedActive.size !== overlayExportWatch.observedActive.length) {
+
+      setOverlayExportWatch({ ...overlayExportWatch, observedActive: [...observedActive] });
+
+    }
+
+  }, [data.montageTasks, overlayExportWatch]);
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,
   );
@@ -10873,8 +11162,12 @@ export function Editor({
     setPlanningWorkers(String(data.montageSettings.planningWorkers));
     setDownloadWorkers(String(data.montageSettings.downloadWorkers));
     setRenderWorkers(String(data.montageSettings.renderWorkers));
-    setAutoWeb(data.montageSettings.autoWeb);
-    setExternalOnly(data.montageSettings.externalOnly);
+    setSourceMode(montageSourceMode(data.montageSettings));
+    setStockSources(data.montageSettings.stockSources ?? montageStockProviders.map(({ id }) => id));
+    setStockTrim(data.montageSettings.stockTrim !== false);
+    setStockUseLibrary(data.montageSettings.stockUseLibrary !== false);
+    setStockHdOnly(data.montageSettings.stockHdOnly !== false);
+    setUseFootageBlocks(Boolean(data.montageSettings.useFootageBlocks));
     setUseScriptText(data.montageSettings.useScriptText !== false);
     setExcludeEnglishText(data.montageSettings.excludeEnglishText !== false);
     setScenePlanner(data.montageSettings.scenePlanner);
@@ -10915,10 +11208,21 @@ export function Editor({
       (project) =>
         project.path === selectedProjects[selectedProjects.length - 1],
     ) || data.montageProjects[0];
+  const projectBackgroundCount = Math.max(0, Number(selectedProject?.selectionSummary?.background || 0));
+  const projectHeldCount = Math.max(0, Number(selectedProject?.selectionSummary?.held || 0));
+  const projectContinuitySummary = [
+    projectHeldCount > 0 ? `удержание ${projectHeldCount}` : "",
+    projectBackgroundCount > 0 ? `нейтральный фон ${projectBackgroundCount}` : "",
+  ].filter(Boolean).join(" · ");
+  const individualOverlayTask = selected.length === 1 ? data.montageTasks.find((task) => task.index === selected[0]) : undefined;
+  const individualOverlayProject = selected.length === 1
+    ? data.montageProjects.find((project) => project.path === individualOverlayTask?.projectPath)
+    : selected.length === 0 ? selectedProject : undefined;
+  const individualOverlayTemplate = individualOverlayTask?.overlayTemplate || individualOverlayProject?.overlayTemplate;
   const localMediaUrl = (path?: string) =>
     path ? encodeURI(`file:///${path.replace(/\\/g, "/")}`) : "";
   useEffect(() => {
-    if (!queueActive) return;
+    if (!pollMontage) return;
     // A Remotion job starts Chromium frame workers. Polling through a separate
     // Python process too aggressively competes with those workers and made the
     // desktop window look frozen on large queues.
@@ -10930,13 +11234,13 @@ export function Editor({
     );
     void refresh();
     return () => window.clearInterval(timer);
-  }, [queueActive, refresh]);
+  }, [pollMontage, refresh, renderer]);
   const chooseOutput = async () => {
     const folder = await window.newsflowDesktop?.chooseFolder();
     if (folder) setOutputFolder(folder);
   };
   const saveSettings = () => {
-    if (renderer === "gpu-timeline" && !gpuChunkSizeValid) return;
+    if (!stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
     void command("save-montage-settings", {
       aspectRatio: ratio,
       renderer,
@@ -10952,6 +11256,12 @@ export function Editor({
       renderWorkers: Number(renderWorkers),
       autoWeb,
       externalOnly,
+      sourceMode,
+      stockSources,
+      stockTrim,
+      stockUseLibrary,
+      stockHdOnly,
+      useFootageBlocks,
       useScriptText,
       excludeEnglishText,
       scenePlanner,
@@ -10961,7 +11271,7 @@ export function Editor({
     });
   };
   const launch = async (indices: number[], replaceOutput = false) => {
-    if (!indices.length || queueActive || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
+    if (!indices.length || queueActive || !stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)) return;
     setQueueLaunching(true);
     try {
       const saved = await command("save-montage-settings", {
@@ -10979,6 +11289,12 @@ export function Editor({
         renderWorkers: Number(renderWorkers),
         autoWeb,
         externalOnly,
+        sourceMode,
+        stockSources,
+        stockTrim,
+        stockUseLibrary,
+        stockHdOnly,
+        useFootageBlocks,
         useScriptText,
         excludeEnglishText,
         scenePlanner,
@@ -10986,7 +11302,33 @@ export function Editor({
         uniqueFootagePercent: Number(uniqueFootagePercent),
         fastReuseRanges,
       });
-      if (saved) await command("run-montage-queue", { indices, replaceOutput });
+      if (saved) {
+        setPendingMontageLaunches(indices.map((index) => ({
+          index,
+          previousUpdatedAt: String(data.montageTasks.find((task) => task.index === index)?.updatedAt ?? ""),
+        })));
+        const queued = await command("run-montage-queue", { indices, replaceOutput });
+        if (!queued) setPendingMontageLaunches([]);
+      }
+    } catch (error) {
+      setPendingMontageLaunches([]);
+      throw error;
+    } finally {
+      setQueueLaunching(false);
+      void refresh();
+    }
+  };
+  const renderOverlayPlans = async (indices: number[]) => {
+    if (queueActive || !indices.length) return undefined;
+    setQueueLaunching(true);
+    setOverlayExportWatch({ indices: [...indices], baselineTasks: data.montageTasks.map((task) => ({ ...task })), observedActive: [] });
+    try {
+      const result = await command("run-montage-queue", { indices, renderOnly: true });
+      if (!result) setOverlayExportWatch(null);
+      return result;
+    } catch (error) {
+      setOverlayExportWatch(null);
+      throw error;
     } finally {
       setQueueLaunching(false);
       void refresh();
@@ -11103,11 +11445,17 @@ export function Editor({
           </Button>
         </div>
       </section>
+      <FootageBlockAssignments data={data} command={command} />
       <MontageLiveStatus
         data={data}
         queuePaused={queuePausedDraft}
         queueRunning={running}
       />
+      <MontageOverlays data={data} command={command} selectedIndices={selected}
+        allIndices={[...new Set([...data.scenarios.map((item) => item.index), ...data.montageTasks.map((item) => item.index)])].filter((index) => Number.isSafeInteger(index) && index >= 0).sort((a, b) => a - b)}
+        mediaUrl={localImageUrl} projectDuration={selectedProject?.duration} individualTemplate={individualOverlayTemplate}
+        onRenderOverlays={renderOverlayPlans} queueActive={queueActive} />
+      {data.preparedProject?.warning && <div className="operation-result" role="alert">{data.preparedProject.warning}</div>}
       <Sheet
         open={configurationOpen}
         onOpenChange={handleConfigurationOpenChange}
@@ -11119,33 +11467,54 @@ export function Editor({
       <section className="panel montage-short-mode">
         <div className="panel-title">
           <div>
-            <b>Короткий ролик из внешних источников</b>
+            <b>Источники футажей</b>
             <small>
-              Для ролика на несколько минут пропускает библиотеку и ищет каждый
-              футаж в разрешённых новостных и стоковых источниках.
-              Автоматическая загрузка коротких фрагментов YouTube выключена.
+              Локальная библиотека, сочетание библиотеки со стоками или только стоки.
+              Процент уникальных футажей и правила ротации действуют во всех режимах.
             </small>
           </div>
         </div>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={externalOnly}
-            onChange={(event) => setExternalOnly(event.target.checked)}
-          />
-          Собирать только из внешних источников
-        </label>
+        <label className="check-row"><input type="checkbox" checked={useFootageBlocks} onChange={(event) => setUseFootageBlocks(event.target.checked)} />Использовать блоки футажей при монтаже</label>
+        <small className="workflow-note">{useFootageBlocks ? "Материалы берутся только из назначенного теме блока и его подпапок. Темы без назначения требуют выбора блока до запуска." : "Действует обычный подбор из текущих источников. Созданные блоки и назначения сохраняются."}</small>
+        <fieldset disabled={useFootageBlocks}>
+        <legend>Источники обычного подбора</legend>
+        <Select label="Источники футажей" value={sourceMode} onChange={(event) => setSourceMode(event.target.value as typeof sourceMode)} options={[
+          { value: "local", label: "Локальная библиотека" },
+          { value: "hybrid", label: "Библиотека + стоки" },
+          { value: "stock", label: "Только стоки" },
+        ]} />
+        <label className="check-row"><input type="checkbox" checked={sourceMode === "hybrid"} onChange={(event) => setSourceMode(event.target.checked ? "hybrid" : "local")} />Использовать стоки с моими футажами</label>
+        <small className="workflow-note">Сначала точное совпадение в вашей библиотеке, затем разрешённые стоки. Снятая галочка выбирает только ваши футажи; режим «Только стоки» остаётся в списке выше.</small>
+        <small className="workflow-note">Если материалов не хватает, используем тематические перебивки или удерживаем кадр; озвучка продолжается.</small>
+        <fieldset disabled={sourceMode === "local"}>
+          <legend>Стоковые источники</legend>
+          <label className="check-row"><input type="checkbox" checked={montageStockProviders.every(({ id }) => stockSources.includes(id))} onChange={(event) => setStockSources(event.target.checked ? montageStockProviders.map(({ id }) => id) : [])} />Все вместе</label>
+          {montageStockProviders.map(({ id, label }) => (
+            <label key={id} className="check-row"><input type="checkbox" checked={stockSources.includes(id)} onChange={(event) => setStockSources((current) => event.target.checked ? montageStockProviders.map((item) => item.id).filter((item) => item === id || current.includes(item)) : current.filter((item) => item !== id))} />{label}</label>
+          ))}
+        </fieldset>
+        <small className="workflow-note">Материалы предоставлены <a href="https://www.pexels.com/" target="_blank" rel="noopener noreferrer">Pexels</a>, <a href="https://pixabay.com/" target="_blank" rel="noopener noreferrer">Pixabay</a>, <a href="https://coverr.co/" target="_blank" rel="noopener noreferrer">Coverr</a>, Wikimedia Commons и NASA. Источники и лицензии использованных файлов сохраняются рядом с MP4.</small>
+        <label className="check-row"><input type="checkbox" checked={stockHdOnly} onChange={(event) => setStockHdOnly(event.target.checked)} />HD 720p+</label>
+        <small className="workflow-note">Отбираются стоки с исходным качеством не ниже HD 720p. Размер готового MP4 1080p сам по себе не повышает детализацию исходника.</small>
+        {!stockSourcesValid ? <small role="alert">Выберите хотя бы один стоковый источник.</small> : null}
+        <label className="check-row"><input type="checkbox" checked={stockUseLibrary} onChange={(event) => setStockUseLibrary(event.target.checked)} />Использовать библиотеку скачанных стоков</label>
+        <small className="workflow-note">Сначала проверяются подходящие скачанные материалы. История использования сохраняется, чтобы чередовать источники и фрагменты в следующих роликах.</small>
+        <small className="workflow-note">Папка библиотеки: <span style={{ overflowWrap: "anywhere", userSelect: "text" }}>{data.montageSettings.stockLibraryFolder || "Путь появится после подключения NewsFlow"}</span>. Перед ручной очисткой завершите задачи: сохранённые проекты могут ссылаться на эти файлы.</small>
+        <label className="check-row"><input type="checkbox" checked={stockTrim} onChange={(event) => setStockTrim(event.target.checked)} />Обрезать стоковые видео</label>
+        <small className="workflow-note">Исходный файл не меняется. При включённой обрезке готовится короткий фрагмент. При выключенной предварительной обрезки нет, но таймлайн по-прежнему ограничивает показ границами озвучки.</small>
+        </fieldset>
       </section>
+      {configurationOpen ? <MontageStockKeys data={data} command={command} /> : null}
       <section className="panel renderer-choice-panel">
         <div className="panel-title">
           <div>
             <b>Как собрать и передать монтаж</b>
             <small>
-              MP4 делает один выбранный движок. DaVinci XML — отдельный
-              редактируемый план этой же дорожки, без второго рендера.
+              MP4 делает один выбранный движок. DaVinci XML содержит отдельные клипы без наложений;
+              при наложениях он содержит сведённый MP4 без отдельных редактируемых слоёв.
             </small>
           </div>
-          <Button disabled={renderer === "gpu-timeline" && !gpuChunkSizeValid} onClick={() => void saveSettings()}>
+          <Button disabled={!stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)} onClick={() => void saveSettings()}>
             <Check size={16} />
             Сохранить выбор
           </Button>
@@ -11199,7 +11568,7 @@ export function Editor({
             <span>04</span>
             <div>
               <b>DaVinci Resolve XML</b>
-              <small>Создать FCPXML с дорожками футажей и MP3. Это не повторный рендер MP4.</small>
+              <small>Создать FCPXML с дорожками футажей и MP3. При наложениях экспортируется сведённый MP4 без отдельных слоёв.</small>
             </div>
             <em>{exportDaVinciXml ? "включён" : "выключен"}</em>
           </button>
@@ -11418,7 +11787,6 @@ export function Editor({
             <input
               type="number"
               min="1"
-              max="8"
               value={downloadWorkers}
               onChange={(event) => setDownloadWorkers(event.target.value)}
             />
@@ -11458,14 +11826,6 @@ export function Editor({
           <label className="check-row">
             <input type="checkbox" checked disabled readOnly />
             Не использовать футажи с английскими/латинскими надписями — обязательное правило
-          </label>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={autoWeb}
-              onChange={(event) => setAutoWeb(event.target.checked)}
-            />
-            Искать в разрешённых внешних источниках, если локальный матч слабый
           </label>
         </div>
         <small className="workflow-note">
@@ -12023,7 +12383,7 @@ export function Editor({
             <b>Проекты, Remotion и DaVinci</b>
             <small>
               .newsflow — план NewsFlow, .remotion.json — композиция, .fcpxml —
-              редактируемая дорожка DaVinci. XML не рендерит MP4 повторно.
+              дорожка DaVinci. При наложениях XML содержит сведённый MP4: слои отдельно не редактируются. Без наложений доступны отдельные клипы.
             </small>
           </div>
           <div className="toolbar compact">
@@ -12218,6 +12578,7 @@ export function Editor({
               {selectedProject.selectionSummaryText}
             </p>
           ) : null}
+          {projectContinuitySummary ? <p className="project-duration">{projectContinuitySummary}</p> : null}
           {selectedProject.outputPath ? (
             <video
               className="project-video"

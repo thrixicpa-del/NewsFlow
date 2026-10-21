@@ -407,6 +407,15 @@ class OpenAIKey:
 
 
 @dataclass
+class StockKey:
+    provider: str
+    secret: str = field(repr=False)
+    label: str = ""
+    active: bool = True
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+
+@dataclass
 class SecretVoicerKey:
     label: str
     secret: str
@@ -458,6 +467,9 @@ class Settings:
     output_folder: str = field(default_factory=lambda: str(default_output_folder()))
     idea_output_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Идеи"))
     footage_folders: list[str] = field(default_factory=list)
+    footage_blocks: list[dict] = field(default_factory=list)
+    footage_block_assignments: dict[str, dict] = field(default_factory=dict)
+    montage_use_footage_blocks: bool = False
     footage_download_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Футажи из интернета"))
     cutter_output_folder: str = field(default_factory=lambda: str(storyflow_documents_root() / "Нарезки"))
     cutter_sources: list[str] = field(default_factory=list)
@@ -483,6 +495,13 @@ class Settings:
     montage_auto_youtube: bool = False
     # Short external-only news cuts may deliberately skip the local library.
     montage_external_only: bool = False
+    # Empty retains the legacy route until the operator saves the new controls.
+    montage_source_mode: str = ""
+    montage_stock_sources: list[str] = field(default_factory=lambda: ["wikimedia", "nasa"])
+    montage_stock_trim: bool = True
+    montage_stock_use_library: bool = True
+    montage_stock_hd_only: bool = True
+    stock_api_keys: list[StockKey] = field(default_factory=list)
     # The narration gives the planner the best semantic context. It can be
     # switched off for fast title+MP3 assembly when a text file is unavailable.
     montage_use_script_text: bool = True
@@ -510,6 +529,9 @@ class Settings:
     montage_intro_duration: float = 6.0
     montage_overlay_enabled: bool = False
     montage_overlay_folder: str = ""
+    montage_overlay_template: dict = field(default_factory=lambda: {
+        "version": 1, "layouts": {"16:9": [], "9:16": []},
+    })
     # The video queue is persistent: a restart never loses a prepared plan or
     # a completed MP4.  These limits are intentionally separate because
     # semantic planning, network download/cutting and FFmpeg rendering stress
@@ -523,6 +545,7 @@ class Settings:
     # Keep recent selections between runs. A re-render first tries unused
     # footage so the same topic does not turn into the same visual loop.
     montage_recent_clip_paths: list[str] = field(default_factory=list)
+    montage_stock_recent_families: list[str] = field(default_factory=list)
     # Publication is a separate persistent final-production queue.  The
     # records are plain metadata only; OAuth refresh tokens are stored by the
     # publisher in DPAPI-protected local token files, never in these lists.
@@ -753,6 +776,7 @@ class Settings:
     # only the topic, selected text and the built-in news-thumbnail rules.
     cover_use_custom_prompt: bool = False
     cover_use_script_context: bool = True
+    cover_manual_missing_only: bool = True
     cover_prompt_variant_count: int = 2
     cover_headline_provider: str = "agent"
     cover_text_mode: str = "overlay"
@@ -1098,6 +1122,33 @@ def _newsflow_auth_library_candidates() -> list[dict]:
     return candidates
 
 
+def _validate_footage_block_settings(data: dict) -> None:
+    """Reject damaged new fields before a normal save can replace their state."""
+    rows = data.get("footage_blocks", [])
+    assignments = data.get("footage_block_assignments", {})
+    if not isinstance(rows, list) or not isinstance(assignments, dict):
+        raise TypeError("Повреждены настройки блоков футажей")
+    identities, names = set(), set()
+    for row in rows:
+        if (not isinstance(row, dict)
+                or any(not isinstance(row.get(key), str) or not row[key].strip() for key in ("id", "name", "root"))
+                or isinstance(row.get("videoCount", 0), bool)
+                or not isinstance(row.get("videoCount", 0), int) or row.get("videoCount", 0) < 0):
+            raise ValueError("Повреждена запись блока футажей")
+        name = " ".join(row["name"].split()).casefold()
+        if row["id"] in identities or name in names:
+            raise ValueError("Названия и ID блоков футажей должны быть уникальны")
+        identities.add(row["id"])
+        names.add(name)
+    for identity, assignment in assignments.items():
+        if (not isinstance(identity, str) or not identity.strip() or not isinstance(assignment, dict)
+                or not isinstance(assignment.get("blockId"), str) or not assignment["blockId"].strip()
+                or assignment.get("origin") not in {"manual", "import"}):
+            raise ValueError("Повреждено назначение блока футажей")
+    if not isinstance(data.get("montage_use_footage_blocks", False), bool):
+        raise TypeError("Повреждён режим блоков футажей")
+
+
 def load_settings() -> Settings:
     path = config_path()
     try:
@@ -1110,6 +1161,10 @@ def load_settings() -> Settings:
         raise SettingsFileCorruptError(path) from error
     if not isinstance(data, dict):
         raise SettingsFileCorruptError(path)
+    try:
+        _validate_footage_block_settings(data)
+    except (TypeError, ValueError) as error:
+        raise SettingsFileCorruptError(path) from error
     try:
         try:
             stored_schema_version = max(0, int(data.get("schema_version", 0) or 0))
@@ -1196,6 +1251,9 @@ def load_settings() -> Settings:
             output_folder=migrate_standard_folder(data.get("output_folder"), "Исходники", "Сценарии"),
             idea_output_folder=migrate_standard_folder(data.get("idea_output_folder"), "Идеи", "Идеи"),
             footage_folders=data.get("footage_folders", []),
+            footage_blocks=data.get("footage_blocks", []),
+            footage_block_assignments=data.get("footage_block_assignments", {}),
+            montage_use_footage_blocks=bool(data.get("montage_use_footage_blocks", False)),
             footage_download_folder=migrate_newsflow_storage(data.get("footage_download_folder"), "Футажи из интернета"),
             cutter_output_folder=migrate_standard_folder(data.get("cutter_output_folder"), "Нарезки", "Нарезки"),
             cutter_sources=data.get("cutter_sources", []),
@@ -1219,6 +1277,16 @@ def load_settings() -> Settings:
             # would make upgraded projects silently behave differently.
             montage_auto_youtube=False,
             montage_external_only=bool(data.get("montage_external_only", False)),
+            montage_source_mode=str(data.get("montage_source_mode", "")),
+            montage_stock_sources=list(data.get("montage_stock_sources", ["wikimedia", "nasa"])),
+            montage_stock_trim=bool(data.get("montage_stock_trim", True)),
+            montage_stock_use_library=bool(data.get("montage_stock_use_library", True)),
+            montage_stock_hd_only=bool(data.get("montage_stock_hd_only", True)),
+            stock_api_keys=[StockKey(
+                provider=str(row.get("provider", "")), secret=unprotect(row.get("secret_protected", "")),
+                label=str(row.get("label", "")), active=bool(row.get("active", True)),
+                id=str(row.get("id") or uuid.uuid4().hex),
+            ) for row in data.get("stock_api_keys", []) if isinstance(row, dict)],
             montage_use_script_text=bool(data.get("montage_use_script_text", True)),
             # Core Montage policy: English/Latin on-screen text is never accepted.
             # Ignore stale legacy false values from older settings files.
@@ -1234,6 +1302,9 @@ def load_settings() -> Settings:
             montage_intro_duration=float(data.get("montage_intro_duration", 6.0)),
             montage_overlay_enabled=bool(data.get("montage_overlay_enabled", False)),
             montage_overlay_folder=data.get("montage_overlay_folder", ""),
+            montage_overlay_template=deepcopy(data.get("montage_overlay_template") or {
+                "version": 1, "layouts": {"16:9": [], "9:16": []},
+            }),
             montage_planning_workers=max(1, int(data.get("montage_planning_workers", 4))),
             montage_download_workers=max(1, int(data.get("montage_download_workers", 2))),
             montage_render_workers=max(1, int(data.get("montage_render_workers", 2))),
@@ -1241,6 +1312,7 @@ def load_settings() -> Settings:
             montage_queue_paused=bool(data.get("montage_queue_paused", False)),
             montage_task_statuses=data.get("montage_task_statuses", {}),
             montage_recent_clip_paths=data.get("montage_recent_clip_paths", []),
+            montage_stock_recent_families=data.get("montage_stock_recent_families", []),
             youtube_publication_jobs=[item for item in data.get("youtube_publication_jobs", []) if isinstance(item, dict)],
             youtube_publication_presets=[item for item in data.get("youtube_publication_presets", []) if isinstance(item, dict)],
             youtube_publication_activity=[item for item in data.get("youtube_publication_activity", []) if isinstance(item, dict)][-5000:],
@@ -1377,6 +1449,7 @@ def load_settings() -> Settings:
             cover_use_custom_prompt=bool(data.get("cover_use_custom_prompt", False)),
             cover_use_script_context=bool(data.get("cover_use_script_context", True)),
             # Up to ten visual approaches per topic; one remains a valid fast workflow.
+            cover_manual_missing_only=bool(data.get("cover_manual_missing_only", True)),
             cover_prompt_variant_count=max(1, min(10, int(data.get("cover_prompt_variant_count", 2) or 2))),
             cover_headline_provider=data.get("cover_headline_provider", "agent") if data.get("cover_headline_provider", "agent") in {"agent", "openai"} else "agent",
             cover_text_mode=data.get("cover_text_mode", "overlay") if data.get("cover_text_mode", "overlay") in {"overlay", "fastgen"} else "overlay",
@@ -1469,6 +1542,7 @@ def load_settings() -> Settings:
             settings.voice_profiles, settings.voice_ranges, settings.voice_default_profile_id,
         )
         # Memory-only baseline: an old worker must not resurrect a replaced key.
+        settings._observed_stock_keys = deepcopy(data.get("stock_api_keys", []))
         settings._observed_api_keys = {
             name: data.get(name, []) for name in _API_KEY_FIELDS
         }
@@ -1476,6 +1550,7 @@ def load_settings() -> Settings:
         settings._observed_cover_key_labels = list(settings.cover_selected_key_labels)
         _remember_montage_reuse_preferences(settings)
         settings._observed_montage_history = list(settings.montage_recent_clip_paths)
+        _remember_footage_blocks(settings)
         return settings
     except (SettingsFileCorruptError, SettingsSchemaVersionError):
         raise
@@ -1517,9 +1592,42 @@ def _merge_montage_task_statuses(persisted: object, incoming: object) -> dict[st
         if not isinstance(value, dict):
             continue
         key = str(key)
-        if key not in merged or _montage_status_order(value) >= _montage_status_order(merged[key]):
-            merged[key] = dict(value)
+        previous = merged.get(key, {})
+        newest = dict(value) if not previous or _montage_status_order(value) >= _montage_status_order(previous) else dict(previous)
+        # Operator overlays and worker progress have independent revisions.
+        # A newer heartbeat must not erase a selected-row override.
+        overlay_source = (value if int(value.get("overlayTemplateRevision", 0) or 0)
+                          > int(previous.get("overlayTemplateRevision", 0) or 0) else previous)
+        if not overlay_source.get("overlayTemplateRevision") and "overlayTemplate" not in newest:
+            overlay_source = value if "overlayTemplate" in value else previous
+        for name in ("overlayTemplate", "overlayTemplateIndividualized", "overlayTemplateRevision"):
+            if name in overlay_source:
+                newest[name] = deepcopy(overlay_source[name])
+        if (int(previous.get("overlayTemplateRevision", 0) or 0)
+                > int(value.get("overlayTemplateRevision", 0) or 0) and "overlayNeedsRender" in previous):
+            newest["overlayNeedsRender"] = previous["overlayNeedsRender"]
+        elif (int(value.get("overlayTemplateRevision", 0) or 0)
+              > int(previous.get("overlayTemplateRevision", 0) or 0) and "overlayNeedsRender" in value):
+            newest["overlayNeedsRender"] = value["overlayNeedsRender"]
+        merged[key] = newest
     return merged
+
+
+def _merge_stock_keys(persisted: list, incoming: list, observed: list | None) -> list[dict]:
+    """Three-way merge by stable row ID; stale workers cannot revive deletions."""
+    def semantic(row):
+        return (row.get("provider"), row.get("label"), row.get("active", True),
+                unprotect(row.get("secret_protected", "")))
+
+    disk = {str(row["id"]): dict(row) for row in persisted if isinstance(row, dict) and row.get("id")}
+    memory = {str(row["id"]): dict(row) for row in incoming if isinstance(row, dict) and row.get("id")}
+    baseline = {str(row["id"]): row for row in (observed or []) if isinstance(row, dict) and row.get("id")}
+    for identity in baseline.keys() - memory.keys():
+        disk.pop(identity, None)
+    for identity, row in memory.items():
+        if identity not in baseline or semantic(row) != semantic(baseline[identity]):
+            disk[identity] = row
+    return list(disk.values())
 
 
 def _api_key_record_identity(record: dict, position: int) -> str:
@@ -1540,9 +1648,13 @@ _API_KEY_FIELDS = ("cover_api_keys", "openai_api_keys", "secret_voicer_keys",
 
 
 _MONTAGE_REUSE_PREFERENCES = (
+    "montage_source_mode", "montage_stock_sources", "montage_stock_trim", "montage_stock_use_library",
+    "montage_stock_hd_only",
     "montage_fast_reuse_enabled", "montage_unique_footage_percent", "montage_fast_reuse_ranges",
     # Render/pause controls also belong to the operator, not stale progress writers.
     "montage_gpu_chunk_size", "montage_queue_paused",
+    "montage_use_footage_blocks",
+    "montage_overlay_template",
 )
 
 
@@ -1551,6 +1663,30 @@ def _remember_montage_reuse_preferences(settings: Settings) -> None:
     settings._observed_montage_reuse = {
         name: deepcopy(getattr(settings, name)) for name in _MONTAGE_REUSE_PREFERENCES
     }
+
+
+def _remember_footage_blocks(settings: Settings) -> None:
+    settings._observed_footage_blocks = deepcopy(settings.footage_blocks)
+    settings._observed_footage_block_assignments = deepcopy(settings.footage_block_assignments)
+
+
+def _merge_footage_block_records(persisted: dict, incoming: dict, observed: dict) -> dict:
+    """Apply only edited IDs; unrelated stale workers cannot revive removals."""
+    result = deepcopy(persisted)
+    for identity in observed.keys() - incoming.keys():
+        result.pop(identity, None)
+    for identity, row in incoming.items():
+        if identity in observed and row == observed[identity]:
+            continue
+        if identity in observed and identity not in persisted:
+            continue
+        # A stale imported batch does not own a newer individual manual choice.
+        disk = persisted.get(identity, {})
+        if (row.get("origin") == "import" and disk.get("origin") == "manual"
+                and disk != observed.get(identity) and row.get("blockId") != disk.get("blockId")):
+            raise ValueError("Ручное назначение блока изменилось. Обновите предпросмотр импорта.")
+        result[identity] = deepcopy(row)
+    return result
 
 
 def _merge_api_key_records(persisted: object, incoming: object, observed: object = None) -> list[dict]:
@@ -1910,6 +2046,9 @@ def save_settings(settings: Settings):
         "output_folder": settings.output_folder,
         "idea_output_folder": settings.idea_output_folder,
         "footage_folders": settings.footage_folders,
+        "footage_blocks": settings.footage_blocks,
+        "footage_block_assignments": settings.footage_block_assignments,
+        "montage_use_footage_blocks": settings.montage_use_footage_blocks,
         "footage_download_folder": settings.footage_download_folder,
         "cutter_output_folder": settings.cutter_output_folder,
         "cutter_sources": settings.cutter_sources,
@@ -1927,6 +2066,14 @@ def save_settings(settings: Settings):
         "montage_auto_web": settings.montage_auto_web,
         "montage_auto_youtube": settings.montage_auto_youtube,
         "montage_external_only": settings.montage_external_only,
+        "montage_source_mode": settings.montage_source_mode,
+        "montage_stock_sources": settings.montage_stock_sources,
+        "montage_stock_trim": settings.montage_stock_trim,
+        "montage_stock_use_library": settings.montage_stock_use_library,
+        "montage_stock_hd_only": settings.montage_stock_hd_only,
+        "stock_api_keys": [{"id": item.id, "provider": item.provider, "label": item.label,
+                            "active": item.active, "secret_protected": protect(item.secret)}
+                           for item in settings.stock_api_keys],
         "montage_use_script_text": settings.montage_use_script_text,
         "montage_exclude_english_text": settings.montage_exclude_english_text,
         "montage_scene_planner": settings.montage_scene_planner,
@@ -1939,6 +2086,7 @@ def save_settings(settings: Settings):
         "montage_intro_duration": settings.montage_intro_duration,
         "montage_overlay_enabled": settings.montage_overlay_enabled,
         "montage_overlay_folder": settings.montage_overlay_folder,
+        "montage_overlay_template": settings.montage_overlay_template,
         "montage_planning_workers": settings.montage_planning_workers,
         "montage_download_workers": settings.montage_download_workers,
         "montage_render_workers": settings.montage_render_workers,
@@ -1946,6 +2094,7 @@ def save_settings(settings: Settings):
         "montage_queue_paused": settings.montage_queue_paused,
         "montage_task_statuses": settings.montage_task_statuses,
         "montage_recent_clip_paths": settings.montage_recent_clip_paths[-3000:],
+        "montage_stock_recent_families": settings.montage_stock_recent_families[-3000:],
         "youtube_publication_jobs": settings.youtube_publication_jobs,
         "youtube_publication_presets": settings.youtube_publication_presets,
         "youtube_publication_activity": settings.youtube_publication_activity[-5000:],
@@ -2083,6 +2232,7 @@ def save_settings(settings: Settings):
         "cover_prompt_provider": settings.cover_prompt_provider,
         "cover_use_custom_prompt": settings.cover_use_custom_prompt,
         "cover_use_script_context": settings.cover_use_script_context,
+        "cover_manual_missing_only": settings.cover_manual_missing_only,
         "cover_prompt_variant_count": settings.cover_prompt_variant_count,
         "cover_headline_provider": settings.cover_headline_provider,
         "cover_text_mode": settings.cover_text_mode,
@@ -2224,6 +2374,25 @@ def save_settings(settings: Settings):
                     on_disk.get(key_name), data.get(key_name),
                     allow_empty=key_name in allowed_empty_fields,
                 )
+        data["stock_api_keys"] = _merge_stock_keys(
+            on_disk.get("stock_api_keys", []), data.get("stock_api_keys", []),
+            getattr(settings, "_observed_stock_keys", None),
+        )
+        if not replacement:
+            disk_blocks = {row["id"]: row for row in on_disk.get("footage_blocks", [])}
+            incoming_blocks = {row["id"]: row for row in settings.footage_blocks}
+            observed_blocks = {row["id"]: row for row in getattr(settings, "_observed_footage_blocks", [])}
+            data["footage_blocks"] = list(_merge_footage_block_records(
+                disk_blocks, incoming_blocks, observed_blocks,
+            ).values())
+            data["footage_block_assignments"] = _merge_footage_block_records(
+                on_disk.get("footage_block_assignments", {}), settings.footage_block_assignments,
+                getattr(settings, "_observed_footage_block_assignments", {}),
+            )
+            _validate_footage_block_settings(data)
+        data["montage_stock_recent_families"] = list(dict.fromkeys([
+            *on_disk.get("montage_stock_recent_families", []), *data["montage_stock_recent_families"],
+        ]))[-3000:]
         for key_name in _API_KEY_FIELDS:
             if replacement and replacement["field"] == key_name:
                 rows = [dict(row) for row in on_disk.get(key_name, [])]
@@ -2323,6 +2492,7 @@ def save_settings(settings: Settings):
                     # a running preparation must keep its captured parameters,
                     # and repeated progress saves must still count as unchanged.
                     _remember_montage_reuse_preferences(settings)
+                    _remember_footage_blocks(settings)
                     settings._edited_montage_reuse = set()
                     if not replacement:
                         settings._observed_montage_history = list(settings.montage_recent_clip_paths)

@@ -18,6 +18,7 @@ APP_ROOT = ROOT / "studio-ui-remotion-verify"
 REQUIRED_SOURCES = (
     "scriptor/bridge.py",
     "scriptor/ai_index.py",
+    "scriptor/onnx_clip.py",
     "scriptor/config.py",
     "scriptor/core.py",
     "scriptor/runner.py",
@@ -27,6 +28,17 @@ REQUIRED_SOURCES = (
     "scriptor/media_health.py",
     "scriptor/thumbnail_prompt_v2.py",
     "scriptor/observability.py",
+    "scriptor/footage_block_bridge.py",
+    "scriptor/footage_blocks.py",
+    "scriptor/montage_blocks.py",
+    "scriptor/montage_continuity.py",
+    "scriptor/stock_credits.py",
+    "scriptor/stock_history.py",
+    "scriptor/stock_media.py",
+    "scriptor/stock_selection.py",
+    "scriptor/stock_sources.py",
+    "scriptor/overlay_library.py",
+    "scriptor/overlays.py",
     "bridge_main.py",
     "Scriptor.spec",
 )
@@ -123,15 +135,15 @@ class CoreRuntimeGuardTests(unittest.TestCase):
         package = json.loads((APP_ROOT / "package.json").read_text(encoding="utf-8"))
 
         self.assertEqual(lock["appVersion"], package["version"])
-        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-observability-r47")
+        self.assertEqual(lock["coreRevision"], "core-bin-2.1.152-montage-r49")
         self.assertEqual(
             lock["coreExeSha256"],
-            "fd20ccf421226f9ac52540ea6fde9427a6cac6201283b641b2ff4086811e4f9b",
+            "afbd777bab19a90e6e1b3ca5f6dc2d1db4dc93545a63e90a56a8b1f63c5730ce",
         )
-        self.assertEqual(lock["coreExeSize"], 34438932)
+        self.assertEqual(lock["coreExeSize"], 21647319)
         self.assertEqual(
             lock["builtFromGitSha"],
-            "a90f18ac2661ced8c911d990b91abd7e5d5fa0a4",
+            "3c7362638b4548b4d1c567282bbcd2755642bfe3",
         )
         self.assertEqual(
             set(lock["sourceGitBlobs"]),

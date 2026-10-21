@@ -34,8 +34,8 @@ class VisualFeatureReuseTests(unittest.TestCase):
                         text[0 if query == wheat else 1 if query in alternatives else 2] = 1
                         yield text
 
-            with (patch("fastembed.ImageEmbedding", side_effect=AssertionError("image model loaded")),
-                  patch("fastembed.TextEmbedding", return_value=Text()),
+            with (patch("scriptor.onnx_clip.ImageEmbedding", side_effect=AssertionError("image model loaded")),
+                  patch("scriptor.onnx_clip.TextEmbedding", return_value=Text()),
                   patch("scriptor.media_health.inspect_video", side_effect=AssertionError("new health work")),
                   patch.object(index, "_sample_visual_window", side_effect=AssertionError("new frames")),
                   patch.object(index, "_sample_frames", side_effect=AssertionError("new screen work"))):
@@ -377,8 +377,8 @@ class VisualFeatureReuseTests(unittest.TestCase):
     def test_taxonomy_upgrade_rescores_exact_vectors_with_text_only_and_zero_cold_budget(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-vector-reuse-") as temporary:
             index, clip = self.fixture(Path(temporary))
-            with (patch("fastembed.ImageEmbedding", side_effect=AssertionError("image model constructed")),
-                  patch("fastembed.TextEmbedding", return_value=self.text_model()) as text,
+            with (patch("scriptor.onnx_clip.ImageEmbedding", side_effect=AssertionError("image model constructed")),
+                  patch("scriptor.onnx_clip.TextEmbedding", return_value=self.text_model()) as text,
                   patch.object(index, "_sample_visual_window", side_effect=AssertionError("frames decoded")),
                   index.read_session()):
                 result = index.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
@@ -401,7 +401,7 @@ class VisualFeatureReuseTests(unittest.TestCase):
             warm = ClipIndex(index.db_path)
             warm._visual_models_available = lambda: True
             warm.visual_window_budget = 0
-            with (patch("fastembed.TextEmbedding", side_effect=AssertionError("warm text construction")),
+            with (patch("scriptor.onnx_clip.TextEmbedding", side_effect=AssertionError("warm text construction")),
                   patch.object(warm, "_sample_visual_window", side_effect=AssertionError("warm decode"))):
                 again = warm.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
             self.assertEqual("sqlite", again["feature_cache"])
@@ -418,7 +418,7 @@ class VisualFeatureReuseTests(unittest.TestCase):
                 index, clip = self.fixture(Path(temporary))
                 with index._connect() as connection:
                     connection.execute(f"UPDATE visual_window_features SET {column}=?", (value,))
-                with (patch("fastembed.TextEmbedding", side_effect=AssertionError("mismatched vectors reused")),
+                with (patch("scriptor.onnx_clip.TextEmbedding", side_effect=AssertionError("mismatched vectors reused")),
                       patch.object(index, "_sample_visual_window", side_effect=AssertionError("budget bypass"))):
                     result = index.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
                 self.assertEqual("unknown", result["relation"])
@@ -430,15 +430,15 @@ class VisualFeatureReuseTests(unittest.TestCase):
             index, clip = self.fixture(Path(temporary))
             reference = index.model_cache / ("models--" + TEXT_MODEL.replace("/", "--")) / "refs" / "main"
             reference.write_text("local-revision-B", encoding="utf-8")
-            with patch("fastembed.TextEmbedding", side_effect=AssertionError("wrong revision reused")):
+            with patch("scriptor.onnx_clip.TextEmbedding", side_effect=AssertionError("wrong revision reused")):
                 result = index.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
             self.assertEqual("cold-window-budget-exhausted", result["reason"])
 
     def test_text_only_load_is_reused_by_full_models_without_relabeling_live_revision(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-vector-reuse-") as temporary:
             index, clip = self.fixture(Path(temporary))
-            with (patch("fastembed.ImageEmbedding", return_value=object()) as image,
-                  patch("fastembed.TextEmbedding", return_value=self.text_model()) as text):
+            with (patch("scriptor.onnx_clip.ImageEmbedding", return_value=object()) as image,
+                  patch("scriptor.onnx_clip.TextEmbedding", return_value=self.text_model()) as text):
                 result = index.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
                 self.assertEqual("contradiction", result["relation"])
                 self.assertEqual(0, image.call_count)
@@ -455,11 +455,11 @@ class VisualFeatureReuseTests(unittest.TestCase):
     def test_partial_text_model_cannot_be_combined_with_new_image_revision(self):
         with tempfile.TemporaryDirectory(prefix="newsflow-vector-reuse-") as temporary:
             index, clip = self.fixture(Path(temporary))
-            with patch("fastembed.TextEmbedding", return_value=self.text_model()):
+            with patch("scriptor.onnx_clip.TextEmbedding", return_value=self.text_model()):
                 index.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
             reference = index.model_cache / ("models--" + IMAGE_MODEL.replace("/", "--")) / "refs" / "main"
             reference.write_text("local-revision-B", encoding="utf-8")
-            with (patch("fastembed.ImageEmbedding", side_effect=AssertionError("revision mismatch reached image load")),
+            with (patch("scriptor.onnx_clip.ImageEmbedding", side_effect=AssertionError("revision mismatch reached image load")),
                   self.assertRaisesRegex(RuntimeError, "model-cache-changed-after-text-load")):
                 index._models(local_files_only=True)
 
@@ -474,7 +474,7 @@ class VisualFeatureReuseTests(unittest.TestCase):
                 yield from embed(queries)
 
             model.query_embed = changed
-            with patch("fastembed.TextEmbedding", return_value=model):
+            with patch("scriptor.onnx_clip.TextEmbedding", return_value=model):
                 result = index.assess_visual_window("seaport cargo cranes ships", clip, 5, 6)
             self.assertEqual("source-changed-during-assessment", result["reason"])
             with index._connect() as connection:

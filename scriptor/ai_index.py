@@ -20,6 +20,9 @@ from .footage import VIDEO_EXTENSIONS, FootageItem, tokenize
 IMAGE_MODEL = "Qdrant/clip-ViT-B-32-vision"
 TEXT_MODEL = "Qdrant/clip-ViT-B-32-text"
 EMBEDDING_DIM = 512
+_STOCK_AD_QUERY = "advertisement software title card"
+_STOCK_AD_SCORE = 0.26
+_STOCK_AD_MARGIN = 0.06
 
 # One-time semantic pass used by the Footage screen's "Улучшить ИИ-индекс"
 # action. It uses already stored CLIP vectors: no source video is decoded
@@ -148,6 +151,12 @@ _SEARCH_CORPORA_LOCK = threading.RLock()
 _VISUAL_FEATURES: OrderedDict = OrderedDict()
 _VISUAL_FEATURES_LOCK = threading.RLock()
 _VISUAL_INFLIGHT: dict[tuple, threading.Event] = {}
+
+
+@dataclass(frozen=True)
+class _PreviewFeatures:
+    mean: object
+    frames: tuple[object, ...]
 
 
 @dataclass(frozen=True)
@@ -307,6 +316,10 @@ class ClipIndex:
         self.candidate_filter: Callable[[FootageItem], bool] | None = None
         self._allowed_roots_snapshot = None
         self._resolved_allowed_roots = ()
+        self._preview_image_model = None
+        self._preview_vectors: OrderedDict[str, _PreviewFeatures] = OrderedDict()
+        self._stock_ad_text_model = None
+        self._stock_ad_vector = None
         self._screen_text_state_cache: dict[tuple[str, bool], str] = {}
         self._lock = threading.RLock()
         self.visual_window_budget = 96
@@ -591,7 +604,7 @@ class ClipIndex:
                     if shared is None or shared[0] is None:
                         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
                         os.environ.setdefault("TQDM_DISABLE", "1")
-                        from fastembed import ImageEmbedding, TextEmbedding
+                        from .onnx_clip import ImageEmbedding, TextEmbedding
                         threads = max(4, min(16, (os.cpu_count() or 8) // 2))
                         shared = (
                             ImageEmbedding(IMAGE_MODEL, cache_dir=cache, threads=threads, cuda="auto",
@@ -631,7 +644,7 @@ class ClipIndex:
             model_key = (cache, json.dumps(revision, sort_keys=True))
             shared = _SHARED_MODELS.get(model_key)
             if shared is None:
-                from fastembed import TextEmbedding
+                from .onnx_clip import TextEmbedding
                 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
                 os.environ.setdefault("TQDM_DISABLE", "1")
                 text_model = TextEmbedding(TEXT_MODEL, cache_dir=cache,
@@ -2020,16 +2033,77 @@ class ClipIndex:
     def search(self, visual_query_en: str, limit: int = 20, exclude: set[str] | None = None) -> list[SearchHit]:
         return self.search_many([visual_query_en], limit=limit, exclude=exclude)[0]
 
+    @staticmethod
+    def _preview_signature(path: Path) -> tuple[str, int, int, int] | None:
+        """Hash bytes on every preview lookup, including preserved-mtime edits."""
+        try:
+            before = path.stat()
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            after = path.stat()
+        except OSError:
+            # Hashing is optional; preserve the decoder's normal error policy.
+            return None
+        before_state = (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        after_state = (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        return (digest.hexdigest(), *after_state) if before_state == after_state else None
+
+    def _preview_features(self, path: Path, image_model) -> _PreviewFeatures:
+        """Share decoded frame vectors while keeping the original mean math."""
+        import numpy as np
+        with self._lock:
+            # Keep a strong model reference: object ids alone can be reused.
+            if self._preview_image_model is not image_model:
+                self._preview_vectors.clear()
+                self._preview_image_model = image_model
+            signature = self._preview_signature(path)
+            key = signature[0] if signature is not None else None
+            features = self._preview_vectors.get(key) if key is not None else None
+            if features is None:
+                images = self._sample_frames(path)[0]
+                image_vectors = list(image_model.embed(images, batch_size=len(images)))
+                features = _PreviewFeatures(
+                    self._normalize(np.mean(image_vectors, axis=0)),
+                    tuple(self._normalize(vector) for vector in image_vectors),
+                )
+                # A clip replaced while decoding must not poison later queries.
+                if signature is not None and self._preview_signature(path) == signature:
+                    self._preview_vectors[key] = features
+                    while len(self._preview_vectors) > 64:
+                        self._preview_vectors.popitem(last=False)
+            else:
+                self._preview_vectors.move_to_end(key)
+            return features
+
     def score_file(self, path: str | Path, visual_query_en: str) -> float:
         """Score an unindexed preview clip against the same CLIP text space."""
         import numpy as np
         image_model, text_model = self._models()
-        sampled = self._sample_frames(Path(path))
-        images = sampled[0]
-        image_vectors = list(image_model.embed(images, batch_size=len(images)))
-        clip_vector = self._normalize(np.mean(image_vectors, axis=0))
+        features = self._preview_features(Path(path), image_model)
         query_vector = self._normalize(next(iter(text_model.query_embed(visual_query_en))))
-        return float(np.dot(clip_vector, query_vector))
+        return float(np.dot(features.mean, query_vector))
+
+    def score_stock_file(self, path: str | Path, visual_query_en: str) -> float:
+        """Keep the normal score unless one frame clearly depicts an ad slate."""
+        import numpy as np
+        image_model, text_model = self._models()
+        features = self._preview_features(Path(path), image_model)
+        with _TEXT_EMBED_LOCK:
+            query_vector = self._normalize(next(iter(text_model.query_embed(visual_query_en))))
+        with self._lock:
+            if self._stock_ad_text_model is not text_model:
+                with _TEXT_EMBED_LOCK:
+                    self._stock_ad_vector = self._normalize(next(iter(text_model.query_embed(_STOCK_AD_QUERY))))
+                self._stock_ad_text_model = text_model
+            ad_vector = self._stock_ad_vector
+        for frame in features.frames:
+            scene_score = float(np.dot(frame, query_vector))
+            ad_score = float(np.dot(frame, ad_vector))
+            if ad_score >= _STOCK_AD_SCORE and ad_score >= scene_score + _STOCK_AD_MARGIN:
+                return -1.0
+        return float(np.dot(features.mean, query_vector))
 
     def mark_used(self, paths: Iterable[str]):
         now = time.time()

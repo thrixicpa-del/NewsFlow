@@ -105,4 +105,3 @@ class IndependentPoliticalReviewTests(unittest.TestCase):
               patch.object(bridge, '_replacement_candidates_for_clip', return_value=[bad]),
               self.assertRaises(ValueError)):
             bridge._complete_project_visual_tail(project, None, Settings())
-

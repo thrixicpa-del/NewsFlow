@@ -34,6 +34,7 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "save-browser-topic-scenario-settings": CommandRegistration(
         "save_browser_topic_scenario_settings", "scriptor.browser_topic_scenarios", _NO_LEGACY,
     ),
+    "cancel-browser-topic-scenarios": CommandRegistration("cancel_browser_topic_scenarios", "scriptor.bridge browser queue cancellation", _NO_LEGACY),
     "generate-browser-topic-scenarios": CommandRegistration(
         "generate_browser_topic_scenarios", "scriptor.browser_topic_scenarios", _NO_LEGACY,
     ),
@@ -61,7 +62,15 @@ COMMAND_CONTRACT: dict[str, CommandRegistration] = {
     "save-cover-manual-prompt": CommandRegistration(
         "save_cover_manual_prompt", "scriptor.bridge manual cover-prompt editor", _NO_LEGACY,
     ),
+    "save-footage-block": CommandRegistration("save_footage_block", "scriptor.footage_block_bridge", _NO_LEGACY),
+    "delete-footage-block": CommandRegistration("delete_footage_block", "scriptor.footage_block_bridge", _NO_LEGACY),
+    "preview-footage-block-import": CommandRegistration("preview_footage_block_import", "scriptor.footage_block_bridge", _NO_LEGACY),
+    "import-footage-block-pairs": CommandRegistration("import_footage_block_pairs", "scriptor.footage_block_bridge", _NO_LEGACY),
+    "assign-footage-block": CommandRegistration("assign_footage_block", "scriptor.footage_block_bridge", _NO_LEGACY),
     "run-montage-queue": CommandRegistration("run_montage_queue", "scriptor.timeline canonical montage path", _NO_LEGACY),
+    "save-montage-stock-keys": CommandRegistration(
+        "save_montage_stock_keys", "scriptor.bridge montage stock credentials", _NO_LEGACY,
+    ),
     "run-proxy-cache-warmup": CommandRegistration(
         "warm_proxy_cache", "scriptor.timeline source-proxy warm-up", _NO_LEGACY,
     ),

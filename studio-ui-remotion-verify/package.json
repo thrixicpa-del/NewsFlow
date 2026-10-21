@@ -50,7 +50,7 @@
     "tailwind-merge": "^3.6.0",
     "typescript": "7.0.2",
     "unzipper": "0.12.5",
-    "vite": "8.2.2"
+    "vite": "8.2.4"
   },
   "devDependencies": {
     "@storybook/react-vite": "10.4.0",
@@ -72,18 +72,46 @@
   "build": {
     "appId": "ru.newsflow.studio",
     "productName": "NewsFlow Studio",
-    "directories": { "output": "release-staging" },
+    "directories": {
+      "output": "release-staging"
+    },
     "npmRebuild": false,
-    "files": ["dist/**/*", "dist-electron/**/*", "remotion/**/*", "remotion-bundle/**/*", "package.json"],
-    "asarUnpack": ["remotion/render.mjs", "remotion-bundle/**/*"],
-    "extraResources": [
-      { "from": "../scriptor", "to": "core/scriptor" },
-      { "from": "D:/NewsFlow-RC/core-bin-2.1.152-observability-r47/NewsFlowCore", "to": "core-bin" },
-      { "from": "D:/NewsFlow-RC/core-bin-2.1.152-observability-r47/NewsFlowCore/_internal/_tcl_data", "to": "core-tcl-data" },
-      { "from": "node_modules/.pnpm/@remotion+compositor-win32-x64-msvc@4.0.515/node_modules/@remotion/compositor-win32-x64-msvc", "to": "remotion-binaries" }
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "remotion/**/*",
+      "remotion-bundle/**/*",
+      "package.json"
     ],
-    "win": { "target": "portable", "icon": "../assets/scriptor.ico" }
+    "asarUnpack": [
+      "remotion/render.mjs",
+      "remotion-bundle/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../scriptor",
+        "to": "core/scriptor"
+      },
+      {
+        "from": "../core-bin-2.1.152-montage-r49/NewsFlowCore",
+        "to": "core-bin"
+      },
+      {
+        "from": "../core-bin-2.1.152-montage-r49/NewsFlowCore/_internal/_tcl_data",
+        "to": "core-tcl-data"
+      },
+      {
+        "from": "node_modules/.pnpm/@remotion+compositor-win32-x64-msvc@4.0.515/node_modules/@remotion/compositor-win32-x64-msvc",
+        "to": "remotion-binaries"
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "../assets/scriptor.ico"
+    }
   },
   "packageManager": "pnpm@11.19.0",
-  "engines": { "node": ">=24.19.0 <25" }
+  "engines": {
+    "node": ">=24.19.0 <25"
+  }
 }

@@ -7,11 +7,13 @@ uses API keys or an arbitrary URL supplied by a queued topic.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Self
 from urllib.parse import urlparse
 
+from .chatgpt_documents import UPLOAD_EVIDENCE, read_requirements, requirement_paths
 from .claude import chrome_path
 from .config import ChromeSession
 
@@ -54,9 +56,13 @@ class ChatGPTBrowserClient:
     manual login first; automation never reads, exports or copies credentials.
     """
 
-    def __init__(self, session: ChromeSession, *, timeout_seconds: int = 900):
+    def __init__(self, session: ChromeSession, *, timeout_seconds: int | None = None):
         self.session = session
-        self.timeout_seconds = max(60, int(timeout_seconds))
+        self.timeout_seconds = None if timeout_seconds is None else max(0.1, float(timeout_seconds))
+        self.is_cancelled = lambda: False
+        self.on_status = lambda _task, _message: None
+        self._pending_pages = {}
+        self._page_tasks = {}
         self._playwright = None
         self._context = None
 
@@ -83,10 +89,18 @@ class ChatGPTBrowserClient:
             self._raise_browser_error(exc)
         return self
 
-    async def __aexit__(self, *_args) -> None:
+    async def __aexit__(self, *args) -> None:
+        if args and args[0] in {asyncio.CancelledError, KeyboardInterrupt}:
+            self.is_cancelled = lambda: True
         await self._close()
 
     async def _close(self) -> None:
+        # Unacknowledged downloaded results stay visible until persistence or
+        # explicit cancellation. Ordinary batch teardown must not discard them.
+        while self._pending_pages and not self.is_cancelled():
+            self._pending_pages = {key: page for key, page in self._pending_pages.items() if not page.is_closed()}
+            if self._pending_pages:
+                await asyncio.sleep(0.5)
         if self._context is not None:
             try:
                 await self._context.close()
@@ -116,12 +130,14 @@ class ChatGPTBrowserClient:
         ) from error
 
     async def generate(self, *, project_url: str, message: str,
-                       requirements_file: str, task) -> str:
+                       requirements_file: str | list[str] = "", task=None, requirements_files: list[str] | None = None) -> str:
         """Send one task in its own confirmed fresh chat and return only its new turn."""
-        del task  # identity is used by the queue, never inserted as hidden prose.
+        self._check_cancelled()
         if self._context is None:
             raise ChatGPTBrowserError("Сессия ChatGPT не запущена")
         page = await self._context.new_page()
+        identity = str(getattr(task, "production_item_id", "") or id(page))
+        self._page_tasks[id(page)] = task
         try:
             await page.goto(
                 validate_chatgpt_project_url(project_url),
@@ -136,38 +152,118 @@ class ChatGPTBrowserClient:
                     "войдите вручную и закройте окно Chrome."
                 )
             assistant_count = await page.locator(_ASSISTANT_SELECTOR).count()
-            if requirements_file:
-                await self._attach_requirements_file(page, requirements_file)
+            await editor.click()
+            await editor.fill(message)
+            paths = requirement_paths(requirements_files if requirements_files is not None else (requirements_file if isinstance(requirements_file, list) else None), requirements_file if isinstance(requirements_file, str) else "")
+            if paths:
+                documents = await self._attach_requirements_files(page, paths)
+            else:
+                documents = []
             # Bind any later download to a control created after this exact
             # submission.  A stale attachment elsewhere in the page must never
             # become this ProductionItem's scenario.
             download_count = await page.locator(_DOWNLOAD_BUTTON_SELECTOR).count()
-            await editor.click()
-            await editor.fill(message)
-            await self._submit_message(page, editor)
+            # Do not overwrite text pasted by the operator during upload repair.
+            while True:
+                self._check_cancelled()
+                if paths and len((await self._document_evidence(page, documents))["ready"]) != len(documents):
+                    self._report_status(task, "Документы ещё не подтверждены; отправка заблокирована")
+                    await page.wait_for_timeout(500)
+                    continue
+                async def before_send():
+                    self._check_cancelled()
+                    if paths and len((await self._document_evidence(page, documents))["ready"]) != len(documents):
+                        raise ChatGPTBrowserError("Документы не подтверждены; отправка заблокирована")
+                try:
+                    await self._submit_message(page, editor, allow_enter=not paths, before_send=before_send)
+                    break
+                except ChatGPTBrowserError:
+                    if self.timeout_seconds is not None:
+                        raise
+                    self._report_status(task, "Ожидается доступная кнопка отправки; документы не отправлены")
+                    await page.wait_for_timeout(500)
             # The contract requires an actual downloadable TXT, not merely a
             # filename or a prose caption in the assistant turn.
             # Local to this tab: concurrent tasks must never share a response
             # locator or fall back to another turn's/user's attachment.
             ready_response = []
+            self._report_status(task, "ChatGPT готовит сценарий; ожидается новое готовое TXT-вложение")
             await self._wait_for_answer(
                 page,
                 baseline_count=assistant_count,
                 download_baseline_count=download_count,
                 on_response=ready_response.append,
             )
-            return await self._download_txt_attachment(
-                page, response=ready_response[0],
-            )
+            download_error = None
+            for attempt in range(3):
+                self._check_cancelled()
+                try:
+                    text = await self._download_txt_attachment(page, response=ready_response[0])
+                    break
+                except ChatGPTBrowserError as error:
+                    retryable = any(word in str(error) for word in ("скачать", "прочитать", "путь"))
+                    if download_error is not None and "не прикрепил новое TXT" in str(error):
+                        # A failed navigation can replace the original DOM.
+                        # Keep the real download failure, never send again.
+                        raise download_error from error
+                    if not retryable or attempt == 2:
+                        raise
+                    download_error = error
+                    self._report_status(task, f"Файл создан; повтор скачивания {attempt + 2}/3 без повторной генерации")
+                    await page.wait_for_timeout(500)
+            self._pending_pages[identity] = page
+            self._report_status(task, "Сценарий скачан; сохраняем TXT и привязку темы")
+            return text
         except ChatGPTBrowserError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize Playwright transport failures for the UI.
             self._raise_browser_error(exc)
         finally:
-            try:
+            # A created but undownloadable file is an explicit owner-approved
+            # terminal failure: close that tab and let subsequent topics run.
+            if identity not in self._pending_pages:
+                try:
+                    await page.close()
+                except Exception:  # noqa: BLE001,S110 - a user can close their tab.
+                    pass
+                self._page_tasks.pop(id(page), None)
+
+    def _report_status(self, task, message: str) -> None:
+        try:
+            self.on_status(task, message)
+        except (OSError, RuntimeError, ValueError) as error:
+            logging.getLogger(__name__).warning("Статус ChatGPT не сохранён (%s); вкладка остаётся открытой", type(error).__name__)
+
+    def _check_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise ChatGPTBrowserError("Генерация отменена пользователем")
+
+    async def finish_task(self, task, save) -> None:
+        identity = str(task.production_item_id)
+        page = self._pending_pages.get(identity)
+        if page is None:
+            return
+        try:
+            while True:
+                self._check_cancelled()
+                try:
+                    saved = save()
+                except Exception as exc:  # noqa: BLE001 - preserve the downloaded answer on storage errors.
+                    self._report_status(task, f"Не удалось сохранить сценарий; вкладка сохранена: {exc}")
+                    saved = False
+                if saved is not False:
+                    await page.close()
+                    return
+                self._report_status(task, "Не удалось сохранить сценарий; устраните ошибку хранения или отмените задачу")
+                if page.is_closed():
+                    raise ChatGPTBrowserError("Вкладка закрыта пользователем до сохранения сценария")
+                await page.wait_for_timeout(500)
+        finally:
+            if self.is_cancelled() or page.is_closed():
+                self._pending_pages.pop(identity, None)
+                self._page_tasks.pop(id(page), None)
+            if self.is_cancelled() and not page.is_closed():
                 await page.close()
-            except Exception:  # noqa: BLE001,S110 - the tab may already be closed by Chromium.
-                pass
 
     @staticmethod
     async def _start_new_chat(page) -> None:
@@ -220,7 +316,7 @@ class ChatGPTBrowserClient:
         return None
 
     @staticmethod
-    async def _submit_message(page, editor=None) -> None:
+    async def _submit_message(page, editor=None, *, allow_enter: bool = True, before_send=None) -> None:
         """Use ChatGPT's explicit send control before falling back to Enter.
 
         A contenteditable composer can treat Enter as a newline under a user
@@ -247,8 +343,12 @@ class ChatGPTBrowserClient:
                     visible = await button.is_visible()
                     saw_explicit_control = saw_explicit_control or visible
                     if visible and await button.is_enabled():
+                        if before_send is not None:
+                            await before_send()
                         await button.click()
                         return
+                except ChatGPTBrowserError:
+                    raise
                 except Exception:  # noqa: BLE001,S112 - cross-version selector fallback.
                     continue
             try:
@@ -259,26 +359,75 @@ class ChatGPTBrowserClient:
             raise ChatGPTBrowserError(
                 "Кнопка отправки ChatGPT осталась недоступна; файл требований мог не успеть загрузиться"
             )
-        if editor is None:
+        if editor is None or not allow_enter:
             raise ChatGPTBrowserError("ChatGPT не показал доступную кнопку отправки")
         try:
+            if before_send is not None:
+                await before_send()
             await editor.press("Enter")
         except Exception as exc:
             raise ChatGPTBrowserError("Не удалось отправить сообщение в ChatGPT") from exc
 
-    @staticmethod
-    async def _attach_requirements_file(page, requirements_file: str) -> None:
-        source = Path(requirements_file)
-        if not source.is_file():
-            raise ChatGPTBrowserError("Файл требований не найден. Выберите его заново.")
-        inputs = page.locator("input[type='file']")
-        try:
-            await inputs.first.wait_for(state="attached", timeout=5_000)
-            await inputs.first.set_input_files(str(source))
-        except Exception as exc:
-            raise ChatGPTBrowserError(
-                "ChatGPT не показал поле прикрепления файла. Откройте новый чат и повторите запуск."
-            ) from exc
+    async def _attach_requirements_file(self, page, requirements_file: str) -> None:
+        await self._attach_requirements_files(page, [requirements_file])
+
+    async def _document_evidence(self, page, documents):
+        return await page.evaluate(UPLOAD_EVIDENCE, [{"name": d["name"], "text": d["text"], "baselineOccurrences": d.get("baselineOccurrences", 0)} for d in documents])
+
+    async def _attach_requirements_files(self, page, paths: list[str]) -> list[dict]:
+        import hashlib
+
+        documents = read_requirements(paths)
+        baseline = await page.evaluate(r"""texts => {
+          const editor = document.querySelector('#prompt-textarea,textarea[data-id="root"],div[contenteditable="true"][data-testid*="composer"],textarea,div[contenteditable="true"]');
+          const typed = (editor?.value ?? editor?.innerText ?? '').replace(/\r\n?/g,'\n');
+          return texts.map(text => typed.split(text).length-1);
+        }""", [document["text"] for document in documents])
+        for document, occurrences in zip(documents, baseline, strict=True):
+            document["baselineOccurrences"] = occurrences
+        original_names = [d["name"] for d in documents]
+        for index, document in enumerate(documents):
+            if original_names.count(document["name"]) > 1:
+                digest = hashlib.sha256(document["data"]).hexdigest()[:12]
+                alias = f"{index + 1:03d}-{digest}-{document['name']}"
+                while alias in original_names:
+                    alias = "doc-" + alias
+                document["name"] = alias
+        attempts = {document["name"]: 0 for document in documents}
+        next_attempt = 0.0
+        while True:
+            self._check_cancelled()
+            if page.is_closed():
+                raise ChatGPTBrowserError("Вкладка закрыта пользователем до отправки документов")
+            evidence = await self._document_evidence(page, documents)
+            if len(evidence["ready"]) == len(documents):
+                return documents
+            self._report_status(self._page_tasks.get(id(page)), "Требуется прикрепить документы: загрузка не подтверждена. Прикрепите файлы или вставьте их полный текст вручную; отправка заблокирована")
+            now = asyncio.get_running_loop().time()
+            pending = [d for d in documents if d["name"] not in evidence["ready"] and attempts[d["name"]] < 2]
+            inputs = page.locator("input[type='file']")
+            if pending and now >= next_attempt and await inputs.count():
+                retry_documents = []
+                for document in pending:
+                    name = document["name"]
+                    if name in evidence["failed"]:
+                        card = page.locator('[data-state="error"],[data-state="failed"]').filter(has_text=name)
+                        remove = card.locator('button[aria-label*="Remove"],button[aria-label*="Удалить"],button[aria-label*="Убрать"]')
+                        if await remove.count() != 1:
+                            continue  # do not fake success by deleting DOM nodes
+                        await remove.click()
+                    retry_documents.append(document)
+                if retry_documents:
+                    for document in retry_documents:
+                        attempts[document["name"]] += 1
+                    try:
+                        # Freeze the selected bytes; later filesystem edits
+                        # cannot silently change a submitted requirement.
+                        await inputs.first.set_input_files([{"name": d["name"], "mimeType": "text/plain", "buffer": d["data"]} for d in retry_documents], timeout=5_000)
+                    except Exception:  # noqa: BLE001 - manual repair must remain available.
+                        self._report_status(self._page_tasks.get(id(page)), "Ошибка загрузки документов; прикрепите их вручную. Отправка не выполнена")
+                    next_attempt = now + 30.0
+            await page.wait_for_timeout(500)
 
     @staticmethod
     async def _download_txt_attachment(page, *, baseline_count: int = 0,
@@ -337,11 +486,14 @@ class ChatGPTBrowserClient:
         download_baseline_count: int | None = None,
         on_response: Callable | None = None,
     ) -> str:
-        deadline = asyncio.get_running_loop().time() + self.timeout_seconds
+        deadline = None if self.timeout_seconds is None else asyncio.get_running_loop().time() + self.timeout_seconds
         previous = ""
         stable_since = 0.0
         answers = page.locator(_ASSISTANT_SELECTOR)
-        while asyncio.get_running_loop().time() < deadline:
+        while deadline is None or asyncio.get_running_loop().time() < deadline:
+            self._check_cancelled()
+            if hasattr(page, "is_closed") and page.is_closed():
+                raise ChatGPTBrowserError("Вкладка закрыта пользователем")
             current = ""
             has_new_turn = False
             try:
@@ -356,11 +508,13 @@ class ChatGPTBrowserClient:
                 has_new_turn = False
             attachment_ready = False
             turn_complete = False
+            turn_state = ""
             if has_new_turn:
                 try:
-                    turn_complete = await response.locator(
+                    turn_state = await response.locator(
                         "xpath=ancestor-or-self::*[@data-talvt-turn-state][1]"
-                    ).get_attribute("data-talvt-turn-state", timeout=250) == "complete"
+                    ).get_attribute("data-talvt-turn-state", timeout=250)
+                    turn_complete = turn_state == "complete"
                 except Exception:  # noqa: BLE001,S110 - legacy layouts have no completion marker.
                     pass
             if has_new_turn and download_baseline_count is not None:
@@ -384,11 +538,12 @@ class ChatGPTBrowserClient:
                     stop_visible = stop_visible or await page.locator(selector).is_visible(timeout=250)
                 except Exception:  # noqa: BLE001,S110 - selector is optional across ChatGPT UI versions.
                     pass
-            if (attachment_ready or turn_complete) and not stop_visible:
+            file_mode = download_baseline_count is not None
+            if (attachment_ready or (turn_complete and not file_mode)) and not stop_visible and turn_state not in {"in_progress", "streaming", "running"}:
                 if on_response is not None:
                     on_response(response)
                 return current
-            if current.strip() and not stop_visible and stable_since and now - stable_since >= 4.0:
+            if not file_mode and current.strip() and not stop_visible and stable_since and now - stable_since >= 4.0:
                 if on_response is not None:
                     on_response(response)
                 return current.replace("\r\n", "\n").replace("\r", "\n")

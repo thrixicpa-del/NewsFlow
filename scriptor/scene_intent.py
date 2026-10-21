@@ -323,6 +323,10 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
                           and re.search(r"несмотря|продолж\w*|начал\w*|произош\w*", lowered))
     rail = (term_matches("поезд", lowered) or term_matches("железнодорож", lowered)
             or bool(re.search(r"\bжелезн\w*\s+дорог\w*|\bвагон(?:ы|а|ов|ами|ах|е|у|ом)?\b", lowered)))
+    aviation = bool(re.search(
+        r"\b(?:самол\w*|аэропорт\w*|аэродром\w*|авиадиспетчер\w*)"
+        r"|\bвоздушн\w*\s+(?:судн\w*|движен\w*)"
+        r"|\bдиспетчерск\w*\s+(?:башн\w*|вышк\w*)", lowered))
     military_naval = bool(re.search(
         r"\bвоенн\w*\s+(?:корабл\w*|судн\w*|флот\w*)|\bпатрульн\w*\s+(?:катер\w*|корабл\w*)"
         r"|\bвм[сф]\b|\bвоенно[-\s]морск\w*", lowered,
@@ -331,7 +335,7 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
     # and exclude a local judicial predicate, rather than matching by suffix.
     ambiguous_vessel = any(
         re.search(r"\bсуд(?:а|ов|ами|ах)\b", clause)
-        and re.search(r"морск\w*|судоход\w*|канал\w*|терминал\w*|порт\w*|грузов\w*|товар\w*|достав\w*|загруж\w*|загруз\w*", clause)
+        and re.search(r"мор(?:е|я|ск\w*)|груз\w*|судоход\w*|канал\w*|терминал\w*|порт\w*|грузов\w*|товар\w*|достав\w*|загруж\w*|загруз\w*", clause)
         and not re.search(
             r"\b(?:апелляц\w*|постановлен\w*|судебн\w*|иск(?:а|и|ов|ами)?|дел[аоу])\b"
             r"|\bрешени\w*(?:\s+\w+){0,2}\s+суд(?:а|ов|ами|ах)\b"
@@ -346,6 +350,7 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
                     or re.search(r"морск\w*\s+логист\w*", lowered)
                     or (re.search(r"\bрек(?:а|е|у|ой|и)\b", lowered)
                         and re.search(r"\b(?:груз\w*|товар\w*|продукци\w*)", lowered)))
+    shipping = shipping and not aviation
     logistics_routes = bool(re.search(r"\bмаршрут\w*", lowered)
                             and re.search(r"логист\w*|альтернатив\w*|перевоз\w*|достав\w*", lowered))
     grain = bool(re.search(r"\b(?:зерн\w*|пшениц\w*|кукуруз\w*)", lowered))
@@ -381,12 +386,18 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
             continue
         if named_people(stem):
             continue
-        if military_naval and stem in {"кораб", "военн"}:
+        if military_naval and stem in {"кораб", "судн", "военн"}:
             continue
+        if aviation and stem == "судн":
+            english = "aircraft flight"
+        if aviation and stem == "военн" and not re.search(r"\b(?:танк|брон|солдат|пехот|назем|машин)\w*", lowered):
+            continue
+        if aviation and stem == "самол" and re.search(r"\bвоенн\w*\s+самол\w*", lowered):
+            english = "military aircraft airbase flight"
         if stem == "кораб":
             english = "commercial cargo ship maritime navigation shipping vessel"
         if stem == "склад":
-            if not re.search(r"\bсклад(?:ы|а|е|у|ом|ов|ам|ами|ах)?\b", lowered):
+            if not re.search(r"\bсклад(?:ы|а|е|у|ом|ов|ам|ами|ах|ск\w*)?\b", lowered):
                 continue
             # Storage is a physical object; fire/emergency requires its own
             # narrated event rather than the legacy dictionary's association.
@@ -459,6 +470,14 @@ def visual_intent(text: str, associations: dict[str, str], *, previous: dict | N
         terms.append("diplomatic negotiations delegations statements ceasefire")
     if rail:
         terms.append("rail freight train grain transport cargo logistics")
+    if aviation:
+        if re.search(r"\bтерминал\w*\s+(?:(?:совсем|полностью)\s+)?опустел\w*\b", lowered):
+            terms = [term for term in terms if not re.search(r"aircraft|airfield|airport|runway", term)]
+            terms.append("empty airport terminal")
+        elif not any("aircraft" in term for term in terms):
+            terms.append("aircraft flight")
+    if "диспетч" in lowered:
+        terms.append("air traffic control tower operators" if aviation else "operations control room operators")
     if military_naval:
         terms.append("military naval warship patrol vessel navy")
     elif shipping:

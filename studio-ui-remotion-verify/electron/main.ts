@@ -8,7 +8,7 @@ import { ensureTclRuntime } from './core-runtime.js';
 import { environmentWindowTitle, isolatedElectronUserDataRoot } from './test-user-data.js';
 import { ALLOWED_CORE_COMMANDS } from './allowed-core-commands.js';
 import { readReadyScenarioFiles } from './scenario-import.js';
-import { readStrictUtf8CoverText } from './strict-text-file.js';
+import { readStrictUtf8CoverText, readStrictUtf8FootageBlockText } from './strict-text-file.js';
 
 const isolatedUserDataRoot = isolatedElectronUserDataRoot(process.env);
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
@@ -499,6 +499,13 @@ handleTrusted('newsflow:choose-browser-scenario-requirements', async () => {
   });
   return result.canceled ? '' : result.filePaths[0] || '';
 });
+handleTrusted('newsflow:choose-browser-scenario-requirements-files', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Требования TXT / Markdown', extensions: ['txt', 'md', 'markdown'] }],
+  });
+  return result.canceled ? [] : result.filePaths;
+});
 handleTrusted('newsflow:choose-cover-text-triples', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
@@ -514,6 +521,14 @@ handleTrusted('newsflow:choose-cover-prompt-pairs', async () => {
   });
   const file = result.canceled ? '' : result.filePaths[0] || '';
   return file ? readStrictUtf8CoverText(file) : '';
+});
+handleTrusted('newsflow:choose-footage-block-pairs', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile'],
+    filters: [{ name: 'Тема — блок футажей TXT', extensions: ['txt'] }],
+  });
+  const file = result.canceled ? '' : result.filePaths[0] || '';
+  return file ? readStrictUtf8FootageBlockText(file) : '';
 });
 handleTrusted('newsflow:choose-scenario-texts', async () => {
   const result = await dialog.showOpenDialog({

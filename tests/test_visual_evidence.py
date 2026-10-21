@@ -440,7 +440,7 @@ class VisualWindowTests(unittest.TestCase):
             root = Path(temporary)
             self.write_model_refs(root, "revision-A")
             first = ClipIndex(root / "index.sqlite3")
-            with patch("fastembed.ImageEmbedding", side_effect=[object(), object()]) as image, patch("fastembed.TextEmbedding", side_effect=[object(), object()]) as text:
+            with patch("scriptor.onnx_clip.ImageEmbedding", side_effect=[object(), object()]) as image, patch("scriptor.onnx_clip.TextEmbedding", side_effect=[object(), object()]) as text:
                 old_models = first._models(local_files_only=True)
                 self.write_model_refs(root, "revision-B")
                 second = ClipIndex(root / "index.sqlite3")
