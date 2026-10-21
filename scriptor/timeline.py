@@ -728,7 +728,18 @@ def _writable_render_folder(folder: Path, minimum_free_bytes: int = 512 * 1024 *
 
 def render_workspace_root() -> Path:
     """Store all disposable montage files on D: by default, not on C:/Temp."""
-    preferred = Path(os.environ.get("NEWSFLOW_RENDER_TEMP_ROOT", r"D:\NewsFlow Studio\Временный рендер"))
+    override = os.environ.get("NEWSFLOW_RENDER_TEMP_ROOT")
+    if override:
+        preferred = Path(override)
+    elif os.environ.get("NEWSFLOW_TEST_MODE") == "1" and os.environ.get("NEWSFLOW_TEST_ROOT"):
+        # Actual FFmpeg smoke must be isolated on every OS. A Windows drive
+        # literal on POSIX looks like a relative filename with an invalid
+        # protocol to FFmpeg and escapes the disposable test profile.
+        preferred = Path(os.environ["NEWSFLOW_TEST_ROOT"]) / "RenderWork"
+    elif sys.platform == "win32":
+        preferred = Path(r"D:\NewsFlow Studio\Временный рендер")
+    else:
+        preferred = Path(tempfile.gettempdir()) / "NewsFlow" / "Временный рендер"
     try:
         return _writable_render_folder(preferred)
     except OSError:
