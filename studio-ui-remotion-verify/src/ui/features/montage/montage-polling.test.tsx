@@ -1,6 +1,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor, fallback } from "../../App";
+import { unsettledMontageLaunches } from "./montage-polling";
 
 afterEach(() => {
   cleanup();
@@ -71,5 +72,43 @@ describe("Montage result polling", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe("Launched montage result handshake", () => {
+  it("does not accept an old terminal result for a newly launched rerender", () => {
+    const pending = [{ index: 0, previousUpdatedAt: "old" }];
+    expect(unsettledMontageLaunches(pending, [
+      { index: 0, status: "Готово", updatedAt: "old" },
+    ])).toEqual(pending);
+    expect(unsettledMontageLaunches(pending, [
+      { index: 0, status: "Планирование сцен", updatedAt: "new" },
+    ])).toEqual(pending);
+    expect(unsettledMontageLaunches(pending, [
+      { index: 0, status: "Готово", updatedAt: "new" },
+    ])).toEqual([]);
+  });
+
+  it("stops only at a new terminal snapshot, including error and user pause", () => {
+    const pending = [{ index: 0, previousUpdatedAt: "old" }];
+    for (const status of ["Готово", "Ошибка", "Пауза"]) {
+      expect(unsettledMontageLaunches(pending, [
+        { index: 0, status, updatedAt: "new" },
+      ])).toEqual([]);
+    }
+    expect(unsettledMontageLaunches(pending, [
+      { index: 1, status: "Готово", updatedAt: "new" },
+    ])).toEqual(pending);
+  });
+
+  it("does not keep polling a completed task while another selected task is active", () => {
+    const pending = [
+      { index: 0, previousUpdatedAt: "old0" },
+      { index: 1, previousUpdatedAt: "old1" },
+    ];
+    expect(unsettledMontageLaunches(pending, [
+      { index: 0, status: "Готово", updatedAt: "new0" },
+      { index: 1, status: "Рендер", updatedAt: "new1" },
+    ])).toEqual(pending.slice(1));
   });
 });
