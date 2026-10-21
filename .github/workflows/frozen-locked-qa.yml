@@ -25,13 +25,21 @@ jobs:
         with: { node-version: '24.19.0' }
       - uses: actions/setup-python@v6
         with: { python-version: '3.12' }
-      - name: Restore exact independently built Frozen Core binary
-        uses: actions/download-artifact@v4
-        with:
-          name: newsflow-frozen-source-qa
-          run-id: 39575622177
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: core-bin-2.1.152-security-r48
+      - name: Restore immutable Frozen r48 from internal draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $temp = Join-Path $env:RUNNER_TEMP 'newsflow-core-verified-download'
+          New-Item -ItemType Directory -Path $temp -Force | Out-Null
+          & gh release download internal-core-2.1.152-r48 --repo $env:GITHUB_REPOSITORY --pattern 'newsflow-core-2.1.152-r48.zip' --dir $temp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archive = Join-Path $temp 'newsflow-core-2.1.152-r48.zip'
+          if (!(Test-Path -LiteralPath $archive -PathType Leaf)) { throw 'Pinned Frozen Core archive unavailable' }
+          Expand-Archive -LiteralPath $archive -DestinationPath 'core-bin-2.1.152-security-r48' -Force
+          if (!(Test-Path -LiteralPath 'core-bin-2.1.152-security-r48/NewsFlowCore/NewsFlowCore.exe' -PathType Leaf)) {
+            throw 'Pinned Frozen Core executable absent after archive expansion'
+          }
       - name: Verify exact binary SHA, source hashes and FFmpeg
         run: node scripts/verify-core-runtime.mjs
         working-directory: studio-ui-remotion-verify
