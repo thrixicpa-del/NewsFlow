@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import imageio_ffmpeg
 import numpy as np
 
 from scriptor import timeline
@@ -110,6 +111,25 @@ class GpuTimelineTimingTests(unittest.TestCase):
         audio = np.frombuffer(raw, dtype="<f4")
         self.assertGreaterEqual(len(audio), 48000)
         self.assertGreater(float(np.sqrt(np.mean(audio[47000:47900] ** 2))), .04)
+
+
+class BundledFfmpegGpuTimelineTimingTests(GpuTimelineTimingTests):
+    """Exercise the locked FFmpeg runtime as well as the production resolver.
+
+    System FFmpeg 6 can preserve concat timing that FFmpeg 7 changes unless the
+    output frame rate is explicit. Keep the same decoded-frame/audio assertions.
+    """
+
+    def setUp(self):
+        with patch.dict(os.environ, {"IMAGEIO_FFMPEG_EXE": ""}):
+            bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        package = Path(imageio_ffmpeg.__file__).resolve().parent
+        self.assertTrue(Path(bundled_ffmpeg).resolve().is_relative_to(package),
+                        "the locked imageio-ffmpeg bundled runtime is required")
+        executable = patch.object(timeline, "ffmpeg_executable", return_value=bundled_ffmpeg)
+        executable.start()
+        self.addCleanup(executable.stop)
+        super().setUp()
 
 
 class RemotionTimingContractTests(unittest.TestCase):

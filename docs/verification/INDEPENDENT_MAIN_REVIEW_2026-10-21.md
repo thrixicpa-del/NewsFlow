@@ -58,6 +58,17 @@ GPU command builder запрашивал `duration + 1/30 + 0.002` для каж
 Независимая дополнительная матрица из 125 комбинаций FPS, source_start и
 длительности также дала ожидаемое число декодированных кадров.
 
+**Дополнение по настоящему Windows CI:** первый запуск новых регрессий
+обнаружил отличие FFmpeg: на границах chunks терялся кадр или нарушался PTS.
+Это не списано на тестовую среду. Независимое воспроизведение на imageio
+FFmpeg 7.0.2 показало, что после concat автоматический output fps становился
+25 вместо 30; при chunks 1 и 3 получалось соответственно 48 и 47 кадров.
+В command builder явно заданы `-r 30 -fps_mode cfr`. На FFmpeg 6.1.1 и
+7.0.2 реальные кадры, PTS, цвета и аудио проходят прежние строгие проверки;
+для дробного примера снова получается 54 кадра / 1.8 секунды. В постоянный
+набор добавлен отдельный прогон с bundled imageio runtime, чтобы Linux CI
+проверял не только системный бинарник. Проверки не ослаблены.
+
 ### 2. Независимое округление сцен в Remotion manifest
 
 **RED:** четыре сцены по 0.45 секунды превращались в 56 кадров вместо 54.
@@ -197,6 +208,7 @@ single-byte, suffix и open-ended ranges возвращают правильны
 | Semantic/visual/cache/intent regression | 283 PASS |
 | Render, overlay, zoom, ONNX, media-server available gates | 120 total: 119 PASS, 1 SKIP (нет NVENC) |
 | Дополнительная независимая FFmpeg матрица | 125 комбинаций PASS |
+| Повтор после Windows fps finding: system + imageio FFmpeg | 7 actual media tests PASS; 10 связанных command/zoom contracts PASS |
 | TypeScript, Electron build, Vite build | PASS; существующее предупреждение Vite о размере bundle |
 | Security gate | PASS |
 | Remotion runtime contract | 12/12 PASS |
@@ -226,6 +238,21 @@ FFmpeg-тесты выполняют настоящие входные обре�
 
 ## Проверенная история CI и ограничения
 
+- [Первый Linux CI этого PR, run 39642298303](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39642298303)
+  на `fbb9726b` завершил все source/functional steps успешно, включая
+  **498 UI tests** и **91 browser/document test с установленным Chromium**
+  без skips. Единственное падение — прежний Frozen guard с теми же двумя
+  отсутствующими файлами. Последующее уточнение output fps проверяется
+  отдельным запуском на новом head; актуальные ссылки и итог находятся
+  в [PR #430](https://github.com/thrixicpa-del/NewsFlow/pull/430).
+- [Первый Windows run этого PR, run 39642298555](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39642298555)
+  на `fbb9726b` выявил описанный выше FFmpeg fps/timebase defect. До него
+  прошли voice ownership/template (10), reset + real UI restart (15),
+  standalone covers + restart (7), cover blocks/owner + restart (26),
+  real browser-documents UI (1), real overlay UI (1), без skips и с
+  production-write guard PASS. В новом media step выполнено 20 тестов;
+  две subtest-конфигурации fractional GPU chunks упали. Поздние stock и
+  Remotion steps были skipped вследствие падения и не объявляются PASS.
 - [CI текущего исходного main, run 39637704780](https://github.com/thrixicpa-del/NewsFlow/actions/runs/39637704780)
   имеет `cancelled`, а не PASS. Последующие skipped steps не считаются
   выполненными.

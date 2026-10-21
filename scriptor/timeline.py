@@ -1112,10 +1112,13 @@ def _gpu_timeline_chunk_command(
         raise ValueError("В блоке GPU-таймлайна нет кадров")
     filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
     script.write_text(";\n".join(filters), encoding="utf-8")
+    # concat does not advertise a fixed frame rate. Pin the output cadence too:
+    # otherwise FFmpeg versions can choose 25 fps or a variable-rate time base.
     return [
         ffmpeg, "-y", *inputs,
         "-filter_complex_script", str(script),
         "-map", "[outv]", "-frames:v", str(sum(frame_counts)), "-an", *gpu_timeline_encoder_args(ffmpeg),
+        "-r", "30", "-fps_mode", "cfr",
         "-movflags", "+faststart", str(output),
     ]
 
