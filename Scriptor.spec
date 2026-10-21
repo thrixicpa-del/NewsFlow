@@ -32,7 +32,8 @@ hiddenimports = []
 for package in (
     "tkinterdnd2",
     "playwright",
-    "fastembed",
+    "huggingface_hub",
+    "tokenizers",
     "onnxruntime",
     "cv2",
     "PIL",
@@ -47,11 +48,11 @@ for package in (
     binaries += collected[1]
     hiddenimports += collected[2]
 
-# ``ai_index`` imports FastEmbed only when footage semantic search is used.
-# PyInstaller cannot discover that deferred import from static analysis; data
-# collection alone leaves ``fastembed`` files on disk but no importable module
-# in PYZ, which makes Montage fail at runtime.
-hiddenimports += collect_submodules("fastembed")
+# The CLIP adapter lazily loads public model snapshots/tokenizers. Bundle its
+# dependency imports explicitly so Windows Frozen Core does not depend on the
+# developer machine's Python installation or an obsolete FastEmbed wheel.
+hiddenimports += collect_submodules("huggingface_hub")
+hiddenimports += collect_submodules("tokenizers")
 
 a = Analysis(
     ["bridge_main.py"],
