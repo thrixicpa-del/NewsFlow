@@ -1,0 +1,32 @@
+name: Montage integration conflict probe (temporary)
+on:
+  push:
+    branches: [integrate/commercial-montage-2026-10-21]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Attempt an unmodified three-way merge of stock features
+        shell: bash
+        run: |
+          git fetch origin codex/montage-stock-sources --no-tags
+          git config user.name 'NewsFlow QA Probe'
+          git config user.email 'qa-probe@users.noreply.github.com'
+          if git merge --no-commit --no-ff origin/codex/montage-stock-sources; then
+            echo 'MERGE_STOCK_UNMODIFIED=PASS'
+            git diff --stat --cached
+            exit 0
+          fi
+          echo 'MERGE_STOCK_UNMODIFIED=FAIL: conflict, no source silently chosen'
+          git diff --name-only --diff-filter=U
+          for file in $(git diff --name-only --diff-filter=U); do
+            echo "::group::CONFLICT $file"
+            grep -n -E '^<<<<<<< |^=======|^>>>>>>> ' "$file" | head -n 50 || true
+            echo "::endgroup::"
+          done
+          exit 1
