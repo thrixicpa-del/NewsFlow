@@ -164,10 +164,12 @@ class ClipAdapterTests(unittest.TestCase):
             self.assertEqual(attempts, [True, False])
 
     def test_incomplete_model_cache_is_error_not_silent_fallback(self):
-        with tempfile.TemporaryDirectory() as folder:
-            with patch.dict(sys.modules, {"huggingface_hub": types.SimpleNamespace(snapshot_download=lambda **_: folder)}):
-                with self.assertRaisesRegex(RuntimeError, "Incomplete CLIP model cache"):
-                    onnx_clip._model_path(onnx_clip._IMAGE_MODEL, folder)
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(sys.modules, {"huggingface_hub": types.SimpleNamespace(snapshot_download=lambda **_: folder)}),
+            self.assertRaisesRegex(RuntimeError, "Incomplete CLIP model cache"),
+        ):
+            onnx_clip._model_path(onnx_clip._IMAGE_MODEL, folder)
 
 
 if __name__ == "__main__":
