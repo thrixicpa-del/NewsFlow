@@ -86,6 +86,14 @@ jobs:
           scriptor.test_command_contract
         env:
           LOCALAPPDATA: ${{ runner.temp }}/newsflow-browser-topics
+      - name: Overlay source and timeline contracts (offline)
+        run: >-
+          python -B tests/run_isolated.py tests.test_overlay_library
+          tests.test_overlay_timing tests.test_overlay_persistence
+          tests.test_overlay_random tests.test_overlay_renderer_modes
+          tests.test_overlay_remotion_contract tests.test_overlay_storage_boundary
+        env:
+          LOCALAPPDATA: ${{ runner.temp }}/newsflow-overlay-boundary
       - run: pnpm typecheck
         working-directory: studio-ui-remotion-verify
       - run: pnpm test:ui

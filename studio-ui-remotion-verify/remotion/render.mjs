@@ -30,6 +30,22 @@ if (!manifestPath || !outputPath) {
 }
 
 const project = JSON.parse(await readFile(manifestPath, 'utf8'));
+// Chroma/alpha/audio finishing is shared by all renderers in the Python core.
+// A standalone manifest must fail before it can publish a layer-less MP4.
+const activeOverlayLayers = project.overlayTemplate?.layouts?.[project.aspectRatio] || [];
+const overlaySources = new Map((project.overlayTemplate?.librarySources || []).map((source) => [source.id, source]));
+const layerIsActive = (layer) => {
+  if (layer.enabled === false) return false;
+  if (!layer.librarySourceId) return true;
+  const source = overlaySources.get(layer.librarySourceId);
+  // Unknown references are invalid rather than permission to silently drop a layer.
+  return !source || (source.enabled !== false && (!source.kind || source.kind === 'all' || source.kind === layer.kind));
+};
+if (project.requiresOverlayFinishing || project.overlay?.src
+    || activeOverlayLayers.some(layerIsActive)) {
+  throw new Error('OVERLAY_FINISHING_REQUIRED: экспортируйте проект через NewsFlow — наложения требуют общего этапа композиции.');
+}
+
 const requestedConcurrency = Math.max(1, Number.parseInt(concurrencyRaw, 10) || 1);
 const parallelJobs = Math.max(1, Number.parseInt(parallelJobsRaw, 10) || 1);
 const concurrency = requestedConcurrency;

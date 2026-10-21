@@ -529,6 +529,9 @@ class Settings:
     montage_intro_duration: float = 6.0
     montage_overlay_enabled: bool = False
     montage_overlay_folder: str = ""
+    montage_overlay_template: dict = field(default_factory=lambda: {
+        "version": 1, "layouts": {"16:9": [], "9:16": []},
+    })
     # The video queue is persistent: a restart never loses a prepared plan or
     # a completed MP4.  These limits are intentionally separate because
     # semantic planning, network download/cutting and FFmpeg rendering stress
@@ -1299,6 +1302,9 @@ def load_settings() -> Settings:
             montage_intro_duration=float(data.get("montage_intro_duration", 6.0)),
             montage_overlay_enabled=bool(data.get("montage_overlay_enabled", False)),
             montage_overlay_folder=data.get("montage_overlay_folder", ""),
+            montage_overlay_template=deepcopy(data.get("montage_overlay_template") or {
+                "version": 1, "layouts": {"16:9": [], "9:16": []},
+            }),
             montage_planning_workers=max(1, int(data.get("montage_planning_workers", 4))),
             montage_download_workers=max(1, int(data.get("montage_download_workers", 2))),
             montage_render_workers=max(1, int(data.get("montage_render_workers", 2))),
@@ -1583,8 +1589,24 @@ def _merge_montage_task_statuses(persisted: object, incoming: object) -> dict[st
         if not isinstance(value, dict):
             continue
         key = str(key)
-        if key not in merged or _montage_status_order(value) >= _montage_status_order(merged[key]):
-            merged[key] = dict(value)
+        previous = merged.get(key, {})
+        newest = dict(value) if not previous or _montage_status_order(value) >= _montage_status_order(previous) else dict(previous)
+        # Operator overlays and worker progress have independent revisions.
+        # A newer heartbeat must not erase a selected-row override.
+        overlay_source = (value if int(value.get("overlayTemplateRevision", 0) or 0)
+                          > int(previous.get("overlayTemplateRevision", 0) or 0) else previous)
+        if not overlay_source.get("overlayTemplateRevision") and "overlayTemplate" not in newest:
+            overlay_source = value if "overlayTemplate" in value else previous
+        for name in ("overlayTemplate", "overlayTemplateIndividualized", "overlayTemplateRevision"):
+            if name in overlay_source:
+                newest[name] = deepcopy(overlay_source[name])
+        if (int(previous.get("overlayTemplateRevision", 0) or 0)
+                > int(value.get("overlayTemplateRevision", 0) or 0) and "overlayNeedsRender" in previous):
+            newest["overlayNeedsRender"] = previous["overlayNeedsRender"]
+        elif (int(value.get("overlayTemplateRevision", 0) or 0)
+              > int(previous.get("overlayTemplateRevision", 0) or 0) and "overlayNeedsRender" in value):
+            newest["overlayNeedsRender"] = value["overlayNeedsRender"]
+        merged[key] = newest
     return merged
 
 
@@ -1629,6 +1651,7 @@ _MONTAGE_REUSE_PREFERENCES = (
     # Render/pause controls also belong to the operator, not stale progress writers.
     "montage_gpu_chunk_size", "montage_queue_paused",
     "montage_use_footage_blocks",
+    "montage_overlay_template",
 )
 
 
@@ -2060,6 +2083,7 @@ def save_settings(settings: Settings):
         "montage_intro_duration": settings.montage_intro_duration,
         "montage_overlay_enabled": settings.montage_overlay_enabled,
         "montage_overlay_folder": settings.montage_overlay_folder,
+        "montage_overlay_template": settings.montage_overlay_template,
         "montage_planning_workers": settings.montage_planning_workers,
         "montage_download_workers": settings.montage_download_workers,
         "montage_render_workers": settings.montage_render_workers,

@@ -29,6 +29,7 @@ import { FootageBlocks, FootageBlockAssignments } from "./features/footage/Foota
 import { unsettledMontageLaunches } from "./features/montage/montage-polling";
 import type { PendingMontageLaunch } from "./features/montage/montage-polling";
 import { TaskCenter } from "./features/task-center/TaskCenter";
+import { MontageOverlays } from "./features/montage/MontageOverlays";
 import type { TaskCenterEntry } from "./features/task-center/task-model";
 import { AppShell } from "./layout/AppShell";
 import { ContextInspector } from "./layout/ContextInspector";
@@ -10994,6 +10995,11 @@ export function Editor({
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [queueLaunching, setQueueLaunching] = useState(false);
   const [pendingMontageLaunches, setPendingMontageLaunches] = useState<PendingMontageLaunch[]>([]);
+  const [overlayExportWatch, setOverlayExportWatch] = useState<{
+    indices: number[];
+    baselineTasks: NewsFlowSnapshot["montageTasks"];
+    observedActive: number[];
+  } | null>(null);
   const [pauseSaving, setPauseSaving] = useState(false);
   const [queuePausedDraft, setQueuePausedDraft] = useState(
     data.montageSettings.queueRunning === false
@@ -11062,10 +11068,11 @@ export function Editor({
     Array<{ start: number; end: number; percent: number }>
   >(data.montageSettings.fastReuseRanges || []);
   const [configurationOpen, setConfigurationOpen] = useState(false);
-  // A persisted phase can outlive a crashed or closed Core.  Only the
-  // process-backed snapshot field may disable launch controls.
+  // Persisted phases alone cannot imply a running process. A locally launched
+  // overlay export is watched separately until its final snapshot is visible:
+  // the worker can exit before the renderer receives that last snapshot.
   const running = data.montageSettings.queueRunning === true;
-  const queueActive = running || queueLaunching || pendingMontageLaunches.length > 0;
+  const queueActive = running || queueLaunching || pendingMontageLaunches.length > 0 || overlayExportWatch !== null;
   // The owner liveness probe can turn false before the last task snapshot
   // reaches React. Keep observing this process's unfinished tasks until their
   // terminal result arrives; historical rows still cannot disable launch.
@@ -11079,6 +11086,59 @@ export function Editor({
       setPendingMontageLaunches(unsettled);
     }
   }, [data.montageTasks, pendingMontageLaunches]);
+  useEffect(() => {
+
+    if (!overlayExportWatch) return;
+
+    const observedActive = new Set(overlayExportWatch.observedActive);
+
+    const terminal = overlayExportWatch.indices.map((index) => {
+
+      const task = data.montageTasks.find((item) => item.index === index);
+
+      if (!task) return true;
+
+      if (task.status !== "Готово" && task.status !== "Ошибка") {
+
+        observedActive.add(index);
+
+        return false;
+
+      }
+
+      const baseline = overlayExportWatch.baselineTasks.find((item) => item.index === index);
+
+      const currentTime = Date.parse(task.updatedAt || "");
+
+      const previousTime = Date.parse(baseline?.updatedAt || "");
+
+      // The bridge writes monotonic microsecond stamps. Date.parse truncates
+
+      // sub-millisecond precision, so compare the stable stamp strings on ties.
+
+      const newerStamp = Boolean(task.updatedAt && (!baseline?.updatedAt ||
+
+        (Number.isFinite(currentTime) && Number.isFinite(previousTime)
+
+          ? currentTime > previousTime || (currentTime === previousTime && task.updatedAt > baseline.updatedAt)
+
+          : task.updatedAt > baseline.updatedAt)));
+
+      const newerAttempt = (task.renderAttempt || 0) > (baseline?.renderAttempt || 0);
+
+      return observedActive.has(index) || newerStamp || newerAttempt;
+
+    }).every(Boolean);
+
+    if (terminal) setOverlayExportWatch(null);
+
+    else if (observedActive.size !== overlayExportWatch.observedActive.length) {
+
+      setOverlayExportWatch({ ...overlayExportWatch, observedActive: [...observedActive] });
+
+    }
+
+  }, [data.montageTasks, overlayExportWatch]);
   const inspectedMontage = data.montageTasks.find(
     (task) => task.index === inspectedMontageIndex,
   );
@@ -11154,6 +11214,11 @@ export function Editor({
     projectHeldCount > 0 ? `удержание ${projectHeldCount}` : "",
     projectBackgroundCount > 0 ? `нейтральный фон ${projectBackgroundCount}` : "",
   ].filter(Boolean).join(" · ");
+  const individualOverlayTask = selected.length === 1 ? data.montageTasks.find((task) => task.index === selected[0]) : undefined;
+  const individualOverlayProject = selected.length === 1
+    ? data.montageProjects.find((project) => project.path === individualOverlayTask?.projectPath)
+    : selected.length === 0 ? selectedProject : undefined;
+  const individualOverlayTemplate = individualOverlayTask?.overlayTemplate || individualOverlayProject?.overlayTemplate;
   const localMediaUrl = (path?: string) =>
     path ? encodeURI(`file:///${path.replace(/\\/g, "/")}`) : "";
   useEffect(() => {
@@ -11247,6 +11312,22 @@ export function Editor({
       }
     } catch (error) {
       setPendingMontageLaunches([]);
+      throw error;
+    } finally {
+      setQueueLaunching(false);
+      void refresh();
+    }
+  };
+  const renderOverlayPlans = async (indices: number[]) => {
+    if (queueActive || !indices.length) return undefined;
+    setQueueLaunching(true);
+    setOverlayExportWatch({ indices: [...indices], baselineTasks: data.montageTasks.map((task) => ({ ...task })), observedActive: [] });
+    try {
+      const result = await command("run-montage-queue", { indices, renderOnly: true });
+      if (!result) setOverlayExportWatch(null);
+      return result;
+    } catch (error) {
+      setOverlayExportWatch(null);
       throw error;
     } finally {
       setQueueLaunching(false);
@@ -11370,6 +11451,11 @@ export function Editor({
         queuePaused={queuePausedDraft}
         queueRunning={running}
       />
+      <MontageOverlays data={data} command={command} selectedIndices={selected}
+        allIndices={[...new Set([...data.scenarios.map((item) => item.index), ...data.montageTasks.map((item) => item.index)])].filter((index) => Number.isSafeInteger(index) && index >= 0).sort((a, b) => a - b)}
+        mediaUrl={localImageUrl} projectDuration={selectedProject?.duration} individualTemplate={individualOverlayTemplate}
+        onRenderOverlays={renderOverlayPlans} queueActive={queueActive} />
+      {data.preparedProject?.warning && <div className="operation-result" role="alert">{data.preparedProject.warning}</div>}
       <Sheet
         open={configurationOpen}
         onOpenChange={handleConfigurationOpenChange}
@@ -11424,8 +11510,8 @@ export function Editor({
           <div>
             <b>Как собрать и передать монтаж</b>
             <small>
-              MP4 делает один выбранный движок. DaVinci XML — отдельный
-              редактируемый план этой же дорожки, без второго рендера.
+              MP4 делает один выбранный движок. DaVinci XML содержит отдельные клипы без наложений;
+              при наложениях он содержит сведённый MP4 без отдельных редактируемых слоёв.
             </small>
           </div>
           <Button disabled={!stockSourcesValid || (renderer === "gpu-timeline" && !gpuChunkSizeValid)} onClick={() => void saveSettings()}>
@@ -11482,7 +11568,7 @@ export function Editor({
             <span>04</span>
             <div>
               <b>DaVinci Resolve XML</b>
-              <small>Создать FCPXML с дорожками футажей и MP3. Это не повторный рендер MP4.</small>
+              <small>Создать FCPXML с дорожками футажей и MP3. При наложениях экспортируется сведённый MP4 без отдельных слоёв.</small>
             </div>
             <em>{exportDaVinciXml ? "включён" : "выключен"}</em>
           </button>
@@ -12297,7 +12383,7 @@ export function Editor({
             <b>Проекты, Remotion и DaVinci</b>
             <small>
               .newsflow — план NewsFlow, .remotion.json — композиция, .fcpxml —
-              редактируемая дорожка DaVinci. XML не рендерит MP4 повторно.
+              дорожка DaVinci. При наложениях XML содержит сведённый MP4: слои отдельно не редактируются. Без наложений доступны отдельные клипы.
             </small>
           </div>
           <div className="toolbar compact">
